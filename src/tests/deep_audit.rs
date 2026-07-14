@@ -459,6 +459,26 @@ fn ck_c4_pinned_timeout_must_be_literal() {
     );
 }
 
+/// Named args on actor method calls reorder by parameter name.
+#[test]
+fn named_args_on_actor_method() {
+    let src = r#"
+        actor Counter {
+            n: i32
+            func add(x: i32, y: i32) -> i32 {
+                self.n + x + y
+            }
+        }
+        func main() -> i32 {
+            let c = Counter.spawn()
+            c.add(y = 3, x = 2)
+        }
+    "#;
+    assert!(check_source(src).is_ok(), "named method args should typecheck");
+    let v = super::run_source(src);
+    assert_eq!(v, crate::interp::Value::Int(5));
+}
+
 /// H2: non-empty list literals respect declared List<T> element type.
 #[test]
 fn h2_list_literal_expected_type_context() {

@@ -478,17 +478,90 @@ impl<'a> Interpreter<'a> {
                     let vals = vals?;
                     return self.eval_call_dispatch(callee, &vals, args);
                 }
-            } else {
-                // P2-9: Named args with Expr::Field (method calls) or Expr::Index
-                // are not yet supported — the args are evaluated positionally without
-                // reordering. The fix requires type information to look up method signatures.
-                // Falls through to positional evaluation below.
+            } else if let Expr::Field(obj, method) = callee {
+                // Named args on method calls: resolve method params from actor
+                // methods (or bare functions) when possible.
+                if let Some(f) = self.find_method_def(obj, method) {
+                    let mut ordered_exprs: Vec<Expr> = Vec::new();
+                    let mut dest_idx = 0;
+                    for arg in args {
+                        match arg {
+                            Expr::NamedArg(n, val) => {
+                                if let Some(pos) = f.params.iter().position(|p| p.name == *n) {
+                                    while ordered_exprs.len() <= pos {
+                                        ordered_exprs.push(Expr::Literal(Lit::Unit));
+                                    }
+                                    ordered_exprs[pos] = *val.clone();
+                                } else {
+                                    ordered_exprs.push(arg.clone());
+                                    continue;
+                                }
+                            }
+                            _ => {
+                                while ordered_exprs.len() <= dest_idx {
+                                    ordered_exprs.push(Expr::Literal(Lit::Unit));
+                                }
+                                ordered_exprs[dest_idx] = arg.clone();
+                                dest_idx += 1;
+                            }
+                        }
+                    }
+                    for (i, p) in f.params.iter().enumerate() {
+                        if i >= ordered_exprs.len()
+                            || matches!(ordered_exprs[i], Expr::Literal(Lit::Unit))
+                        {
+                            if let Some(ref default_expr) = p.default_value {
+                                if i >= ordered_exprs.len() {
+                                    ordered_exprs.push(default_expr.clone());
+                                } else {
+                                    ordered_exprs[i] = default_expr.clone();
+                                }
+                            }
+                        }
+                    }
+                    let vals: Result<Vec<_>, _> =
+                        ordered_exprs.iter().map(|a| self.eval_expr(a)).collect();
+                    let vals = vals?;
+                    return self.eval_call_dispatch(callee, &vals, args);
+                }
             }
         }
 
         let vals: Result<Vec<_>, _> = args.iter().map(|a| self.eval_expr(a)).collect();
         let vals = vals?;
         self.eval_call_dispatch(callee, &vals, args)
+    }
+
+    /// Look up a method `FuncDef` for named-arg reordering on `obj.method(...)`.
+    fn find_method_def(&self, obj: &Expr, method: &str) -> Option<crate::ast::FuncDef> {
+        // Module-qualified bare functions: Module::func
+        if let Some(qualified) = Self::build_qualified_path(obj, method) {
+            if let Some(f) = self.find_function(&qualified) {
+                return Some(f);
+            }
+        }
+        if let Expr::Ident(name) = obj {
+            // Actor type name as static call: Counter.spawn is not a method with args.
+            if let Some(actor) = self.find_actor(name) {
+                if let Some(m) = actor.methods.iter().find(|m| m.name == method) {
+                    return Some(m.clone());
+                }
+            }
+            // Instance variable: look up value type via actor instance methods.
+            if let Some(val) = self.lookup(name) {
+                if let Value::Actor(handle) = val {
+                    let actor = handle.inner.read().unwrap_or_else(|e| e.into_inner());
+                    if let Some(m) = actor.methods.iter().find(|m| m.name == method) {
+                        return Some(m.clone());
+                    }
+                }
+            }
+            // Flattened import: bare function name.
+            if let Some(f) = self.find_function(method) {
+                return Some(f);
+            }
+        }
+        None
     }
 
     /// Apply interpreter-side write-back for `mutate` parameters.
