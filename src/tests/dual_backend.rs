@@ -6828,6 +6828,24 @@ fn dual_map_multi_key_println() {
     );
 }
 
+/// Option of List println Some([1, 2, 3]).
+#[test]
+fn dual_option_list_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = Some([1, 2, 3])
+            println(a)
+            0
+        }
+        "#,
+        "Some([1, 2, 3])"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
