@@ -387,6 +387,26 @@ fn ck_c5_user_fault_state_rejected() {
 }
 
 #[test]
+fn lx_h8_empty_fstring_interp_rejected() {
+    let src = r#"
+        func main() -> i32 {
+            let s = f"{}"
+            0
+        }
+    "#;
+    // parse fails before typecheck — check_source panics on parse, so use parse helper carefully.
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+    let err = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect_err("empty f-string interp must fail");
+    assert!(
+        err.message.contains("empty") || err.message.contains("interpolation"),
+        "unexpected: {}",
+        err.message
+    );
+}
+
+#[test]
 fn lx_c6_indent_stack_no_panic() {
     // LX-C6: sketch mode indent/dedent must not panic on empty stack.
     let src = "func main() -> i32:\n    0\n";
