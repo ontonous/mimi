@@ -61,10 +61,16 @@ impl<'a> Interpreter<'a> {
             None
         };
 
-        // Snapshot parameters for old() in ensures
+        // CG-H10 / IN mirror: only snapshot params when contract checking is on
+        // and `ensures` may reference `old(...)`. Avoid cloning every arg
+        // on the hot path when verify_contracts is off.
         let mut old_snapshots: HashMap<String, Value> = HashMap::new();
+        let need_old = self.verify_contracts
+            && func.body.iter().any(|s| matches!(s, Stmt::Ensures(_, _)));
         for (p, a) in func.params.iter().zip(filled_args) {
-            old_snapshots.insert(p.name.clone(), a.clone());
+            if need_old {
+                old_snapshots.insert(p.name.clone(), a.clone());
+            }
             let r = if p.mut_ {
                 self.bind_mut(&p.name, a)
             } else {

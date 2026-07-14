@@ -56,25 +56,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_int_mul(new_len, sizeof_i64, "alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
 
-        // realloc the data array to accommodate the new element
-        let realloc_fn = self
-            .module
-            .get_function("realloc")
-            .ok_or_else(|| "realloc not declared".to_string())?;
-        let new_data = self
-            .builder
-            .build_call(
-                realloc_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(old_data),
-                    BasicMetadataValueEnum::IntValue(alloc_size),
-                ],
-                "realloc_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("realloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("realloc returned void")?
-            .into_pointer_value();
+        // realloc the data array to accommodate the new element (B4: NULL → abort)
+        let new_data = self.realloc_or_abort(old_data, alloc_size, "push")?;
 
         // Store new data pointer back to the list struct
         self.builder
@@ -419,30 +402,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_unconditional_branch(realloc_merge_bb)
             .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
 
-        // realloc path: new_len > 0, shrink the allocation
+        // realloc path: new_len > 0, shrink the allocation (B4: NULL → abort)
         self.builder.position_at_end(realloc_bb);
         let new_alloc_size = self
             .builder
             .build_int_mul(new_len, self.list_elem_size(), "new_alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
-        let realloc_fn = self
-            .module
-            .get_function("realloc")
-            .ok_or("realloc not declared")?;
-        let realloc_result = self
-            .builder
-            .build_call(
-                realloc_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(old_data),
-                    BasicMetadataValueEnum::IntValue(new_alloc_size),
-                ],
-                "realloc_result",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("realloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("realloc returned void")?
-            .into_pointer_value();
+        let realloc_result = self.realloc_or_abort(old_data, new_alloc_size, "pop")?;
         self.builder
             .build_store(data_gep, realloc_result)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;

@@ -554,6 +554,73 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(ptr)
     }
 
+    /// B4 companion: Call `realloc` and abort on NULL (OOM).
+    ///
+    /// Same control-flow shape as [`malloc_or_abort`]: on NULL, call
+    /// `mimi_runtime_abort` and mark the block unreachable; on success,
+    /// continue in the ok block with a non-null pointer.
+    ///
+    /// SAFETY: callers must not pass `size == 0` when they still need a live
+    /// allocation (use free+null instead — see list `pop` CG-H3).
+    pub(super) fn realloc_or_abort(
+        &self,
+        old_ptr: inkwell::values::PointerValue<'ctx>,
+        size: inkwell::values::IntValue<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let realloc_fn = self.get_runtime_fn("realloc")?;
+        let ptr = self
+            .builder
+            .build_call(
+                realloc_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(old_ptr),
+                    BasicMetadataValueEnum::IntValue(size),
+                ],
+                &format!("{}_realloc", name),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("realloc call error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("realloc returned void".into()))?
+            .into_pointer_value();
+
+        let is_null = self
+            .builder
+            .build_is_null(ptr, &format!("{}_is_null", name))
+            .map_err(|e| CompileError::LlvmError(format!("is_null error: {}", e)))?;
+        let current_fn = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("no current function for realloc_or_abort".into())
+        })?;
+        let ok_bb = self
+            .context
+            .append_basic_block(current_fn, &format!("{}_ok", name));
+        let err_bb = self
+            .context
+            .append_basic_block(current_fn, &format!("{}_oom", name));
+        self.builder
+            .build_conditional_branch(is_null, err_bb, ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("cond_br error: {}", e)))?;
+
+        self.builder.position_at_end(err_bb);
+        let abort_fn = self.get_or_declare_abort_fn();
+        let msg = self
+            .builder
+            .build_global_string_ptr("out of memory (realloc)", &format!("{}_oom_msg", name))
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+        self.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(msg.as_pointer_value())],
+            &format!("{}_oom_abort", name),
+        )?;
+        // SAFETY: mimi_runtime_abort is noreturn; this block is unreachable.
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreach: {}", e)))?;
+
+        self.builder.position_at_end(ok_bb);
+        Ok(ptr)
+    }
+
     /// v0.29.32: Get or declare the `mimi_wall_clock_ms` runtime function.
     /// Returns i64 (milliseconds since UNIX epoch).
     pub(super) fn get_or_declare_wall_clock_fn(&self) -> inkwell::values::FunctionValue<'ctx> {
