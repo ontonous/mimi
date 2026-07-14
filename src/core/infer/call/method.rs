@@ -140,58 +140,57 @@ impl<'a> Checker<'a> {
                     .map(|a| a.methods.iter().any(|m| m.name == *method_name))
                     .unwrap_or(false);
                 if is_actor_method {
-                    let actor = self
-                        .file
-                        .items
-                        .iter()
-                        .find_map(|item| match item {
-                            Item::Actor(a) if a.name == *type_name => Some(a),
-                            _ => None,
-                        })
-                        .expect("is_actor_method implies actor exists");
-                    let method = actor
-                        .methods
-                        .iter()
-                        .find(|m| m.name == *method_name)
-                        .expect("is_actor_method implies method exists");
-                    let ret = method
-                        .ret
-                        .as_ref()
-                        .map(|t| self.resolve_type(t))
-                        .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
-                    // Type-check the explicit args against declared param types.
-                    if args.len() != method.params.len() {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0257,
-                            format!(
-                                "method '{}' of actor '{}' expects {} arguments, got {}",
-                                method_name,
-                                type_name,
-                                method.params.len(),
-                                args.len()
-                            ),
-                        );
-                    } else {
-                        for (i, (arg, param)) in args.iter().zip(method.params.iter()).enumerate() {
-                            let declared = self.resolve_type(&param.ty);
-                            let at = self.infer_expr(arg, scopes);
-                            // IF-C1/C4: strict unify rejects escape hatches at call sites.
-                            if self.unification.unify_strict(&at, &declared).is_err() {
+                    // Avoid .expect: re-resolve actor/method with if-let.
+                    if let Some(actor) = self.file.items.iter().find_map(|item| match item {
+                        Item::Actor(a) if a.name == *type_name => Some(a),
+                        _ => None,
+                    }) {
+                        if let Some(method) =
+                            actor.methods.iter().find(|m| m.name == *method_name)
+                        {
+                            let ret = method
+                                .ret
+                                .as_ref()
+                                .map(|t| self.resolve_type(t))
+                                .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                            // Type-check the explicit args against declared param types.
+                            if args.len() != method.params.len() {
                                 self.emit_code(
-                                    crate::diagnostic::codes::E0211,
+                                    crate::diagnostic::codes::E0257,
                                     format!(
-                                        "argument {} of method '{}' expected {}, found {}",
-                                        i + 1,
+                                        "method '{}' of actor '{}' expects {} arguments, got {}",
                                         method_name,
-                                        fmt_type(&declared),
-                                        fmt_type(&at)
+                                        type_name,
+                                        method.params.len(),
+                                        args.len()
                                     ),
                                 );
+                            } else {
+                                for (i, (arg, param)) in
+                                    args.iter().zip(method.params.iter()).enumerate()
+                                {
+                                    let declared = self.resolve_type(&param.ty);
+                                    let at = self.infer_expr(arg, scopes);
+                                    // IF-C1/C4: strict unify rejects escape hatches at call sites.
+                                    if self.unification.unify_strict(&at, &declared).is_err() {
+                                        self.emit_code(
+                                            crate::diagnostic::codes::E0211,
+                                            format!(
+                                                "argument {} of method '{}' expected {}, found {}",
+                                                i + 1,
+                                                method_name,
+                                                fmt_type(&declared),
+                                                fmt_type(&at)
+                                            ),
+                                        );
+                                    }
+                                    let _ = i;
+                                }
                             }
-                            let _ = i;
+                            return ret;
                         }
                     }
-                    return ret;
+                    return Type::Name("unknown".into(), vec![]);
                 }
                 return self.check_call(&qualified_func, args, scopes);
             }
