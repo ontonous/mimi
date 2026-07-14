@@ -1018,20 +1018,46 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_extract_value(sv.into(), 0, "opt_disc")?
             .into_int_value();
         let payload_bv = self.build_extract_value(sv.into(), 1, "opt_pay")?;
-        let payload_i64 = match payload_bv {
+        // Classify payload for Some(...) formatting.
+        enum OptPay<'a> {
+            Int(inkwell::values::IntValue<'a>),
+            StrPtr(inkwell::values::PointerValue<'a>),
+            RecPtr(inkwell::values::PointerValue<'a>),
+        }
+        let pay_kind = match payload_bv {
             BasicValueEnum::IntValue(iv) => {
-                if iv.get_type().get_bit_width() < 64 {
+                let as_i64 = if iv.get_type().get_bit_width() < 64 {
                     self.builder
                         .build_int_s_extend(iv, i64_ty, "opt_pay_i64")
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?
                 } else {
                     iv
+                };
+                if inner_record.is_some() {
+                    let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let p = self
+                        .builder
+                        .build_int_to_ptr(as_i64, i8_ptr, "opt_rec_from_i64")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    OptPay::RecPtr(p)
+                } else {
+                    OptPay::Int(as_i64)
                 }
             }
-            BasicValueEnum::PointerValue(pv) => self
-                .builder
-                .build_ptr_to_int(pv, i64_ty, "opt_pay_ptr")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+            BasicValueEnum::PointerValue(pv) => {
+                if inner_record.is_some() {
+                    OptPay::RecPtr(pv)
+                } else {
+                    OptPay::StrPtr(pv)
+                }
+            }
+            BasicValueEnum::StructValue(psv) => {
+                // string {ptr,len}
+                let dp = self
+                    .build_extract_value(psv.into(), 0, "opt_str_ptr")?
+                    .into_pointer_value();
+                OptPay::StrPtr(dp)
+            }
             other => {
                 return Err(CompileError::LlvmError(format!(
                     "option payload unexpected kind {:?}",
@@ -1079,42 +1105,57 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_conditional_branch(is_some, some_bb, none_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         self.builder.position_at_end(some_bb);
-        if let Some(rec_name) = inner_record {
-            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-            let rec_ptr = self
-                .builder
-                .build_int_to_ptr(payload_i64, i8_ptr, "opt_rec_ptr")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-            let rec_str = self.emit_record_display(rec_name, rec_ptr)?;
-            let some_fmt = self
-                .builder
-                .build_global_string_ptr("Some(%s)", "opt_some_sfmt")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-            self.build_call(
-                snprintf_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(buf),
-                    BasicMetadataValueEnum::IntValue(buf_size),
-                    BasicMetadataValueEnum::PointerValue(some_fmt.as_pointer_value()),
-                    BasicMetadataValueEnum::PointerValue(rec_str),
-                ],
-                "opt_some_snprintf_s",
-            )?;
-        } else {
-            let some_fmt = self
-                .builder
-                .build_global_string_ptr("Some(%ld)", "opt_some_fmt")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-            self.build_call(
-                snprintf_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(buf),
-                    BasicMetadataValueEnum::IntValue(buf_size),
-                    BasicMetadataValueEnum::PointerValue(some_fmt.as_pointer_value()),
-                    BasicMetadataValueEnum::IntValue(payload_i64),
-                ],
-                "opt_some_snprintf",
-            )?;
+        match pay_kind {
+            OptPay::RecPtr(rec_ptr) => {
+                let rec_name = inner_record.unwrap_or("Record");
+                let rec_str = self.emit_record_display(rec_name, rec_ptr)?;
+                let some_fmt = self
+                    .builder
+                    .build_global_string_ptr("Some(%s)", "opt_some_sfmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::IntValue(buf_size),
+                        BasicMetadataValueEnum::PointerValue(some_fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::PointerValue(rec_str),
+                    ],
+                    "opt_some_snprintf_s",
+                )?;
+            }
+            OptPay::StrPtr(sp) => {
+                let some_fmt = self
+                    .builder
+                    .build_global_string_ptr("Some(%s)", "opt_some_str_fmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::IntValue(buf_size),
+                        BasicMetadataValueEnum::PointerValue(some_fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::PointerValue(sp),
+                    ],
+                    "opt_some_snprintf_str",
+                )?;
+            }
+            OptPay::Int(payload_i64) => {
+                let some_fmt = self
+                    .builder
+                    .build_global_string_ptr("Some(%ld)", "opt_some_fmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::IntValue(buf_size),
+                        BasicMetadataValueEnum::PointerValue(some_fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::IntValue(payload_i64),
+                    ],
+                    "opt_some_snprintf",
+                )?;
+            }
         }
         self.builder
             .build_unconditional_branch(merge_bb)
