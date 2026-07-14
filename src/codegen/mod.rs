@@ -548,16 +548,11 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// v0.29.32: Get or declare the `mimi_wall_clock_ms` runtime function.
     /// Returns i64 (milliseconds since UNIX epoch).
-    pub(super) fn get_or_declare_wall_clock_fn(
-        &self,
-    ) -> inkwell::values::FunctionValue<'ctx> {
+    pub(super) fn get_or_declare_wall_clock_fn(&self) -> inkwell::values::FunctionValue<'ctx> {
         if let Some(f) = self.module.get_function("mimi_wall_clock_ms") {
             return f;
         }
-        let ty = self
-            .context
-            .i64_type()
-            .fn_type(&[], false);
+        let ty = self.context.i64_type().fn_type(&[], false);
         self.module.add_function(
             "mimi_wall_clock_ms",
             ty,
@@ -566,9 +561,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// v0.29.32: Get or declare `mimi_runtime_abort` (returns !).
-    pub(super) fn get_or_declare_abort_fn(
-        &self,
-    ) -> inkwell::values::FunctionValue<'ctx> {
+    pub(super) fn get_or_declare_abort_fn(&self) -> inkwell::values::FunctionValue<'ctx> {
         if let Some(f) = self.module.get_function("mimi_runtime_abort") {
             return f;
         }
@@ -586,9 +579,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// v0.29.43: Get or declare `mimi_pinned_fault` runtime function.
     /// Sets a thread-local pending Fault flag and returns 1 (non-zero = pending).
-    pub(super) fn get_or_declare_pinned_fault_fn(
-        &self,
-    ) -> inkwell::values::FunctionValue<'ctx> {
+    pub(super) fn get_or_declare_pinned_fault_fn(&self) -> inkwell::values::FunctionValue<'ctx> {
         if let Some(f) = self.module.get_function("mimi_pinned_fault") {
             return f;
         }
@@ -1019,16 +1010,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // could leave heap slots uninitialized, causing UB in generated
                 // code. Now we log a compile error diagnostic instead of
                 // silently continuing.
-                match self.gep().build_struct_gep(struct_ty, base, field, "heap_slot_null_init") {
+                match self
+                    .gep()
+                    .build_struct_gep(struct_ty, base, field, "heap_slot_null_init")
+                {
                     Ok(gep_val) => {
                         if let Err(e) = self.builder.build_store(gep_val, null_ptr) {
                             // Use mimi_assert-style: log but don't panic, as
                             // this is a best-effort null-init for safety.
-                            eprintln!("[mimi codegen] WARN: build_store failed in null-init: {}", e);
+                            eprintln!(
+                                "[mimi codegen] WARN: build_store failed in null-init: {}",
+                                e
+                            );
                         }
                     }
                     Err(e) => {
-                        eprintln!("[mimi codegen] WARN: build_struct_gep failed in null-init: {}", e);
+                        eprintln!(
+                            "[mimi codegen] WARN: build_struct_gep failed in null-init: {}",
+                            e
+                        );
                     }
                 }
                 if let Some(saved_bb) = saved {

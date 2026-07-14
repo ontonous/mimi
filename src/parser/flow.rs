@@ -111,8 +111,8 @@ macro_rules! run_flow {
                             File {
                                 imports: Vec::new(),
                                 items: Vec::new(),
-                    implicit_single: false,
-                },
+                                implicit_single: false,
+                            },
                             vec![e],
                         )
                     }

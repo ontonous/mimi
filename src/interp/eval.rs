@@ -264,9 +264,7 @@ impl<'a> Interpreter<'a> {
                     let handle = match &target_val {
                         Value::Actor(h) => h,
                         _ => {
-                            return Err(InterpError::new(
-                                "delegate target is not an actor",
-                            ));
+                            return Err(InterpError::new("delegate target is not an actor"));
                         }
                     };
                     if handle.is_faulted() {
@@ -298,7 +296,10 @@ impl<'a> Interpreter<'a> {
                         Err(e) => {
                             // v0.29.47: ChannelOverloaded — mailbox full or TTL expired.
                             let msg = format!("{}", e);
-                            if msg.contains("TTL") || msg.contains("muted") || msg.contains("backpressure") {
+                            if msg.contains("TTL")
+                                || msg.contains("muted")
+                                || msg.contains("backpressure")
+                            {
                                 return Err(InterpError::new(format!(
                                     "ChannelOverloaded: delegate target mailbox full — {}",
                                     msg
@@ -347,20 +348,14 @@ impl<'a> Interpreter<'a> {
                     };
                     if ms <= 0 {
                         // v0.29.43: zero/negative timeout → immediate delayed Fault.
-                        let from_state = self
-                            .current_flow_state
-                            .as_deref()
-                            .unwrap_or("FFI_Pinned");
+                        let from_state = self.current_flow_state.as_deref().unwrap_or("FFI_Pinned");
                         let event = format!("pinned_timeout:{}ms", ms);
                         let snapshot = format!(
                             "pinned timeout expired (timeout={}ms): FFI anchor watchdog",
                             ms
                         );
-                        let fault = crate::flow_matrix::make_fault_value(
-                            from_state,
-                            &event,
-                            &snapshot,
-                        );
+                        let fault =
+                            crate::flow_matrix::make_fault_value(from_state, &event, &snapshot);
                         return Ok(Some(fault));
                     }
                     Some(ms)
@@ -392,20 +387,12 @@ impl<'a> Interpreter<'a> {
                 // If so, generate delayed Fault with the panic context.
                 if let Err(ref e) = body_res {
                     if is_runtime_panic(e) {
-                        let from_state = self
-                            .current_flow_state
-                            .as_deref()
-                            .unwrap_or("FFI_Pinned");
+                        let from_state = self.current_flow_state.as_deref().unwrap_or("FFI_Pinned");
                         let event = format!("pinned_panic:{}", e.code());
-                        let snapshot = format!(
-                            "pinned body panic: {} — FFI anchor delayed Fault",
-                            e
-                        );
-                        let fault = crate::flow_matrix::make_fault_value(
-                            from_state,
-                            &event,
-                            &snapshot,
-                        );
+                        let snapshot =
+                            format!("pinned body panic: {} — FFI anchor delayed Fault", e);
+                        let fault =
+                            crate::flow_matrix::make_fault_value(from_state, &event, &snapshot);
                         return Ok(Some(fault));
                     }
                     // Non-runtime errors propagate as-is.
@@ -421,20 +408,14 @@ impl<'a> Interpreter<'a> {
                     let elapsed = now_ms - _pinned_start_ms;
                     if elapsed > to_ms {
                         // v0.29.43: timeout → delayed Fault (not abort).
-                        let from_state = self
-                            .current_flow_state
-                            .as_deref()
-                            .unwrap_or("FFI_Pinned");
+                        let from_state = self.current_flow_state.as_deref().unwrap_or("FFI_Pinned");
                         let event = format!("pinned_timeout:{}ms", to_ms);
                         let snapshot = format!(
                             "pinned timeout expired ({}ms > {}ms): FFI anchor watchdog",
                             elapsed, to_ms
                         );
-                        let fault = crate::flow_matrix::make_fault_value(
-                            from_state,
-                            &event,
-                            &snapshot,
-                        );
+                        let fault =
+                            crate::flow_matrix::make_fault_value(from_state, &event, &snapshot);
                         return Ok(Some(fault));
                     }
                 }
@@ -555,9 +536,10 @@ impl<'a> Interpreter<'a> {
         t: &TransitionDef,
         vals: &[Value],
     ) -> Result<Value, InterpError> {
-        let body = t.body.as_ref().ok_or_else(|| {
-            InterpError::new(format!("transition '{}' has no body", t.name))
-        })?;
+        let body = t
+            .body
+            .as_ref()
+            .ok_or_else(|| InterpError::new(format!("transition '{}' has no body", t.name)))?;
 
         // v0.29.43: set flow state context for delayed Fault from pinned blocks.
         // Restored at every return point below.
@@ -614,11 +596,7 @@ impl<'a> Interpreter<'a> {
                 // Shadow persistent fields for recover (WAL-restored first).
                 if let Some(from_payload) = vals.first() {
                     let restored = self.abort_persistent_tx_restore(&flow.name, from_payload, flow);
-                    shadow_persistent_into_fault(
-                        &mut fault,
-                        &restored,
-                        &flow.persistent_fields,
-                    );
+                    shadow_persistent_into_fault(&mut fault, &restored, &flow.persistent_fields);
                     drop_fault_payload_except(&restored, &flow.persistent_fields);
                 } else {
                     self.abort_persistent_tx(&flow.name);
@@ -809,7 +787,9 @@ impl<'a> Interpreter<'a> {
                             continue;
                         }
                         match (fields.get(name), tx.snapshot.get(name)) {
-                            (Some(cur), Some(old)) if !crate::interp::value::values_equal(cur, old) => {
+                            (Some(cur), Some(old))
+                                if !crate::interp::value::values_equal(cur, old) =>
+                            {
                                 return true;
                             }
                             _ => {}
@@ -849,11 +829,7 @@ fn default_value_for_runtime(sample: &Value) -> Value {
 }
 
 /// Copy persistent fields from the abandoned state into the Fault record.
-fn shadow_persistent_into_fault(
-    fault: &mut Value,
-    from: &Value,
-    persistent: &[String],
-) {
+fn shadow_persistent_into_fault(fault: &mut Value, from: &Value, persistent: &[String]) {
     if persistent.is_empty() {
         return;
     }
@@ -1032,7 +1008,13 @@ impl<'a> Interpreter<'a> {
         val: Value,
         _kind: &DelegateKind,
     ) -> Result<Value, InterpError> {
-        if let Value::Closure { params: _, ret: _, body, captured } = target {
+        if let Value::Closure {
+            params: _,
+            ret: _,
+            body,
+            captured,
+        } = target
+        {
             self.push_scope();
             // Bind captured vars
             for (name, cap_val) in captured {

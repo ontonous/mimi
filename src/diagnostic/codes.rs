@@ -325,9 +325,9 @@ pub fn describe(code: &str) -> &'static str {
         E0412 => "protocol must be flat (no nested protocol-state payloads)",
         E0413 => "unknown session type name",
         E0414 => "session protocol order violation",
-E0415 => "view/mutate borrow violation",
-E0416 => "transition under pinned FFI anchor",
-E0417 => "mutate parameter reassign (realloc/swap banned)",
+        E0415 => "view/mutate borrow violation",
+        E0416 => "transition under pinned FFI anchor",
+        E0417 => "mutate parameter reassign (realloc/swap banned)",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",

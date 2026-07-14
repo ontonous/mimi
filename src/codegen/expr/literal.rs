@@ -2,8 +2,8 @@ use crate::ast::*;
 use crate::codegen::{CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use inkwell::types::BasicMetadataTypeEnum;
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -92,7 +92,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ],
                 true,
             );
-            self.module.add_function("snprintf", ty, Some(inkwell::module::Linkage::External))
+            self.module
+                .add_function("snprintf", ty, Some(inkwell::module::Linkage::External))
         });
 
         // Phase 1: Compile each part and compute total buffer size at runtime

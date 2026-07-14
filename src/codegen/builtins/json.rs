@@ -1,8 +1,8 @@
 use super::super::CallSiteValueExt;
 use super::CodeGenerator;
 use crate::error::{CompileError, MimiResult};
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use inkwell::types::BasicMetadataTypeEnum;
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
 impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_to_json(
@@ -30,7 +30,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ],
                 true,
             );
-            self.module.add_function("snprintf", ty, Some(inkwell::module::Linkage::External))
+            self.module
+                .add_function("snprintf", ty, Some(inkwell::module::Linkage::External))
         });
         let strcpy_fn = self
             .module
@@ -200,9 +201,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                         .map_err(|e| format!("strcpy error: {}", e))?;
                     // Free the escaped string (it's heap-allocated by the runtime).
-                    let free_fn = self.module.get_function("free")
+                    let free_fn = self
+                        .module
+                        .get_function("free")
                         .ok_or_else(|| CompileError::LlvmError("free not declared".into()))?;
-                    let _ = self.build_call(free_fn, &[BasicMetadataValueEnum::PointerValue(escaped)], "free_escaped");
+                    let _ = self.build_call(
+                        free_fn,
+                        &[BasicMetadataValueEnum::PointerValue(escaped)],
+                        "free_escaped",
+                    );
                     Ok(buf.into())
                 } else {
                     // CG-H2 (audit): pointer values in `to_json` are List/Record/Map/Set,

@@ -230,18 +230,12 @@ impl UnificationTable {
             (_, Type::Name(n, _)) if n == "Any" => Ok(()),
             // L12: single-sided "unknown" must not unify (helpers already reject);
             // both-unknown is allowed as a cascade placeholder only.
-            (Type::Name(na, _), Type::Name(nb, _)) if na == "unknown" && nb != "unknown" => {
-                Err(UnifyError::Mismatch(format!(
-                    "cannot unify unknown with {}",
-                    nb
-                )))
-            }
-            (Type::Name(na, _), Type::Name(nb, _)) if nb == "unknown" && na != "unknown" => {
-                Err(UnifyError::Mismatch(format!(
-                    "cannot unify {} with unknown",
-                    na
-                )))
-            }
+            (Type::Name(na, _), Type::Name(nb, _)) if na == "unknown" && nb != "unknown" => Err(
+                UnifyError::Mismatch(format!("cannot unify unknown with {}", nb)),
+            ),
+            (Type::Name(na, _), Type::Name(nb, _)) if nb == "unknown" && na != "unknown" => Err(
+                UnifyError::Mismatch(format!("cannot unify {} with unknown", na)),
+            ),
             // CO-C2 (audit): Type::Infer placeholder — legitimate inference variable binding.
             // SAFETY: only emitted by `parse_type_atom` for `_` (parse_type.rs:67) and
             //         threaded through let-bindings. Resolved by substitution at the
@@ -385,8 +379,7 @@ impl UnificationTable {
         let a_resolved = self.resolve(a);
         let b_resolved = self.resolve(b);
         let is_escape = |t: &Type| -> bool {
-            matches!(t, Type::Infer)
-                || matches!(t, Type::Name(n, _) if n == "Any" || n == "_")
+            matches!(t, Type::Infer) || matches!(t, Type::Name(n, _) if n == "Any" || n == "_")
         };
         if is_escape(&a_resolved) {
             return Err(UnifyError::Mismatch(format!(

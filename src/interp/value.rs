@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(clippy::unwrap_used)]
 
 use crate::ast::*;
 use crate::interp::error::InterpError;
@@ -484,7 +485,8 @@ impl MailboxBpState {
             let limit = self.depth_limit.load(std::sync::atomic::Ordering::Acquire);
             if d <= limit {
                 // Depth is under limit — clear the mute flag ourselves (don't wait for try_unmute).
-                self.muted.store(false, std::sync::atomic::Ordering::Release);
+                self.muted
+                    .store(false, std::sync::atomic::Ordering::Release);
                 return false;
             }
             return true;
@@ -497,8 +499,7 @@ impl MailboxBpState {
         let until = Self::now_ms().saturating_add(self.cooldown_ms);
         self.unmute_after_ms
             .store(until, std::sync::atomic::Ordering::Release);
-        self.muted
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.muted.store(true, std::sync::atomic::Ordering::Release);
         self.mute_gen
             .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
@@ -528,10 +529,7 @@ impl MailboxBpState {
 
     /// Increment depth; enter mute if over high-water mark. Returns new depth.
     pub fn on_enqueue(&self) -> usize {
-        let d = self
-            .depth
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-            + 1;
+        let d = self.depth.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
         if d > self.depth_limit.load(std::sync::atomic::Ordering::Acquire) {
             self.enter_mute();
         }
@@ -540,13 +538,11 @@ impl MailboxBpState {
 
     /// Decrement depth (message completed or rejected); try unmute.
     pub fn on_dequeue(&self) {
-        let _ = self
-            .depth
-            .fetch_update(
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-                |v| Some(v.saturating_sub(1)),
-            );
+        let _ = self.depth.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |v| Some(v.saturating_sub(1)),
+        );
         self.try_unmute();
     }
 }
@@ -592,7 +588,8 @@ static ACTOR_HANDLES: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<usize, ActorHandle>>,
 > = std::sync::OnceLock::new();
 
-pub(crate) fn actor_handles() -> &'static std::sync::Mutex<std::collections::HashMap<usize, ActorHandle>> {
+pub(crate) fn actor_handles(
+) -> &'static std::sync::Mutex<std::collections::HashMap<usize, ActorHandle>> {
     ACTOR_HANDLES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -647,11 +644,7 @@ impl ActorHandle {
                         }
                     }
                     // v0.29.11: Fault absorption — drain without dispatch.
-                    if worker_inner
-                        .read()
-                        .map(|a| a.faulted)
-                        .unwrap_or(true)
-                    {
+                    if worker_inner.read().map(|a| a.faulted).unwrap_or(true) {
                         let _ = msg.response.send(Err(InterpError::new(
                             "actor mailbox short-circuited (Fault)",
                         )));
@@ -663,11 +656,8 @@ impl ActorHandle {
                         // Read method definition
                         let (func, _actor_name) = {
                             let actor = worker_inner.read().expect("actor worker lock");
-                            let Some(func) = actor
-                                .methods
-                                .iter()
-                                .find(|f| f.name == msg.method)
-                                .cloned()
+                            let Some(func) =
+                                actor.methods.iter().find(|f| f.name == msg.method).cloned()
                             else {
                                 let _ = msg.response.send(Err(InterpError::new(format!(
                                     "actor method '{}' not found",
@@ -804,11 +794,7 @@ impl ActorHandle {
     /// loop also checks `faulted` and drains remaining messages without dispatch.
     /// Idempotent. v0.29.20: also notifies linked peers (PeerFault injection).
     pub(crate) fn short_circuit_mailbox(&self) {
-        let already = self
-            .inner
-            .read()
-            .map(|a| a.faulted)
-            .unwrap_or(true);
+        let already = self.inner.read().map(|a| a.faulted).unwrap_or(true);
         if already {
             return;
         }
@@ -827,10 +813,7 @@ impl ActorHandle {
 
     /// True when this actor has entered Fault absorption (mailbox short-circuited).
     pub(crate) fn is_faulted(&self) -> bool {
-        self.inner
-            .read()
-            .map(|a| a.faulted)
-            .unwrap_or(true)
+        self.inner.read().map(|a| a.faulted).unwrap_or(true)
     }
 
     /// v0.29.21: enqueue a mailbox message with backpressure governance.
@@ -845,9 +828,7 @@ impl ActorHandle {
         args: Vec<Value>,
     ) -> Result<std::sync::mpsc::Receiver<Result<Value, InterpError>>, InterpError> {
         if self.is_faulted() {
-            return Err(InterpError::new(
-                "actor mailbox short-circuited (Fault)",
-            ));
+            return Err(InterpError::new("actor mailbox short-circuited (Fault)"));
         }
         let start = std::time::Instant::now();
         let ttl = std::time::Duration::from_millis(self.bp.ttl_ms);
@@ -858,7 +839,11 @@ impl ActorHandle {
             self.bp.try_unmute();
             let depth = self.bp.current_depth();
             let muted = self.bp.is_muted();
-            let over = depth >= self.bp.depth_limit.load(std::sync::atomic::Ordering::Acquire);
+            let over = depth
+                >= self
+                    .bp
+                    .depth_limit
+                    .load(std::sync::atomic::Ordering::Acquire);
             if !muted && !over {
                 break;
             }
@@ -936,7 +921,9 @@ impl ActorHandle {
 
     /// Configured high-water depth limit.
     pub(crate) fn mailbox_depth_limit(&self) -> usize {
-        self.bp.depth_limit.load(std::sync::atomic::Ordering::Acquire)
+        self.bp
+            .depth_limit
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Reconfigure high-water depth (v0.29.21).
@@ -1286,8 +1273,7 @@ fn values_equal_depth(a: &Value, b: &Value, depth: u32) -> bool {
         (Value::Set(a), Value::Set(b)) => {
             // B8: use values_equal_depth to propagate depth tracking.
             a.len() == b.len()
-                && a
-                    .iter()
+                && a.iter()
                     .all(|x| b.iter().any(|y| values_equal_depth(x, y, depth + 1)))
         }
         (Value::Array(a), Value::Array(b)) => {
@@ -1318,17 +1304,26 @@ fn values_equal_depth(a: &Value, b: &Value, depth: u32) -> bool {
                     .all(|(x, y)| values_equal_depth(x, y, depth + 1))
         }
         (Value::Tuple(a), Value::Tuple(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal_depth(x, y, depth + 1))
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| values_equal_depth(x, y, depth + 1))
         }
         (Value::Variant(an, av), Value::Variant(bn, bv)) => {
             an == bn
                 && av.len() == bv.len()
-                && av.iter().zip(bv.iter()).all(|(x, y)| values_equal_depth(x, y, depth + 1))
+                && av
+                    .iter()
+                    .zip(bv.iter())
+                    .all(|(x, y)| values_equal_depth(x, y, depth + 1))
         }
         (Value::Record(_, a), Value::Record(_, b)) => {
             a.len() == b.len()
-                && a.iter()
-                    .all(|(k, v)| b.get(k).map(|bv| values_equal_depth(v, bv, depth + 1)).unwrap_or(false))
+                && a.iter().all(|(k, v)| {
+                    b.get(k)
+                        .map(|bv| values_equal_depth(v, bv, depth + 1))
+                        .unwrap_or(false)
+                })
         }
         (Value::Newtype(_, a), Value::Newtype(_, b)) => values_equal_depth(a, b, depth + 1),
         (Value::Ref(a), Value::Ref(b)) | (Value::RefMut(a), Value::RefMut(b)) => {

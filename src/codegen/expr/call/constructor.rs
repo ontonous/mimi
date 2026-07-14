@@ -1354,11 +1354,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Widen an integer value to i64 if it's a narrower integer.
     /// Non-integer values pass through unchanged.
-    fn widen_int_to_i64(
-        &self,
-        val: BasicValueEnum<'ctx>,
-        name: &str,
-    ) -> BasicValueEnum<'ctx> {
+    fn widen_int_to_i64(&self, val: BasicValueEnum<'ctx>, name: &str) -> BasicValueEnum<'ctx> {
         if let BasicValueEnum::IntValue(iv) = val {
             let bw = iv.get_type().get_bit_width();
             if bw < 64 {

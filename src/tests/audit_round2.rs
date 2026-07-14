@@ -68,7 +68,11 @@ func main() -> i32 {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_ok(), "two-stage comprehension with guards should type-check: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "two-stage comprehension with guards should type-check: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -132,7 +136,10 @@ func main() -> i32 {
     return 0
 }
 "#;
-    assert!(check_source(src).is_ok(), "to_json(List<string>) should type-check");
+    assert!(
+        check_source(src).is_ok(),
+        "to_json(List<string>) should type-check"
+    );
 }
 
 #[test]
@@ -144,7 +151,10 @@ func main() -> i32 {
     return 0
 }
 "#;
-    assert!(check_source(src).is_ok(), "to_json(List<f64>) should type-check");
+    assert!(
+        check_source(src).is_ok(),
+        "to_json(List<f64>) should type-check"
+    );
 }
 
 #[test]
@@ -156,7 +166,10 @@ func main() -> i32 {
     return 0
 }
 "#;
-    assert!(check_source(src).is_ok(), "to_json(List<bool>) should type-check");
+    assert!(
+        check_source(src).is_ok(),
+        "to_json(List<bool>) should type-check"
+    );
 }
 
 #[test]
@@ -220,7 +233,10 @@ func main() -> i32 {
     return 0
 }
 "#;
-    assert!(check_source(src).is_ok(), "all scalar to_json should type-check");
+    assert!(
+        check_source(src).is_ok(),
+        "all scalar to_json should type-check"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -260,7 +276,8 @@ fn optional_chain_after_index() {
 #[test]
 fn optional_chain_mixed_with_try() {
     // x?.y? — mixed optional chain and try
-    let src = "func main() -> i32 { let x: Option<Option<i32>> = Some(Some(1)); x?.to_string()?; 0 }";
+    let src =
+        "func main() -> i32 { let x: Option<Option<i32>> = Some(Some(1)); x?.to_string()?; 0 }";
     parse(src); // should not panic
 }
 
@@ -281,7 +298,10 @@ func main() -> i32 {
     return x
 }
 "#;
-    assert!(check_source(src).is_ok(), "try operator should still type-check");
+    assert!(
+        check_source(src).is_ok(),
+        "try operator should still type-check"
+    );
 }
 
 #[test]
@@ -296,7 +316,10 @@ func main() -> i32 {
     return y
 }
 "#;
-    assert!(check_source(src).is_ok(), "chained try operators should type-check");
+    assert!(
+        check_source(src).is_ok(),
+        "chained try operators should type-check"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -325,7 +348,10 @@ func main() -> i32 {
 }
 "#;
     // Should at least type-check
-    assert!(check_source(src).is_ok(), "complex contract should type-check");
+    assert!(
+        check_source(src).is_ok(),
+        "complex contract should type-check"
+    );
 }
 
 #[test]
@@ -342,7 +368,10 @@ func main() -> i32 {
     nested(5)
 }
 "#;
-    assert!(check_source(src).is_ok(), "simple contract should type-check");
+    assert!(
+        check_source(src).is_ok(),
+        "simple contract should type-check"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -360,7 +389,10 @@ func main() -> i32 {
     return 0
 }
 "#;
-    assert!(check_source(src).is_ok(), "nested Option type substitution should work");
+    assert!(
+        check_source(src).is_ok(),
+        "nested Option type substitution should work"
+    );
 }
 
 #[test]
@@ -373,7 +405,10 @@ func main() -> i32 {
     return 0
 }
 "#;
-    assert!(check_source(src).is_ok(), "Result type substitution should work");
+    assert!(
+        check_source(src).is_ok(),
+        "Result type substitution should work"
+    );
 }
 
 #[test]
@@ -399,7 +434,10 @@ func main() -> i32 {
     return xs[0][0][0]
 }
 "#;
-    assert!(check_source(src).is_ok(), "deeply nested generics should type-check");
+    assert!(
+        check_source(src).is_ok(),
+        "deeply nested generics should type-check"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -418,7 +456,10 @@ func main() -> i32 {
     inc(5)
 }
 "#;
-    assert!(check_source(src).is_ok(), "old() in binary postcondition should type-check");
+    assert!(
+        check_source(src).is_ok(),
+        "old() in binary postcondition should type-check"
+    );
 }
 
 #[test]
@@ -433,7 +474,10 @@ func main() -> i32 {
     double(5)
 }
 "#;
-    assert!(check_source(src).is_ok(), "old() in call postcondition should type-check");
+    assert!(
+        check_source(src).is_ok(),
+        "old() in call postcondition should type-check"
+    );
 }
 
 #[test]
@@ -467,7 +511,10 @@ func main() -> i32 {
     swap_add(3, 4)
 }
 "#;
-    assert!(check_source(src).is_ok(), "multiple old() references should type-check");
+    assert!(
+        check_source(src).is_ok(),
+        "multiple old() references should type-check"
+    );
 }
 
 #[test]
@@ -482,7 +529,10 @@ func main() -> i32 {
     clamp(15, 0, 10)
 }
 "#;
-    assert!(check_source(src).is_ok(), "old() in if-else postcondition should type-check");
+    assert!(
+        check_source(src).is_ok(),
+        "old() in if-else postcondition should type-check"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -585,7 +635,10 @@ func main() -> i32 {
     let linter = crate::lint::Linter::new();
     let result = linter.lint(&file, src);
     assert!(
-        result.diagnostics.iter().any(|d| d.code.as_deref() == Some("W012")),
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.code.as_deref() == Some("W012")),
         "W012 should detect _ escape hatch in nested func: {:?}",
         result.diagnostics
     );
@@ -604,7 +657,10 @@ func main() -> i32 {
     let linter = crate::lint::Linter::new();
     let result = linter.lint(&file, src);
     assert!(
-        result.diagnostics.iter().any(|d| d.code.as_deref() == Some("W012")),
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.code.as_deref() == Some("W012")),
         "W012 should detect Any escape hatch: {:?}",
         result.diagnostics
     );
@@ -724,7 +780,10 @@ func main() -> i32 {
     return result
 }
 "#;
-    assert!(check_source(src).is_ok(), "simple while-let pattern should be accepted");
+    assert!(
+        check_source(src).is_ok(),
+        "simple while-let pattern should be accepted"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -747,9 +806,9 @@ fn lsp_references_definition_at_correct_line() {
     // The func definition is on line 0; parser pos is 1-indexed (line 1),
     // so the fix converts to 0-indexed. If the conversion is missing,
     // the definition will be reported at line 1 instead of 0.
-    let def = refs.iter().find(|r| {
-        r.get("role").and_then(|v| v.as_str()) == Some("definition")
-    });
+    let def = refs
+        .iter()
+        .find(|r| r.get("role").and_then(|v| v.as_str()) == Some("definition"));
     if let Some(def) = def {
         let line = def
             .get("range")
@@ -757,7 +816,11 @@ fn lsp_references_definition_at_correct_line() {
             .and_then(|s| s.get("line"))
             .and_then(|l| l.as_u64());
         if let Some(l) = line {
-            assert_eq!(l, 0, "definition should be at line 0 (0-indexed), got {}", l);
+            assert_eq!(
+                l, 0,
+                "definition should be at line 0 (0-indexed), got {}",
+                l
+            );
         }
     }
 }
@@ -1082,7 +1145,9 @@ fn can_link() -> bool {
 
 #[test]
 fn dual_comprehension_with_guard() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     let src = r#"
 func main() -> i32 {
     let xs: List<i32> = [1, 2, 3, 4, 5]
@@ -1104,7 +1169,9 @@ func main() -> i32 {
 
 #[test]
 fn dual_and_or_operators() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     let src = r#"
 func main() -> i32 {
     let a = true
@@ -1130,7 +1197,9 @@ func main() -> i32 {
 
 #[test]
 fn dual_try_operator() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     let src = r#"
 func foo() -> Result<i32, string> { Ok(42) }
 func main() -> i32 {
@@ -1152,7 +1221,9 @@ func main() -> i32 {
 
 #[test]
 fn dual_nan_falsy() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     let src = r#"
 func main() -> i32 {
     let nan = sqrt(-1.0)
@@ -1176,7 +1247,9 @@ func main() -> i32 {
 
 #[test]
 fn dual_list_growth() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     // Test large list literal operations.
     let src = r#"
 func main() -> i32 {
@@ -1198,7 +1271,9 @@ func main() -> i32 {
 
 #[test]
 fn dual_sum_builtin() {
-    if !can_link() { return; }
+    if !can_link() {
+        return;
+    }
     let src = r#"
 func main() -> i32 {
     let xs: List<i32> = [10, 20, 30, 40, 50]

@@ -33,8 +33,7 @@ impl Formatter {
         let scanner = crate::source_scan::SourceScanner::new(line);
         let scanned = scanner.scan();
         let chars: Vec<char> = scanned.iter().map(|(c, _)| *c).collect();
-        let regions: Vec<crate::source_scan::Region> =
-            scanned.iter().map(|(_, r)| *r).collect();
+        let regions: Vec<crate::source_scan::Region> = scanned.iter().map(|(_, r)| *r).collect();
         let mut out = String::with_capacity(line.len() + 8);
         let mut i = 0;
         while i < chars.len() {

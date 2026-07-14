@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(clippy::unwrap_used)]
 
 use thiserror::Error;
 
@@ -461,11 +462,8 @@ impl Errno {
                     // on failure — it never reads past `buflen`.  `buf`
                     // is a stack array owned exclusively by this frame,
                     // so there is no aliasing.
-                    let rc = libc::strerror_r(
-                        code,
-                        buf.as_mut_ptr() as *mut libc::c_char,
-                        buf.len(),
-                    );
+                    let rc =
+                        libc::strerror_r(code, buf.as_mut_ptr() as *mut libc::c_char, buf.len());
                     if rc == 0 {
                         // The buffer is NUL-terminated by strerror_r.
                         std::ffi::CStr::from_bytes_until_nul(&buf)

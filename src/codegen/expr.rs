@@ -861,10 +861,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BinOp::Add => fa + fb,
                             BinOp::Sub => fa - fb,
                             BinOp::Mul => fa * fb,
-                            BinOp::Div => if fb == 0.0 { return None; } else { fa / fb },
+                            BinOp::Div => {
+                                if fb == 0.0 {
+                                    return None;
+                                } else {
+                                    fa / fb
+                                }
+                            }
                             _ => unreachable!(),
                         };
-                        Some(BasicValueEnum::FloatValue(self.context.f64_type().const_float(v)))
+                        Some(BasicValueEnum::FloatValue(
+                            self.context.f64_type().const_float(v),
+                        ))
                     }
                     BinOp::EqCmp | BinOp::NeCmp | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                         let b = match op {
@@ -876,7 +884,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BinOp::Ge => fa >= fb,
                             _ => unreachable!(),
                         };
-                        Some(BasicValueEnum::IntValue(self.context.bool_type().const_int(b as u64, false)))
+                        Some(BasicValueEnum::IntValue(
+                            self.context.bool_type().const_int(b as u64, false),
+                        ))
                     }
                     _ => None,
                 };
@@ -1124,7 +1134,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Extend i32 (or narrower) to i64 before tagging — the tag
                 // scheme assumes a 64-bit slot (bit 0 = 1 for ints).
                 let iv_ext = if iv.get_type().get_bit_width() < 64 {
-                    self.builder.build_int_s_extend(iv, i64_ty, "any_sext")
+                    self.builder
+                        .build_int_s_extend(iv, i64_ty, "any_sext")
                         .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
                 } else {
                     iv

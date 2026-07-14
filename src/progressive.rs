@@ -103,7 +103,6 @@ pub fn main_local_names(file: &File) -> Vec<String> {
     Vec::new()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,7 +154,10 @@ mod tests {
             pub_: false,
             generics: vec![],
             annotations: vec![],
-            states: vec![StateDef { name: "A".into(), payload: None }],
+            states: vec![StateDef {
+                name: "A".into(),
+                payload: None,
+            }],
             transitions: vec![],
             impl_protocols: vec![],
             persistent_fields: vec![],

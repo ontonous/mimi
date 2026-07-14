@@ -24,7 +24,11 @@ impl<'a> Checker<'a> {
             // Handle flow transition call: FlowName::transition(args)
             // Prefer overload key that includes from_state of the first arg.
             let short_key = format!("flow::{}::{}", module_name, method_name);
-            if self.funcs.keys().any(|k| k == &short_key || k.starts_with(&format!("{}::", short_key))) {
+            if self
+                .funcs
+                .keys()
+                .any(|k| k == &short_key || k.starts_with(&format!("{}::", short_key)))
+            {
                 // v0.29.23: no state transition while view/mutate borrow is live.
                 self.reject_transition_under_borrow(&format!(
                     "call flow transition '{}::{}'",

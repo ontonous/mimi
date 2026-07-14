@@ -251,10 +251,7 @@ mod tests {
         assert_eq!(validate_package_name("a/b"), Err(PathError::InvalidName));
         assert_eq!(validate_package_name("a\\b"), Err(PathError::InvalidName));
         assert_eq!(validate_package_name(""), Err(PathError::Empty));
-        assert_eq!(
-            validate_package_name("pkg\0name"),
-            Err(PathError::NulByte)
-        );
+        assert_eq!(validate_package_name("pkg\0name"), Err(PathError::NulByte));
     }
 
     #[test]

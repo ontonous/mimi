@@ -93,7 +93,9 @@ fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
         if t.name == "reset" || t.name == "recover" || t.name == "peer_fault" {
             continue;
         }
-        events.entry(t.name.clone()).or_insert_with(|| t.params.clone());
+        events
+            .entry(t.name.clone())
+            .or_insert_with(|| t.params.clone());
     }
 
     // Already-defined (from_state, event) pairs — never override user code.
@@ -192,11 +194,7 @@ fn default_type_value(ty: &Type, shapes: &HashMap<String, Vec<Field>>) -> Expr {
 
 const MAX_DEFAULT_NESTING: usize = 8;
 
-fn default_type_value_depth(
-    ty: &Type,
-    shapes: &HashMap<String, Vec<Field>>,
-    depth: usize,
-) -> Expr {
+fn default_type_value_depth(ty: &Type, shapes: &HashMap<String, Vec<Field>>, depth: usize) -> Expr {
     match ty {
         Type::Name(n, _) if n == "string" || n == "String" => {
             Expr::Literal(Lit::String(String::new()))
@@ -287,10 +285,7 @@ fn inject_peer_fault_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
 ///   - `transition ffi_crash(FFI_Pinned) -> Fault` — fallback (is_fallback=true)
 ///
 /// User-written transitions from FFI_Pinned are never overridden.
-fn inject_ffi_pinned_transitions(
-    flow: &mut FlowDef,
-    shapes: &HashMap<String, Vec<Field>>,
-) {
+fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>) {
     // Only act if the user explicitly declared an FFI_Pinned state.
     if !flow.states.iter().any(|s| s.name == "FFI_Pinned") {
         return;
@@ -782,7 +777,6 @@ pub fn make_fault_value(from_state: &str, event: &str, snapshot: &str) -> crate:
     Value::Record(Some("Fault".to_string()), fields)
 }
 
-
 /// Build a PeerFault record value (v0.29.20).
 pub fn make_peer_fault_value(peer_id: &str, reason: &str) -> crate::interp::Value {
     use crate::interp::Value;
@@ -852,17 +846,28 @@ mod tests {
         );
         // Defined: Zero+inc. Missing: Positive+inc, Fault+inc + reset/recover.
         let fallbacks: Vec<_> = flow.transitions.iter().filter(|t| t.is_fallback).collect();
-        assert!(fallbacks.len() >= 4, "expected ≥4 fallbacks, got {:?}", fallbacks);
-        assert!(fallbacks.iter().any(|t| t.from_state == "Positive" && t.name == "inc"));
-        assert!(fallbacks.iter().any(|t| t.from_state == "Fault" && t.name == "inc"));
-        assert!(fallbacks.iter().any(|t| t.name == "reset" && t.from_state == "Fault"));
-        assert!(fallbacks.iter().any(|t| t.name == "recover" && t.from_state == "Fault"));
-        // User transition preserved.
         assert!(
-            flow.transitions
-                .iter()
-                .any(|t| !t.is_fallback && t.from_state == "Zero" && t.name == "inc")
+            fallbacks.len() >= 4,
+            "expected ≥4 fallbacks, got {:?}",
+            fallbacks
         );
+        assert!(fallbacks
+            .iter()
+            .any(|t| t.from_state == "Positive" && t.name == "inc"));
+        assert!(fallbacks
+            .iter()
+            .any(|t| t.from_state == "Fault" && t.name == "inc"));
+        assert!(fallbacks
+            .iter()
+            .any(|t| t.name == "reset" && t.from_state == "Fault"));
+        assert!(fallbacks
+            .iter()
+            .any(|t| t.name == "recover" && t.from_state == "Fault"));
+        // User transition preserved.
+        assert!(flow
+            .transitions
+            .iter()
+            .any(|t| !t.is_fallback && t.from_state == "Zero" && t.name == "inc"));
     }
 
     #[test]
@@ -907,6 +912,9 @@ mod tests {
             .collect();
         assert_eq!(event_fb.len(), 1);
         assert_eq!(event_fb[0].from_state, "Fault");
-        assert!(flow.transitions.iter().any(|t| t.name == "reset" && t.is_fallback));
+        assert!(flow
+            .transitions
+            .iter()
+            .any(|t| t.name == "reset" && t.is_fallback));
     }
 }

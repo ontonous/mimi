@@ -447,8 +447,8 @@ pub(crate) mod legacy {
             Ok(File {
                 imports: all_imports,
                 items: all_items,
-                    implicit_single: false,
-                })
+                implicit_single: false,
+            })
         }
     }
 
@@ -465,7 +465,7 @@ pub(crate) mod legacy {
             Item::Const { name, .. } => Some(name),
             Item::Flow(f) => Some(&f.name),
             Item::Protocol(p) => Some(&p.name),
-        Item::Session(s) => Some(&s.name),
+            Item::Session(s) => Some(&s.name),
         }
     }
 }

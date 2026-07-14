@@ -91,10 +91,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         match op {
             UnOp::Neg => {
                 if let BasicValueEnum::IntValue(iv) = v {
-                     // Use the operand's own type for the zero constant — i32 and i64
-                     // are both valid integer widths after the A1 type restoration.
-                     let zero = iv.get_type().const_int(0, true);
-                     Ok(self
+                    // Use the operand's own type for the zero constant — i32 and i64
+                    // are both valid integer widths after the A1 type restoration.
+                    let zero = iv.get_type().const_int(0, true);
+                    Ok(self
                         .builder
                         .build_int_sub(zero, iv, "neg")
                         .map_err(|e| CompileError::LlvmError(format!("neg error: {}", e)))?
@@ -307,16 +307,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         if matches!(op, BinOp::Div) {
             // Use operand width for constants — i32 operands need i32 constants.
             let zero = r.get_type().const_int(0, false);
-            let is_zero = self.builder
+            let is_zero = self
+                .builder
                 .build_int_compare(inkwell::IntPredicate::EQ, r, zero, "div_by_zero")
                 .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-            let safe_r = self.builder
+            let safe_r = self
+                .builder
                 .build_select(is_zero, r.get_type().const_int(1, false), r, "safe_divisor")
                 .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
                 .into_int_value();
-            let div = self.builder.build_int_signed_div(l, safe_r, "div")
+            let div = self
+                .builder
+                .build_int_signed_div(l, safe_r, "div")
                 .map_err(|e| CompileError::LlvmError(format!("div error: {}", e)))?;
-            let result = self.builder
+            let result = self
+                .builder
                 .build_select(is_zero, zero, div, "div_result")
                 .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?;
             return Ok(result);
@@ -363,16 +368,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // CG-H1 (deep audit): modulo by zero is UB (SIGFPE).
                 // Use operand width for constants — i32 operands need i32 constants.
                 let zero = r.get_type().const_int(0, false);
-                let is_zero = self.builder
+                let is_zero = self
+                    .builder
                     .build_int_compare(inkwell::IntPredicate::EQ, r, zero, "mod_by_zero")
                     .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-                let safe_r = self.builder
-                    .build_select(is_zero, r.get_type().const_int(1, false), r, "safe_mod_divisor")
+                let safe_r = self
+                    .builder
+                    .build_select(
+                        is_zero,
+                        r.get_type().const_int(1, false),
+                        r,
+                        "safe_mod_divisor",
+                    )
                     .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
                     .into_int_value();
-                let rem = self.builder.build_int_signed_rem(l, safe_r, "rem")
+                let rem = self
+                    .builder
+                    .build_int_signed_rem(l, safe_r, "rem")
                     .map_err(|e| CompileError::LlvmError(format!("rem error: {}", e)))?;
-                let result = self.builder
+                let result = self
+                    .builder
                     .build_select(is_zero, zero, rem, "mod_result")
                     .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?;
                 Ok(result)
@@ -598,13 +613,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Runtime pow function is i64 — extend i32 operands to i64 first.
                 let i64_ty = self.context.i64_type();
                 let base_i64 = if base.get_type().get_bit_width() < 64 {
-                    self.builder.build_int_s_extend(base, i64_ty, "pow_base_ext")
+                    self.builder
+                        .build_int_s_extend(base, i64_ty, "pow_base_ext")
                         .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
-                } else { base };
+                } else {
+                    base
+                };
                 let exp_i64 = if exp.get_type().get_bit_width() < 64 {
-                    self.builder.build_int_s_extend(exp, i64_ty, "pow_exp_ext")
+                    self.builder
+                        .build_int_s_extend(exp, i64_ty, "pow_exp_ext")
                         .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
-                } else { exp };
+                } else {
+                    exp
+                };
                 let pow_fn_name = "__mimi_pow_i64";
                 let fn_ty = i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false);
                 let pow_fn = self.module.get_function(pow_fn_name).unwrap_or_else(|| {
@@ -620,7 +641,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or_else(|| CompileError::LlvmError("pow returned void".into()))?;
                 // If the original operands were i32, truncate the result back.
                 if base.get_type().get_bit_width() < 64 {
-                    Ok(self.builder.build_int_truncate(result.into_int_value(), base.get_type(), "pow_trunc")
+                    Ok(self
+                        .builder
+                        .build_int_truncate(result.into_int_value(), base.get_type(), "pow_trunc")
                         .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?
                         .into())
                 } else {

@@ -423,12 +423,16 @@ func f(x: i32) -> i32 {
     x
 }
 "#;
-    let results = crate::verifier::verify_source(src)
-        .expect("verify_source should not error");
+    let results = crate::verifier::verify_source(src).expect("verify_source should not error");
     assert!(
-        results.iter().any(|r| r.status == crate::verifier::VerifStatus::Failed),
+        results
+            .iter()
+            .any(|r| r.status == crate::verifier::VerifStatus::Failed),
         "ensures result > 100 should fail for f(x)=x with x>=0 — got: {:?}",
-        results.iter().map(|r| (&r.func_name, &r.status, &r.message)).collect::<Vec<_>>()
+        results
+            .iter()
+            .map(|r| (&r.func_name, &r.status, &r.message))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -453,8 +457,7 @@ func dec(x: i32) -> i32 {
     x - 1
 }
 "#;
-    let results = crate::verifier::verify_source(src)
-        .expect("verify_source should not error");
+    let results = crate::verifier::verify_source(src).expect("verify_source should not error");
     // Both should verify independently without cross-contamination
     for r in &results {
         assert_eq!(
@@ -513,8 +516,14 @@ fn crit07_lexer_multi_level_dedent() {
     let tokens = crate::lexer::Lexer::new(src).tokenize();
     assert!(tokens.is_ok(), "tokenize should succeed");
     let tokens = tokens.unwrap();
-    let dedent_count = tokens.iter().filter(|t| matches!(t.kind, crate::lexer::TokenKind::Dedent)).count();
-    let indent_count = tokens.iter().filter(|t| matches!(t.kind, crate::lexer::TokenKind::Indent)).count();
+    let dedent_count = tokens
+        .iter()
+        .filter(|t| matches!(t.kind, crate::lexer::TokenKind::Dedent))
+        .count();
+    let indent_count = tokens
+        .iter()
+        .filter(|t| matches!(t.kind, crate::lexer::TokenKind::Indent))
+        .count();
     assert_eq!(
         dedent_count, indent_count,
         "indent/dedent should be balanced: {} indents, {} dedents",
@@ -569,7 +578,11 @@ func f(x: f64) -> f64 {
 "#;
     // Should not panic on scientific notation
     let result = crate::verifier::verify_source(src);
-    assert!(result.is_ok(), "verify_source should not panic on scientific notation: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "verify_source should not panic on scientific notation: {:?}",
+        result.err()
+    );
 }
 
 // ── CRITICAL #18: json_has_key 对空值正确判断 ──
@@ -646,7 +659,9 @@ fn high_lex_number_prefix_no_digits() {
     assert!(tokens.is_ok(), "0x without digits should tokenize");
     // Verify the token is an Int with prefix "0x"
     let tokens = tokens.unwrap();
-    let int_tok = tokens.iter().find(|t| matches!(t.kind, crate::lexer::TokenKind::Int(_)));
+    let int_tok = tokens
+        .iter()
+        .find(|t| matches!(t.kind, crate::lexer::TokenKind::Int(_)));
     assert!(int_tok.is_some(), "should have an Int token");
     if let Some(t) = int_tok {
         if let crate::lexer::TokenKind::Int(s) = &t.kind {
@@ -664,18 +679,16 @@ fn high_lex_scientific_no_digits() {
     let tokens = tokens.unwrap();
     // The "1" should be Int("1"), and "e" should be a separate Ident token
     // (not Int("1e") or Float("1e") which would be malformed)
-    let has_int_one = tokens.iter().any(|t| {
-        matches!(&t.kind, crate::lexer::TokenKind::Int(s) if s == "1")
-    });
+    let has_int_one = tokens
+        .iter()
+        .any(|t| matches!(&t.kind, crate::lexer::TokenKind::Int(s) if s == "1"));
     assert!(has_int_one, "should have Int(\"1\") token, not Int(\"1e\")");
     // Should NOT have an Int or Float token containing "1e"
-    let has_malformed = tokens.iter().any(|t| {
-        match &t.kind {
-            crate::lexer::TokenKind::Int(s) | crate::lexer::TokenKind::Float(s) => {
-                s.contains('e') || s.contains('E')
-            }
-            _ => false,
+    let has_malformed = tokens.iter().any(|t| match &t.kind {
+        crate::lexer::TokenKind::Int(s) | crate::lexer::TokenKind::Float(s) => {
+            s.contains('e') || s.contains('E')
         }
+        _ => false,
     });
     assert!(!has_malformed, "should not have a token containing '1e'");
 }
@@ -742,10 +755,13 @@ flow Counter {
 }
 "#;
     // Should parse without error — flow keyword is a sync point
-    let result = crate::parser::Parser::new(
-        crate::lexer::Lexer::new(src).tokenize().unwrap()
-    ).parse_file();
-    assert!(result.is_ok(), "flow keyword should be recognized after func: {:?}", result.err());
+    let result =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(src).tokenize().unwrap()).parse_file();
+    assert!(
+        result.is_ok(),
+        "flow keyword should be recognized after func: {:?}",
+        result.err()
+    );
 }
 
 // ── HIGH: Interpreter 闭包 early_return 隔离 ──
@@ -802,8 +818,7 @@ func f(x: i32) -> i32 {
     x
 }
 "#;
-    let results = crate::verifier::verify_source(src)
-        .expect("verify_source should not error");
+    let results = crate::verifier::verify_source(src).expect("verify_source should not error");
     for r in &results {
         assert_eq!(
             r.status,
@@ -829,11 +844,15 @@ func f(x: i32) -> i32 {
     x
 }
 "#;
-    let results = crate::verifier::verify_source(src)
-        .expect("verify_source should not error");
+    let results = crate::verifier::verify_source(src).expect("verify_source should not error");
     assert!(
-        results.iter().any(|r| r.status == crate::verifier::VerifStatus::Failed),
+        results
+            .iter()
+            .any(|r| r.status == crate::verifier::VerifStatus::Failed),
         "ensures result > 100 should fail for f(x)=x — got: {:?}",
-        results.iter().map(|r| (&r.func_name, &r.status)).collect::<Vec<_>>()
+        results
+            .iter()
+            .map(|r| (&r.func_name, &r.status))
+            .collect::<Vec<_>>()
     );
 }

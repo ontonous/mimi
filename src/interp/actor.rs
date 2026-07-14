@@ -7,7 +7,8 @@ impl<'a> Interpreter<'a> {
         if let Some(flow) = self.flow_index.get(actor_name) {
             for ann in &flow.annotations {
                 if let crate::ast::FlowAnnotation::MaxChildren(n) = ann {
-                    let count = self.actor_spawn_counts
+                    let count = self
+                        .actor_spawn_counts
                         .get(actor_name)
                         .copied()
                         .unwrap_or(0);
@@ -61,7 +62,11 @@ impl<'a> Interpreter<'a> {
             peer_links: Vec::new(),
             parent_id: crate::interp::value::CURRENT_ACTOR_ID.with(|id| {
                 let id = id.get();
-                if id == 0 { None } else { Some(id) }
+                if id == 0 {
+                    None
+                } else {
+                    Some(id)
+                }
             }),
             is_detached: false,
             producers: Vec::new(),
@@ -74,7 +79,10 @@ impl<'a> Interpreter<'a> {
         let handle = ActorHandle::new(instance, program);
         self.spawn_count += 1;
         // per-actor-type tracking
-        *self.actor_spawn_counts.entry(actor_name.to_string()).or_insert(0) += 1;
+        *self
+            .actor_spawn_counts
+            .entry(actor_name.to_string())
+            .or_insert(0) += 1;
         // v0.29.31: auto-apply @mailbox(depth=N) from flow annotations.
         if let Some(flow) = self.flow_index.get(actor_name) {
             for ann in &flow.annotations {
@@ -89,7 +97,8 @@ impl<'a> Interpreter<'a> {
 
     /// v0.29.24: remaining spawn quota (`None` if unlimited).
     pub(crate) fn spawn_quota_remaining(&self) -> Option<usize> {
-        self.max_children.map(|m| m.saturating_sub(self.spawn_count))
+        self.max_children
+            .map(|m| m.saturating_sub(self.spawn_count))
     }
 
     /// v0.29.24: set process-wide max children (for tests / runtime reconfigure).

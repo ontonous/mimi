@@ -29,10 +29,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         // B4: use malloc_or_abort for NULL check.
-        let buf = self.malloc_or_abort(
-            self.context.i64_type().const_int(2, false),
-            "char_buf",
-        )?;
+        let buf = self.malloc_or_abort(self.context.i64_type().const_int(2, false), "char_buf")?;
         // Handle both string representations:
         // - PointerValue: char* directly (literal strings)
         // - StructValue: {i8*, i64} (builtin function results)
@@ -59,36 +56,55 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .into_int_value(),
             BasicMetadataValueEnum::PointerValue(_) => {
                 let strlen_fn = self.get_runtime_fn("strlen")?;
-                self.build_call(strlen_fn, &[BasicMetadataValueEnum::PointerValue(data_ptr)], "strlen")?
-                    .try_as_basic_value_opt()
-                    .ok_or("strlen returned void")?
-                    .into_int_value()
+                self.build_call(
+                    strlen_fn,
+                    &[BasicMetadataValueEnum::PointerValue(data_ptr)],
+                    "strlen",
+                )?
+                .try_as_basic_value_opt()
+                .ok_or("strlen returned void")?
+                .into_int_value()
             }
-            _ => return Err(CompileError::TypeMismatch("str_char_at: first arg must be string".to_string())),
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "str_char_at: first arg must be string".to_string(),
+                ))
+            }
         };
         // Clamp index to [0, len-1] using select: if index >= len, use len-1 (last char).
         // Index may be i32 — extend to i64 for comparison with string length.
         let i64_ty = self.context.i64_type();
         let index_i64 = if index.get_type().get_bit_width() < 64 {
-            self.builder.build_int_s_extend(index, i64_ty, "idx_sext")
+            self.builder
+                .build_int_s_extend(index, i64_ty, "idx_sext")
                 .map_err(|e| CompileError::LlvmError(format!("s_ext error: {}", e)))?
         } else {
             index
         };
-        let oob = self.builder
+        let oob = self
+            .builder
             .build_int_compare(inkwell::IntPredicate::SGE, index_i64, s_len, "idx_oob")
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let neg = self.builder
-            .build_int_compare(inkwell::IntPredicate::SLT, index_i64, i64_ty.const_int(0, false), "idx_neg")
+        let neg = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                index_i64,
+                i64_ty.const_int(0, false),
+                "idx_neg",
+            )
             .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let clamped_lo = self.builder
+        let clamped_lo = self
+            .builder
             .build_select(neg, i64_ty.const_int(0, false), index_i64, "idx_clamped_lo")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();
-        let last_valid = self.builder
+        let last_valid = self
+            .builder
             .build_int_sub(s_len, i64_ty.const_int(1, false), "last_valid")
             .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-        let safe_idx = self.builder
+        let safe_idx = self
+            .builder
             .build_select(oob, last_valid, clamped_lo, "safe_idx")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
             .into_int_value();

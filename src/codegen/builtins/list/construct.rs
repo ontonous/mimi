@@ -62,7 +62,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_select(is_neg, zero, raw_len, "range_len_clamped")
             .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();;
+            .into_int_value();
         // Allocate array: len * sizeof(i64)
         let sizeof_i64 = self.list_elem_size();
         let alloc_size = self

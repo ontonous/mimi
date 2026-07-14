@@ -20,8 +20,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let ty = iv.get_type();
                 let bw = ty.get_bit_width();
                 let zero = ty.const_int(0, true);
-                let min_val = ty.const_int(if bw >= 64 { i64::MIN as u64 } else { i32::MIN as u64 }, false);
-                let max_val = ty.const_int(if bw >= 64 { i64::MAX as u64 } else { i32::MAX as u64 }, false);
+                let min_val = ty.const_int(
+                    if bw >= 64 {
+                        i64::MIN as u64
+                    } else {
+                        i32::MIN as u64
+                    },
+                    false,
+                );
+                let max_val = ty.const_int(
+                    if bw >= 64 {
+                        i64::MAX as u64
+                    } else {
+                        i32::MAX as u64
+                    },
+                    false,
+                );
                 let neg = self
                     .builder
                     .build_int_sub(zero, iv, "neg")

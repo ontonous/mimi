@@ -412,10 +412,14 @@ impl Parser {
                 if next_is_dot {
                     self.advance(); // consume `?`
                     self.advance(); // consume `.`
-                    // Support both `?.field` and `?.0` (optional tuple index)
+                                    // Support both `?.field` and `?.0` (optional tuple index)
                     if let TokenKind::Int(s) = &self.peek().kind {
                         let idx = s.replace('_', "").parse::<usize>().map_err(|_| {
-                            ParseError::new("invalid tuple index", self.peek().line, self.peek().col)
+                            ParseError::new(
+                                "invalid tuple index",
+                                self.peek().line,
+                                self.peek().col,
+                            )
                         })?;
                         self.advance();
                         // OptionalChain doesn't have a tuple-index variant;

@@ -397,7 +397,11 @@ fn collect_refs_in_expr(expr: &Expr, info: &mut VarUsage) {
             }
         }
         Expr::Block(b) => collect_refs_in_block(b, info),
-        Expr::Try(e) | Expr::Spawn(e) | Expr::Await(e) | Expr::TypeOf(e) | Expr::OptionalChain(e, _) => {
+        Expr::Try(e)
+        | Expr::Spawn(e)
+        | Expr::Await(e)
+        | Expr::TypeOf(e)
+        | Expr::OptionalChain(e, _) => {
             collect_refs_in_expr(e, info);
         }
         Expr::If { cond, then_, else_ } => {
@@ -1376,12 +1380,12 @@ mod tests {
 /// Detect `let x: _ = ...` and `let x: Any = ...` patterns that bypass the
 /// type checker via the unification escape hatches. W012 warns the user that
 /// such bindings propagate the escape hatch into all downstream usages.
-fn detect_escape_hatch_type_annotations(
-    func: &FuncDef,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+fn detect_escape_hatch_type_annotations(func: &FuncDef, diagnostics: &mut Vec<Diagnostic>) {
     let mut check_stmt = |stmt: &Stmt| {
-        if let Stmt::Let { ty: Some(t), pos, .. } = stmt {
+        if let Stmt::Let {
+            ty: Some(t), pos, ..
+        } = stmt
+        {
             if is_escape_hatch_type(t) {
                 diagnostics.push(Diagnostic::warning_code(
                     W012,
@@ -1433,11 +1437,7 @@ fn walk_stmt_inner(stmt: &Stmt, visit: &mut impl FnMut(&Stmt)) {
         Stmt::Block(stmts) | Stmt::Parasteps(stmts) | Stmt::OnFailure(stmts) | Stmt::Do(stmts) => {
             walk_stmts(stmts, visit)
         }
-        Stmt::If {
-            then_,
-            else_,
-            ..
-        } => {
+        Stmt::If { then_, else_, .. } => {
             walk_stmts(then_, visit);
             if let Some(e) = else_ {
                 walk_stmts(e, visit);

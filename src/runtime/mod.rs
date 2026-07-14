@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 // Mimi language runtime — pure Rust implementation.
 //
 // This module provides all runtime symbols needed by LLVM-codegened Mimi programs,
@@ -347,7 +348,14 @@ pub extern "C" fn mimi_list_push_i64(list: *mut MimiList, element: i64) {
     };
     if new_len > cap {
         // MEM-C10: use checked_mul for cap*2 to prevent overflow.
-        let nc = if cap <= 0 { 4 } else { match cap.checked_mul(2) { Some(c) => c, None => return } };
+        let nc = if cap <= 0 {
+            4
+        } else {
+            match cap.checked_mul(2) {
+                Some(c) => c,
+                None => return,
+            }
+        };
         let nd = realloc_list_data(lst.data, nc);
         if nd.is_null() {
             return;
@@ -2260,7 +2268,10 @@ pub extern "C" fn json_get_int(
         Some(val) => {
             // C6-fix: log parse failure instead of silently returning 0
             val.parse::<i64>().unwrap_or_else(|e| {
-                eprintln!("[mimi runtime] json_get_int: parse error for '{}': {}", val, e);
+                eprintln!(
+                    "[mimi runtime] json_get_int: parse error for '{}': {}",
+                    val, e
+                );
                 0
             })
         }
@@ -2394,7 +2405,10 @@ pub extern "C" fn mimi_json_as_i64(json: *const std::ffi::c_char) -> i64 {
         Some(val) => {
             // C6-fix: log parse failure instead of silently returning 0
             val.parse::<i64>().unwrap_or_else(|e| {
-                eprintln!("[mimi runtime] mimi_json_as_i64: parse error for '{}': {}", val, e);
+                eprintln!(
+                    "[mimi runtime] mimi_json_as_i64: parse error for '{}': {}",
+                    val, e
+                );
                 0
             })
         }
@@ -4122,7 +4136,10 @@ pub extern "C" fn __mimi_extern_test_parse_int(json: *const std::ffi::c_char) ->
         .parse()
         .unwrap_or_else(|e| {
             // C6-fix: log parse failure instead of silently returning 0
-            eprintln!("[mimi runtime] mimi_json_as_i32: parse error for '{}': {}", digits, e);
+            eprintln!(
+                "[mimi runtime] mimi_json_as_i32: parse error for '{}': {}",
+                digits, e
+            );
             0
         });
     if neg {
@@ -4420,7 +4437,9 @@ pub extern "C" fn mimi_wall_clock_ms() -> i64 {
         }
         Err(_) => {
             if !LOGGED.with(|c| c.replace(true)) {
-                eprintln!("mimi_wall_clock_ms: system clock before UNIX_EPOCH; using last good value");
+                eprintln!(
+                    "mimi_wall_clock_ms: system clock before UNIX_EPOCH; using last good value"
+                );
             }
             LAST_MS.with(|c| c.get())
         }
@@ -4491,12 +4510,15 @@ pub extern "C" fn mimi_pinned_fault_state() -> *const std::ffi::c_char {
         let mut cstr = cstr_cell.borrow_mut();
         PINNED_FAULT_PENDING.with(|cell| {
             if let Some(ref info) = *cell.borrow() {
-                *cstr = Some(std::ffi::CString::new(info.state_name.as_str()).unwrap_or_else(|_| {
-                    std::ffi::CString::new("FFI_Pinned").unwrap()
-                }));
+                *cstr = Some(
+                    std::ffi::CString::new(info.state_name.as_str())
+                        .unwrap_or_else(|_| std::ffi::CString::new("FFI_Pinned").unwrap()),
+                );
             }
         });
-        cstr.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null())
+        cstr.as_ref()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null())
     })
 }
 
@@ -4578,7 +4600,11 @@ thread_local! {
 /// Returns a pointer to the allocated memory, or null on failure.
 /// The memory is tracked in the shadow map with the given tag and label.
 #[no_mangle]
-pub extern "C" fn mimi_shadow_alloc(size: usize, tag: u8, label: *const std::ffi::c_char) -> *mut u8 {
+pub extern "C" fn mimi_shadow_alloc(
+    size: usize,
+    tag: u8,
+    label: *const std::ffi::c_char,
+) -> *mut u8 {
     let label_str = if label.is_null() {
         String::new()
     } else {
@@ -4635,7 +4661,11 @@ pub extern "C" fn mimi_shadow_check(ptr: *const u8, expected_tag: u8) -> i32 {
     SHADOW_MAP.with(|m| {
         let m = m.borrow();
         if let Some(info) = m.get(&(ptr as usize)) {
-            if info.tag == expected_tag { 1 } else { 0 }
+            if info.tag == expected_tag {
+                1
+            } else {
+                0
+            }
         } else {
             0
         }
@@ -4686,10 +4716,14 @@ pub extern "C" fn mimi_shadow_dump() -> *const std::ffi::c_char {
                 ));
             }
         });
-        *cstr_cell.borrow_mut() = Some(std::ffi::CString::new(buf).unwrap_or_else(|_| {
-            std::ffi::CString::new("").unwrap()
-        }));
-        cstr_cell.borrow().as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null())
+        *cstr_cell.borrow_mut() = Some(
+            std::ffi::CString::new(buf).unwrap_or_else(|_| std::ffi::CString::new("").unwrap()),
+        );
+        cstr_cell
+            .borrow()
+            .as_ref()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null())
     })
 }
 // ---------------------------------------------------------------------------
@@ -7361,7 +7395,6 @@ pub extern "C" fn mimi_actor_spawn(
     Box::into_raw(repr) as *mut std::ffi::c_void
 }
 
-
 /// Get the actor ID from a handle. Used by codegen for self-call detection.
 #[no_mangle]
 pub extern "C" fn mimi_actor_id(handle: *mut std::ffi::c_void) -> u64 {
@@ -7463,8 +7496,7 @@ pub extern "C" fn mimi_actor_call(
         .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
         + 1;
     if d > repr.mailbox_depth_limit {
-        repr.muted
-            .store(true, std::sync::atomic::Ordering::Release);
+        repr.muted.store(true, std::sync::atomic::Ordering::Release);
     }
     // Send to mailbox. If the channel is closed (actor dropped), return 0.
     if repr.mailbox_tx.send(msg).is_err() {
@@ -7559,7 +7591,6 @@ pub extern "C" fn mimi_actor_is_faulted(handle: *mut std::ffi::c_void) -> i32 {
     }
 }
 
-
 /// v0.29.21: set mailbox high-water depth limit for backpressure.
 #[no_mangle]
 pub extern "C" fn mimi_actor_set_mailbox_depth(handle: *mut std::ffi::c_void, depth: i64) {
@@ -7578,7 +7609,8 @@ pub extern "C" fn mimi_actor_mailbox_depth(handle: *mut std::ffi::c_void) -> i64
         return 0;
     }
     let repr = unsafe { &*(handle as *const MimiActorRepr) };
-    repr.mailbox_depth.load(std::sync::atomic::Ordering::Acquire) as i64
+    repr.mailbox_depth
+        .load(std::sync::atomic::Ordering::Acquire) as i64
 }
 
 /// v0.29.21: 1 if actor is muted under backpressure, else 0.
@@ -8249,9 +8281,13 @@ pub extern "C" fn mimi_session_pair() -> i64 {
     ((hb << 32) | (ha & 0xFFFF_FFFFu64)) as i64
 }
 #[no_mangle]
-pub extern "C" fn mimi_session_lo(pair: i64) -> i64 { (pair as u64 & 0xFFFF_FFFFu64) as i64 }
+pub extern "C" fn mimi_session_lo(pair: i64) -> i64 {
+    (pair as u64 & 0xFFFF_FFFFu64) as i64
+}
 #[no_mangle]
-pub extern "C" fn mimi_session_hi(pair: i64) -> i64 { ((pair as u64) >> 32) as i64 }
+pub extern "C" fn mimi_session_hi(pair: i64) -> i64 {
+    ((pair as u64) >> 32) as i64
+}
 
 // =========================================================================
 // v0.28.21 — QuotedAst runtime representation

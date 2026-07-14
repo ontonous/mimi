@@ -66,8 +66,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.comptime_file = Some(std::rc::Rc::new(crate::ast::File {
             imports: file.imports.clone(),
             items: file.items.clone(),
-                    implicit_single: false,
-                }));
+            implicit_single: false,
+        }));
 
         // v0.28.21 — Evaluate top-level `comptime func` and `const` items via the
         // interpreter and cache the results so `Expr::Comptime` blocks and
@@ -242,8 +242,23 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn is_builtin_type_name(name: &str) -> bool {
         matches!(
             name,
-            "i32" | "i64" | "f32" | "f64" | "bool" | "string" | "unit" | "char" | "Int" | "Float"
-                | "Bool" | "String" | "List" | "Option" | "Result" | "Set" | "Map"
+            "i32"
+                | "i64"
+                | "f32"
+                | "f64"
+                | "bool"
+                | "string"
+                | "unit"
+                | "char"
+                | "Int"
+                | "Float"
+                | "Bool"
+                | "String"
+                | "List"
+                | "Option"
+                | "Result"
+                | "Set"
+                | "Map"
         )
     }
 
@@ -269,8 +284,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             ty: Type::Name(t.from_state.clone(), vec![]),
             mut_: false,
             default_value: None,
-                borrow: None,
-            });
+            borrow: None,
+        });
         params.extend(t.params.iter().cloned());
 
         // M6: multi-target uses first as nominal; see module docs above.
@@ -433,9 +448,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 derives: vec![],
                 attributes: vec![],
             };
-            let llvm_ty = BasicTypeEnum::StructType(
-                self.context.struct_type(&[string_ty, string_ty], false),
-            );
+            let llvm_ty =
+                BasicTypeEnum::StructType(self.context.struct_type(&[string_ty, string_ty], false));
             self.type_llvm.insert("PeerFault".to_string(), llvm_ty);
             self.type_defs.insert("PeerFault".to_string(), pf_ty);
         }
@@ -472,14 +486,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                 attributes: vec![],
             };
             // SystemTrace LLVM struct: { string, string, string, MemoryDump, PanicPayload }
-            let memory_dump_ty = self.type_llvm.get("MemoryDump").copied()
-                .unwrap_or(BasicTypeEnum::StructType(self.context.struct_type(&[string_ty, i32_ty], false)));
-            let panic_payload_ty = self.type_llvm.get("PanicPayload").copied()
-                .unwrap_or(BasicTypeEnum::StructType(self.context.struct_type(&[string_ty, string_ty, i32_ty, string_ty], false)));
-            let llvm_ty = BasicTypeEnum::StructType(
-                self.context
-                    .struct_type(&[string_ty, string_ty, string_ty, memory_dump_ty, panic_payload_ty], false),
-            );
+            let memory_dump_ty =
+                self.type_llvm
+                    .get("MemoryDump")
+                    .copied()
+                    .unwrap_or(BasicTypeEnum::StructType(
+                        self.context.struct_type(&[string_ty, i32_ty], false),
+                    ));
+            let panic_payload_ty =
+                self.type_llvm
+                    .get("PanicPayload")
+                    .copied()
+                    .unwrap_or(BasicTypeEnum::StructType(
+                        self.context
+                            .struct_type(&[string_ty, string_ty, i32_ty, string_ty], false),
+                    ));
+            let llvm_ty = BasicTypeEnum::StructType(self.context.struct_type(
+                &[
+                    string_ty,
+                    string_ty,
+                    string_ty,
+                    memory_dump_ty,
+                    panic_payload_ty,
+                ],
+                false,
+            ));
             self.type_llvm.insert("SystemTrace".to_string(), llvm_ty);
             self.type_defs.insert("SystemTrace".to_string(), st_ty);
         }
@@ -489,17 +520,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                 name: "PanicPayload".to_string(),
                 pub_: false,
                 kind: crate::ast::TypeDefKind::Record(vec![
-                    crate::ast::Field { name: "error_type".to_string(), ty: crate::ast::Type::Name("string".to_string(), vec![]) },
-                    crate::ast::Field { name: "file".to_string(), ty: crate::ast::Type::Name("string".to_string(), vec![]) },
-                    crate::ast::Field { name: "line".to_string(), ty: crate::ast::Type::Name("i32".to_string(), vec![]) },
-                    crate::ast::Field { name: "stack".to_string(), ty: crate::ast::Type::Name("string".to_string(), vec![]) },
+                    crate::ast::Field {
+                        name: "error_type".to_string(),
+                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                    },
+                    crate::ast::Field {
+                        name: "file".to_string(),
+                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                    },
+                    crate::ast::Field {
+                        name: "line".to_string(),
+                        ty: crate::ast::Type::Name("i32".to_string(), vec![]),
+                    },
+                    crate::ast::Field {
+                        name: "stack".to_string(),
+                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                    },
                 ]),
                 generics: vec![],
                 derives: vec![],
                 attributes: vec![],
             };
             let llvm_ty = BasicTypeEnum::StructType(
-                self.context.struct_type(&[string_ty, string_ty, i32_ty, string_ty], false),
+                self.context
+                    .struct_type(&[string_ty, string_ty, i32_ty, string_ty], false),
             );
             self.type_llvm.insert("PanicPayload".to_string(), llvm_ty);
             self.type_defs.insert("PanicPayload".to_string(), pp_ty);
@@ -510,16 +554,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 name: "MemoryDump".to_string(),
                 pub_: false,
                 kind: crate::ast::TypeDefKind::Record(vec![
-                    crate::ast::Field { name: "fields".to_string(), ty: crate::ast::Type::Name("string".to_string(), vec![]) },
-                    crate::ast::Field { name: "count".to_string(), ty: crate::ast::Type::Name("i32".to_string(), vec![]) },
+                    crate::ast::Field {
+                        name: "fields".to_string(),
+                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                    },
+                    crate::ast::Field {
+                        name: "count".to_string(),
+                        ty: crate::ast::Type::Name("i32".to_string(), vec![]),
+                    },
                 ]),
                 generics: vec![],
                 derives: vec![],
                 attributes: vec![],
             };
-            let llvm_ty = BasicTypeEnum::StructType(
-                self.context.struct_type(&[string_ty, i32_ty], false),
-            );
+            let llvm_ty =
+                BasicTypeEnum::StructType(self.context.struct_type(&[string_ty, i32_ty], false));
             self.type_llvm.insert("MemoryDump".to_string(), llvm_ty);
             self.type_defs.insert("MemoryDump".to_string(), md_ty);
         }
@@ -599,7 +648,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // code to use wrong constants. Now propagated as a CompileError.
         if let Err(e) = interp.eval_comptime_block(&Vec::new()) {
             return Err(CompileError::Generic(format!(
-                "comptime evaluation error: {}", e
+                "comptime evaluation error: {}",
+                e
             )));
         }
         // Drain every pre-computed comptime result into the codegen cache.

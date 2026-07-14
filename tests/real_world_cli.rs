@@ -66,11 +66,7 @@ fn run_mimi_run_out(src: &Path) -> Result<String, String> {
 fn run_mimi_build_and_exec(src: &Path) -> Result<String, String> {
     let dir = std::env::temp_dir();
     let stem = src.file_stem().expect("src has stem").to_string_lossy();
-    let binary = dir.join(format!(
-        "mimi_rw_{}_{}",
-        std::process::id(),
-        stem
-    ));
+    let binary = dir.join(format!("mimi_rw_{}_{}", std::process::id(), stem));
 
     let build_output = Command::new(mimi_bin())
         .current_dir(project_root())
@@ -91,7 +87,9 @@ fn run_mimi_build_and_exec(src: &Path) -> Result<String, String> {
         .map_err(|e| format!("failed to run compiled binary: {e}"))?;
     let _ = fs::remove_file(&binary);
     if exec_output.status.success() {
-        Ok(String::from_utf8_lossy(&exec_output.stdout).trim_end().to_string())
+        Ok(String::from_utf8_lossy(&exec_output.stdout)
+            .trim_end()
+            .to_string())
     } else {
         Err(format!(
             "compiled binary exited with {}",

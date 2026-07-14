@@ -2,8 +2,7 @@ use crate::ast::*;
 use crate::core::checker::Checker;
 use crate::core::helpers::{
     fmt_type, is_bool, is_int, is_json_serializable, is_numeric, is_numeric_coercion, same_type,
-    subst_type_params,
-    suggest_name,
+    subst_type_params, suggest_name,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -680,10 +679,19 @@ impl<'a> Checker<'a> {
                 return Type::Name("Record".into(), vec![]);
             }
             // v0.28.20 — concurrency primitives; handle types are uniform i64.
-            "atomic_i32_new" | "atomic_i32_drop" | "atomic_i64_new" | "atomic_i64_drop"
-            | "atomic_bool_new" | "atomic_bool_drop" | "mutex_new" | "mutex_lock"
-            | "channel_new" | "actor_mailbox_depth" | "actor_is_muted"
-            | "actor_spawn_count" | "actor_max_children" => {
+            "atomic_i32_new"
+            | "atomic_i32_drop"
+            | "atomic_i64_new"
+            | "atomic_i64_drop"
+            | "atomic_bool_new"
+            | "atomic_bool_drop"
+            | "mutex_new"
+            | "mutex_lock"
+            | "channel_new"
+            | "actor_mailbox_depth"
+            | "actor_is_muted"
+            | "actor_spawn_count"
+            | "actor_max_children" => {
                 for a in args {
                     self.infer_expr(a, scopes);
                 }
@@ -789,9 +797,16 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("i64".into(), vec![]);
             }
-            "atomic_i32_store" | "atomic_i64_store" | "atomic_bool_store" | "mutex_set"
-            | "mutex_unlock" | "mutex_drop" | "channel_send" | "channel_drop"
-            | "actor_set_mailbox_depth" | "actor_set_max_children" => {
+            "atomic_i32_store"
+            | "atomic_i64_store"
+            | "atomic_bool_store"
+            | "mutex_set"
+            | "mutex_unlock"
+            | "mutex_drop"
+            | "channel_send"
+            | "channel_drop"
+            | "actor_set_mailbox_depth"
+            | "actor_set_max_children" => {
                 for a in args {
                     self.infer_expr(a, scopes);
                 }
@@ -809,15 +824,21 @@ impl<'a> Checker<'a> {
             }
             "session_open" => {
                 // session_open::<S>() returns SessionChan residual S.
-                for a in args { self.infer_expr(a, scopes); }
+                for a in args {
+                    self.infer_expr(a, scopes);
+                }
                 return Type::Name("SessionChan".into(), vec![]);
             }
             "session_pair" => {
-                for a in args { self.infer_expr(a, scopes); }
+                for a in args {
+                    self.infer_expr(a, scopes);
+                }
                 return Type::Name("List".into(), vec![Type::Name("i64".into(), vec![])]);
             }
             "protocol_methods" => {
-                for a in args { self.infer_expr(a, scopes); }
+                for a in args {
+                    self.infer_expr(a, scopes);
+                }
                 return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
             }
 
@@ -2048,8 +2069,8 @@ impl<'a> Checker<'a> {
             // Initialize residual from SessionChan<S> annotation if present.
             if let Some(sname) = Self::session_chan_name(&ty) {
                 if let Some(body) = self.session_types.get(&sname).cloned() {
-                    let resolved = crate::session::resolve(&body, &self.session_types)
-                        .unwrap_or(body);
+                    let resolved =
+                        crate::session::resolve(&body, &self.session_types).unwrap_or(body);
                     self.set_residual(v, resolved.clone());
                     return Some((Some(v.clone()), resolved));
                 }
@@ -2183,5 +2204,4 @@ impl<'a> Checker<'a> {
         }
         Type::Name("unit".into(), vec![])
     }
-
 }

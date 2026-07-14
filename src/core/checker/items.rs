@@ -1126,26 +1126,28 @@ impl<'a> Checker<'a> {
                             let resolved = self.resolve_type(&p.ty);
                             self.check_type_well_formed(
                                 &resolved,
-                                &format!("transition '{}' param '{}' in flow '{}'", t.name, p.name, f.name),
+                                &format!(
+                                    "transition '{}' param '{}' in flow '{}'",
+                                    t.name, p.name, f.name
+                                ),
                             );
                             scopes[0].insert(p.name.clone(), resolved);
                         }
                         let prev_ret = self.current_ret.take();
                         let prev_flow_targets = std::mem::take(&mut self.flow_return_targets);
-                        let ret_type: Type =
-                            if t.to_states.len() == 1 {
-                                // Use unqualified state name since record literals produce bare names
-                                Type::Name(t.to_states[0].clone(), vec![])
-                            } else {
-                                // Multi-target: validate each return against allowed types
-                                let mut allowed = Vec::new();
-                                for ts in &t.to_states {
-                                    allowed.push(Type::Name(ts.clone(), vec![]));
-                                }
-                                self.flow_return_targets = allowed;
-                                // Use unit as ret to suppress per-return unification errors
-                                Type::Name("unit".into(), vec![])
-                            };
+                        let ret_type: Type = if t.to_states.len() == 1 {
+                            // Use unqualified state name since record literals produce bare names
+                            Type::Name(t.to_states[0].clone(), vec![])
+                        } else {
+                            // Multi-target: validate each return against allowed types
+                            let mut allowed = Vec::new();
+                            for ts in &t.to_states {
+                                allowed.push(Type::Name(ts.clone(), vec![]));
+                            }
+                            self.flow_return_targets = allowed;
+                            // Use unit as ret to suppress per-return unification errors
+                            Type::Name("unit".into(), vec![])
+                        };
                         self.current_ret = Some(ret_type.clone());
                         self.var_scopes.push(std::collections::HashMap::new());
                         self.cap_vars.push(std::collections::HashMap::new());
@@ -1198,8 +1200,7 @@ impl<'a> Checker<'a> {
                         // flow state must have a matching field
                         if let Some(ref proto_payload_ty) = ps.payload_type {
                             // L7: missing flow state for protocol state → diagnostic, not ICE.
-                            let Some(flow_state) =
-                                f.states.iter().find(|s| s.name == ps.name)
+                            let Some(flow_state) = f.states.iter().find(|s| s.name == ps.name)
                             else {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0412,
@@ -1210,12 +1211,16 @@ impl<'a> Checker<'a> {
                                 );
                                 continue;
                             };
-                            let has_field = flow_state.payload.as_ref()
-                                .map(|fields| fields.iter().any(|field| {
-                                    let field_ty = self.resolve_type(&field.ty);
-                                    let expected_ty = self.resolve_type(proto_payload_ty);
-                                    self.unification.unify(&field_ty, &expected_ty).is_ok()
-                                }))
+                            let has_field = flow_state
+                                .payload
+                                .as_ref()
+                                .map(|fields| {
+                                    fields.iter().any(|field| {
+                                        let field_ty = self.resolve_type(&field.ty);
+                                        let expected_ty = self.resolve_type(proto_payload_ty);
+                                        self.unification.unify(&field_ty, &expected_ty).is_ok()
+                                    })
+                                })
                                 .unwrap_or(false);
                             if !has_field {
                                 self.emit_code(
@@ -1281,7 +1286,10 @@ impl<'a> Checker<'a> {
                                     // (i.e., another flow's state record name)
                                     let is_subflow_state = self.file.items.iter().any(|item| {
                                         if let crate::ast::Item::Flow(other_flow) = item {
-                                            other_flow.states.iter().any(|s| s.name == field_ty_name)
+                                            other_flow
+                                                .states
+                                                .iter()
+                                                .any(|s| s.name == field_ty_name)
                                                 && other_flow.name != f.name
                                         } else {
                                             false
@@ -1291,7 +1299,9 @@ impl<'a> Checker<'a> {
                                         // Conservative projection: subflow state in
                                         // protocol payload → E0418 if protocol has
                                         // transitions that target this state
-                                        let proto_targets_this = proto.transitions.iter()
+                                        let proto_targets_this = proto
+                                            .transitions
+                                            .iter()
                                             .any(|pt| pt.to_state == field_ty_name);
                                         if proto_targets_this {
                                             self.emit_code(
@@ -1338,7 +1348,11 @@ impl<'a> Checker<'a> {
                     }
                     if !targeted_by.contains(s.name.as_str()) {
                         // Skip the first state — it's the initial entry state
-                        let is_first = f.states.first().map(|first| first.name == s.name).unwrap_or(false);
+                        let is_first = f
+                            .states
+                            .first()
+                            .map(|first| first.name == s.name)
+                            .unwrap_or(false);
                         if !is_first {
                             self.warnings.push(
                                 crate::diagnostic::Diagnostic::warning_code(

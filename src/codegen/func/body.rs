@@ -883,7 +883,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         target_ty: BasicTypeEnum<'ctx>,
         name: &str,
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        if let (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(target_it)) = (val, target_ty) {
+        if let (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(target_it)) = (val, target_ty)
+        {
             let val_bw = iv.get_type().get_bit_width();
             let target_bw = target_it.get_bit_width();
             if val_bw == target_bw {

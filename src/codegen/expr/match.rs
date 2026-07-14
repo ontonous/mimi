@@ -117,7 +117,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // available, instead of the synthetic {i32,i64} which is
                         // a UB type mismatch when the real layout differs (e.g.
                         // {i32, i32, i32} for 2-field payload or {i32, f64}).
-                        let real_ty = variant_owner.as_ref()
+                        let real_ty = variant_owner
+                            .as_ref()
                             .and_then(|(owner, _)| self.type_llvm.get(owner))
                             .and_then(|bt| match bt {
                                 BasicTypeEnum::StructType(st) => Some(*st),
@@ -128,7 +129,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
                             self.context.struct_type(&[i32_ty, i64_ty], false)
                         });
-                        let loaded = self.build_load(BasicTypeEnum::StructType(struct_ty), pv, "enum_loaded")?;
+                        let loaded = self.build_load(
+                            BasicTypeEnum::StructType(struct_ty),
+                            pv,
+                            "enum_loaded",
+                        )?;
                         let sv = match loaded {
                             BasicValueEnum::StructValue(sv) => sv,
                             _ => {
@@ -657,7 +662,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Truncate i64 payload back to the natural int width.
                 let truncated = self
                     .builder
-                    .build_int_truncate(payload_val.into_int_value(), nat_int_ty, "payload_trunc_back")
+                    .build_int_truncate(
+                        payload_val.into_int_value(),
+                        nat_int_ty,
+                        "payload_trunc_back",
+                    )
                     .map_err(|e| CompileError::LlvmError(format!("trunc payload back: {}", e)))?;
                 Ok((truncated.into(), natural_ty))
             } else {
@@ -913,7 +922,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let b_val = self.context.bool_type().const_int(*b as u64, false);
                             // Match scrutinee width for bool comparison too.
                             let bw = scrutinee_iv.get_type().get_bit_width();
-                            let target = if bw < 64 { self.context.i32_type() } else { self.context.i64_type() };
+                            let target = if bw < 64 {
+                                self.context.i32_type()
+                            } else {
+                                self.context.i64_type()
+                            };
                             self.builder
                                 .build_int_z_extend(b_val, target, "bool_ext")
                                 .map_err(|e| {
@@ -1135,9 +1148,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                             if let Some(term) = term {
                                 self.builder.position_before(&term);
                             }
-                            let extended = self.builder
+                            let extended = self
+                                .builder
                                 .build_int_s_extend(*iv, target_ty, "phi_sext")
-                                .map_err(|e| CompileError::LlvmError(format!("phi s_ext: {}", e)))?;
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("phi s_ext: {}", e))
+                                })?;
                             Ok(BasicValueEnum::IntValue(extended))
                         } else {
                             Ok(*v)

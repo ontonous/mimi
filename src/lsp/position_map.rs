@@ -29,7 +29,10 @@ impl<'a> PositionMap<'a> {
                 line_starts.push(offset + 1);
             }
         }
-        Self { line_starts, source }
+        Self {
+            line_starts,
+            source,
+        }
     }
 
     /// Number of lines in the document.
@@ -51,7 +54,8 @@ impl<'a> PositionMap<'a> {
             .get(line + 1)
             .copied()
             .unwrap_or_else(|| self.source.len());
-        let line_text = &self.source[line_start.min(self.source.len())..line_end.min(self.source.len())];
+        let line_text =
+            &self.source[line_start.min(self.source.len())..line_end.min(self.source.len())];
 
         // Trim trailing newline
         let line_text = line_text.trim_end_matches('\n').trim_end_matches('\r');
@@ -78,7 +82,8 @@ impl<'a> PositionMap<'a> {
             .get(line + 1)
             .copied()
             .unwrap_or_else(|| self.source.len());
-        let line_text = &self.source[line_start.min(self.source.len())..line_end.min(self.source.len())];
+        let line_text =
+            &self.source[line_start.min(self.source.len())..line_end.min(self.source.len())];
         let line_text = line_text.trim_end_matches('\n').trim_end_matches('\r');
 
         // Convert byte offset within line to UTF-16 code unit offset
@@ -89,7 +94,13 @@ impl<'a> PositionMap<'a> {
     }
 
     /// Convert Mimi span (1-indexed line, 1-indexed byte column) to LSP range.
-    pub fn span_to_lsp(&self, start_line: usize, start_col: usize, end_line: usize, end_col: usize) -> serde_json::Value {
+    pub fn span_to_lsp(
+        &self,
+        start_line: usize,
+        start_col: usize,
+        end_line: usize,
+        end_col: usize,
+    ) -> serde_json::Value {
         // Mimi spans are 1-indexed; LSP is 0-indexed.
         // Mimi columns are byte offsets; LSP characters are UTF-16 units.
         let sl = start_line.saturating_sub(1);
@@ -119,7 +130,9 @@ impl<'a> PositionMap<'a> {
             .copied()
             .unwrap_or_else(|| self.source.len());
         let text = &self.source[start.min(self.source.len())..end.min(self.source.len())];
-        text.trim_end_matches('\n').trim_end_matches('\r').to_string()
+        text.trim_end_matches('\n')
+            .trim_end_matches('\r')
+            .to_string()
     }
 }
 

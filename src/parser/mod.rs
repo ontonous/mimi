@@ -158,7 +158,11 @@ impl Parser {
             }
             items.push(self.parse_item()?);
         }
-        let mut file = File { imports, items, implicit_single: false };
+        let mut file = File {
+            imports,
+            items,
+            implicit_single: false,
+        };
         // Keep legacy path in lockstep with flow_parse for AST equivalence tests.
         crate::progressive::apply_progressive_typestate(&mut file);
         crate::flow_matrix::expand_file(&mut file);
@@ -245,7 +249,11 @@ impl Parser {
         }
 
         errors.extend(std::mem::take(&mut self.errors));
-        let mut file = File { imports, items, implicit_single: false };
+        let mut file = File {
+            imports,
+            items,
+            implicit_single: false,
+        };
         crate::progressive::apply_progressive_typestate(&mut file);
         crate::flow_matrix::expand_file(&mut file);
         (file, errors)
