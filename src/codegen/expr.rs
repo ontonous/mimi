@@ -716,6 +716,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if let Some(stripped) = name.strip_suffix("_new") {
                         return stripped.to_string();
                     }
+                    // User enum variants first (may shadow built-in Some/None/Ok/Err names).
+                    if let Some((owner, _)) = self.find_variant_owner(name) {
+                        return owner;
+                    }
                     // Built-in Option/Result constructors.
                     if name == "Some" {
                         let inner = args
@@ -744,10 +748,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     if name == "Err" {
                         return "Result".to_string();
-                    }
-                    // Enum variant constructors → owning enum type name.
-                    if let Some((owner, _)) = self.find_variant_owner(name) {
-                        return owner;
                     }
                     if let Some(ret_name) = self.infer_call_return_type_name(name) {
                         return ret_name;
