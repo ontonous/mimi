@@ -357,13 +357,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(BasicValueEnum::PointerValue(raw))
             }
             Type::Name(n, _) if self.record_type_names.contains(n.as_str()) => {
-                // Reuse to_json specialized path via temporary call-site shape:
-                // build snprintf record path by calling compile_call is heavy;
-                // fall back to error for nested records until specialized.
-                Err(CompileError::LlvmError(format!(
-                    "export wrapper: returning non-repr(C) record '{}' as JSON not yet wired; use List or scalars",
-                    n
-                )))
+                let llvm_ty = *self.type_llvm.get(n).ok_or_else(|| {
+                    CompileError::LlvmError(format!("no LLVM type for record {}", n))
+                })?;
+                let BasicTypeEnum::StructType(sty) = llvm_ty else {
+                    return Err(CompileError::LlvmError(format!(
+                        "record type {} is not a struct",
+                        n
+                    )));
+                };
+                let struct_ptr = match internal_val {
+                    BasicValueEnum::PointerValue(pv) => pv,
+                    BasicValueEnum::StructValue(sv) => {
+                        let alloca =
+                            self.build_alloca(BasicTypeEnum::StructType(sty), "exp_rec")?;
+                        self.build_store(alloca, sv)?;
+                        alloca
+                    }
+                    _ => {
+                        return Err(CompileError::LlvmError(
+                            "export record return: unexpected value kind".into(),
+                        ))
+                    }
+                };
+                let raw = self.compile_record_to_json_cstr(n, struct_ptr)?;
+                // C caller owns the buffer — do not register for free_heap_allocs.
+                Ok(BasicValueEnum::PointerValue(raw))
             }
             _ => Err(CompileError::LlvmError(
                 "export_value_as_json_cstr: unsupported type".into(),
