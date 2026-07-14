@@ -2576,6 +2576,153 @@ pub extern "C" fn mimi_map_to_json_i64(handle: MapHandle) -> *mut std::ffi::c_ch
     alloc_c_string(&parts.join(""))
 }
 
+/// Build a MapHandle from a JSON object with string keys and string values.
+/// Values are heap-cloned C strings (ValueHandles via mimi_str_clone).
+#[no_mangle]
+pub extern "C" fn mimi_map_from_json_string(json: *const std::ffi::c_char) -> MapHandle {
+    if json.is_null() {
+        return mimi_map_new();
+    }
+    // SAFETY: non-null JSON C string from codegen.
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_map_new();
+    if handle == 0 {
+        return 0;
+    }
+    let bytes = s.as_bytes();
+    let mut pos = 0usize;
+    while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+        pos += 1;
+    }
+    if pos >= bytes.len() || bytes[pos] != b'{' {
+        return handle;
+    }
+    pos += 1;
+    const MAX_ENTRIES: usize = 1_000_000;
+    let mut count = 0usize;
+    loop {
+        if count >= MAX_ENTRIES {
+            break;
+        }
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r' | b',') {
+            pos += 1;
+        }
+        if pos >= bytes.len() || bytes[pos] == b'}' {
+            break;
+        }
+        if bytes[pos] != b'"' {
+            break;
+        }
+        pos += 1;
+        let mut esc = false;
+        let mut key = String::new();
+        loop {
+            if pos >= bytes.len() {
+                return handle;
+            }
+            let c = bytes[pos];
+            if esc {
+                key.push(c as char);
+                esc = false;
+                pos += 1;
+                continue;
+            }
+            if c == b'\\' {
+                esc = true;
+                pos += 1;
+                continue;
+            }
+            if c == b'"' {
+                pos += 1;
+                break;
+            }
+            key.push(c as char);
+            pos += 1;
+        }
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+            pos += 1;
+        }
+        if pos >= bytes.len() || bytes[pos] != b':' {
+            break;
+        }
+        pos += 1;
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+            pos += 1;
+        }
+        // Expect string value.
+        if pos >= bytes.len() || bytes[pos] != b'"' {
+            break;
+        }
+        pos += 1;
+        esc = false;
+        let mut val = String::new();
+        loop {
+            if pos >= bytes.len() {
+                return handle;
+            }
+            let c = bytes[pos];
+            if esc {
+                val.push(c as char);
+                esc = false;
+                pos += 1;
+                continue;
+            }
+            if c == b'\\' {
+                esc = true;
+                pos += 1;
+                continue;
+            }
+            if c == b'"' {
+                pos += 1;
+                break;
+            }
+            val.push(c as char);
+            pos += 1;
+        }
+        let v_handle = mimi_str_clone(val.as_ptr() as *const std::ffi::c_char, val.len() as i64);
+        // SAFETY: handle is a valid map from mimi_map_new.
+        unsafe {
+            (*map_from_handle(handle)).inner.insert(key, v_handle);
+        }
+        count += 1;
+    }
+    handle
+}
+
+/// Serialize a MapHandle whose values are C-string ValueHandles to JSON.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_string(handle: MapHandle) -> *mut std::ffi::c_char {
+    if handle == 0 {
+        return alloc_c_string("{}");
+    }
+    // SAFETY: handle is a non-zero MapHandle.
+    let map = unsafe { &*map_from_handle(handle) };
+    if map.inner.len() > 1_000_000 {
+        return alloc_c_string("{...}");
+    }
+    let mut entries: Vec<_> = map.inner.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 2 + 2);
+    parts.push(String::from("{"));
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        parts.push(json_escape_string(k));
+        parts.push(String::from(":"));
+        // Decode value handle as C string when it looks heapish.
+        let vh = **v;
+        let vs = if vh >= 1_048_576 && vh % 8 == 0 {
+            safe_c_string_from_handle(vh).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        parts.push(json_escape_string(&vs));
+    }
+    parts.push(String::from("}"));
+    alloc_c_string(&parts.join(""))
+}
+
 /// Build a MapHandle from a JSON object with string keys and integer values.
 /// Values are stored as raw i64 ValueHandles (same as map_set of integers).
 #[no_mangle]
@@ -2837,6 +2984,75 @@ pub extern "C" fn mimi_set_to_json_i64(handle: SetHandle) -> *mut std::ffi::c_ch
     }
     parts.push(String::from("]"));
     alloc_c_string(&parts.join(""))
+}
+
+/// Build a SetHandle from a JSON array of strings.
+/// Elements are stored as heap-cloned C-string ValueHandles.
+#[no_mangle]
+pub extern "C" fn mimi_set_from_json_string(json: *const std::ffi::c_char) -> SetHandle {
+    let handle = mimi_set_new();
+    if handle == 0 || json.is_null() {
+        return handle;
+    }
+    // SAFETY: non-null JSON C string from codegen.
+    let s = unsafe { cstr_to_string(json) };
+    let len = json_array_length(json);
+    if len <= 0 {
+        return handle;
+    }
+    const MAX: i64 = 1_000_000;
+    let n = len.min(MAX);
+    for i in 0..n {
+        let elem = json_get_element(json, i);
+        if elem.is_null() {
+            continue;
+        }
+        // SAFETY: elem is a heap C string from json_get_element.
+        let es = unsafe { cstr_to_string(elem) };
+        // Strip surrounding quotes if present (json_get_element may return quoted).
+        let body = es.trim().trim_matches('"');
+        let v = mimi_str_clone(body.as_ptr() as *const std::ffi::c_char, body.len() as i64);
+        unsafe {
+            libc::free(elem as *mut std::ffi::c_void);
+        }
+        mimi_set_insert(handle, v as SetValueHandle);
+    }
+    let _ = s;
+    handle
+}
+
+/// Display form `Set{a, b}` for string-valued sets (sorted by string content).
+#[no_mangle]
+pub extern "C" fn mimi_set_to_display_string(handle: SetHandle) -> *mut std::ffi::c_char {
+    if handle == 0 {
+        return alloc_c_string("Set{}");
+    }
+    // SAFETY: non-zero SetHandle.
+    let set = unsafe { &*set_from_handle(handle) };
+    if set.inner.len() > 1_000_000 {
+        return alloc_c_string("Set{...}");
+    }
+    let mut vals: Vec<String> = set
+        .inner
+        .iter()
+        .map(|v| {
+            if *v >= 1_048_576 && *v % 8 == 0 {
+                safe_c_string_from_handle(*v as ValueHandle).unwrap_or_default()
+            } else {
+                v.to_string()
+            }
+        })
+        .collect();
+    vals.sort();
+    let mut s = String::from("Set{");
+    for (i, v) in vals.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        s.push_str(v);
+    }
+    s.push('}');
+    alloc_c_string(&s)
 }
 
 /// Build a SetHandle from a JSON array of integers.

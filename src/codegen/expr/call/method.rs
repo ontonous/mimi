@@ -1549,46 +1549,60 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
             }
             Type::Name(n, args) if n == "Map" => {
-                // Map<string, i32|i64> from JSON object of integer values.
+                // Map<string, i32|i64|string> from JSON object.
                 let val_is_int = args
                     .get(1)
                     .map(|t| matches!(t, Type::Name(tn, _) if tn == "i32" || tn == "i64"))
                     .unwrap_or(true);
-                if !val_is_int {
+                let val_is_string = args
+                    .get(1)
+                    .map(|t| matches!(t, Type::Name(tn, _) if tn == "string"))
+                    .unwrap_or(false);
+                if !val_is_int && !val_is_string {
                     return Err(CompileError::Generic(
-                        "from_json::<Map>: only Map<string, i32|i64> is supported in codegen"
+                        "from_json::<Map>: only Map<string, i32|i64|string> is supported in codegen"
                             .into(),
                     ));
                 }
-                let func = self.get_runtime_fn("mimi_map_from_json_i64")?;
+                let fn_name = if val_is_string {
+                    "mimi_map_from_json_string"
+                } else {
+                    "mimi_map_from_json_i64"
+                };
+                let func = self.get_runtime_fn(fn_name)?;
                 let result = self.build_call(
                     func,
                     &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
                     "map_from_json",
                 )?;
-                Ok(self
-                    .expect_basic_value(&result, "mimi_map_from_json_i64")?
-                    .into())
+                Ok(self.expect_basic_value(&result, fn_name)?.into())
             }
             Type::Name(n, args) if n == "Set" => {
                 let elem_is_int = args
                     .first()
                     .map(|t| matches!(t, Type::Name(tn, _) if tn == "i32" || tn == "i64"))
                     .unwrap_or(true);
-                if !elem_is_int {
+                let elem_is_string = args
+                    .first()
+                    .map(|t| matches!(t, Type::Name(tn, _) if tn == "string"))
+                    .unwrap_or(false);
+                if !elem_is_int && !elem_is_string {
                     return Err(CompileError::Generic(
-                        "from_json::<Set>: only Set<i32|i64> is supported in codegen".into(),
+                        "from_json::<Set>: only Set<i32|i64|string> is supported in codegen".into(),
                     ));
                 }
-                let func = self.get_runtime_fn("mimi_set_from_json_i64")?;
+                let fn_name = if elem_is_string {
+                    "mimi_set_from_json_string"
+                } else {
+                    "mimi_set_from_json_i64"
+                };
+                let func = self.get_runtime_fn(fn_name)?;
                 let result = self.build_call(
                     func,
                     &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
                     "set_from_json",
                 )?;
-                Ok(self
-                    .expect_basic_value(&result, "mimi_set_from_json_i64")?
-                    .into())
+                Ok(self.expect_basic_value(&result, fn_name)?.into())
             }
             Type::Name(n, args) if n == "Result" && !args.is_empty() => {
                 let ok_val = self.compile_from_json_scalar_ok(&args[0], raw_ptr)?;
