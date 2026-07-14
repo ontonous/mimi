@@ -6753,6 +6753,43 @@ fn dual_list_result_println() {
     );
 }
 
+/// Nested Result println Ok(Ok(5)).
+#[test]
+fn dual_nested_result_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a: Result<Result<i32, i32>, i32> = Ok(Ok(5))
+            println(a)
+            0
+        }
+        "#,
+        "Ok(Ok(5))"
+    );
+}
+
+/// List of custom enum println.
+#[test]
+fn dual_list_enum_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Color { Red Green Blue(i32) }
+        func main() -> i32 {
+            let xs = [Red, Blue(7), Green]
+            println(xs)
+            0
+        }
+        "#,
+        "[Red(), Blue(7), Green()]"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
