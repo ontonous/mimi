@@ -6719,6 +6719,25 @@ fn dual_nested_record_println() {
     );
 }
 
+/// List of records println Display form.
+#[test]
+fn dual_list_record_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            let xs = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+            println(xs)
+            0
+        }
+        "#,
+        "[Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]"
+    );
+}
+
 /// Map println via JSON object (sorted keys).
 #[test]
 fn dual_map_println() {
