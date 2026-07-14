@@ -6846,6 +6846,43 @@ fn dual_option_list_println() {
     );
 }
 
+/// Option of Map println.
+#[test]
+fn dual_option_map_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, i32>>("{\"a\":1}")
+            let a = Some(m)
+            println(a)
+            0
+        }
+        "#,
+        "Some({\"a\":1})"
+    );
+}
+
+/// Result of List println.
+#[test]
+fn dual_result_list_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a: Result<List<i32>, i32> = Ok([1, 2])
+            println(a)
+            0
+        }
+        "#,
+        "Ok([1, 2])"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
