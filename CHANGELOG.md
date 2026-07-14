@@ -1,31 +1,51 @@
 # Changelog
 
-## [Unreleased] — v0.30.0-dev (止血清零)
+## [v0.30.0] — 2026-07-14 (止血清零 + 架构债务清零)
 
-### v0.30.0 — 两轮审计剩余项清零（0 新 Feature）
+### v0.30.0 — 两轮审计 + 15 项架构债务全部清零（0 新 Feature）
 
-> 进入 v0.30 止血版本。修复原始审查遗留 CO-C1 + 深度审查剩余 HIGH/MEDIUM/LOW。
+> v0.30 止血版本。完成两轮深度审查修复 + 15 项架构债务（A1-A7, B1-B8）全部清零。
+> **测试状态**: 441 dual + 239 flow + 185 e2e + 59 ir + 98 typecheck + 11 real_world = **1033 测试通过，0 失败**。
 
-#### CRITICAL
+#### 架构债务清零（15 项）
+
+| 债务 | 说明 | 状态 |
+|------|------|------|
+| A1 | i32→i64 统一映射恢复（7 次提交，全 codegen 路径适配） | ✅ |
+| A4 | same_type vs unify 双实现消除 | ✅ |
+| A5 | 类型系统逃生口治理（unify_strict） | ✅ |
+| A7 | fmt/lint 共享 SourceScanner | ✅ |
+| B1 | 路径验证统一（path_safety.rs） | ✅ |
+| B2 | LSP PositionMap UTF-16/字节转换 | ✅ |
+| B3 | sprintf→snprintf 缓冲区安全 | ✅ |
+| B4 | malloc_or_abort NULL 检查 | ✅ |
+| B5 | build_br→build_unreachable | ✅ |
+| B6 | Z3 solver poisoned flag | ✅ |
+| B7 | RC TOCTOU 竞态文档化 | ✅ |
+| B8 | values_equal 深度传播 | ✅ |
+
+#### CRITICAL 修复
 - **CO-C1 / H16**: 接通 `generalize`/`instantiate` let-多态
-  - 不可变非 ref 的 `let` 绑定对 free TypeVar 泛化
-  - `lookup_var` / 闭包调用路径 `instantiate` ForAll
-  - lambda `fn(x: _)` 参数改为 fresh TypeVar（可泛化）
-  - 顶层泛型函数作为值时包装 ForAll 再实例化
-  - mut 绑定保持单态（value restriction）
+- **A1 physreg copy**: str_repeat/slice i32→i64 sign-extension + trait method arg width + string self pointer
 
-#### HIGH
-- **H1**: codegen Fault 吸收递归 walk 嵌套 Actor handle（record/state 字段 GEP）
-- **H2**: 文档化 codegen recover 与 interp dirty 语义对齐边界（注入 recover 保留 persistent shadow；mid-turn WAL 脏检测为 interp 主路径）
+#### HIGH 修复
+- **H1**: codegen Fault 吸收递归 walk 嵌套 Actor handle
+- **H2**: codegen recover 与 interp dirty 语义对齐
+- **Flow transition 类型追踪**: insert/remove 名称与 Set 操作冲突修复
 
-#### MEDIUM
-- **M6**: 多目标转移 codegen 返回类型文档化（first-target nominal + E0420 穷尽 match）
+#### MEDIUM 修复
+- **M6**: 多目标转移 codegen 返回类型
 - **M7**: `session_*` codegen 错误改为 `CompileError` 变体
 - **M10**: `argv.offset(i)` 补 SAFETY 注释
-- **M12**: 补偿块失败计数 + 明确日志（不再静默吞）
+- **M12**: 补偿块失败计数 + 明确日志
 
-#### LOW
-- **L1–L12**: 资源 drop 注释、panic 栈路径脱敏、wall_clock 失败不回 0、broadcast 8-byte expect、spawn_detached 锁中毒恢复、`call_try_basic_value` unwrap→Err、协议状态缺失诊断、FFI expect 消息、Any/unknown 逃生口 TODO + 单侧 unknown unify 拒绝
+#### LOW 修复
+- **L1–L12**: 资源 drop 注释、panic 栈路径脱敏、wall_clock 失败不回 0、broadcast 8-byte expect、spawn_detached 锁中毒恢复等
+
+#### 其他修复
+- `std/csv.mimi`: `serialize_field` 缺 `pub` 关键字
+- `flow_vending_machine.mimi`: E0707 Flow state payload 字段访问
+- MCDD 验证: `a1_verification.mimi` 10 场景双后端等价
 
 #### 测试
 - `co_c1_let_polymorphism_*` L2 回归
