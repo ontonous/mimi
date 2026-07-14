@@ -402,6 +402,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "mimi_set_to_display_string"
                     } else if arg_type.contains("Set<bool>") {
                         "mimi_set_to_display_bool"
+                    } else if arg_type.contains("Set<f64>") || arg_type.contains("Set<f32>") {
+                        "mimi_set_to_display_f64"
                     } else {
                         "mimi_set_to_display"
                     };
