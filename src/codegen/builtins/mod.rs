@@ -913,6 +913,11 @@ fn register_set_fns<'ctx>(
         Some(inkwell::module::Linkage::External),
     );
     module.add_function(
+        "mimi_set_to_display",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
         "mimi_option_i64_to_json",
         i8_ptr.fn_type(
             &[

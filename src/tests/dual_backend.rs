@@ -6717,6 +6717,24 @@ fn dual_map_println() {
     );
 }
 
+/// Set println as Set{1, 2, 3} sorted.
+#[test]
+fn dual_set_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s: Set<i32> = from_json::<Set<i32>>("[3,1,2]")
+            println(s)
+            0
+        }
+        "#,
+        "Set{1, 2, 3}"
+    );
+}
+
 /// map_set / map_get / has_key after from_json Map.
 #[test]
 fn dual_map_set_get_has_key() {
