@@ -1087,12 +1087,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         .ok_or_else(|| CompileError::LlvmError("session_hi returned void".into()))?
         .into_int_value();
         let i64_ty = self.context.i64_type();
-        let data = self
-            .builder
-            .build_array_malloc(i64_ty, i64_ty.const_int(2, false), "spd")
-            .map_err(|e| CompileError::LlvmError(format!("session_pair malloc: {}", e)))?;
+        // CG-C2: use malloc_or_abort instead of bare build_array_malloc (OOM → null deref).
+        let data = self.malloc_or_abort(i64_ty.const_int(16, false), "spd")?;
         // SAFETY (M9): in_bounds GEP with indices 0 and 1 on a freshly allocated
         // 2-element i64 array; stores write only within that allocation.
+        // SAFETY: data is non-null (malloc_or_abort); indices 0/1 in 16-byte block.
         unsafe {
             self.builder
                 .build_store(

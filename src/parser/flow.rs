@@ -98,25 +98,41 @@ macro_rules! run_flow {
             }
         }
     }};
-    // Recovery mode: collect errors
+    // Recovery mode: collect errors and preserve partial AST.
+    // PR-C2: on a hard transition error, keep already-parsed imports/items
+    // instead of returning an empty File + single error.
     (recovery $state:expr, $mode:expr, $tokens:expr) => {{
         let mut __state = $state;
         loop {
             match __state {
                 FlowState::Done(file, errors) => break (file, errors),
-                __s => match __s.transition(&FlowEvent::Step, $mode, $tokens) {
-                    Ok((new_state, _)) => __state = new_state,
-                    Err(e) => {
-                        break (
-                            File {
-                                imports: Vec::new(),
-                                items: Vec::new(),
-                                implicit_single: false,
-                            },
-                            vec![e],
-                        )
+                __s => {
+                    // Snapshot partial results before moving state into transition.
+                    let (imports, items, mut errors) = match &__s {
+                        FlowState::Init { acc, .. }
+                        | FlowState::Imports { acc, .. }
+                        | FlowState::Items { acc, .. } => {
+                            (acc.imports.clone(), acc.items.clone(), acc.errors.clone())
+                        }
+                        FlowState::Done(file, errors) => {
+                            (file.imports.clone(), file.items.clone(), errors.clone())
+                        }
+                    };
+                    match __s.transition(&FlowEvent::Step, $mode, $tokens) {
+                        Ok((new_state, _)) => __state = new_state,
+                        Err(e) => {
+                            errors.push(e);
+                            break (
+                                File {
+                                    imports,
+                                    items,
+                                    implicit_single: false,
+                                },
+                                errors,
+                            );
+                        }
                     }
-                },
+                }
             }
         }
     }};

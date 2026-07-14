@@ -93,6 +93,9 @@ fn resolve_registry_dep(
     dst: &Path,
     reg: &Path,
 ) -> Result<ResolvedDep, String> {
+    // AU-C3: reject path-traversal package names before joining into the registry.
+    crate::path_safety::validate_package_name(&dep.name)
+        .map_err(|e| format!("invalid package name '{}': {}", dep.name, e))?;
     let pkg_dir = reg.join(&dep.name);
     if !pkg_dir.exists() {
         return Err(format!(

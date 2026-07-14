@@ -723,9 +723,28 @@ impl Parser {
                         self.expect(TokenKind::Eq, "`=`")?;
                     }
                     if let TokenKind::Int(s) = &self.peek().kind {
-                        let depth = s.parse::<usize>().unwrap_or(2048);
+                        // PR-C1: parse failure is a hard error, not silent default.
+                        let tok = self.peek();
+                        let (line, col) = (tok.line, tok.col);
+                        let depth = s.parse::<usize>().map_err(|_| {
+                            ParseError::new(
+                                format!(
+                                    "invalid @mailbox depth '{}': expected non-negative integer",
+                                    s
+                                ),
+                                line,
+                                col,
+                            )
+                        })?;
                         self.advance();
                         annotations.push(FlowAnnotation::MailboxDepth(depth));
+                    } else {
+                        let tok = self.peek();
+                        return Err(ParseError::new(
+                            "expected integer depth in @mailbox(...), e.g. @mailbox(depth=2048)",
+                            tok.line,
+                            tok.col,
+                        ));
                     }
                 }
                 "max_children" => {
@@ -737,9 +756,28 @@ impl Parser {
                         self.expect(TokenKind::Eq, "`=`")?;
                     }
                     if let TokenKind::Int(s) = &self.peek().kind {
-                        let n = s.parse::<usize>().unwrap_or(10);
+                        // PR-C1: parse failure is a hard error, not silent default.
+                        let tok = self.peek();
+                        let (line, col) = (tok.line, tok.col);
+                        let n = s.parse::<usize>().map_err(|_| {
+                            ParseError::new(
+                                format!(
+                                    "invalid @max_children value '{}': expected non-negative integer",
+                                    s
+                                ),
+                                line,
+                                col,
+                            )
+                        })?;
                         self.advance();
                         annotations.push(FlowAnnotation::MaxChildren(n));
+                    } else {
+                        let tok = self.peek();
+                        return Err(ParseError::new(
+                            "expected integer in @max_children(...), e.g. @max_children(10)",
+                            tok.line,
+                            tok.col,
+                        ));
                     }
                 }
                 _ => {}
@@ -796,9 +834,28 @@ impl Parser {
                                 self.expect(TokenKind::Eq, "`=`")?;
                             }
                             if let TokenKind::Int(s) = &self.peek().kind {
-                                let depth = s.parse::<usize>().unwrap_or(2048);
+                                // PR-C1: parse failure is a hard error, not silent default.
+                                let tok = self.peek();
+                                let (line, col) = (tok.line, tok.col);
+                                let depth = s.parse::<usize>().map_err(|_| {
+                                    ParseError::new(
+                                        format!(
+                                            "invalid @mailbox depth '{}': expected non-negative integer",
+                                            s
+                                        ),
+                                        line,
+                                        col,
+                                    )
+                                })?;
                                 self.advance();
                                 annotations.push(FlowAnnotation::MailboxDepth(depth));
+                            } else {
+                                let tok = self.peek();
+                                return Err(ParseError::new(
+                                    "expected integer depth in @mailbox(...), e.g. @mailbox(depth=2048)",
+                                    tok.line,
+                                    tok.col,
+                                ));
                             }
                         }
                         "max_children" => {
@@ -810,18 +867,42 @@ impl Parser {
                                 self.expect(TokenKind::Eq, "`=`")?;
                             }
                             if let TokenKind::Int(s) = &self.peek().kind {
-                                let n = s.parse::<usize>().unwrap_or(10);
+                                // PR-C1: parse failure is a hard error, not silent default.
+                                let tok = self.peek();
+                                let (line, col) = (tok.line, tok.col);
+                                let n = s.parse::<usize>().map_err(|_| {
+                                    ParseError::new(
+                                        format!(
+                                            "invalid @max_children value '{}': expected non-negative integer",
+                                            s
+                                        ),
+                                        line,
+                                        col,
+                                    )
+                                })?;
                                 self.advance();
                                 annotations.push(FlowAnnotation::MaxChildren(n));
+                            } else {
+                                let tok = self.peek();
+                                return Err(ParseError::new(
+                                    "expected integer in @max_children(...), e.g. @max_children(10)",
+                                    tok.line,
+                                    tok.col,
+                                ));
                             }
                         }
                         _ => {
-                            // HIGH fix: previously silently ignored unknown @annotations
-                            // with parentheses. Now emit a diagnostic warning.
-                            eprintln!(
-                                "[mimi parser] WARN: unknown flow annotation '@{}' — ignored",
-                                ann_name
-                            );
+                            // PR-H2: unknown @annotations must surface as parse errors
+                            // (not eprintln!) so LSP/check can report them with span.
+                            let tok = self.peek();
+                            return Err(ParseError::new(
+                                format!(
+                                    "unknown flow annotation '@{}' — expected @mailbox(...) or @max_children(...)",
+                                    ann_name
+                                ),
+                                tok.line,
+                                tok.col,
+                            ));
                         }
                     }
                     self.expect(TokenKind::RParen, "`)`")?;

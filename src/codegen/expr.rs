@@ -1226,7 +1226,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 };
                 self.call_quote_new_node(1, inner, null_i8.into(), 0) // QAST_RETURN=1
             }
-            Stmt::Continue => self.call_quote_new_leaf(19, 0), // QAST_CONTINUE
+            Stmt::Continue => self.call_quote_new_leaf(19, self.i64_const(0)), // QAST_CONTINUE
             Stmt::Let { pat, init, .. } => {
                 let name = match pat {
                     crate::ast::Pattern::Variable(n) => n.clone(),
@@ -1270,20 +1270,25 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         match expr {
             Expr::Literal(lit) => match lit {
-                Lit::Int(v) => self.call_quote_new_leaf(0, *v), // QAST_INT
-                Lit::Float(v) => self.call_quote_new_leaf(1, v.to_bits() as i64), // QAST_FLOAT
-                Lit::Bool(v) => self.call_quote_new_leaf(2, if *v { 1 } else { 0 }), // QAST_BOOL
+                Lit::Int(v) => self.call_quote_new_leaf(0, self.i64_const(*v)), // QAST_INT
+                Lit::Float(v) => self.call_quote_new_leaf(1, self.i64_const(v.to_bits() as i64)), // QAST_FLOAT
+                Lit::Bool(v) => {
+                    self.call_quote_new_leaf(2, self.i64_const(if *v { 1 } else { 0 }))
+                } // QAST_BOOL
                 Lit::String(s) => {
                     let global = self
                         .builder
                         .build_global_string_ptr(s, "q_str")
                         .map_err(|e| CompileError::LlvmError(format!("quote str: {}", e)))?;
-                    self.call_quote_new_leaf(
-                        3,
-                        self.ptr_to_i64(BasicValueEnum::PointerValue(global.as_pointer_value())),
-                    )
+                    // CG-C1: emit real ptrtoint so the runtime leaf stores the string pointer.
+                    let ptr_i64 = self.build_ptr_to_int(
+                        global.as_pointer_value(),
+                        self.context.i64_type(),
+                        "q_str_i64",
+                    )?;
+                    self.call_quote_new_leaf(3, ptr_i64)
                 }
-                Lit::Unit => self.call_quote_new_leaf(4, 0), // QAST_UNIT
+                Lit::Unit => self.call_quote_new_leaf(4, self.i64_const(0)), // QAST_UNIT
                 Lit::FString(_) => Err("f-string in runtime QuotedAst not supported".into()),
             },
             Expr::Ident(name) => {
@@ -1291,10 +1296,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .builder
                     .build_global_string_ptr(name, "q_ident")
                     .map_err(|e| CompileError::LlvmError(format!("quote ident: {}", e)))?;
-                self.call_quote_new_leaf(
-                    5,
-                    self.ptr_to_i64(BasicValueEnum::PointerValue(global.as_pointer_value())),
-                )
+                // CG-C1: emit real ptrtoint for identifier name string.
+                let ptr_i64 = self.build_ptr_to_int(
+                    global.as_pointer_value(),
+                    self.context.i64_type(),
+                    "q_ident_i64",
+                )?;
+                self.call_quote_new_leaf(5, ptr_i64)
             }
             Expr::Binary(op, l, r) => {
                 let lv = self.compile_quote_runtime_expr(l)?;
@@ -1309,7 +1317,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::QuoteInterpolate(inner) => {
                 // Evaluate interpolation at codegen time and wrap as leaf.
                 let val = self.fold_quote_interpolate(inner)?;
-                let val_i64 = self.ptr_to_i64(val);
+                let val_i64 = self.basic_value_to_i64(val, "q_interp")?;
                 self.call_quote_new_leaf(15, val_i64) // QAST_INTERP
             }
             Expr::Tuple(items) => {
@@ -1326,29 +1334,74 @@ impl<'ctx> CodeGenerator<'ctx> {
     // ---------- Helper methods ----------
 
     /// Emit `mimi_quote_new_leaf(tag, value) -> i8*`.
+    ///
+    /// `value` is an LLVM i64 SSA value (constant or `ptrtoint` result).
+    /// CG-C1: previously took a Rust `i64` and forced pointers through a
+    /// compile-time-zero stub — string/ident leaves lost their data.
     fn call_quote_new_leaf(
         &self,
         tag: i32,
-        value: i64,
+        value: inkwell::values::IntValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let func = self
             .module
             .get_function("mimi_quote_new_leaf")
             .ok_or("mimi_quote_new_leaf not declared")?;
         let i32_ty = self.context.i32_type();
-        let i64_ty = self.context.i64_type();
         let result = self
             .builder
             .build_call(
                 func,
                 &[
                     BasicMetadataValueEnum::IntValue(i32_ty.const_int(tag as u64, true)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(value as u64, false)),
+                    BasicMetadataValueEnum::IntValue(value),
                 ],
                 "q_leaf",
             )
             .map_err(|e| CompileError::LlvmError(format!("q leaf: {}", e)))?;
         Ok(call_try_basic_value(&result).ok_or("mimi_quote_new_leaf void")?)
+    }
+
+    fn i64_const(&self, v: i64) -> inkwell::values::IntValue<'ctx> {
+        self.context.i64_type().const_int(v as u64, false)
+    }
+
+    /// Convert a BasicValueEnum to i64 for quote leaf payloads (CG-C1).
+    fn basic_value_to_i64(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        let i64_ty = self.context.i64_type();
+        match val {
+            BasicValueEnum::IntValue(iv) => {
+                let bw = iv.get_type().get_bit_width();
+                if bw == 64 {
+                    Ok(iv)
+                } else if bw == 1 {
+                    self.builder
+                        .build_int_z_extend(iv, i64_ty, &format!("{}_zext", name))
+                        .map_err(|e| CompileError::LlvmError(format!("zext: {}", e)))
+                } else if bw < 64 {
+                    self.builder
+                        .build_int_s_extend(iv, i64_ty, &format!("{}_sext", name))
+                        .map_err(|e| CompileError::LlvmError(format!("sext: {}", e)))
+                } else {
+                    self.builder
+                        .build_int_truncate(iv, i64_ty, &format!("{}_trunc", name))
+                        .map_err(|e| CompileError::LlvmError(format!("trunc: {}", e)))
+                }
+            }
+            BasicValueEnum::PointerValue(pv) => {
+                self.build_ptr_to_int(pv, i64_ty, &format!("{}_ptr", name))
+            }
+            BasicValueEnum::FloatValue(fv) => self
+                .builder
+                .build_bit_cast(fv, i64_ty, &format!("{}_fbits", name))
+                .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))
+                .map(|v| v.into_int_value()),
+            _ => Ok(i64_ty.const_zero()),
+        }
     }
 
     /// Emit `mimi_quote_new_node(tag, child0, child1, extra) -> i8*`.
@@ -1419,22 +1472,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .context
                 .ptr_type(inkwell::AddressSpace::default())
                 .const_zero(),
-        }
-    }
-
-    /// Convert a pointer-typed BasicValueEnum to an i64 (for leaf data0).
-    fn ptr_to_i64(&self, val: BasicValueEnum<'ctx>) -> i64 {
-        match val {
-            BasicValueEnum::PointerValue(_pv) => {
-                // We cannot know the pointer's address at compile time,
-                // so zero is returned. The runtime leaf stores pointer
-                // values directly from the mimi_quote_new_leaf call,
-                // which takes an i64 argument that the LLVM call carries
-                // as a runtime value.
-                0
-            }
-            BasicValueEnum::IntValue(iv) => iv.get_zero_extended_constant().unwrap_or(0) as i64,
-            _ => 0,
         }
     }
 

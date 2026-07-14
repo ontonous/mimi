@@ -101,16 +101,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .build_global_string_ptr("%ld", "int_fmt")
                         .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
                     let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                    // B3: Use snprintf for buffer safety.
-                    let snprintf_ty = i8_ptr.fn_type(
-                        &[
-                            BasicMetadataTypeEnum::PointerType(i8_ptr),
-                            BasicMetadataTypeEnum::IntType(self.context.i64_type()),
-                            BasicMetadataTypeEnum::PointerType(i8_ptr),
-                        ],
-                        true,
-                    );
+                    // B3/CG-C3: snprintf returns i32 (not i8*). Prefer the module
+                    // declaration from declare_runtime_fns; only declare with correct
+                    // signature if missing.
                     let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
+                        let i32_ty = self.context.i32_type();
+                        let snprintf_ty = i32_ty.fn_type(
+                            &[
+                                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                                BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            ],
+                            true,
+                        );
                         self.module.add_function(
                             "snprintf",
                             snprintf_ty,
@@ -197,10 +200,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .builder
                     .build_global_string_ptr("%.15g", "float_fmt")
                     .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
-                // B3: Use snprintf for buffer safety.
+                // B3/CG-C3: snprintf returns i32, not i8*.
                 let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                 let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
-                    let ty = i8_ptr.fn_type(
+                    let i32_ty = self.context.i32_type();
+                    let ty = i32_ty.fn_type(
                         &[
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
                             BasicMetadataTypeEnum::IntType(self.context.i64_type()),
