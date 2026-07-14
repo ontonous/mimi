@@ -113,9 +113,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         fields[0],
                         BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
                     )
+                    && !arg_type.starts_with("Option")
+                    && !arg_type.starts_with("Result")
+                    && !self.type_defs.contains_key(arg_type)
                 {
-                    // Bool-headed int tuple: `(true, 1)` / map_get — not enum
-                    // (enum disc is typically i32/i64, not i1).
+                    // Bool-headed int tuple: `(true, 1)` / map_get.
+                    // Skip when arg_type is Option/Result/named enum (same layout).
                     let str_ptr = self.emit_int_tuple_to_string(*sv)?;
                     Ok((
                         BasicMetadataValueEnum::PointerValue(str_ptr),
@@ -123,6 +126,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ))
                 } else if num_fields >= 2 {
                     // Option/Result/enum-like: print payload field (field 1).
+                    // For Option None (disc=0), interp prints `None()` — approximate
+                    // by printing payload only when disc!=0, else "None".
+                    if (arg_type.starts_with("Option") || arg_type == "Option")
+                        && matches!(
+                            fields[0],
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                        )
+                    {
+                        let str_ptr = self.emit_option_to_string(*sv)?;
+                        return Ok((
+                            BasicMetadataValueEnum::PointerValue(str_ptr),
+                            "%s".to_string(),
+                        ));
+                    }
                     let payload = self.build_extract_value((*sv).into(), 1, "payload")?;
                     match payload {
                         BasicValueEnum::IntValue(iv) => {
@@ -218,6 +235,100 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => Ok((*arg, "%p".to_string())),
         }
+    }
+
+    /// Format Option {i1, i64} as `Some(n)` / `None()` matching interp Display.
+    fn emit_option_to_string(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let disc = self
+            .build_extract_value(sv.into(), 0, "opt_disc")?
+            .into_int_value();
+        let payload = self
+            .build_extract_value(sv.into(), 1, "opt_pay")?
+            .into_int_value();
+        let payload_i64 = if payload.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(payload, i64_ty, "opt_pay_i64")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+        } else {
+            payload
+        };
+        let some_fmt = self
+            .builder
+            .build_global_string_ptr("Some(%ld)", "opt_some_fmt")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let none_str = self
+            .builder
+            .build_global_string_ptr("None()", "opt_none_str")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let buf_size = i64_ty.const_int(64, false);
+        let buf = self.malloc_or_abort(buf_size, "opt_print_buf")?;
+        let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
+            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+            let i32_ty = self.context.i32_type();
+            let ty = i32_ty.fn_type(
+                &[
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                    BasicMetadataTypeEnum::IntType(i64_ty),
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                ],
+                true,
+            );
+            self.module.add_function(
+                "snprintf",
+                ty,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+        // if disc: snprintf(buf, "Some(%ld)", payload) else strcpy(buf, "None()")
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent fn".into()))?;
+        let some_bb = self.context.append_basic_block(parent, "opt_print_some");
+        let none_bb = self.context.append_basic_block(parent, "opt_print_none");
+        let merge_bb = self.context.append_basic_block(parent, "opt_print_merge");
+        let zero = disc.get_type().const_int(0, false);
+        let is_some = self
+            .builder
+            .build_int_compare(IntPredicate::NE, disc, zero, "opt_is_some")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder
+            .build_conditional_branch(is_some, some_bb, none_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(some_bb);
+        self.build_call(
+            snprintf_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::IntValue(buf_size),
+                BasicMetadataValueEnum::PointerValue(some_fmt.as_pointer_value()),
+                BasicMetadataValueEnum::IntValue(payload_i64),
+            ],
+            "opt_some_snprintf",
+        )?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(none_bb);
+        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+        self.build_call(
+            strcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(none_str.as_pointer_value()),
+            ],
+            "opt_none_strcpy",
+        )?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(merge_bb);
+        Ok(buf)
     }
 
     /// Format an all-integer struct (tuple / map_get) as `(v0, v1, ...)`.

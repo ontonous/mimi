@@ -896,16 +896,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     {
                         Some("List<unknown>".to_string())
                     }
-                    // Option<T>: {i1 disc, T payload}; approximate as Option
-                    [BasicTypeEnum::IntType(t), _] if t.get_bit_width() == 1 => {
-                        Some("Option".to_string())
-                    }
-                    // Result<T, E>: {i1 disc, T ok, E err}; approximate as Result
-                    // When E = string (Result<T, string>), the err field is {i8*, i64}.
-                    // When E = i64 (Result<T, i64>), the err field is just i64.
-                    [BasicTypeEnum::IntType(t), _, _] if t.get_bit_width() == 1 => {
-                        Some("Result".to_string())
-                    }
+                    // Do NOT map {i1, T} → Option: map_get / (bool, i64) tuples share
+                    // this layout. Option/Result must come from var_type_names
+                    // (Some/None/Ok/Err tracking) or explicit annotations.
+                    [BasicTypeEnum::IntType(t), _] if t.get_bit_width() == 1 => None,
+                    [BasicTypeEnum::IntType(t), _, _] if t.get_bit_width() == 1 => None,
                     _ => None,
                 }
             }
