@@ -7002,6 +7002,46 @@ fn dual_result_enum_println() {
     );
 }
 
+/// List of Map println (handles → JSON objects).
+#[test]
+fn dual_list_map_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Map<string, i32>>("{\"a\":1}")
+            let b = from_json::<Map<string, i32>>("{\"b\":2}")
+            let xs = [a, b]
+            println(xs)
+            0
+        }
+        "#,
+        "[{\"a\":1}, {\"b\":2}]"
+    );
+}
+
+/// List of Set println.
+#[test]
+fn dual_list_set_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Set<i32>>("[1,3]")
+            let b = from_json::<Set<i32>>("[2]")
+            let xs = [a, b]
+            println(xs)
+            0
+        }
+        "#,
+        "[Set{1, 3}, Set{2}]"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
