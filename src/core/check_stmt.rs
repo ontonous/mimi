@@ -848,20 +848,17 @@ impl<'a> Checker<'a> {
                 self.loop_depth -= 1;
             }
             Stmt::WhileLet { pat, init, body } => {
-                // CG-H3 (audit): reject list/slice patterns at type-check time so the
-                // user gets a clear error instead of an opaque codegen failure later.
-                // The interpreter supports these patterns, but codegen does not.
-                if matches!(pat, Pattern::Array(_) | Pattern::Slice(_, _)) {
+                // CG-H3: fixed-length list Array patterns are supported in
+                // codegen (length check + element bind). Slice/`..rest` is
+                // still incomplete for rest rebinding — reject with E0251.
+                if matches!(pat, Pattern::Slice(_, _)) {
                     self.emit_code(
                         crate::diagnostic::codes::E0251,
-                        "while-let list/slice patterns are not supported in codegen; \
-                         use a regular for loop, an index-based while loop, \
-                         or destructure into individual variables"
+                        "while-let slice patterns with `..rest` are not supported in codegen; \
+                         use a fixed-length list pattern `[a, b]`, a for loop, \
+                         or an index-based while loop"
                             .to_string(),
                     );
-                    // Still type-check the pattern and body to catch other errors,
-                    // but return early to avoid cascading diagnostics from the
-                    // unsupported pattern.
                     let it = self.infer_expr(init, scopes);
                     scopes.push(HashMap::new());
                     self.check_pattern(pat, &it, scopes);

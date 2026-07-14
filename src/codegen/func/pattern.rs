@@ -336,9 +336,62 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Ok(result)
             }
-            Pattern::Array(_) | Pattern::Slice(_, _) => Err(CompileError::Generic(
-                "list/slice pattern check in while-let: not yet supported in codegen".to_string(),
-            )),
+            Pattern::Array(sub_pats) => {
+                // Fixed-length list/array: match when len == sub_pats.len().
+                // Element sub-patterns are not re-checked here (bind phase
+                // re-evaluates); length is the loop-continuation guard.
+                let list_ptr = match val {
+                    BasicValueEnum::PointerValue(pv) => *pv,
+                    BasicValueEnum::StructValue(sv) => {
+                        let tmp = self.build_alloca(
+                            BasicTypeEnum::StructType(sv.get_type()),
+                            "pat_arr_tmp",
+                        )?;
+                        self.build_store(tmp, *sv)?;
+                        tmp
+                    }
+                    _ => {
+                        return Err(CompileError::Generic(
+                            "list pattern check: expected list value".to_string(),
+                        ))
+                    }
+                };
+                let len = self.load_list_len(list_ptr)?;
+                let expected = self
+                    .context
+                    .i64_type()
+                    .const_int(sub_pats.len() as u64, false);
+                self.builder
+                    .build_int_compare(inkwell::IntPredicate::EQ, len, expected, "pat_arr_len")
+                    .map_err(|e| CompileError::LlvmError(format!("icmp: {}", e)))
+            }
+            Pattern::Slice(sub_pats, _rest) => {
+                // Prefix length: match when len >= sub_pats.len().
+                let list_ptr = match val {
+                    BasicValueEnum::PointerValue(pv) => *pv,
+                    BasicValueEnum::StructValue(sv) => {
+                        let tmp = self.build_alloca(
+                            BasicTypeEnum::StructType(sv.get_type()),
+                            "pat_slice_tmp",
+                        )?;
+                        self.build_store(tmp, *sv)?;
+                        tmp
+                    }
+                    _ => {
+                        return Err(CompileError::Generic(
+                            "slice pattern check: expected list value".to_string(),
+                        ))
+                    }
+                };
+                let len = self.load_list_len(list_ptr)?;
+                let min_len = self
+                    .context
+                    .i64_type()
+                    .const_int(sub_pats.len() as u64, false);
+                self.builder
+                    .build_int_compare(inkwell::IntPredicate::UGE, len, min_len, "pat_slice_len")
+                    .map_err(|e| CompileError::LlvmError(format!("icmp: {}", e)))
+            }
         }
     }
 
