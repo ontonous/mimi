@@ -173,7 +173,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[Expr],
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let mut compiled_args = self.compile_arg_values(args, vars)?;
+        let ordered = self.reorder_named_args(name, args)?;
+        let mut compiled_args = self.compile_arg_values(&ordered, vars)?;
+        // Use ordered exprs for list-mutation/borrow paths below.
+        let args = ordered.as_slice();
 
         // v0.28.29 fix for mimichat gap #2: list-mutating builtins (`push`,
         // `pop`) take a `*List` pointer at the LLVM level. When the caller
@@ -1178,13 +1181,86 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Compile argument expressions into LLVM basic values.
+    /// Named args (`name = expr`) are reordered to the function's parameter
+    /// order when `func_name` is known (and present in `func_defs`).
     fn compile_arg_values(
         &mut self,
         args: &[Expr],
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<Vec<BasicValueEnum<'ctx>>, CompileError> {
         args.iter()
-            .map(|arg| self.compile_expr(arg, vars))
+            .map(|arg| match arg {
+                Expr::NamedArg(_, value) => self.compile_expr(value, vars),
+                other => self.compile_expr(other, vars),
+            })
+            .collect()
+    }
+
+    /// Reorder named args to positional order for a known function definition.
+    fn reorder_named_args(&self, name: &str, args: &[Expr]) -> Result<Vec<Expr>, CompileError> {
+        let has_named = args.iter().any(|a| matches!(a, Expr::NamedArg(_, _)));
+        if !has_named {
+            return Ok(args.to_vec());
+        }
+        let Some(fdef) = self.func_defs.get(name) else {
+            // Unknown function (builtin/method): strip NamedArg wrappers only.
+            return Ok(args
+                .iter()
+                .map(|a| match a {
+                    Expr::NamedArg(_, v) => *v.clone(),
+                    other => other.clone(),
+                })
+                .collect());
+        };
+        let mut ordered: Vec<Option<Expr>> = vec![None; fdef.params.len()];
+        let mut next_pos = 0usize;
+        for arg in args {
+            match arg {
+                Expr::NamedArg(n, val) => {
+                    let Some(pos) = fdef.params.iter().position(|p| p.name == *n) else {
+                        return Err(CompileError::Generic(format!(
+                            "unknown named argument '{}' for function '{}'",
+                            n, name
+                        )));
+                    };
+                    if pos >= ordered.len() {
+                        ordered.resize(pos + 1, None);
+                    }
+                    ordered[pos] = Some(*val.clone());
+                }
+                other => {
+                    while next_pos < ordered.len() && ordered[next_pos].is_some() {
+                        next_pos += 1;
+                    }
+                    if next_pos >= ordered.len() {
+                        ordered.push(Some(other.clone()));
+                    } else {
+                        ordered[next_pos] = Some(other.clone());
+                    }
+                    next_pos += 1;
+                }
+            }
+        }
+        // Fill defaults for missing slots.
+        for (i, p) in fdef.params.iter().enumerate() {
+            if i < ordered.len() && ordered[i].is_none() {
+                if let Some(ref d) = p.default_value {
+                    ordered[i] = Some(d.clone());
+                }
+            }
+        }
+        ordered
+            .into_iter()
+            .enumerate()
+            .map(|(i, o)| {
+                o.ok_or_else(|| {
+                    CompileError::Generic(format!(
+                        "missing argument {} for function '{}'",
+                        i + 1,
+                        name
+                    ))
+                })
+            })
             .collect()
     }
 
