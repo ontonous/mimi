@@ -175,8 +175,8 @@ impl<'a> Checker<'a> {
                         for (i, (arg, param)) in args.iter().zip(method.params.iter()).enumerate() {
                             let declared = self.resolve_type(&param.ty);
                             let at = self.infer_expr(arg, scopes);
-                            // IF-C4: unify so TypeVars / Option payloads resolve.
-                            if self.unification.unify(&at, &declared).is_err() {
+                            // IF-C1/C4: strict unify rejects escape hatches at call sites.
+                            if self.unification.unify_strict(&at, &declared).is_err() {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0211,
                                     format!(
@@ -264,8 +264,8 @@ impl<'a> Checker<'a> {
                                 user_args.iter().zip(method_params.iter()).enumerate()
                             {
                                 let at = self.infer_expr(arg, scopes);
-                                // IF-C5: unify so TypeVars / Option payloads resolve.
-                                if self.unification.unify(&at, param).is_err() {
+                                // IF-C1/C5: strict unify rejects escape hatches at call sites.
+                                if self.unification.unify_strict(&at, param).is_err() {
                                     self.emit_code(
                                         crate::diagnostic::codes::E0211,
                                         format!(
