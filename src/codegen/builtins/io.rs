@@ -91,6 +91,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "%s".to_string(),
                     ));
                 }
+                // Custom enum: {i32 tag, i64 payload}
+                if !arg_type.is_empty()
+                    && self.type_defs.get(arg_type).is_some_and(|td| {
+                        matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
+                    })
+                {
+                    let str_ptr = self.emit_enum_display(arg_type, *sv)?;
+                    return Ok((
+                        BasicMetadataValueEnum::PointerValue(str_ptr),
+                        "%s".to_string(),
+                    ));
+                }
+                // Enum-like {i32, i64}: resolve type from arg_type or variant name.
+                if num_fields == 2
+                    && matches!(
+                        fields[0],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 32
+                    )
+                    && matches!(
+                        fields[1],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                    )
+                {
+                    let enum_ty = if self.type_defs.get(arg_type).is_some_and(|td| {
+                        matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
+                    }) {
+                        Some(arg_type.to_string())
+                    } else if let Some((owner, _)) = self.find_variant_owner(arg_type) {
+                        Some(owner)
+                    } else {
+                        None
+                    };
+                    if let Some(et) = enum_ty {
+                        let str_ptr = self.emit_enum_display(&et, *sv)?;
+                        return Ok((
+                            BasicMetadataValueEnum::PointerValue(str_ptr),
+                            "%s".to_string(),
+                        ));
+                    }
+                }
                 // Detect Mimi string struct: {i8*, i64}
                 if num_fields == 2 && matches!(fields[0], BasicTypeEnum::PointerType(_)) {
                     let ptr = self.build_extract_value((*sv).into(), 0, "str_ptr")?;
@@ -518,6 +558,145 @@ impl<'ctx> CodeGenerator<'ctx> {
             ],
             "list_rec_close_cpy",
         )?;
+        Ok(buf)
+    }
+
+    /// Format custom enum `{i32 tag, i64 payload}` as `Variant` / `Variant(n)`.
+    fn emit_enum_display(
+        &self,
+        type_name: &str,
+        sv: inkwell::values::StructValue<'ctx>,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let td = self.type_defs.get(type_name).ok_or_else(|| {
+            CompileError::LlvmError(format!("no type def for enum {}", type_name))
+        })?;
+        let variants = match &td.kind {
+            crate::ast::TypeDefKind::Enum(vs) => vs.clone(),
+            _ => {
+                return Err(CompileError::LlvmError(format!(
+                    "{} is not an enum",
+                    type_name
+                )))
+            }
+        };
+        let mut sorted = variants;
+        sorted.sort_by(|a, b| a.name.cmp(&b.name));
+        let tag = self
+            .build_extract_value(sv.into(), 0, "enum_tag")?
+            .into_int_value();
+        let payload = self
+            .build_extract_value(sv.into(), 1, "enum_pay")?
+            .into_int_value();
+        let payload_i64 = if payload.get_type().get_bit_width() < 64 {
+            self.builder
+                .build_int_s_extend(payload, i64_ty, "enum_pay_i64")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+        } else {
+            payload
+        };
+        let buf = self.malloc_or_abort(i64_ty.const_int(128, false), "enum_disp_buf")?;
+        let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
+            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+            let i32_ty = self.context.i32_type();
+            let ty = i32_ty.fn_type(
+                &[
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                    BasicMetadataTypeEnum::IntType(i64_ty),
+                    BasicMetadataTypeEnum::PointerType(i8_ptr),
+                ],
+                true,
+            );
+            self.module.add_function(
+                "snprintf",
+                ty,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
+        let merge_bb = self.context.append_basic_block(parent, "enum_disp_merge");
+        let default_bb = self.context.append_basic_block(parent, "enum_disp_default");
+        let mut switch_cases: Vec<(
+            inkwell::values::IntValue<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        )> = Vec::new();
+        let mut case_bbs: Vec<(usize, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+        for (i, v) in sorted.iter().enumerate() {
+            let case_bb = self
+                .context
+                .append_basic_block(parent, &format!("enum_disp_{}", v.name));
+            switch_cases.push((tag.get_type().const_int(i as u64, false), case_bb));
+            case_bbs.push((i, case_bb));
+        }
+        self.builder
+            .build_switch(tag, default_bb, &switch_cases)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        for (i, case_bb) in case_bbs {
+            self.builder.position_at_end(case_bb);
+            let v = &sorted[i];
+            let has_payload = v.payload.is_some();
+            if has_payload {
+                let fmt = self
+                    .builder
+                    .build_global_string_ptr(
+                        &format!("{}(%ld)", v.name),
+                        &format!("enum_fmt_{}", v.name),
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::IntValue(i64_ty.const_int(128, false)),
+                        BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::IntValue(payload_i64),
+                    ],
+                    &format!("enum_sn_{}", v.name),
+                )?;
+            } else {
+                let fmt = self
+                    .builder
+                    .build_global_string_ptr(
+                        &format!("{}()", v.name),
+                        &format!("enum_ufmt_{}", v.name),
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                self.build_call(
+                    strcpy_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                    ],
+                    &format!("enum_cpy_{}", v.name),
+                )?;
+            }
+            self.builder
+                .build_unconditional_branch(merge_bb)
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        }
+        self.builder.position_at_end(default_bb);
+        let unk = self
+            .builder
+            .build_global_string_ptr("Enum(?)", "enum_unk")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+        self.build_call(
+            strcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(unk.as_pointer_value()),
+            ],
+            "enum_unk_cpy",
+        )?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(merge_bb);
         Ok(buf)
     }
 

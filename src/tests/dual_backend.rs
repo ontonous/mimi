@@ -926,7 +926,7 @@ fn dual_enum_ctor() {
         type MyOption { Some(i32) None }
         func main() -> i32 { println(Some(42)); 0 }
     "#,
-        "42"
+        "Some(42)"
     );
 }
 
@@ -1047,13 +1047,13 @@ fn dual_enum_tag_print() {
         return;
     }
     // codegen match on enum variants with payloads has known ordinal mismatch;
-    // test the constructor works (prints payload) without match.
+    // test the constructor works (prints variant Display) without match.
     dual_assert!(
         r#"
         type MyOption { Some(i32) None }
         func main() -> i32 { println(Some(99)); 0 }
     "#,
-        "99"
+        "Some(99)"
     );
 }
 
@@ -6696,6 +6696,25 @@ fn dual_option_float_println() {
         }
         "#,
         "Some(3.5)"
+    );
+}
+
+/// Custom enum println unit and payload variants.
+#[test]
+fn dual_custom_enum_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Color { Red Green Blue(i32) }
+        func main() -> i32 {
+            println(Red)
+            println(Blue(7))
+            0
+        }
+        "#,
+        "Red()\nBlue(7)"
     );
 }
 
