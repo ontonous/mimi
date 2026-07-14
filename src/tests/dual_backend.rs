@@ -6661,6 +6661,26 @@ fn dual_option_record_println() {
     );
 }
 
+/// Option of string println Some(hi) / None().
+#[test]
+fn dual_option_string_println() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = Some("hi")
+            let b: Option<string> = None
+            println(a)
+            println(b)
+            0
+        }
+        "#,
+        "Some(hi)\nNone()"
+    );
+}
+
 /// Result println formats Ok(n) / Err(n) on both backends.
 #[test]
 fn dual_result_println() {
