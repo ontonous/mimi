@@ -363,6 +363,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if arg_type == "Map" || arg_type.starts_with("Map<") {
                     let fn_name = if arg_type.contains("Map<string, string>") {
                         "mimi_map_to_json_string"
+                    } else if arg_type.contains("Map<string, bool>") {
+                        "mimi_map_to_json_bool"
                     } else {
                         "mimi_map_to_json_i64"
                     };

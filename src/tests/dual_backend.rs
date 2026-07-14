@@ -7173,6 +7173,24 @@ fn dual_from_json_set_string() {
     );
 }
 
+/// from_json Map of bool values + println dual.
+#[test]
+fn dual_from_json_map_bool() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, bool>>("{\"a\":true,\"b\":false}")
+            println(m)
+            0
+        }
+        "#,
+        "{\"a\":true,\"b\":false}"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {

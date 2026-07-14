@@ -1549,10 +1549,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
             }
             Type::Name(n, args) if n == "Map" => {
-                // Map<string, i32|i64|string> from JSON object.
+                // Map<string, i32|i64|string|bool> from JSON object.
                 let val_is_int = args
                     .get(1)
-                    .map(|t| matches!(t, Type::Name(tn, _) if tn == "i32" || tn == "i64"))
+                    .map(|t| {
+                        matches!(
+                            t,
+                            Type::Name(tn, _) if tn == "i32" || tn == "i64" || tn == "bool"
+                        )
+                    })
                     .unwrap_or(true);
                 let val_is_string = args
                     .get(1)
@@ -1560,10 +1565,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .unwrap_or(false);
                 if !val_is_int && !val_is_string {
                     return Err(CompileError::Generic(
-                        "from_json::<Map>: only Map<string, i32|i64|string> is supported in codegen"
+                        "from_json::<Map>: only Map<string, i32|i64|bool|string> is supported in codegen"
                             .into(),
                     ));
                 }
+                // bool values parse as 0/1 via mimi_map_from_json_i64 (JsonParser true/false).
                 let fn_name = if val_is_string {
                     "mimi_map_from_json_string"
                 } else {
