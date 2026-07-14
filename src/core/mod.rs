@@ -15,9 +15,9 @@ mod infer_expr;
 
 pub(crate) use checker::Checker;
 pub use helpers::{fmt_type, is_type_param, subst_type_params};
-pub(crate) use helpers::{is_bool, is_numeric_coercion, is_trait_coercion, same_type};
+pub(crate) use helpers::{is_bool, is_numeric_coercion, is_trait_coercion};
 #[cfg(test)]
-pub(crate) use helpers::{is_int, is_numeric, is_string};
+pub(crate) use helpers::{is_int, is_numeric, is_string, same_type};
 
 pub fn check(file: &File) -> Result<(), Vec<Diagnostic>> {
     checker::flow::flow_check(file)
