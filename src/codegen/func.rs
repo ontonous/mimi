@@ -2065,8 +2065,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.context.i32_type()
                         };
                         let then_val = if then_bw < else_bw && then_reaches {
-                            self.builder.position_at_end(then_bb_end.unwrap());
-                            if let Some(term) = then_bb_end.and_then(|b| b.get_terminator()) {
+                            let then_end = then_bb_end.ok_or_else(|| {
+                                CompileError::LlvmError(
+                                    "if-then s_ext: missing then block end".into(),
+                                )
+                            })?;
+                            self.builder.position_at_end(then_end);
+                            if let Some(term) = then_end.get_terminator() {
                                 self.builder.position_before(&term);
                             }
                             BasicValueEnum::IntValue(
@@ -2084,8 +2089,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             then_val
                         };
                         let else_val = if else_bw < then_bw && else_reaches {
-                            self.builder.position_at_end(else_bb_end.unwrap());
-                            if let Some(term) = else_bb_end.and_then(|b| b.get_terminator()) {
+                            let else_end = else_bb_end.ok_or_else(|| {
+                                CompileError::LlvmError(
+                                    "if-else s_ext: missing else block end".into(),
+                                )
+                            })?;
+                            self.builder.position_at_end(else_end);
+                            if let Some(term) = else_end.get_terminator() {
                                 self.builder.position_before(&term);
                             }
                             BasicValueEnum::IntValue(

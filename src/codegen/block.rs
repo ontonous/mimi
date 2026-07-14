@@ -1145,17 +1145,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if let Some(term) = then_bb_end.get_terminator() {
                     self.builder.position_before(&term);
                 }
+                let tv = then_val.ok_or_else(|| {
+                    CompileError::LlvmError("if-then s_ext: missing then value".into())
+                })?;
                 BasicValueEnum::IntValue(
                     self.builder
                         .build_int_s_extend(
-                            then_val.unwrap().into_int_value(),
+                            tv.into_int_value(),
                             target_ty,
                             "if_then_sext",
                         )
                         .map_err(|e| CompileError::LlvmError(format!("if then s_ext: {}", e)))?,
                 )
             } else {
-                then_val.unwrap()
+                then_val.ok_or_else(|| {
+                    CompileError::LlvmError("if-then: missing then value".into())
+                })?
             };
             // Extend else_val if needed (in else_bb_end block, before terminator)
             let else_val = if else_bw < then_bw && else_reaches {
@@ -1163,17 +1168,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if let Some(term) = else_bb_end.get_terminator() {
                     self.builder.position_before(&term);
                 }
+                let ev = else_val.ok_or_else(|| {
+                    CompileError::LlvmError("if-else s_ext: missing else value".into())
+                })?;
                 BasicValueEnum::IntValue(
                     self.builder
                         .build_int_s_extend(
-                            else_val.unwrap().into_int_value(),
+                            ev.into_int_value(),
                             target_ty,
                             "if_else_sext",
                         )
                         .map_err(|e| CompileError::LlvmError(format!("if else s_ext: {}", e)))?,
                 )
             } else {
-                else_val.unwrap()
+                else_val.ok_or_else(|| {
+                    CompileError::LlvmError("if-else: missing else value".into())
+                })?
             };
             (then_val, else_val)
         } else {

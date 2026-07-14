@@ -1334,9 +1334,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .ok_or(CompileError::LlvmError("no current function".into()))?,
             "fopen_null_check",
         );
-        let write_bb = self
-            .context
-            .append_basic_block(self.current_function().unwrap(), "fopen_not_null");
+        let write_bb = self.context.append_basic_block(
+            self.current_function()
+                .ok_or(CompileError::LlvmError("no current function".into()))?,
+            "fopen_not_null",
+        );
         let is_null = self
             .builder
             .build_int_compare(
