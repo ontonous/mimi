@@ -7137,6 +7137,42 @@ fn dual_list_result_map_println() {
     );
 }
 
+/// from_json Map of string values + println dual.
+#[test]
+fn dual_from_json_map_string() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, string>>("{\"a\":\"hi\"}")
+            println(m)
+            0
+        }
+        "#,
+        "{\"a\":\"hi\"}"
+    );
+}
+
+/// from_json Set of string + println dual.
+#[test]
+fn dual_from_json_set_string() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<string>>("[\"a\",\"b\"]")
+            println(s)
+            0
+        }
+        "#,
+        "Set{a, b}"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {

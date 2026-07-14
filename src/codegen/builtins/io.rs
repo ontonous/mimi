@@ -361,7 +361,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(iv) => {
                 // Map/Set opaque handles: serialize via runtime JSON helpers.
                 if arg_type == "Map" || arg_type.starts_with("Map<") {
-                    let func = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                    let fn_name = if arg_type.contains("Map<string, string>") {
+                        "mimi_map_to_json_string"
+                    } else {
+                        "mimi_map_to_json_i64"
+                    };
+                    let func = self.get_runtime_fn(fn_name)?;
                     let raw = self
                         .build_call(
                             func,
@@ -369,7 +374,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "print_map_json",
                         )?
                         .try_as_basic_value_opt()
-                        .ok_or("mimi_map_to_json_i64 void")?
+                        .ok_or("map to_json void")?
                         .into_pointer_value();
                     return Ok((
                         BasicMetadataValueEnum::PointerValue(raw),
@@ -377,7 +382,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ));
                 }
                 if arg_type == "Set" || arg_type.starts_with("Set<") || arg_type == "set" {
-                    let func = self.get_runtime_fn("mimi_set_to_display")?;
+                    let fn_name = if arg_type.contains("Set<string>") {
+                        "mimi_set_to_display_string"
+                    } else {
+                        "mimi_set_to_display"
+                    };
+                    let func = self.get_runtime_fn(fn_name)?;
                     let raw = self
                         .build_call(
                             func,
@@ -385,7 +395,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "print_set_disp",
                         )?
                         .try_as_basic_value_opt()
-                        .ok_or("mimi_set_to_display void")?
+                        .ok_or("set display void")?
                         .into_pointer_value();
                     return Ok((
                         BasicMetadataValueEnum::PointerValue(raw),
