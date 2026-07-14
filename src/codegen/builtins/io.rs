@@ -250,42 +250,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Format Result {i1, ok, err} integer payloads as `Ok(n)` / `Err(n)`.
+    /// Format Result {i1, ok, err} as `Ok(...)` / `Err(...)` (int or string payload).
     fn emit_result_to_string(
         &self,
         sv: inkwell::values::StructValue<'ctx>,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
         let i64_ty = self.context.i64_type();
+        let fields = sv.get_type().get_field_types();
         let disc = self
             .build_extract_value(sv.into(), 0, "res_disc")?
             .into_int_value();
-        let ok = self
-            .build_extract_value(sv.into(), 1, "res_ok")?
-            .into_int_value();
-        let err = self
-            .build_extract_value(sv.into(), 2, "res_err")?
-            .into_int_value();
-        let to_i64 = |iv: inkwell::values::IntValue<'ctx>, name: &str| -> MimiResult<_> {
-            if iv.get_type().get_bit_width() < 64 {
-                Ok(self
-                    .builder
-                    .build_int_s_extend(iv, i64_ty, name)
-                    .map_err(|e| CompileError::LlvmError(e.to_string()))?)
-            } else {
-                Ok(iv)
-            }
-        };
-        let ok_i64 = to_i64(ok, "res_ok_i64")?;
-        let err_i64 = to_i64(err, "res_err_i64")?;
-        let ok_fmt = self
-            .builder
-            .build_global_string_ptr("Ok(%ld)", "res_ok_fmt")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let err_fmt = self
-            .builder
-            .build_global_string_ptr("Err(%ld)", "res_err_fmt")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let buf_size = i64_ty.const_int(64, false);
+        let ok_val = self.build_extract_value(sv.into(), 1, "res_ok")?;
+        let err_val = self.build_extract_value(sv.into(), 2, "res_err")?;
+        let buf_size = i64_ty.const_int(256, false);
         let buf = self.malloc_or_abort(buf_size, "res_print_buf")?;
         let snprintf_fn = self.module.get_function("snprintf").unwrap_or_else(|| {
             let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -320,34 +297,207 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_conditional_branch(is_ok, ok_bb, err_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(ok_bb);
-        self.build_call(
-            snprintf_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::IntValue(buf_size),
-                BasicMetadataValueEnum::PointerValue(ok_fmt.as_pointer_value()),
-                BasicMetadataValueEnum::IntValue(ok_i64),
-            ],
-            "res_ok_snprintf",
-        )?;
-        self.builder
-            .build_unconditional_branch(merge_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.builder.position_at_end(err_bb);
-        self.build_call(
-            snprintf_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(buf),
-                BasicMetadataValueEnum::IntValue(buf_size),
-                BasicMetadataValueEnum::PointerValue(err_fmt.as_pointer_value()),
-                BasicMetadataValueEnum::IntValue(err_i64),
-            ],
-            "res_err_snprintf",
-        )?;
-        self.builder
-            .build_unconditional_branch(merge_bb)
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+        let emit_arm = |label: &str,
+                        bb: inkwell::basic_block::BasicBlock<'ctx>,
+                        val: BasicValueEnum<'ctx>,
+                        field_ty: BasicTypeEnum<'ctx>|
+         -> MimiResult<()> {
+            self.builder.position_at_end(bb);
+            match field_ty {
+                BasicTypeEnum::IntType(_) => {
+                    let iv = val.into_int_value();
+                    let as_i64 = if iv.get_type().get_bit_width() < 64 {
+                        self.builder
+                            .build_int_s_extend(iv, i64_ty, &format!("{}_i64", label))
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        iv
+                    };
+                    // Result<T,string> stores Err as ptrtoint of heap {ptr,len} string.
+                    // Only decode as string when value looks like a heap pointer
+                    // (>= 1MB, 8-byte aligned); small integers stay numeric.
+                    let min_heap = i64_ty.const_int(1_048_576, false);
+                    let is_heapish = if iv.get_type().get_bit_width() == 64 {
+                        let ge = self
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::UGE,
+                                as_i64,
+                                min_heap,
+                                &format!("{}_ge_heap", label),
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let and7 = self
+                            .builder
+                            .build_and(
+                                as_i64,
+                                i64_ty.const_int(7, false),
+                                &format!("{}_and7", label),
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let aligned = self
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::EQ,
+                                and7,
+                                i64_ty.const_int(0, false),
+                                &format!("{}_aligned", label),
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder
+                            .build_and(ge, aligned, &format!("{}_heapish", label))
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        self.context.bool_type().const_int(0, false)
+                    };
+
+                    let parent_fn = self
+                        .builder
+                        .get_insert_block()
+                        .and_then(|bb| bb.get_parent())
+                        .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
+                    let str_bb =
+                        self.context
+                            .append_basic_block(parent_fn, &format!("res_{}_str", label));
+                    let int_bb =
+                        self.context
+                            .append_basic_block(parent_fn, &format!("res_{}_int", label));
+                    let arm_merge = self.context.append_basic_block(
+                        parent_fn,
+                        &format!("res_{}_arm_merge", label),
+                    );
+                    self.builder
+                        .build_conditional_branch(is_heapish, str_bb, int_bb)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+                    self.builder.position_at_end(str_bb);
+                    {
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let str_sty = self.context.struct_type(
+                            &[
+                                BasicTypeEnum::PointerType(i8_ptr),
+                                BasicTypeEnum::IntType(i64_ty),
+                            ],
+                            false,
+                        );
+                        let as_ptr = self
+                            .builder
+                            .build_int_to_ptr(as_i64, i8_ptr, &format!("{}_as_ptr", label))
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let loaded = self
+                            .builder
+                            .build_load(
+                                BasicTypeEnum::StructType(str_sty),
+                                as_ptr,
+                                &format!("{}_str_ld", label),
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                            .into_struct_value();
+                        let data_ptr = self
+                            .build_extract_value(loaded.into(), 0, &format!("{}_data", label))?
+                            .into_pointer_value();
+                        let fmt = self
+                            .builder
+                            .build_global_string_ptr(
+                                &format!("{}(%s)", if label == "ok" { "Ok" } else { "Err" }),
+                                &format!("res_{}_sfmt", label),
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(buf),
+                                BasicMetadataValueEnum::IntValue(buf_size),
+                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                BasicMetadataValueEnum::PointerValue(data_ptr),
+                            ],
+                            &format!("res_{}_snprintf_s", label),
+                        )?;
+                    }
+                    self.builder
+                        .build_unconditional_branch(arm_merge)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+                    self.builder.position_at_end(int_bb);
+                    {
+                        let fmt = self
+                            .builder
+                            .build_global_string_ptr(
+                                &format!("{}(%ld)", if label == "ok" { "Ok" } else { "Err" }),
+                                &format!("res_{}_fmt", label),
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(buf),
+                                BasicMetadataValueEnum::IntValue(buf_size),
+                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                BasicMetadataValueEnum::IntValue(as_i64),
+                            ],
+                            &format!("res_{}_snprintf", label),
+                        )?;
+                    }
+                    self.builder
+                        .build_unconditional_branch(arm_merge)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.builder.position_at_end(arm_merge);
+                }
+                BasicTypeEnum::StructType(sty) => {
+                    // string {ptr,len}
+                    let fields_st = sty.get_field_types();
+                    if fields_st.len() >= 1 {
+                        let sv = val.into_struct_value();
+                        let ptr = self
+                            .build_extract_value(sv.into(), 0, &format!("{}_str", label))?
+                            .into_pointer_value();
+                        let fmt = self
+                            .builder
+                            .build_global_string_ptr(
+                                &format!("{}(%s)", if label == "ok" { "Ok" } else { "Err" }),
+                                &format!("res_{}_sfmt", label),
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(buf),
+                                BasicMetadataValueEnum::IntValue(buf_size),
+                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                BasicMetadataValueEnum::PointerValue(ptr),
+                            ],
+                            &format!("res_{}_snprintf_s", label),
+                        )?;
+                    }
+                }
+                _ => {
+                    let fmt = self
+                        .builder
+                        .build_global_string_ptr(
+                            if label == "ok" { "Ok(?)" } else { "Err(?)" },
+                            &format!("res_{}_unk", label),
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                    self.build_call(
+                        strcpy_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                        ],
+                        &format!("res_{}_strcpy", label),
+                    )?;
+                }
+            }
+            self.builder
+                .build_unconditional_branch(merge_bb)
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            Ok(())
+        };
+
+        emit_arm("ok", ok_bb, ok_val, fields[1])?;
+        emit_arm("err", err_bb, err_val, fields[2])?;
         self.builder.position_at_end(merge_bb);
         Ok(buf)
     }
