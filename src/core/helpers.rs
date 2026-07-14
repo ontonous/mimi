@@ -409,6 +409,13 @@ pub(crate) fn is_json_serializable(t: &Type) -> bool {
             if n == "Set" && args.len() == 1 {
                 return matches!(&args[0], Type::Name(v, _) if v == "i32" || v == "i64");
             }
+            // Option<T> / Result<T,E> when payload types are serializable.
+            if n == "Option" && args.len() == 1 {
+                return is_json_serializable(&args[0]);
+            }
+            if n == "Result" && args.len() == 2 {
+                return is_json_serializable(&args[0]) && is_json_serializable(&args[1]);
+            }
             // Records are supported by the codegen record-to-json sprintf path.
             // We can't distinguish Records from other Name types here, so we
             // allow any Name with args (e.g. "Point", "User") — the codegen will
@@ -453,6 +460,8 @@ pub(crate) fn is_json_serializable(t: &Type) -> bool {
             }
             false
         }
+        Type::Option(inner) => is_json_serializable(inner),
+        Type::Result(ok, err) => is_json_serializable(ok) && is_json_serializable(err),
         _ => false,
     }
 }
