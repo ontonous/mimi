@@ -93,7 +93,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         let int_val = call_try_basic_value(&result)
             .ok_or("mimi_map_has_key returned void".to_string())?
             .into_int_value();
-        Ok(BasicValueEnum::IntValue(int_val))
+        // Runtime returns i32 0/1; convert to LLVM i1 bool for dual println.
+        let zero = int_val.get_type().const_int(0, false);
+        let as_bool = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::NE, int_val, zero, "has_key_bool")
+            .map_err(|e| format!("has_key_bool: {}", e))?;
+        Ok(BasicValueEnum::IntValue(as_bool))
     }
 
     pub(super) fn compile_map_get(
