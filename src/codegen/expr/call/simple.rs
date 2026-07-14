@@ -516,7 +516,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         }
                         fmt.push('}');
-                        let buf_size = i64_ty.const_int(4096, false);
+                        // CG-H1: size buffer from format length + per-field slack
+                        // (string fields can be large; 256B/field + 1KiB base).
+                        let est = (fmt.len() + fields.len() * 256 + 1024).max(4096) as u64;
+                        let buf_size = i64_ty.const_int(est, false);
                         // B4: OOM-safe buffer for record to_json.
                         let buf = self.malloc_or_abort(buf_size, "record_json_malloc")?;
                         let fmt_ptr = self
@@ -1677,8 +1680,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             fmt.push('}');
 
-            // Allocate buffer and sprintf
-            let buf_size = i64_ty.const_int(4096, false);
+            // Allocate buffer and sprintf (CG-H1: size from format + field slack).
+            let est = (fmt.len() + fields.len() * 256 + 1024).max(4096) as u64;
+            let buf_size = i64_ty.const_int(est, false);
             // B4: OOM-safe buffer for element to_json.
             let buf = self.malloc_or_abort(buf_size, "elem_json_malloc")?;
             let fmt_ptr = self
