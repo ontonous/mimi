@@ -30,6 +30,7 @@ thread_local! {
     pub(in crate::interp) static FFI_CALLBACK_CTX: RefCell<FfiCallbackCtx> = RefCell::new(FfiCallbackCtx {
         interp: std::ptr::null_mut(),
         entries: HashMap::new(),
+        reentrancy_depth: 0,
     });
 }
 
@@ -46,6 +47,8 @@ pub(in crate::interp) struct FfiCallbackCtx {
     pub(in crate::interp) interp: *mut Interpreter<'static>,
     // (closure, ret_is_float, arg_free_mask, arg_kinds)
     pub(in crate::interp) entries: HashMap<i64, (Value, bool, Vec<bool>, Vec<CallbackArgKind>)>,
+    /// Nested trampoline depth on this thread (IP-C5 soft mitigation).
+    pub(in crate::interp) reentrancy_depth: u32,
 }
 
 use std::sync::Mutex;
@@ -231,6 +234,36 @@ unsafe fn callback_trampoline_inner(
     }
 
     let callback_id = *userdata;
+    // IP-C5: track nested trampoline depth; warn once when re-entering while
+    // the parent still holds the interpreter (interp is cleared during apply).
+    let reentered = FFI_CALLBACK_CTX.with(|c| {
+        let mut ctx = c.borrow_mut();
+        let was = ctx.reentrancy_depth;
+        ctx.reentrancy_depth = was.saturating_add(1);
+        was > 0
+    });
+    if reentered {
+        static REENT_WARNED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !REENT_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "[mimi] WARNING: nested FFI callback reentrancy detected (IP-C5). \
+                 Nested callbacks cannot share the live interpreter; side effects \
+                 may be lost or evaluated on a temporary interpreter."
+            );
+        }
+    }
+    struct DepthGuard;
+    impl Drop for DepthGuard {
+        fn drop(&mut self) {
+            FFI_CALLBACK_CTX.with(|c| {
+                let mut ctx = c.borrow_mut();
+                ctx.reentrancy_depth = ctx.reentrancy_depth.saturating_sub(1);
+            });
+        }
+    }
+    let _depth_guard = DepthGuard;
+
     // F3: Fast path — check thread-local context first (synchronous callbacks).
     // If not found, fall back to the global store (async/off-thread callbacks).
     let entry = FFI_CALLBACK_CTX.with(|c| {

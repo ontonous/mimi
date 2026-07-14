@@ -257,6 +257,7 @@ impl<'a> Interpreter<'a> {
                     super::ffi::callback::FfiCallbackCtx {
                         interp: ctx.interp,
                         entries: ctx.entries.clone(),
+                        reentrancy_depth: ctx.reentrancy_depth,
                     }
                 }));
                 // SAFETY: self is a mutable reference that lives for the duration of
