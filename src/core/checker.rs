@@ -35,8 +35,9 @@ pub(crate) struct Checker<'a> {
     pub(crate) trait_generics: HashMap<String, Vec<String>>,
     /// Track trait implementations: (trait_name, type_name) -> list of method names
     pub(crate) impls: HashMap<(String, String), Vec<String>>,
-    /// Track where clauses for functions: func_name -> (type_param, bounds)
-    pub(crate) where_clauses: HashMap<String, (String, Vec<String>)>,
+    /// Track where clauses for functions: func_name -> [(type_param, bounds), ...]
+    /// CK-H6: store ALL type-param bounds (not a single overwritten entry).
+    pub(crate) where_clauses: HashMap<String, Vec<(String, Vec<String>)>>,
     /// Track effects for functions: func_name -> list of effect names
     pub(crate) func_effects: HashMap<String, Vec<String>>,
     /// Track available effects in current scope
