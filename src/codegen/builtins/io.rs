@@ -251,15 +251,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ));
                 }
                 if arg_type == "Set" || arg_type.starts_with("Set<") || arg_type == "set" {
-                    let func = self.get_runtime_fn("mimi_set_to_json_i64")?;
+                    let func = self.get_runtime_fn("mimi_set_to_display")?;
                     let raw = self
                         .build_call(
                             func,
                             &[BasicMetadataValueEnum::IntValue(*iv)],
-                            "print_set_json",
+                            "print_set_disp",
                         )?
                         .try_as_basic_value_opt()
-                        .ok_or("mimi_set_to_json_i64 void")?
+                        .ok_or("mimi_set_to_display void")?
                         .into_pointer_value();
                     return Ok((
                         BasicMetadataValueEnum::PointerValue(raw),

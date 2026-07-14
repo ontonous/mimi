@@ -2778,6 +2778,30 @@ pub extern "C" fn mimi_result_i64_to_json(disc: i64, ok: i64, err: i64) -> *mut 
     }
 }
 
+/// Display form `Set{1, 2, 3}` (sorted ints) for println dual.
+#[no_mangle]
+pub extern "C" fn mimi_set_to_display(handle: SetHandle) -> *mut std::ffi::c_char {
+    if handle == 0 {
+        return alloc_c_string("Set{}");
+    }
+    // SAFETY: non-zero SetHandle.
+    let set = unsafe { &*set_from_handle(handle) };
+    if set.inner.len() > 1_000_000 {
+        return alloc_c_string("Set{...}");
+    }
+    let mut vals: Vec<i64> = set.inner.iter().copied().collect();
+    vals.sort_unstable();
+    let mut s = String::from("Set{");
+    for (i, v) in vals.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        s.push_str(&v.to_string());
+    }
+    s.push('}');
+    alloc_c_string(&s)
+}
+
 /// Serialize a SetHandle of integer values to a JSON array string.
 #[no_mangle]
 pub extern "C" fn mimi_set_to_json_i64(handle: SetHandle) -> *mut std::ffi::c_char {
