@@ -1040,8 +1040,12 @@ impl std::fmt::Display for Value {
                     write!(f, "{} {{}}", name)
                 } else {
                     write!(f, "{} {{ ", name)?;
+                    // Sorted keys for dual-backend stable Display.
+                    let mut keys: Vec<_> = fields.keys().collect();
+                    keys.sort();
                     let mut first = true;
-                    for (k, v) in fields.iter() {
+                    for k in keys {
+                        let v = &fields[k];
                         if !first {
                             write!(f, ", ")?;
                         }
