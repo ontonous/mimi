@@ -330,7 +330,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             BinOp::Add => self.builder.build_int_add(l, r, "add"),
             BinOp::Sub => self.builder.build_int_sub(l, r, "sub"),
             BinOp::Mul => self.builder.build_int_mul(l, r, "mul"),
-            BinOp::Div => unreachable!(), // handled above
+            // Div is handled above with zero-check; keep defensive Err not panic.
+            BinOp::Div => {
+                return Err(CompileError::LlvmError(
+                    "internal: integer Div should have been handled earlier".into(),
+                ));
+            }
             _ => return Err(format!("unsupported integer arithmetic operator {:?}", op).into()),
         };
         Ok(res

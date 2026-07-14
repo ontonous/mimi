@@ -1,4 +1,3 @@
-#![allow(clippy::unwrap_used)]
 // Codegen for v0.28.20 concurrency primitives.
 //
 // Each primitive is a thin wrapper around its corresponding
@@ -1170,7 +1169,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "shadow_alloc",
             )
             .map_err(|e| format!("shadow_alloc: {}", e))?;
-        Ok(call_try_basic_value(&call).unwrap().into_int_value().into())
+        // TYS-C4: never unwrap call results — propagate as CompileError.
+        let v = call_try_basic_value(&call).ok_or_else(|| {
+            CompileError::LlvmError("shadow_alloc returned void".into())
+        })?;
+        Ok(v.into_int_value().into())
     }
 
     /// Generic shadow_tag/check/free — calls a runtime function with i64 args.
@@ -1223,6 +1226,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_call(func, &call_args, fn_name)
             .map_err(|e| format!("{}: {}", fn_name, e))?;
-        Ok(call_try_basic_value(&call).unwrap().into_int_value().into())
+        // TYS-C4: never unwrap call results — propagate as CompileError.
+        let v = call_try_basic_value(&call).ok_or_else(|| {
+            CompileError::LlvmError(format!("{} returned void", fn_name))
+        })?;
+        Ok(v.into_int_value().into())
     }
 }

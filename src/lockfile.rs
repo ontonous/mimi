@@ -25,8 +25,7 @@ impl Lockfile {
         if !lock_path.exists() {
             return Ok(None);
         }
-        let content = std::fs::read_to_string(&lock_path)
-            .map_err(|e| format!("failed to read {}: {}", lock_path.display(), e))?;
+        let content = crate::path_safety::read_source_capped(&lock_path)?;
         let lockfile: Self = toml::from_str(&content)
             .map_err(|e| format!("failed to parse {}: {}", lock_path.display(), e))?;
         Ok(Some(lockfile))

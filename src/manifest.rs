@@ -39,8 +39,7 @@ impl Manifest {
         if !toml_path.exists() {
             return Ok(None);
         }
-        let content = std::fs::read_to_string(&toml_path)
-            .map_err(|e| format!("failed to read {}: {}", toml_path.display(), e))?;
+        let content = crate::path_safety::read_source_capped(&toml_path)?;
         let manifest: Self = toml::from_str(&content)
             .map_err(|e| format!("failed to parse {}: {}", toml_path.display(), e))?;
         Ok(Some(manifest))

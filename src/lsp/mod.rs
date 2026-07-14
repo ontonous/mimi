@@ -120,7 +120,7 @@ impl LspServer {
         let path = self.cache_file_path();
         self.cache_path = path.clone();
         let Some(path) = path else { return };
-        let data = match fs::read_to_string(&path) {
+        let data = match crate::path_safety::read_source_capped(&path) {
             Ok(d) => d,
             Err(_) => return,
         };
@@ -210,7 +210,7 @@ impl LspServer {
             if module_name.is_empty() {
                 continue;
             }
-            let source = match fs::read_to_string(&path) {
+            let source = match crate::path_safety::read_source_capped(&path) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
