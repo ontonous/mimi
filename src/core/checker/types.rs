@@ -77,11 +77,14 @@ impl<'a> Checker<'a> {
             Type::ImplTrait(traits) => Type::ImplTrait(traits.clone()),
             Type::DynTrait(traits) => Type::DynTrait(traits.clone()),
             Type::TypeVar(_) => {
+                // M4: release builds previously returned the unresolved TypeVar
+                // silently (debug_assert erased). Prefer Infer so later checks
+                // treat it as an escape hatch rather than a concrete type.
                 mimi_debug_assert!(
                     false,
                     "resolve_type: unexpected TypeVar — should have been unified"
                 );
-                ty.clone()
+                Type::Infer
             }
             Type::ForAll(params, body) => {
                 Type::ForAll(params.clone(), Box::new(self.resolve_type(body)))

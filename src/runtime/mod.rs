@@ -4610,16 +4610,9 @@ pub extern "C" fn mimi_json_deserialize(
                     pos += 1;
                 }
                 if overflow {
-                    // Free any strings allocated so far and return null
-                    if elem_type == 2 {
-                        for i in 0..idx {
-                            let ptr = data[i as usize] as *mut std::ffi::c_char;
-                            if !ptr.is_null() {
-                                // SAFETY: freeing a non-null string allocated during deserialization.
-                                unsafe { libc::free(ptr as *mut std::ffi::c_void) };
-                            }
-                        }
-                    }
+                    // M1: overflow only occurs on the integer parse arm; the
+                    // prior elem_type==2 string free was dead code. Local `data`
+                    // Vec drops on return (no forget yet).
                     if !out_len.is_null() {
                         // SAFETY: `out_len` was checked non-null above.
                         unsafe { *out_len = 0 };
