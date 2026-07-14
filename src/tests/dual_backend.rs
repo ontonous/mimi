@@ -6601,6 +6601,24 @@ fn dual_from_json_result_ok() {
     );
 }
 
+/// from_json::<Set<i32>> from JSON array.
+#[test]
+fn dual_from_json_set_i64() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<i32>>("[1,2,3]")
+            println(s.size())
+            0
+        }
+        "#,
+        "3"
+    );
+}
+
 #[test]
 fn dual_from_json_all_scalar_fields() {
     if !can_link() {

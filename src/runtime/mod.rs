@@ -2700,6 +2700,37 @@ pub extern "C" fn mimi_set_new() -> SetHandle {
     Box::into_raw(set) as SetHandle
 }
 
+/// Build a SetHandle from a JSON array of integers.
+#[no_mangle]
+pub extern "C" fn mimi_set_from_json_i64(json: *const std::ffi::c_char) -> SetHandle {
+    let handle = mimi_set_new();
+    if handle == 0 || json.is_null() {
+        return handle;
+    }
+    // SAFETY: non-null JSON C string from codegen.
+    let s = unsafe { cstr_to_string(json) };
+    let len = json_array_length(json);
+    if len <= 0 {
+        return handle;
+    }
+    const MAX: i64 = 1_000_000;
+    let n = len.min(MAX);
+    for i in 0..n {
+        let elem = json_get_element(json, i);
+        if elem.is_null() {
+            continue;
+        }
+        let v = mimi_json_as_i64(elem);
+        // Free the element string allocated by json_get_element.
+        unsafe {
+            libc::free(elem as *mut std::ffi::c_void);
+        }
+        mimi_set_insert(handle, v as SetValueHandle);
+    }
+    let _ = s;
+    handle
+}
+
 #[no_mangle]
 pub extern "C" fn mimi_set_destroy(handle: SetHandle) {
     if handle == 0 {

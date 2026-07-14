@@ -1593,6 +1593,22 @@ impl<'a> Interpreter<'a> {
                         Ok(Value::Variant("Ok".into(), vec![ok_val]))
                     }
                 },
+                "Set" if type_args.len() == 1 => match val {
+                    Value::List(items) | Value::Set(items) => {
+                        let mut out = Vec::new();
+                        for item in items {
+                            let v = self.coerce_value_to_type(item, &type_args[0])?;
+                            if !out.iter().any(|e| crate::interp::value::values_equal(e, &v)) {
+                                out.push(v);
+                            }
+                        }
+                        Ok(Value::Set(out))
+                    }
+                    other => Err(InterpError::new(format!(
+                        "expected list/set for Set, got {}",
+                        other
+                    ))),
+                },
                 _ => {
                     if let Some(type_def) = self.type_defs.get(name) {
                         match &type_def.kind {
