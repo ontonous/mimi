@@ -95,21 +95,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // mimi_any_to_string's tagged-integer heuristic which would
                     // misidentify odd positive integers (e.g. 5 → 5>>1 = 2).
                     let alloc_size = self.context.i64_type().const_int(32, false);
-                    let malloc_fn = self
-                        .module
-                        .get_function("malloc")
-                        .ok_or_else(|| "malloc not declared".to_string())?;
-                    let buf = self
-                        .builder
-                        .build_call(
-                            malloc_fn,
-                            &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                            "malloc_int_str",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                        .try_as_basic_value_opt()
-                        .ok_or("malloc returned void")?
-                        .into_pointer_value();
+                    let buf = self.malloc_or_abort(alloc_size, "malloc_int_str")?;
                     let fmt_global = self
                         .builder
                         .build_global_string_ptr("%ld", "int_fmt")
@@ -206,21 +192,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             BasicMetadataValueEnum::FloatValue(fv) => {
                 let alloc_size = self.context.i64_type().const_int(32, false);
-                let malloc_fn = self
-                    .module
-                    .get_function("malloc")
-                    .ok_or_else(|| "malloc not declared".to_string())?;
-                let buf = self
-                    .builder
-                    .build_call(
-                        malloc_fn,
-                        &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                        "malloc_call",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value_opt()
-                    .ok_or("malloc returned void")?
-                    .into_pointer_value();
+                let buf = self.malloc_or_abort(alloc_size, "malloc_call")?;
                 let fmt_global = self
                     .builder
                     .build_global_string_ptr("%.15g", "float_fmt")
@@ -316,21 +288,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ));
                 };
                 let alloc_size = self.context.i64_type().const_int(2, false);
-                let malloc_fn = self
-                    .module
-                    .get_function("malloc")
-                    .ok_or_else(|| "malloc not declared".to_string())?;
-                let buf = self
-                    .builder
-                    .build_call(
-                        malloc_fn,
-                        &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                        "malloc_call",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                    .try_as_basic_value_opt()
-                    .ok_or("malloc returned void")?
-                    .into_pointer_value();
+                let buf = self.malloc_or_abort(alloc_size, "malloc_call")?;
                 self.builder
                     .build_store(buf, self.context.i8_type().const_int(b'?' as u64, false))
                     .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;

@@ -66,10 +66,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // For f-strings with interpolation: dynamically compute buffer size, then fill
         // B3: Use snprintf instead of sprintf for buffer safety.
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
+        // B4: allocations go through malloc_or_abort (no bare malloc).
         let strcpy_fn = self
             .module
             .get_function("strcpy")
@@ -147,17 +144,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                             } else {
                                 iv
                             };
-                            let temp_buf = self
-                                .build_call(
-                                    malloc_fn,
-                                    &[BasicMetadataValueEnum::IntValue(
-                                        i64_ty.const_int(32, false),
-                                    )],
-                                    &format!("fstr_temp_{}", i),
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("malloc returned void")?
-                                .into_pointer_value();
+                            let temp_buf = self.malloc_or_abort(
+                                i64_ty.const_int(32, false),
+                                &format!("fstr_temp_{}", i),
+                            )?;
                             self.register_heap_alloc(temp_buf);
                             let fmt = self
                                 .builder
@@ -195,17 +185,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicValueEnum::FloatValue(fv) => {
                             // MEM-C1 (deep audit): %f can produce up to 317 chars for extreme
                             // float values (e.g. DBL_MAX). Use 512-byte buffer to be safe.
-                            let temp_buf = self
-                                .build_call(
-                                    malloc_fn,
-                                    &[BasicMetadataValueEnum::IntValue(
-                                        i64_ty.const_int(512, false),
-                                    )],
-                                    &format!("fstr_temp_{}", i),
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("malloc returned void")?
-                                .into_pointer_value();
+                            let temp_buf = self.malloc_or_abort(
+                                i64_ty.const_int(512, false),
+                                &format!("fstr_temp_{}", i),
+                            )?;
                             self.register_heap_alloc(temp_buf);
                             let fmt = self
                                 .builder
@@ -310,15 +293,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // Phase 2: Allocate correctly-sized buffer and fill
-        let buf = self
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(total_size)],
-                "fstr_buf",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        let buf = self.malloc_or_abort(total_size, "fstr_buf")?;
         self.register_heap_alloc(buf);
 
         let empty = self

@@ -534,19 +534,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "values_alloc_size",
             )
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let values_data = self
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "values_malloc",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        let values_data = self.malloc_or_abort(alloc_size, "values_malloc")?;
         let values_data_i64 = self
             .build_bit_cast(
                 BasicValueEnum::PointerValue(values_data),
@@ -758,19 +746,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_mul(list_len.into_int_value(), elem_size, "alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let out_ptr = self
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "out_malloc",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        let out_ptr = self.malloc_or_abort(alloc_size, "out_malloc")?;
         let out_i64 = self
             .build_bit_cast(
                 BasicValueEnum::PointerValue(out_ptr),

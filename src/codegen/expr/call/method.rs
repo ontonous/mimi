@@ -1251,7 +1251,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let inner_ty = &type_params[0];
                 let i64_ty = self.context.i64_type();
-                let malloc_fn = self.get_runtime_fn("malloc")?;
                 let json_arr_len_fn = self.get_runtime_fn("json_array_length")?;
                 let json_get_elem_fn = self.get_runtime_fn("json_get_element")?;
 
@@ -1272,15 +1271,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .builder
                     .build_int_mul(len_val, sizeof_i64, "alloc_size")
                     .map_err(|e| CompileError::LlvmError(format!("mul: {}", e)))?;
-                let data_ptr = self
-                    .build_call(
-                        malloc_fn,
-                        &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                        "malloc_data",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or("malloc returned void")?
-                    .into_pointer_value();
+                // B4: OOM-safe list data buffer for from_json arrays.
+                let data_ptr = self.malloc_or_abort(alloc_size, "malloc_data")?;
 
                 // Cast to i64* for element access
                 let data_i64_ptr = self.build_pointer_cast(
@@ -1409,17 +1401,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             };
                             let struct_size =
                                 self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
-                            let malloc_fn = self.get_runtime_fn("malloc")?;
                             let size_val = i64_ty.const_int(struct_size, false);
-                            let heap_ptr = self
-                                .build_call(
-                                    malloc_fn,
-                                    &[BasicMetadataValueEnum::IntValue(size_val)],
-                                    "malloc_record",
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("malloc returned void")?
-                                .into_pointer_value();
+                            // B4: OOM-safe heap record for from_json object decode.
+                            let heap_ptr = self.malloc_or_abort(size_val, "malloc_record")?;
                             let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                             let typed_ptr = self
                                 .build_bit_cast(

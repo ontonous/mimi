@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::codegen::{CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
-use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
+use inkwell::types::{BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
 
@@ -105,19 +105,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_mul(len_val, sizeof_i64, "alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let data_ptr = self
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "malloc_call",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        let data_ptr = self.malloc_or_abort(alloc_size, "malloc_call")?;
         let data_ptr_i64 = self
             .build_bit_cast(
                 data_ptr.into(),
@@ -187,17 +175,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let struct_ty = sv.get_type();
                 let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(struct_ty));
-                let malloc_fn = self.malloc_fn();
                 let size_val = self.context.i64_type().const_int(size, false);
-                let ptr = self
-                    .build_call(
-                        malloc_fn,
-                        &[BasicMetadataValueEnum::IntValue(size_val)],
-                        "malloc",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or("malloc returned void")?
-                    .into_pointer_value();
+                // B4: OOM-safe heap copy when packing structs into i64 slots.
+                let ptr = self.malloc_or_abort(size_val, "struct_to_i64")?;
                 let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 let typed_ptr = self
                     .build_bit_cast(
@@ -213,17 +193,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    fn malloc_fn(&self) -> inkwell::values::FunctionValue<'ctx> {
-        self.module.get_function("malloc").unwrap_or_else(|| {
-            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-            let i64_ty = self.context.i64_type();
-            self.module.add_function(
-                "malloc",
-                i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64_ty)], false),
-                Some(inkwell::module::Linkage::External),
-            )
-        })
-    }
 
     fn build_list_struct(
         &self,
@@ -410,19 +379,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_mul(list_len, elem_size, "comp_alloc")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let out_ptr = self
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "comp_malloc",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        let out_ptr = self.malloc_or_abort(alloc_size, "comp_malloc")?;
         let out_i64 = self
             .build_bit_cast(
                 out_ptr.into(),

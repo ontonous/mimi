@@ -686,18 +686,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Allocate a heap copy of the string instead of a .rodata global,
                 // so that the memory can be safely freed by free_heap_allocs.
                 let len = self.context.i64_type().const_int(s.len() as u64, false);
-                let malloc_fn = self.get_runtime_fn("malloc")?;
-                let heap_ptr = self
-                    .build_call(
-                        malloc_fn,
-                        &[BasicMetadataValueEnum::IntValue(len)],
-                        "comptime_str_malloc",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or_else(|| {
-                        CompileError::LlvmError("comptime_str malloc returned void".into())
-                    })?
-                    .into_pointer_value();
+                // B4: OOM-safe heap copy for comptime string values.
+                let heap_ptr = self.malloc_or_abort(len, "comptime_str_malloc")?;
                 let i8_ty = self.context.i8_type();
                 for (idx, &byte) in s.as_bytes().iter().enumerate() {
                     let gep = self.build_in_bounds_gep(
