@@ -1532,6 +1532,39 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         }
                     }
+                    Type::Name(n, args) if n == "Result" && !args.is_empty() => {
+                        // List of Result: bare JSON value → Ok(T) via scalar Ok path.
+                        let ok_val = self.compile_from_json_scalar_ok(&args[0], elem_json)?;
+                        let res_val = self.compile_constructor("Ok", vec![ok_val])?;
+                        match res_val {
+                            BasicValueEnum::StructValue(sv) => {
+                                let sty = sv.get_type();
+                                let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                                let heap = self.malloc_or_abort(
+                                    i64_ty.const_int(size, false),
+                                    "list_res_heap",
+                                )?;
+                                let i8_ptr =
+                                    self.context.ptr_type(inkwell::AddressSpace::default());
+                                let typed = self
+                                    .build_bit_cast(
+                                        heap.into(),
+                                        BasicTypeEnum::PointerType(i8_ptr),
+                                        "list_res_ptr",
+                                    )?
+                                    .into_pointer_value();
+                                self.build_store(typed, sv)?;
+                                self.build_ptr_to_int(typed, i64_ty, "list_res_as_i64")?
+                            }
+                            BasicValueEnum::IntValue(iv) => iv,
+                            other => {
+                                return Err(CompileError::Generic(format!(
+                                    "from_json List Result: unexpected {:?}",
+                                    other.get_type()
+                                )));
+                            }
+                        }
+                    }
                     Type::Option(inner) => {
                         let json_as_i64_fn = self.module.get_function("mimi_json_as_i64");
                         let json_as_f64_fn = self.module.get_function("mimi_json_as_f64");
