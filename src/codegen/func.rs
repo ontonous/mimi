@@ -805,6 +805,34 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// MEM-C13: if returning a closure `{fn_ptr, env_ptr}`, pop the env heap
+    /// pointer from the current `heap_allocs` scope so `free_heap_allocs` does
+    /// not free an env the caller still owns.
+    pub(in crate::codegen) fn claim_returned_closure_env(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        ret_type: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let is_closure = match ret_type {
+            BasicTypeEnum::StructType(st) => {
+                let fields = st.get_field_types();
+                fields.len() == 2
+                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(fields[1], BasicTypeEnum::PointerType(_))
+            }
+            _ => false,
+        };
+        if !is_closure {
+            return Ok(val);
+        }
+        // Env was registered as the most recent raw heap ptr when the lambda
+        // was built (see build_closure_struct). Pop it so free_heap_allocs
+        // leaves the env alive for the caller.
+        let _ = self.pop_last_heap_ptr();
+        let _ = val; // value passes through unchanged
+        Ok(val)
+    }
+
     pub(in crate::codegen) fn claim_string_return_value(
         &self,
         val: BasicValueEnum<'ctx>,
@@ -812,6 +840,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         expr: Option<&Expr>,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // Closures are not strings; claim env ownership first when applicable.
+        let val = self.claim_returned_closure_env(val, ret_type)?;
         let is_string_struct = match ret_type {
             BasicTypeEnum::StructType(st) => {
                 let fields = st.get_field_types();

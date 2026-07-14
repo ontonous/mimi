@@ -28,13 +28,29 @@ pub fn compute_dir_checksum(dir: &Path) -> Result<String, String> {
             hash = hash.wrapping_mul(0x100000001b3); // FNV prime (64-bit)
         }
         // Mix in file content
-        if let Ok(mut f) = std::fs::File::open(path) {
-            let mut buf = Vec::new();
-            if f.read_to_end(&mut buf).is_ok() {
-                for b in &buf {
-                    hash ^= *b as u64;
-                    hash = hash.wrapping_mul(0x100000001b3);
+        // CL-H13: log skipped files so incomplete checksums are diagnosable.
+        match std::fs::File::open(path) {
+            Ok(mut f) => {
+                let mut buf = Vec::new();
+                if let Err(e) = f.read_to_end(&mut buf) {
+                    eprintln!(
+                        "[mimi] warning: checksum skipping unreadable file {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    for b in &buf {
+                        hash ^= *b as u64;
+                        hash = hash.wrapping_mul(0x100000001b3);
+                    }
                 }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[mimi] warning: checksum skipping unopenable file {}: {}",
+                    path.display(),
+                    e
+                );
             }
         }
     }

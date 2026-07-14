@@ -74,8 +74,8 @@ fn run_once(
     strict: bool,
     extra_args: &[String],
 ) -> Result<i32, String> {
-    let source = fs::read_to_string(path)
-        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    // CL-H1: size-capped source load (shared with other CLI entry points).
+    let source = mimi::path_safety::read_source_capped(path)?;
     if is_sketch(path) {
         return Err("cannot run a .mms sketch file directly; promote to .mimi first".into());
     }
@@ -130,7 +130,7 @@ fn run_once(
             diagnostics.len()
         );
         let use_color = colors_enabled();
-        let src = fs::read_to_string(path).ok();
+        let src = mimi::path_safety::read_source_capped(path).ok();
         let src_ref = src.as_deref();
         for d in &diagnostics {
             let formatted = format_diagnostic(d, src_ref, &path.display().to_string());
@@ -163,7 +163,7 @@ fn run_once(
         }
         Err(interp_err) => {
             let use_color = colors_enabled();
-            let src = fs::read_to_string(path).ok();
+            let src = mimi::path_safety::read_source_capped(path).ok();
             let src_ref = src.as_deref();
             let diagnostic = interp_err.to_diagnostic();
             let formatted = format_diagnostic(&diagnostic, src_ref, &path.display().to_string());

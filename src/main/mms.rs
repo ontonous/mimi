@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::PathBuf;
 
 use mimispec::latex::render_file_latex;
@@ -59,8 +58,7 @@ pub(crate) fn mms(
                 .map_err(|e| format!("stdin error: {}", e))?;
             input
         } else {
-            fs::read_to_string(path)
-                .map_err(|e| format!("failed to read {}: {}", path.display(), e))?
+            mimi::path_safety::read_source_capped(path)?
         };
 
         let result = mimispec::parse(&source);

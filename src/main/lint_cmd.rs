@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::PathBuf;
 
 use mimi::diagnostic::Severity;
@@ -14,8 +13,7 @@ pub(crate) fn lint_files(files: &[PathBuf], fail_on_warnings: bool) -> Result<()
     }
 
     for path in files {
-        let source = fs::read_to_string(path)
-            .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+        let source = mimi::path_safety::read_source_capped(path)?;
         let tokens = lexer::Lexer::new(&source)
             .tokenize()
             .map_err(|e| format!("lexer error in {}: {}", path.display(), e))?;

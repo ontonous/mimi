@@ -180,6 +180,34 @@ pub fn validate_path_dep(path: &str) -> Result<(), PathError> {
     Ok(())
 }
 
+/// Default maximum size for source / text files read by the toolchain (CL-H1).
+/// Prevents unbounded `read_to_string` from OOM-ing the process on huge inputs.
+pub const MAX_SOURCE_BYTES: u64 = 100 * 1024 * 1024; // 100 MiB
+
+/// Read a text file after rejecting inputs larger than `MAX_SOURCE_BYTES`.
+///
+/// CL-H1: every CLI / loader path that used to call `fs::read_to_string`
+/// directly should go through this helper so a multi-GB file cannot exhaust
+/// memory before parsing even starts.
+pub fn read_source_capped(path: &Path) -> Result<String, String> {
+    read_source_capped_limit(path, MAX_SOURCE_BYTES)
+}
+
+/// Like [`read_source_capped`] but with an explicit byte limit (for tests).
+pub fn read_source_capped_limit(path: &Path, max_bytes: u64) -> Result<String, String> {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > max_bytes {
+            return Err(format!(
+                "file too large ({} bytes, max {}): {}",
+                meta.len(),
+                max_bytes,
+                path.display()
+            ));
+        }
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +217,35 @@ mod tests {
         let base = Path::new("/project");
         let result = validate_safe_path(base, "src/main.mimi");
         assert_eq!(result.unwrap(), PathBuf::from("/project/src/main.mimi"));
+    }
+
+    #[test]
+    fn read_source_capped_rejects_oversize() {
+        let dir =
+            std::env::temp_dir().join(format!("mimi_path_safety_size_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.mimi");
+        // Write 64 bytes, then enforce a 32-byte cap.
+        std::fs::write(&path, vec![b'a'; 64]).unwrap();
+        let err = read_source_capped_limit(&path, 32).unwrap_err();
+        assert!(
+            err.contains("file too large"),
+            "expected size error, got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_source_capped_accepts_small() {
+        let dir = std::env::temp_dir().join(format!("mimi_path_safety_ok_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ok.mimi");
+        std::fs::write(&path, "func main() {}").unwrap();
+        let src = read_source_capped(&path).unwrap();
+        assert_eq!(src, "func main() {}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

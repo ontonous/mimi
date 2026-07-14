@@ -160,20 +160,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if let BasicTypeEnum::StructType(_sty) = elem_ty {
                             let size = self.llvm_type_size_bytes(elem_ty);
                             let size_val = i64_ty.const_int(size, false);
-                            let malloc_fn = self.get_runtime_fn("malloc")?;
-                            let heap_ptr = self
-                                .builder
-                                .build_call(
-                                    malloc_fn,
-                                    &[BasicMetadataValueEnum::IntValue(size_val)],
-                                    "push_struct_malloc",
-                                )
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("malloc error: {}", e))
-                                })?
-                                .try_as_basic_value_opt()
-                                .ok_or("malloc returned void")?
-                                .into_pointer_value();
+                            // B4: abort on OOM instead of null-deref.
+                            let heap_ptr = self.malloc_or_abort(size_val, "push_struct")?;
                             let loaded = self
                                 .builder
                                 .build_load(elem_ty, pv, "push_struct_load")
@@ -229,18 +217,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .builder
                         .build_int_add(len, i64_ty.const_int(1, false), "push_str_alloc_size")
                         .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-                    let malloc_fn = self.get_runtime_fn("malloc")?;
-                    let buf = self
-                        .builder
-                        .build_call(
-                            malloc_fn,
-                            &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                            "push_str_malloc",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                        .try_as_basic_value_opt()
-                        .ok_or("malloc returned void")?
-                        .into_pointer_value();
+                    let buf = self.malloc_or_abort(alloc_size, "push_str")?;
                     let memcpy_fn = self.get_runtime_fn("memcpy")?;
                     self.builder
                         .build_call(
@@ -272,18 +249,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // after the current stack frame is torn down.
                     let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
                     let size_val = i64_ty.const_int(size, false);
-                    let malloc_fn = self.get_runtime_fn("malloc")?;
-                    let heap_ptr = self
-                        .builder
-                        .build_call(
-                            malloc_fn,
-                            &[BasicMetadataValueEnum::IntValue(size_val)],
-                            "push_struct_malloc",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-                        .try_as_basic_value_opt()
-                        .ok_or("malloc returned void")?
-                        .into_pointer_value();
+                    let heap_ptr = self.malloc_or_abort(size_val, "push_struct_val")?;
                     self.builder
                         .build_store(heap_ptr, sv)
                         .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
@@ -413,6 +379,48 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
 
         // realloc to shrink (optional, but good practice)
+        // CG-H3: guard against realloc(ptr, 0) when popping the last element,
+        // which is implementation-defined (may free+return NULL or return a
+        // unique empty allocation). When new_len == 0, just free the old data.
+        let zero = i64_ty.const_int(0, false);
+        let new_is_zero = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, new_len, zero, "new_is_zero")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+        let function = self
+            .current_function()
+            .ok_or_else(|| "codegen: no current function for pop realloc guard".to_string())?;
+        let realloc_bb = self.context.append_basic_block(function, "pop_realloc");
+        let free_bb = self.context.append_basic_block(function, "pop_free");
+        let realloc_merge_bb = self
+            .context
+            .append_basic_block(function, "pop_realloc_merge");
+        self.builder
+            .build_conditional_branch(new_is_zero, free_bb, realloc_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+
+        // free path: new_len == 0, free old data and set data to null
+        self.builder.position_at_end(free_bb);
+        let free_fn = self
+            .module
+            .get_function("free")
+            .ok_or("free not declared")?;
+        self.builder
+            .build_call(
+                free_fn,
+                &[BasicMetadataValueEnum::PointerValue(old_data)],
+                "free_old_data",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+        self.builder
+            .build_store(data_gep, i8_ptr.const_null())
+            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        self.builder
+            .build_unconditional_branch(realloc_merge_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+
+        // realloc path: new_len > 0, shrink the allocation
+        self.builder.position_at_end(realloc_bb);
         let new_alloc_size = self
             .builder
             .build_int_mul(new_len, self.list_elem_size(), "new_alloc_size")
@@ -438,6 +446,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(data_gep, realloc_result)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
+        self.builder
+            .build_unconditional_branch(realloc_merge_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+
+        self.builder.position_at_end(realloc_merge_bb);
 
         self.builder
             .build_unconditional_branch(merge_bb)
@@ -450,9 +463,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_phi(BasicTypeEnum::IntType(i64_ty), "pop_result")
             .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
         let zero = i64_ty.const_int(0, false);
+        // Non-empty path reaches merge via pop_realloc_merge (after free/realloc),
+        // not directly from pop_nonempty — phi predecessors must match CFG edges.
         phi.add_incoming(&[
             (&BasicValueEnum::IntValue(zero), empty_bb),
-            (&elem_val, nonempty_bb),
+            (&elem_val, realloc_merge_bb),
         ]);
         Ok(phi.as_basic_value())
     }
@@ -476,21 +491,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_mul(list_len, sizeof_i64, "alloc_size")
             .map_err(|e| CompileError::LlvmError(format!("mul error: {}", e)))?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let new_data = self
-            .builder
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(alloc_size)],
-                "malloc_call",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("malloc error: {}", e)))?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        // B4: OOM-safe allocation for reverse buffer.
+        let new_data = self.malloc_or_abort(alloc_size, "reverse_data")?;
         let new_data_i64 = self
             .builder
             .build_bit_cast(

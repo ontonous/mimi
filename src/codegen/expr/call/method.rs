@@ -807,6 +807,43 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(BasicTypeEnum::PointerType(i8_ptr_ty), method_gep, "fn_ptr")?
             .into_pointer_value();
 
+        // CG-H7: guard against null vtable entry (unimplemented trait method).
+        // Instead of calling null (SIGSEGV), emit trap + unreachable.
+        let is_null = self
+            .builder
+            .build_is_null(fn_ptr, "fn_null")
+            .map_err(|e| CompileError::LlvmError(format!("null check: {}", e)))?;
+        let function = self
+            .current_function()
+            .ok_or_else(|| "codegen: no current function for dyn trait".to_string())?;
+        let null_bb = self.context.append_basic_block(function, "null_method");
+        let call_bb = self.context.append_basic_block(function, "call_method");
+        self.builder
+            .build_conditional_branch(is_null, null_bb, call_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
+
+        // null path: mimi_runtime_abort (noreturn) + unreachable (CG-H7)
+        self.builder.position_at_end(null_bb);
+        let abort_fn = self.get_or_declare_abort_fn();
+        let msg = self
+            .builder
+            .build_global_string_ptr(
+                "unimplemented trait method (null vtable entry)",
+                "null_vtable_msg",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("global string: {}", e)))?;
+        self.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(msg.as_pointer_value())],
+            "abort_unimplemented",
+        )?;
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreachable: {}", e)))?;
+
+        // call path: proceed with dispatch
+        self.builder.position_at_end(call_bb);
+
         let data_gep = self
             .gep()
             .build_struct_gep(BasicTypeEnum::StructType(fat_ty), fat_ptr, 0, "data_gep")

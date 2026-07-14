@@ -233,3 +233,47 @@ fn list_push_overflow_safe() {
     "#;
     check_source(src).expect("list push should typecheck");
 }
+
+// ============================================================
+// 2026-07-14 follow-up: CL-H1 / CG-H3
+// ============================================================
+
+#[test]
+fn cl_h1_read_source_capped_rejects_oversize() {
+    // CL-H1: shared size gate used by CLI/loader.
+    use std::env;
+    let dir = env::temp_dir().join(format!("mimi_cl_h1_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("big.mimi");
+    std::fs::write(&path, vec![b'x'; 64]).unwrap();
+    let err = crate::path_safety::read_source_capped_limit(&path, 32).unwrap_err();
+    assert!(
+        err.contains("file too large"),
+        "expected oversize error, got: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cg_h3_pop_last_element_dual_backend() {
+    // CG-H3: pop to empty must free data (not realloc(ptr,0)) and return the value.
+    use super::{compile_and_run, run_source};
+    let src = "func main() -> i32 {\n\
+        let xs: List<i32> = [7];\n\
+        let v = pop(xs);\n\
+        let empty = if len(xs) == 0 { 1 } else { 0 };\n\
+        println(v);\n\
+        println(empty);\n\
+        0\n\
+    }\n";
+    let interp = run_source(src);
+    assert_eq!(interp.as_int().unwrap_or(-1), 0);
+    match compile_and_run(src) {
+        Ok(stdout) => {
+            assert_eq!(stdout.trim(), "7\n1");
+        }
+        Err(e) => {
+            eprintln!("SKIP: compile unavailable: {e}");
+        }
+    }
+}

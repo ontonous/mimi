@@ -76,8 +76,7 @@ pub(crate) fn build(
     target: Option<&str>,
 ) -> Result<(), String> {
     let path = resolve_path(path)?;
-    let source = fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let (file, parse_errors) = parser::Parser::new(tokens).parse_file_with_recovery();
     if !parse_errors.is_empty() {
@@ -140,7 +139,7 @@ pub(crate) fn build(
             diagnostics.len()
         );
         let use_color = colors_enabled();
-        let src = fs::read_to_string(&path).ok();
+        let src = mimi::path_safety::read_source_capped(&path).ok();
         let src_ref = src.as_deref();
         for d in &diagnostics {
             let formatted = format_diagnostic(d, src_ref, &path.display().to_string());

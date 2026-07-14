@@ -1,10 +1,10 @@
 use crate::ast::*;
 use crate::codegen::types;
-use crate::codegen::{CallSiteValueExt, CodeGenerator, VarEntry};
+use crate::codegen::{CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
 use inkwell::types::BasicTypeEnum;
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
+use inkwell::values::BasicValueEnum;
 use std::collections::{BTreeMap, HashMap};
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -199,7 +199,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.build_store(env_gep, i8_ptr.const_null())?;
         } else {
             let env_heap_ptr = self.allocate_closure_env(free_vars)?;
+            // Cast first, then register the cast pointer (MEM-C13).
+            // free_heap_allocs / claim compare by LLVM value identity; the
+            // pointer extracted from the closure struct is the cast value.
             let env_ptr_i8 = self.build_pointer_cast(env_heap_ptr, i8_ptr, "env_ptr_i8")?;
+            // Register so non-escaping closures free their env at scope exit.
+            // Escaping returns claim via claim_returned_closure_env.
+            self.register_heap_alloc(env_ptr_i8);
             self.build_store(env_gep, env_ptr_i8)?;
         }
 
@@ -211,6 +217,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Allocate and populate the closure environment struct on the heap.
+    ///
+    /// MEM-C13: caller must `register_heap_alloc` the cast `i8*` env pointer
+    /// (or claim it on escape). Raw malloc here is not tracked.
     fn allocate_closure_env(
         &self,
         free_vars: &BTreeMap<String, VarEntry<'ctx>>,
@@ -221,23 +230,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let env_byte_size = env_struct_type
             .size_of()
             .ok_or_else(|| "size_of error".to_string())?;
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| "malloc not declared".to_string())?;
-        let env_heap_ptr = self
-            .build_call(
-                malloc_fn,
-                &[BasicMetadataValueEnum::IntValue(env_byte_size)],
-                "env_heap",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("malloc returned void")?
-            .into_pointer_value();
+        // B4: use malloc_or_abort so OOM aborts instead of null-deref.
+        let env_heap_ptr = self.malloc_or_abort(env_byte_size, "env_heap")?;
 
-        // NOTE: not registered in heap_allocs — closure env must outlive the
-        // creating scope if the closure escapes (returned or stored to a shared
-        // variable), so we cannot auto-free it on scope exit.
         for (i, (name, &(var_alloca, ty))) in free_vars.iter().enumerate() {
             let val = self.build_load(ty, var_alloca, &format!("cap_val_{}", name))?;
             let field_gep = self
