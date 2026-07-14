@@ -300,11 +300,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         }
                     }
-                    let rt_fn_name = match inner {
-                        "string" => "mimi_list_str_to_json",
-                        "f64" => "mimi_list_f64_to_json",
-                        "bool" => "mimi_list_bool_to_json",
-                        _ => "mimi_list_i64_to_json",
+                    let rt_fn_name = if inner.starts_with("Map") {
+                        // mimi_list_map_to_string emits valid JSON array of objects.
+                        "mimi_list_map_to_string"
+                    } else if inner.starts_with("Set") {
+                        "mimi_list_set_to_string"
+                    } else {
+                        match inner {
+                            "string" => "mimi_list_str_to_json",
+                            "f64" | "f32" => "mimi_list_f64_to_json",
+                            "bool" => "mimi_list_bool_to_json",
+                            _ => "mimi_list_i64_to_json",
+                        }
                     };
                     let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                     let fn_ty =
@@ -328,7 +335,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.register_heap_alloc(raw);
                     return self.wrap_c_string(raw);
                 }
-                // Map / Map<string, i32|i64> → mimi_map_to_json_i64(handle)
+                // Map / Map<string, …> → typed map JSON helpers
                 if obj_type == "Map" || obj_type.starts_with("Map<") {
                     let handle = match &metadata_args[0] {
                         BasicMetadataValueEnum::IntValue(iv) => *iv,
@@ -344,7 +351,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )))
                         }
                     };
-                    let func = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                    let fn_name = if obj_type.contains("Map<string, string>") {
+                        "mimi_map_to_json_string"
+                    } else if obj_type.contains("Map<string, bool>") {
+                        "mimi_map_to_json_bool"
+                    } else if obj_type.contains("Map<string, f64>")
+                        || obj_type.contains("Map<string, f32>")
+                    {
+                        "mimi_map_to_json_f64"
+                    } else {
+                        "mimi_map_to_json_i64"
+                    };
+                    let func = self.get_runtime_fn(fn_name)?;
                     let raw = self
                         .build_call(
                             func,
@@ -352,7 +370,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "to_json_map",
                         )?
                         .try_as_basic_value_opt()
-                        .ok_or("mimi_map_to_json_i64 returned void")?
+                        .ok_or("map to_json returned void")?
                         .into_pointer_value();
                     self.register_heap_alloc(raw);
                     return self.wrap_c_string(raw);
