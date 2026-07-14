@@ -196,33 +196,55 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if !is_bool {
                     return None;
                 }
-                let true_global = build_global("true", "bool_true_var")?;
-                let false_global = build_global("false", "bool_false_var")?;
-                let cond = match value {
-                    BasicValueEnum::IntValue(iv) => self
-                        .builder
-                        .build_int_compare(
-                            inkwell::IntPredicate::NE,
-                            iv,
-                            self.context.i64_type().const_int(0, false),
-                            "bool_ne_zero",
-                        )
-                        .ok()?,
-                    _ => return None,
-                };
-                let selected = self
-                    .builder
-                    .build_select(
-                        cond,
-                        BasicValueEnum::PointerValue(true_global),
-                        BasicValueEnum::PointerValue(false_global),
-                        "bool_str",
-                    )
-                    .ok()?;
-                Some(selected)
+                self.select_bool_string(value, &build_global)
+            }
+            // CG-H9: comparison / logical / not results are bool-typed.
+            Expr::Binary(op, _, _)
+                if matches!(
+                    op,
+                    crate::ast::BinOp::EqCmp
+                        | crate::ast::BinOp::NeCmp
+                        | crate::ast::BinOp::Lt
+                        | crate::ast::BinOp::Le
+                        | crate::ast::BinOp::Gt
+                        | crate::ast::BinOp::Ge
+                        | crate::ast::BinOp::And
+                        | crate::ast::BinOp::Or
+                ) =>
+            {
+                self.select_bool_string(value, &build_global)
+            }
+            Expr::Unary(crate::ast::UnOp::Not, _) => {
+                self.select_bool_string(value, &build_global)
             }
             _ => None,
         }
+    }
+
+    fn select_bool_string(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        build_global: &dyn Fn(&str, &str) -> Option<inkwell::values::PointerValue<'ctx>>,
+    ) -> Option<BasicValueEnum<'ctx>> {
+        let true_global = build_global("true", "bool_true_var")?;
+        let false_global = build_global("false", "bool_false_var")?;
+        let cond = match value {
+            BasicValueEnum::IntValue(iv) => {
+                let zero = iv.get_type().const_int(0, false);
+                self.builder
+                    .build_int_compare(inkwell::IntPredicate::NE, iv, zero, "bool_ne_zero")
+                    .ok()?
+            }
+            _ => return None,
+        };
+        self.builder
+            .build_select(
+                cond,
+                BasicValueEnum::PointerValue(true_global),
+                BasicValueEnum::PointerValue(false_global),
+                "bool_str",
+            )
+            .ok()
     }
     /// Determine the Mimi Type of an expression by resolving through the
     /// caller's type_map. Used to infer callee generic bindings at call sites.
