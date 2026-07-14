@@ -1860,6 +1860,23 @@ pub extern "C" fn mimi_list_list_to_string(
     list: *const MimiList,
     elem_to_string: extern "C" fn(*const MimiList) -> *mut std::ffi::c_char,
 ) -> *mut std::ffi::c_char {
+    list_list_to_string_impl(list, elem_to_string, ", ")
+}
+
+/// Compact JSON form of `List<List<T>>` (no spaces after commas).
+#[no_mangle]
+pub extern "C" fn mimi_list_list_to_json(
+    list: *const MimiList,
+    elem_to_string: extern "C" fn(*const MimiList) -> *mut std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    list_list_to_string_impl(list, elem_to_string, ",")
+}
+
+fn list_list_to_string_impl(
+    list: *const MimiList,
+    elem_to_string: extern "C" fn(*const MimiList) -> *mut std::ffi::c_char,
+    sep: &str,
+) -> *mut std::ffi::c_char {
     if list.is_null() {
         return alloc_c_string("[]");
     }
@@ -1875,11 +1892,13 @@ pub extern "C" fn mimi_list_list_to_string(
     parts.push(String::from("["));
     for i in 0..lst.len as isize {
         if i > 0 {
-            parts.push(String::from(", "));
+            parts.push(String::from(sep));
         }
-        // `lst.data` points to inner list pointers (`*const MimiList`).
-        let inner = unsafe { *lst.data.offset(i) as *const MimiList };
-        if inner.is_null() {
+        // `lst.data` points to inner list pointers (`*const MimiList`) or
+        // ptrtoint handles stored as i64 slots.
+        let slot = unsafe { *(lst.data as *const i64).offset(i) };
+        let inner = slot as *const MimiList;
+        if inner.is_null() || slot == 0 {
             parts.push(String::from("null"));
         } else {
             let inner_str = elem_to_string(inner);

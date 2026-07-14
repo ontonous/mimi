@@ -300,6 +300,55 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         }
                     }
+                    if inner.starts_with("List") {
+                        // Nested List: use mimi_list_list_to_json + inner i64 list formatter.
+                        // Outer list already stored in `alloca` above.
+                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let callback_fn_ty = i8_ptr_ty
+                            .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
+                        let inner_fn = self
+                            .module
+                            .get_function("mimi_list_i64_to_json")
+                            .unwrap_or_else(|| {
+                                self.module.add_function(
+                                    "mimi_list_i64_to_json",
+                                    callback_fn_ty,
+                                    Some(inkwell::module::Linkage::External),
+                                )
+                            });
+                        let callback = inner_fn.as_global_value().as_pointer_value();
+                        let fn_ty = i8_ptr_ty.fn_type(
+                            &[
+                                BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                                BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                            ],
+                            false,
+                        );
+                        let callee = self
+                            .module
+                            .get_function("mimi_list_list_to_json")
+                            .unwrap_or_else(|| {
+                                self.module.add_function(
+                                    "mimi_list_list_to_json",
+                                    fn_ty,
+                                    Some(inkwell::module::Linkage::External),
+                                )
+                            });
+                        let raw = self
+                            .build_call(
+                                callee,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(alloca),
+                                    BasicMetadataValueEnum::PointerValue(callback),
+                                ],
+                                "to_json_list_list",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("mimi_list_list_to_json void")?
+                            .into_pointer_value();
+                        self.register_heap_alloc(raw);
+                        return self.wrap_c_string(raw);
+                    }
                     let rt_fn_name = if inner.starts_with("Map") {
                         if inner.contains("Map<string, string>") {
                             "mimi_list_map_to_json_string"
