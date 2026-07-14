@@ -3,34 +3,21 @@ use crate::ast::*;
 use std::sync::{Arc, RwLock};
 
 /// Holds borrow guards alive during a synchronous FFI C call.
-/// Each guard variant pairs the lock guard (dropped first) with the `Arc`
-/// that keeps the underlying data alive (dropped second).
 ///
-/// # Safety invariant (field ordering)
-/// The `Arc` is stored AFTER the guard so that on drop, the guard is
-/// released first (unlocking the RwLock) before the Arc potentially frees it.
-/// Do NOT reorder these fields without auditing all transmute sites.
-/// Tuple-struct fields drop in declaration order (Rust guarantees this for
-/// struct fields and tuple struct fields alike). Reversing field 0 and 1
-/// would cause the guard to reference freed data — undefined behavior.
-///
-/// # Safety invariant (guard source)
-/// Guards are always created via `arc.read()`/`arc.write()` from the same
-/// `Arc<RwLock<Value>>` that is stored alongside them. This ensures the
-/// data referenced by the guard cannot be freed before the guard is dropped.
+/// # Safety (IP-C2)
+/// Read/Write guards are lifetime-erased to `'static` so they can be stored
+/// in a `Vec` that outlives the temporary borrow scope. Safety rests on:
+/// 1. The paired `Arc<RwLock<Value>>` keeps the lock target alive.
+/// 2. Explicit `Drop` releases the guard **before** dropping the Arc
+///    (independent of field declaration order — unlike tuple-struct drop).
+/// 3. The erased guard is never re-borrowed as a Rust reference after creation;
+///    only the raw pointer already passed to C is used during the call.
 ///
 /// # Layout verification
-/// See `test_ffi_guard_field_ordering` for a runtime assertion that the
-/// transmute-based safety contract holds (guard dropped before Arc).
+/// See `test_ffi_guard_field_ordering`.
 pub(in crate::interp) enum FfiGuard {
-    Read(
-        std::sync::RwLockReadGuard<'static, Value>,
-        Arc<RwLock<Value>>,
-    ),
-    Write(
-        std::sync::RwLockWriteGuard<'static, Value>,
-        Arc<RwLock<Value>>,
-    ),
+    Read(FfiReadHold),
+    Write(FfiWriteHold),
     /// A libffi closure (dynamic C-compatible function pointer) that must
     /// remain alive for the duration of the C call, plus its boxed userdata.
     CallbackClosure {
@@ -39,30 +26,53 @@ pub(in crate::interp) enum FfiGuard {
     },
 }
 
+/// Read-guard hold with explicit drop order (guard then Arc).
+pub(in crate::interp) struct FfiReadHold {
+    guard: Option<std::sync::RwLockReadGuard<'static, Value>>,
+    arc: Arc<RwLock<Value>>,
+}
+
+impl Drop for FfiReadHold {
+    fn drop(&mut self) {
+        // IP-C2: always drop the lock guard before the Arc, regardless of
+        // field declaration order.
+        self.guard.take();
+        // arc drops after Option is cleared
+        let _ = &self.arc;
+    }
+}
+
+/// Write-guard hold with explicit drop order (guard then Arc).
+pub(in crate::interp) struct FfiWriteHold {
+    guard: Option<std::sync::RwLockWriteGuard<'static, Value>>,
+    arc: Arc<RwLock<Value>>,
+}
+
+impl Drop for FfiWriteHold {
+    fn drop(&mut self) {
+        self.guard.take();
+        let _ = &self.arc;
+    }
+}
+
 /// # Safety
-/// `'static` transmute is safe because:
-/// 1. The Arc stored alongside the guard keeps the underlying data alive.
-/// 2. Rust drops tuple-struct fields in declaration order, so the guard
-///    (field 0) is dropped before its paired Arc (field 1).
-/// 3. No code ever accesses the `'static` guard through the reference —
-///    only the raw pointer (from `&*guard`) was already passed to C.
-///    The guard exists purely to keep the lock held.
-///
-/// If you add/remove/reorder fields in `FfiGuard`, update this comment.
+/// Lifetime erasure to `'static` is justified by the Arc pairing and the fact
+/// that the guard is only used to keep the lock held until `FfiReadHold::drop`.
 pub(in crate::interp) fn ffi_guard_new_read(
     guard: std::sync::RwLockReadGuard<'_, Value>,
     arc: Arc<RwLock<Value>>,
 ) -> FfiGuard {
-    // SAFETY: See safety doc on this function.
-    FfiGuard::Read(
-        unsafe {
-            std::mem::transmute::<
-                std::sync::RwLockReadGuard<'_, Value>,
-                std::sync::RwLockReadGuard<'static, Value>,
-            >(guard)
-        },
+    // SAFETY: Arc keeps the RwLock alive; Drop releases the guard first.
+    let guard_static = unsafe {
+        std::mem::transmute::<
+            std::sync::RwLockReadGuard<'_, Value>,
+            std::sync::RwLockReadGuard<'static, Value>,
+        >(guard)
+    };
+    FfiGuard::Read(FfiReadHold {
+        guard: Some(guard_static),
         arc,
-    )
+    })
 }
 
 /// Same safety contract as `ffi_guard_new_read` but for write guards.
@@ -70,16 +80,17 @@ pub(in crate::interp) fn ffi_guard_new_write(
     guard: std::sync::RwLockWriteGuard<'_, Value>,
     arc: Arc<RwLock<Value>>,
 ) -> FfiGuard {
-    // SAFETY: See safety doc on `ffi_guard_new_read`.
-    FfiGuard::Write(
-        unsafe {
-            std::mem::transmute::<
-                std::sync::RwLockWriteGuard<'_, Value>,
-                std::sync::RwLockWriteGuard<'static, Value>,
-            >(guard)
-        },
+    // SAFETY: see `ffi_guard_new_read`.
+    let guard_static = unsafe {
+        std::mem::transmute::<
+            std::sync::RwLockWriteGuard<'_, Value>,
+            std::sync::RwLockWriteGuard<'static, Value>,
+        >(guard)
+    };
+    FfiGuard::Write(FfiWriteHold {
+        guard: Some(guard_static),
         arc,
-    )
+    })
 }
 
 /// RAII guard that tracks shared handles created during an FFI call and
