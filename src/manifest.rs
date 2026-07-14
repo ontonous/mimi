@@ -75,7 +75,10 @@ impl Manifest {
         Err("max search depth exceeded while looking for mimi.toml".into())
     }
 
-    /// Get the entry point file path
+    /// Get the entry point file path.
+    ///
+    /// AU-H7: invalid entry paths fall back to `main.mimi` but emit a stderr
+    /// warning so silent path errors are visible (LSP/CLI can also re-validate).
     pub fn entry_path(&self, base_dir: &Path) -> PathBuf {
         let entry = self
             .package
@@ -84,6 +87,10 @@ impl Manifest {
             .unwrap_or("main.mimi");
         // B1: use unified path safety validation.
         if crate::path_safety::validate_safe_path(base_dir, entry).is_err() {
+            eprintln!(
+                "[mimi] WARN: package entry '{}' is unsafe (path traversal); falling back to main.mimi",
+                entry
+            );
             return base_dir.join("main.mimi");
         }
         base_dir.join(entry)

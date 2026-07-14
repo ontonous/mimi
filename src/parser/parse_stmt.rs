@@ -646,6 +646,14 @@ impl Parser {
                         base_col,
                     ));
                 }
+                // LX-H8: empty interpolation f"{}" is invalid.
+                if expr_str.trim().is_empty() {
+                    return Err(ParseError::new(
+                        "empty interpolation in f-string (f\"{}\" is not allowed)",
+                        base_line,
+                        base_col,
+                    ));
+                }
                 let tokens = crate::lexer::Lexer::new(&expr_str)
                     .tokenize()
                     .map_err(|e| ParseError::new(e.to_string(), base_line, base_col))?;
