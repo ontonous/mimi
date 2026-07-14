@@ -4545,9 +4545,10 @@ pub extern "C" fn test_threaded_callback(
         // soundness is the caller's responsibility; the closure captures `x` by
         // value and `f` is invoked with that single argument.
         Some(f) => unsafe { f(x) },
-        None => i64::MIN as i32,
+        // IP-C4: 0 error sentinel (i64::MIN is a legal return).
+        None => 0,
     });
-    handle.join().unwrap_or(i64::MIN as i32)
+    handle.join().unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
