@@ -7699,6 +7699,61 @@ fn dual_from_json_result_set() {
     );
 }
 
+/// to_json Result of Set dual.
+#[test]
+fn dual_to_json_result_set() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<i32>>("[1,2]")
+            let a: Result<Set<i32>, i32> = Ok(s)
+            println(to_json(a))
+            0
+        }
+        "#,
+        "{\"Ok\":[[1,2]]}"
+    );
+}
+
+/// from_json List of Set dual.
+#[test]
+fn dual_from_json_list_set() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = from_json::<List<Set<i32>>>("[[1,2],[3]]")
+            println(xs)
+            0
+        }
+        "#,
+        "[Set{1, 2}, Set{3}]"
+    );
+}
+
+/// from_json List of Option dual.
+#[test]
+fn dual_from_json_list_option() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = from_json::<List<Option<i32>>>("[1, null, 3]")
+            println(xs)
+            0
+        }
+        "#,
+        "[Some(1), None(), Some(3)]"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {

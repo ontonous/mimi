@@ -1570,6 +1570,31 @@ pub extern "C" fn mimi_result_map_to_json(
     }
 }
 
+/// Result of Set handle → `{"Ok":[[…]]}` / `{"Err":[n]}`.
+#[no_mangle]
+pub extern "C" fn mimi_result_set_to_json(
+    disc: i64,
+    ok_handle: SetHandle,
+    err: i64,
+    mode: i64,
+) -> *mut std::ffi::c_char {
+    if disc != 0 {
+        let json_ptr = match mode {
+            1 => mimi_set_to_json_string(ok_handle),
+            2 => mimi_set_to_json_bool(ok_handle),
+            3 => mimi_set_to_json_f64(ok_handle),
+            _ => mimi_set_to_json_i64(ok_handle),
+        };
+        let s = unsafe { cstr_to_string(json_ptr) };
+        if !json_ptr.is_null() {
+            unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+        }
+        alloc_c_string(&format!("{{\"Ok\":[{}]}}", s))
+    } else {
+        alloc_c_string(&format!("{{\"Err\":[{}]}}", err))
+    }
+}
+
 /// Render `List<Set>` as a JSON array of JSON arrays `[[1,2],[3]]`.
 #[no_mangle]
 pub extern "C" fn mimi_list_set_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
