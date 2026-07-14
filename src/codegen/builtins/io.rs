@@ -2315,6 +2315,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             RecPtr(inkwell::values::PointerValue<'a>),
             /// Nested Option payload is ptrtoint of heap Option; load only in Some arm.
             NestedOpt(inkwell::values::IntValue<'a>),
+            /// Nested Result payload is ptrtoint of heap Result; load only in Some arm.
+            NestedRes(inkwell::values::IntValue<'a>),
         }
         let pay_kind = match payload_bv {
             BasicValueEnum::IntValue(iv) => {
@@ -2455,6 +2457,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     {
                         // Defer load of nested Option until Some arm (None has null payload).
                         OptPay::NestedOpt(as_i64)
+                    } else if arg_type
+                        .strip_prefix("Option<")
+                        .and_then(|s| s.strip_suffix('>'))
+                        .is_some_and(|inner| inner.starts_with("Result"))
+                    {
+                        OptPay::NestedRes(as_i64)
                     } else {
                         OptPay::Int(as_i64)
                     }
@@ -2696,6 +2704,47 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicMetadataValueEnum::PointerValue(nested),
                     ],
                     "opt_nested_snprintf",
+                )?;
+            }
+            OptPay::NestedRes(as_i64) => {
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                let nested_ptr = self
+                    .builder
+                    .build_int_to_ptr(as_i64, i8_ptr, "opt_res_from_i64")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let res_sty = self.context.struct_type(
+                    &[
+                        BasicTypeEnum::IntType(self.context.bool_type()),
+                        BasicTypeEnum::IntType(i64_ty),
+                        BasicTypeEnum::IntType(i64_ty),
+                    ],
+                    false,
+                );
+                let loaded = self
+                    .builder
+                    .build_load(
+                        BasicTypeEnum::StructType(res_sty),
+                        nested_ptr,
+                        "opt_res_ld",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_struct_value();
+                let res_ty = Self::strip_first_type_arg(arg_type, "Option")
+                    .unwrap_or_else(|| "Result".to_string());
+                let nested = self.emit_result_to_string_typed(loaded, None, &res_ty)?;
+                let some_fmt = self
+                    .builder
+                    .build_global_string_ptr("Some(%s)", "opt_res_sfmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::IntValue(buf_size),
+                        BasicMetadataValueEnum::PointerValue(some_fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::PointerValue(nested),
+                    ],
+                    "opt_res_snprintf",
                 )?;
             }
             OptPay::Float(fv) => {
