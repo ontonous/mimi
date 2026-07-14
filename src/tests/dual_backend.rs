@@ -7493,6 +7493,42 @@ fn dual_to_json_map_f64() {
     );
 }
 
+/// to_json Set of bool dual.
+#[test]
+fn dual_to_json_set_bool() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<bool>>("[true, false, true]")
+            println(to_json(s))
+            0
+        }
+        "#,
+        "[false,true]"
+    );
+}
+
+/// to_json Set of f64 dual.
+#[test]
+fn dual_to_json_set_f64() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<f64>>("[1.5, 2.0, 1.5]")
+            println(to_json(s))
+            0
+        }
+        "#,
+        "[1.5,2.0]"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {

@@ -393,6 +393,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     };
                     let fn_name = if obj_type.contains("Set<string>") {
                         "mimi_set_to_json_string"
+                    } else if obj_type.contains("Set<bool>") {
+                        "mimi_set_to_json_bool"
+                    } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>") {
+                        "mimi_set_to_json_f64"
                     } else {
                         "mimi_set_to_json_i64"
                     };
