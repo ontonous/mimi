@@ -1200,8 +1200,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         type_args: &[Type],
         raw_ptr: inkwell::values::PointerValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        // Body continues with existing match on type_args[0] using raw_ptr.
-
         match &type_args[0] {
             Type::Name(n, _) if n == "i32" || n == "i64" => {
                 let func = self.get_runtime_fn("mimi_json_as_i64")?;
