@@ -11609,3 +11609,22 @@ fn dual_from_json_set_product_tuple() {
         "Set{(1, 2), (3, 4)}\n[[1,2],[3,4]]"
     );
 }
+
+/// Option of Set of product-tuple dual.
+#[test]
+fn dual_option_set_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let o: Option<Set<(i32, i32)>> = Some(from_json::<Set<(i32, i32)>>("[[1,2]]"))
+            println(o)
+            println(to_json(o))
+            0
+        }
+        "#,
+        "Some(Set{(1, 2)})\n{\"Some\":[[[1,2]]]}"
+    );
+}

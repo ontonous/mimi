@@ -4341,17 +4341,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                         };
                         OptPay::StrPtr(raw)
                     } else if arg_type.contains("Set<") || arg_type == "Option<Set>" {
-                        let fn_name = Self::set_display_fn_for_type(arg_type);
-                        let func = self.get_runtime_fn(fn_name)?;
-                        let raw = self
-                            .build_call(
+                        let set_inner = arg_type
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                            .unwrap_or(arg_type);
+                        let raw = if let Some(elem) = set_inner
+                            .strip_prefix("Set<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                                let resolved = if self.is_product_tuple_alias(elem) {
+                                    self.resolve_alias_type_name(elem)
+                                } else {
+                                    elem.to_string()
+                                };
+                                // Display style for Option of Set product.
+                                self.emit_set_product_to_json(as_i64, &resolved, 1)?
+                            } else {
+                                let fn_name = Self::set_display_fn_for_type(arg_type);
+                                let func = self.get_runtime_fn(fn_name)?;
+                                self.build_call(
+                                    func,
+                                    &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                    "opt_set_disp",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("set display void")?
+                                .into_pointer_value()
+                            }
+                        } else {
+                            let fn_name = Self::set_display_fn_for_type(arg_type);
+                            let func = self.get_runtime_fn(fn_name)?;
+                            self.build_call(
                                 func,
                                 &[BasicMetadataValueEnum::IntValue(as_i64)],
                                 "opt_set_disp",
                             )?
                             .try_as_basic_value_opt()
                             .ok_or("set display void")?
-                            .into_pointer_value();
+                            .into_pointer_value()
+                        };
                         OptPay::StrPtr(raw)
                     } else if arg_type.contains("List<") || arg_type.starts_with("Option<List") {
                         // Defer list load until Some arm (None payload may be null).

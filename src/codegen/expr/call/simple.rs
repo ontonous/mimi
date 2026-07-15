@@ -2743,6 +2743,44 @@ impl<'ctx> CodeGenerator<'ctx> {
                             2
                         } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>") {
                             3
+                        } else if let Some(elem) = obj_type
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                            .and_then(|s| s.strip_prefix("Set<"))
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                                let resolved = if self.is_product_tuple_alias(elem) {
+                                    self.resolve_alias_type_name(elem)
+                                } else {
+                                    elem.to_string()
+                                };
+                                let mut arity: i64 = 0;
+                                let mut depth = 0i32;
+                                let mut any = false;
+                                let body = resolved
+                                    .strip_prefix('(')
+                                    .and_then(|s| s.strip_suffix(')'))
+                                    .unwrap_or(resolved.as_str());
+                                for ch in body.chars() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            arity += 1;
+                                            any = true;
+                                        }
+                                        c if !c.is_whitespace() => any = true,
+                                        _ => {}
+                                    }
+                                }
+                                if any {
+                                    arity += 1;
+                                }
+                                10 + arity.max(1)
+                            } else {
+                                0
+                            }
                         } else {
                             0
                         };
