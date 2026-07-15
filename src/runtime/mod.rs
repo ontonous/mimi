@@ -860,14 +860,15 @@ pub extern "C" fn mimi_rc_upgrade(ptr: *mut std::ffi::c_void) -> *mut std::ffi::
         if s == 0 {
             return std::ptr::null_mut();
         }
+        // RT-H7: success path AcqRel so the increment synchronizes with
+        // Release decrements on the free path (not only a post-CAS fence).
         match hdr
             .strong
-            .compare_exchange_weak(s, s + 1, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange_weak(s, s + 1, Ordering::AcqRel, Ordering::Acquire)
         {
             Ok(_) => {
                 // M31: Acquire fence ensures all prior writes to the RC object
-                // are visible after a successful weak upgrade, preventing a race
-                // where the object is being freed by another thread.
+                // are visible after a successful weak upgrade.
                 std::sync::atomic::fence(Ordering::Acquire);
                 return ptr;
             }

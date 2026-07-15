@@ -72,6 +72,8 @@ impl<'a> Checker<'a> {
         type_map: &mut HashMap<String, Type>,
     ) {
         match param {
+            // CK-C6: type-param arm must come first; the concrete Name arm below
+            // must not re-check is_type_param (that branch was dead).
             Type::Name(name, _) if is_type_param(name, generics) => {
                 if !Self::occurs_check(name, actual) {
                     type_map
@@ -79,32 +81,25 @@ impl<'a> Checker<'a> {
                         .or_insert_with(|| actual.clone());
                 }
             }
-            Type::Name(name, p_args) => {
-                if is_type_param(name, generics) {
-                    if !Self::occurs_check(name, actual) {
-                        type_map
-                            .entry(name.clone())
-                            .or_insert_with(|| actual.clone());
+            Type::Name(name, p_args) if !p_args.is_empty() => {
+                match actual {
+                    Type::Name(_, a_args) if p_args.len() == a_args.len() => {
+                        for (pa, aa) in p_args.iter().zip(a_args.iter()) {
+                            self.infer_type_params(pa, aa, generics, type_map);
+                        }
                     }
-                } else if !p_args.is_empty() {
-                    match actual {
-                        Type::Name(_, a_args) if p_args.len() == a_args.len() => {
-                            for (pa, aa) in p_args.iter().zip(a_args.iter()) {
-                                self.infer_type_params(pa, aa, generics, type_map);
-                            }
-                        }
-                        // Dual representation: Name("Option", [T]) <-> Option(T)
-                        Type::Option(a_inner) if name == "Option" && p_args.len() == 1 => {
-                            self.infer_type_params(&p_args[0], a_inner, generics, type_map);
-                        }
-                        Type::Result(a_ok, a_err) if name == "Result" && p_args.len() == 2 => {
-                            self.infer_type_params(&p_args[0], a_ok, generics, type_map);
-                            self.infer_type_params(&p_args[1], a_err, generics, type_map);
-                        }
-                        _ => {}
+                    // Dual representation: Name("Option", [T]) <-> Option(T)
+                    Type::Option(a_inner) if name == "Option" && p_args.len() == 1 => {
+                        self.infer_type_params(&p_args[0], a_inner, generics, type_map);
                     }
+                    Type::Result(a_ok, a_err) if name == "Result" && p_args.len() == 2 => {
+                        self.infer_type_params(&p_args[0], a_ok, generics, type_map);
+                        self.infer_type_params(&p_args[1], a_err, generics, type_map);
+                    }
+                    _ => {}
                 }
             }
+            Type::Name(_, _) => {}
             Type::Option(p_inner) => {
                 match actual {
                     Type::Option(a_inner) => {
