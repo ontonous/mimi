@@ -162,16 +162,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .unwrap_or_else(|| "List".to_string());
                             let elem = Self::strip_first_type_arg(&mid, "List")
                                 .unwrap_or_default();
-                            let inner_fn = if elem == "string" {
-                                "mimi_list_to_string"
-                            } else if elem.starts_with("Map") {
-                                "mimi_list_map_to_string"
-                            } else if elem.starts_with("Set") {
-                                "mimi_list_set_to_string"
+                            if elem.starts_with('(') {
+                                // List of List of product tuples.
+                                self.emit_list_list_product_tuple_to_string(*sv, &elem)?
                             } else {
-                                "mimi_list_i32_to_string"
-                            };
-                            self.emit_list_list_to_string(*sv, inner_fn)?
+                                let inner_fn = if elem == "string" {
+                                    "mimi_list_to_string"
+                                } else if elem.starts_with("Map") {
+                                    "mimi_list_map_to_string"
+                                } else if elem.starts_with("Set") {
+                                    "mimi_list_set_to_string"
+                                } else {
+                                    "mimi_list_i32_to_string"
+                                };
+                                self.emit_list_list_to_string(*sv, inner_fn)?
+                            }
                         } else if let Some(inner) = arg_type
                             .strip_prefix("List<")
                             .and_then(|s| s.strip_suffix('>'))
@@ -2722,11 +2727,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Handles nested brackets (e.g. `Result<Option<Map<string, i32>>, i32>`).
     fn strip_first_type_arg(type_name: &str, prefix: &str) -> Option<String> {
         let rest = type_name.strip_prefix(prefix)?.strip_prefix('<')?;
+        // Track both angle-bracket and paren depth so product tuples like
+        // List<(i32, i32)> do not split on the comma inside the tuple.
         let mut depth = 0i32;
         for (i, ch) in rest.char_indices() {
             match ch {
-                '<' => depth += 1,
-                '>' => {
+                '<' | '(' => depth += 1,
+                '>' | ')' => {
                     depth -= 1;
                     if depth < 0 {
                         return Some(rest[..i].trim().to_string());
@@ -4350,6 +4357,303 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or("mimi_list_i32_to_string returned void")?
             .into_pointer_value();
         Ok(raw)
+    }
+
+    /// Format `List<List<(…)>>` by reconstructing each inner list of product tuples.
+    fn emit_list_list_product_tuple_to_string(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+        elem_type_str: &str,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let list_ty = self.list_struct_type();
+        let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_list_tup_print")?;
+        self.build_store(alloca, sv)?;
+        let len = self.load_list_len(alloca)?;
+        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_list_tup_buf")?;
+        let open = self
+            .builder
+            .build_global_string_ptr("[", "list_list_tup_open")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+        let strcat_fn = self.get_runtime_fn("strcat")?;
+        self.build_call(
+            strcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
+            ],
+            "list_list_tup_open_cpy",
+        )?;
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
+        let idx_alloca =
+            self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_list_tup_i")?;
+        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
+        let loop_bb = self.context.append_basic_block(parent, "list_list_tup_loop");
+        let body_bb = self.context.append_basic_block(parent, "list_list_tup_body");
+        let done_bb = self.context.append_basic_block(parent, "list_list_tup_done");
+        self.builder
+            .build_unconditional_branch(loop_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(loop_bb);
+        let idx = self
+            .builder
+            .build_load(i64_ty, idx_alloca, "list_list_tup_idx")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_int_value();
+        let cont = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, idx, len, "list_list_tup_cont")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder
+            .build_conditional_branch(cont, body_bb, done_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(body_bb);
+        let zero = i64_ty.const_int(0, false);
+        let need_comma = self
+            .builder
+            .build_int_compare(IntPredicate::UGT, idx, zero, "list_list_tup_comma")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let comma_bb = self
+            .context
+            .append_basic_block(parent, "list_list_tup_comma_bb");
+        let elem_bb = self.context.append_basic_block(parent, "list_list_tup_elem");
+        self.builder
+            .build_conditional_branch(need_comma, comma_bb, elem_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(comma_bb);
+        let comma = self
+            .builder
+            .build_global_string_ptr(", ", "list_list_tup_comma_s")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
+            ],
+            "list_list_tup_strcat_comma",
+        )?;
+        self.builder
+            .build_unconditional_branch(elem_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(elem_bb);
+        let data_gep = self
+            .gep()
+            .build_struct_gep(list_ty, alloca, 1, "list_list_tup_data_gep")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let data_ptr = self
+            .builder
+            .build_load(i8_ptr, data_gep, "list_list_tup_data")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_pointer_value();
+        let elem_slot = unsafe {
+            self.builder
+                .build_gep(i64_ty, data_ptr, &[idx], "list_list_tup_slot")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+        };
+        let elem_i64 = self
+            .builder
+            .build_load(i64_ty, elem_slot, "list_list_tup_elem")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_int_value();
+        let inner_ptr = self
+            .builder
+            .build_int_to_ptr(elem_i64, i8_ptr, "list_list_tup_as_ptr")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let inner_sv = self
+            .builder
+            .build_load(
+                BasicTypeEnum::StructType(list_ty),
+                inner_ptr,
+                "list_list_tup_ld",
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_struct_value();
+        let piece = self.emit_list_product_tuple_to_string(inner_sv, elem_type_str)?;
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(piece),
+            ],
+            "list_list_tup_strcat_elem",
+        )?;
+        let next = self
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), "list_list_tup_next")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_store(idx_alloca, next)?;
+        self.builder
+            .build_unconditional_branch(loop_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(done_bb);
+        let close = self
+            .builder
+            .build_global_string_ptr("]", "list_list_tup_close")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
+            ],
+            "list_list_tup_close",
+        )?;
+        Ok(buf)
+    }
+
+    /// Serialize `List<List<(…)>>` to nested JSON arrays of product tuples.
+    pub(in crate::codegen) fn emit_list_list_product_tuple_to_json(
+        &self,
+        list_alloca: inkwell::values::PointerValue<'ctx>,
+        elem_type_str: &str,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let list_ty = self.list_struct_type();
+        let len = self.load_list_len(list_alloca)?;
+        let buf =
+            self.malloc_or_abort(i64_ty.const_int(8192, false), "list_list_tup_json_buf")?;
+        let open = self
+            .builder
+            .build_global_string_ptr("[", "list_list_tup_json_open")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+        let strcat_fn = self.get_runtime_fn("strcat")?;
+        self.build_call(
+            strcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
+            ],
+            "list_list_tup_json_open_cpy",
+        )?;
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
+        let idx_alloca =
+            self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_list_tup_json_i")?;
+        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
+        let loop_bb = self
+            .context
+            .append_basic_block(parent, "list_list_tup_json_loop");
+        let body_bb = self
+            .context
+            .append_basic_block(parent, "list_list_tup_json_body");
+        let done_bb = self
+            .context
+            .append_basic_block(parent, "list_list_tup_json_done");
+        self.builder
+            .build_unconditional_branch(loop_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(loop_bb);
+        let idx = self
+            .builder
+            .build_load(i64_ty, idx_alloca, "list_list_tup_json_idx")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_int_value();
+        let cont = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, idx, len, "list_list_tup_json_cont")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder
+            .build_conditional_branch(cont, body_bb, done_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(body_bb);
+        let zero = i64_ty.const_int(0, false);
+        let need_comma = self
+            .builder
+            .build_int_compare(IntPredicate::UGT, idx, zero, "list_list_tup_json_comma")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let comma_bb = self
+            .context
+            .append_basic_block(parent, "list_list_tup_json_comma_bb");
+        let elem_bb = self
+            .context
+            .append_basic_block(parent, "list_list_tup_json_elem");
+        self.builder
+            .build_conditional_branch(need_comma, comma_bb, elem_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(comma_bb);
+        let comma = self
+            .builder
+            .build_global_string_ptr(",", "list_list_tup_json_comma_s")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
+            ],
+            "list_list_tup_json_strcat_comma",
+        )?;
+        self.builder
+            .build_unconditional_branch(elem_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(elem_bb);
+        let data_gep = self
+            .gep()
+            .build_struct_gep(list_ty, list_alloca, 1, "list_list_tup_json_data_gep")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let data_ptr = self
+            .builder
+            .build_load(i8_ptr, data_gep, "list_list_tup_json_data")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_pointer_value();
+        let elem_slot = unsafe {
+            self.builder
+                .build_gep(i64_ty, data_ptr, &[idx], "list_list_tup_json_slot")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+        };
+        let elem_i64 = self
+            .builder
+            .build_load(i64_ty, elem_slot, "list_list_tup_json_elem")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_int_value();
+        let inner_ptr = self
+            .builder
+            .build_int_to_ptr(elem_i64, i8_ptr, "list_list_tup_json_as_ptr")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        // Inner list is stored as ptrtoint of list struct.
+        let piece = self.emit_list_product_tuple_to_json(inner_ptr, elem_type_str)?;
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(piece),
+            ],
+            "list_list_tup_json_strcat_elem",
+        )?;
+        let next = self
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), "list_list_tup_json_next")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_store(idx_alloca, next)?;
+        self.builder
+            .build_unconditional_branch(loop_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(done_bb);
+        let close = self
+            .builder
+            .build_global_string_ptr("]", "list_list_tup_json_close")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
+            ],
+            "list_list_tup_json_close",
+        )?;
+        Ok(buf)
     }
 
     /// Materialize a `List<List<T>>` struct value into an alloca and call

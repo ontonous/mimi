@@ -444,8 +444,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     if inner.starts_with("List") {
-                        // Nested List: use mimi_list_list_to_json + inner i64 list formatter.
-                        // Outer list already stored in `alloca` above.
+                        // Nested List: product-tuple inner uses codegen loop;
+                        // scalar inners use mimi_list_list_to_json + i64 formatter.
+                        let mid_elem = Self::strip_list_element_type(inner)
+                            .or_else(|| {
+                                inner
+                                    .strip_prefix("List<")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                    .map(|s| s.to_string())
+                            })
+                            .unwrap_or_default();
+                        if mid_elem.starts_with('(') {
+                            let raw =
+                                self.emit_list_list_product_tuple_to_json(alloca, &mid_elem)?;
+                            self.register_heap_alloc(raw);
+                            return self.wrap_c_string(raw);
+                        }
                         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                         let callback_fn_ty = i8_ptr_ty
                             .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
