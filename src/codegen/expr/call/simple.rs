@@ -643,12 +643,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                             || self.type_defs.get(ok_inner).is_some_and(|td| {
                                 matches!(td.kind, crate::ast::TypeDefKind::Record(_))
                             });
+                        let ok_is_option_product = ok_inner.starts_with("Option")
+                            && (ok_inner.contains('(') || ok_inner.contains("Tuple"));
                         if ok_is_product {
                             let raw = self.emit_list_result_product_to_json(alloca, inner)?;
                             self.register_heap_alloc(raw);
                             return self.wrap_c_string(raw);
                         }
-                        // Scalar / Option / nested Result Ok — runtime i64 helper.
+                        if ok_is_option_product {
+                            let raw =
+                                self.emit_list_result_option_product_to_json(alloca, inner)?;
+                            self.register_heap_alloc(raw);
+                            return self.wrap_c_string(raw);
+                        }
+                        // Scalar / other Option / nested Result Ok — runtime i64 helper.
                         "mimi_list_result_i64_to_json"
                     } else if inner.starts_with('(') {
                         // List of product tuples: codegen loop → JSON array of arrays.
