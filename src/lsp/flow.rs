@@ -282,7 +282,15 @@ fn did_close(mut server: LspServer, msg: &Value) -> (LspServer, Option<Value>) {
         None => return (server, None),
     };
     server.cache_remove(uri);
-    (server, None)
+    // L-H4: clear client-side diagnostics for the closed document.
+    (
+        server,
+        Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": { "uri": uri, "diagnostics": [] }
+        })),
+    )
 }
 
 fn did_save(mut server: LspServer, msg: &Value) -> (LspServer, Option<Value>) {
