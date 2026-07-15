@@ -42,7 +42,9 @@ impl<'a> super::Lexer<'a> {
         // consume '/*'
         self.advance();
         self.advance();
-        let mut depth: i32 = 1;
+        // LX-M1: usize + nest cap (lockstep with flow.rs).
+        const MAX_BLOCK_COMMENT_DEPTH: usize = 10_000;
+        let mut depth: usize = 1;
         while depth > 0 {
             match self.peek() {
                 None => return Err(unterminated_block_comment(self.line, self.col)),
@@ -57,6 +59,9 @@ impl<'a> super::Lexer<'a> {
                     self.advance();
                     if self.peek() == Some('*') {
                         self.advance();
+                        if depth >= MAX_BLOCK_COMMENT_DEPTH {
+                            return Err(unterminated_block_comment(self.line, self.col));
+                        }
                         depth += 1;
                     }
                 }
