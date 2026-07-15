@@ -1,5 +1,5 @@
 use mimi::{lockfile, manifest, pkg_registry, pkg_resolve};
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 pub(crate) fn update() -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;
@@ -21,14 +21,21 @@ pub(crate) fn update() -> Result<(), String> {
     std::fs::create_dir_all(&deps_dir).map_err(|e| format!("failed to create deps dir: {}", e))?;
 
     let mut lock = lockfile::Lockfile::load(&dir)?.unwrap_or_else(lockfile::Lockfile::new);
-    let mut visited: HashSet<String> = HashSet::new();
+    let mut visited: HashMap<String, Option<String>> = HashMap::new();
     let mut queue: Vec<manifest::Dependency> = direct_deps;
     let mut updated_count = 0;
 
     while let Some(dep) = queue.pop() {
-        if !visited.insert(dep.name.clone()) {
+        if let Some(prev) = visited.get(&dep.name) {
+            if prev != &dep.version {
+                eprintln!(
+                    "warning: dependency '{}' requested as {:?} and {:?}; using first resolution",
+                    dep.name, prev, dep.version
+                );
+            }
             continue;
         }
+        visited.insert(dep.name.clone(), dep.version.clone());
 
         let dst = deps_dir.join(&dep.name);
 
@@ -37,7 +44,7 @@ pub(crate) fn update() -> Result<(), String> {
             if pkg_resolve::checksum_matches(&dst, old_entry.checksum.as_deref()) {
                 println!("  = {} ({})", dep.name, old_entry.version);
                 updated_count += 1;
-                let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited);
+                let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
                 for sub_dep in sub_deps {
                     println!("    → {} (dependency of {})", sub_dep.name, dep.name);
                     queue.push(sub_dep);
@@ -64,7 +71,7 @@ pub(crate) fn update() -> Result<(), String> {
         }
         updated_count += 1;
 
-        let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited);
+        let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
         for sub_dep in sub_deps {
             println!("    → {} (dependency of {})", sub_dep.name, dep.name);
             queue.push(sub_dep);
