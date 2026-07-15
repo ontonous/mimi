@@ -92,12 +92,11 @@ func main() -> i32 {
 
 #[test]
 fn builtin_pop() {
+    // Dual with codegen: pop returns the element only (not (elem, list) tuple).
     let src = r#"
 func main() -> i32 {
     let a = [1, 2, 3];
-    let result = pop(a);
-    let (popped, _) = result;
-    popped
+    pop(a)
 }
 "#;
     let v = run_source(src);
@@ -105,17 +104,16 @@ func main() -> i32 {
 }
 
 #[test]
-fn builtin_pop_returns_remaining() {
+fn builtin_pop_returns_element_type() {
     let src = r#"
 func main() -> i32 {
     let a = [1, 2, 3];
-    let result = pop(a);
-    let (_, new_list) = result;
-    len(new_list)
+    let last = pop(a);
+    last
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::Int(2));
+    assert_eq!(v, interp::Value::Int(3));
 }
 
 #[test]
