@@ -94,10 +94,22 @@ impl Parser {
             TokenKind::Int(v) => {
                 let (line, col) = (self.peek().line, self.peek().col);
                 self.advance();
-                let val = v
-                    .replace('_', "")
-                    .parse::<i64>()
-                    .map_err(|_| ParseError::new("invalid integer", line, col))?;
+                // F-H10: support 0x/0b/0o bases in match patterns (same as expr lits).
+                let cleaned = v.replace('_', "");
+                let val = if cleaned.starts_with("0x") || cleaned.starts_with("0X") {
+                    i64::from_str_radix(&cleaned[2..], 16)
+                        .map_err(|_| ParseError::new("invalid hex integer", line, col))?
+                } else if cleaned.starts_with("0b") || cleaned.starts_with("0B") {
+                    i64::from_str_radix(&cleaned[2..], 2)
+                        .map_err(|_| ParseError::new("invalid binary integer", line, col))?
+                } else if cleaned.starts_with("0o") || cleaned.starts_with("0O") {
+                    i64::from_str_radix(&cleaned[2..], 8)
+                        .map_err(|_| ParseError::new("invalid octal integer", line, col))?
+                } else {
+                    cleaned
+                        .parse::<i64>()
+                        .map_err(|_| ParseError::new("invalid integer", line, col))?
+                };
                 Ok(Pattern::Literal(Lit::Int(val)))
             }
             TokenKind::String(v) => {

@@ -1258,3 +1258,20 @@ func main() -> i32 {
         assert_ne!(v, crate::interp::Value::Int(10), "1__0 must not equal 10");
     }
 }
+
+
+#[test]
+fn match_hex_pattern() {
+    // F-H10: match arms accept 0x/0b integer patterns.
+    let src = r#"
+func main() -> i32 {
+    let x = 0xFF
+    match x {
+        0xFF => 1
+        0b1010 => 2
+        _ => 0
+    }
+}
+"#;
+    assert_eq!(run_source(src), crate::interp::Value::Int(1));
+}
