@@ -833,7 +833,7 @@ fn e2e_json_is_valid() {
     "#,
     )
     .expect("src/tests/codegen_e2e.rs:569 unwrap failed");
-    assert_eq!(stdout.trim(), "1\n0");
+    assert_eq!(stdout.trim(), "true\nfalse");
 }
 
 #[test]
@@ -964,7 +964,7 @@ fn e2e_float_comparison() {
     "#,
     )
     .expect("src/tests/codegen_e2e.rs:627 unwrap failed");
-    assert_eq!(stdout.trim(), "1\n0\n1\n0");
+    assert_eq!(stdout.trim(), "true\nfalse\ntrue\nfalse");
 }
 
 #[test]
@@ -987,7 +987,7 @@ fn e2e_float_equality() {
     "#,
     )
     .expect("src/tests/codegen_e2e.rs:644 unwrap failed");
-    assert_eq!(stdout.trim(), "1\n0\n1");
+    assert_eq!(stdout.trim(), "true\nfalse\ntrue");
 }
 
 #[test]
@@ -1053,7 +1053,7 @@ fn e2e_boolean_and_or() {
     "#,
     )
     .expect("src/tests/codegen_e2e.rs:686 unwrap failed");
-    assert_eq!(stdout.trim(), "0\n1");
+    assert_eq!(stdout.trim(), "false\ntrue");
 }
 
 // ===================== Function Calls =====================
@@ -1190,7 +1190,7 @@ fn e2e_int_equality() {
     "#,
     )
     .expect("src/tests/codegen_e2e.rs:775 unwrap failed");
-    assert_eq!(stdout.trim(), "1\n0\n1");
+    assert_eq!(stdout.trim(), "true\nfalse\ntrue");
 }
 
 #[test]
@@ -1205,7 +1205,7 @@ fn e2e_int_comparison() {
     "#,
     )
     .expect("src/tests/codegen_e2e.rs:784 unwrap failed");
-    assert_eq!(stdout.trim(), "1\n0\n1\n1");
+    assert_eq!(stdout.trim(), "true\nfalse\ntrue\ntrue");
 }
 
 // ===================== Mutable Variables =====================
@@ -3298,7 +3298,7 @@ fn e2e_result_is_ok_is_err() {
     "#,
     )
     .expect("src/tests/codegen_e2e.rs:1884 unwrap failed");
-    assert_eq!(stdout.trim(), "1\n0\n0\n1");
+    assert_eq!(stdout.trim(), "true\nfalse\nfalse\ntrue");
 }
 
 #[test]
@@ -3321,7 +3321,7 @@ fn e2e_option_is_some_is_none() {
     "#,
     )
     .expect("src/tests/codegen_e2e.rs:1902 unwrap failed");
-    assert_eq!(stdout.trim(), "1\n0\n0\n1");
+    assert_eq!(stdout.trim(), "true\nfalse\nfalse\ntrue");
 }
 
 #[test]
@@ -3388,7 +3388,7 @@ fn e2e_option_ok_or() {
     "#,
     )
     .expect("src/tests/codegen_e2e.rs:1953 unwrap failed");
-    assert_eq!(stdout.trim(), "1\n0\n0\n1");
+    assert_eq!(stdout.trim(), "true\nfalse\nfalse\ntrue");
 }
 
 #[test]
