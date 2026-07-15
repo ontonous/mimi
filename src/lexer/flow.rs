@@ -100,7 +100,9 @@ impl<'a> LexerPos<'a> {
     fn skip_block_comment(self) -> Result<Self, LexerError> {
         let pos = next!(self);
         let mut pos = next!(pos);
-        let mut depth: i32 = 1;
+        // LX-M1: use usize; cap nesting to avoid pathological inputs.
+        const MAX_BLOCK_COMMENT_DEPTH: usize = 10_000;
+        let mut depth: usize = 1;
         while depth > 0 {
             match pos.peek() {
                 None => return Err(unterminated_block_comment(pos.line, pos.col)),
@@ -115,6 +117,9 @@ impl<'a> LexerPos<'a> {
                     pos = next!(pos);
                     if pos.peek() == Some('*') {
                         pos = next!(pos);
+                        if depth >= MAX_BLOCK_COMMENT_DEPTH {
+                            return Err(unterminated_block_comment(pos.line, pos.col));
+                        }
                         depth += 1;
                     }
                 }

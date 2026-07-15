@@ -6634,6 +6634,26 @@ fn dual_to_json_tuple() {
     );
 }
 
+/// Result of product-tuple Ok payload to_json.
+#[test]
+fn dual_to_json_result_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let r: Result<(i32, i32), i32> = Ok((1, 2))
+            println(to_json(r))
+            let e: Result<(i32, i32), i32> = Err(9)
+            println(to_json(e))
+            0
+        }
+        "#,
+        "{\"Ok\":[[1,2]]}\n{\"Err\":[9]}"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {
