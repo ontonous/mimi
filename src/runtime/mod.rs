@@ -15703,10 +15703,14 @@ pub extern "C" fn mimi_list_from_json_result_product_i64(
         if i >= bytes.len() || bytes[i] == b']' {
             break;
         }
-        let pack_size = 8 + n * 8;
+        // disc (8) + n Ok product fields (n*8) + Err payload (8)
+        let pack_size = 8 + n * 8 + 8;
         let ptr = unsafe { libc::malloc(pack_size) as *mut i64 };
         if ptr.is_null() {
             break;
+        }
+        unsafe {
+            std::ptr::write_bytes(ptr as *mut u8, 0, pack_size);
         }
         let mut is_err = false;
         let mut err_str = String::new();
@@ -15751,13 +15755,25 @@ pub extern "C" fn mimi_list_from_json_result_product_i64(
             }
         }
         if is_err {
+            // Heap Mimi string {ptr, len} so decode_result_err_string works.
             let c = alloc_c_string(&err_str);
+            let heap = unsafe { libc::malloc(16) as *mut i64 };
+            if !heap.is_null() {
+                unsafe {
+                    *heap = c as i64;
+                    *heap.add(1) = err_str.len() as i64;
+                }
+            }
             unsafe {
                 *ptr = 0;
-                *ptr.add(1) = c as i64;
-                for fi in 1..n {
+                for fi in 0..n {
                     *ptr.add(1 + fi) = 0;
                 }
+                *ptr.add(1 + n) = if heap.is_null() {
+                    c as i64
+                } else {
+                    heap as i64
+                };
             }
             while i < bytes.len() && bytes[i] != b',' && bytes[i] != b']' {
                 i += 1;
@@ -15819,6 +15835,7 @@ pub extern "C" fn mimi_list_from_json_result_product_i64(
             unsafe {
                 *ptr = 1;
                 std::ptr::copy_nonoverlapping(fields.as_ptr(), ptr.add(1), n);
+                *ptr.add(1 + n) = 0;
             }
         }
         handles.push(ptr as i64);
@@ -15923,9 +15940,13 @@ pub extern "C" fn mimi_list_from_json_result_set_product_i64(
             i += 1;
         }
         let obj = String::from_utf8_lossy(&bytes[obj_start..i]).into_owned();
-        let pack = unsafe { libc::malloc(16) as *mut i64 };
+        // disc + Ok SetHandle + Err (heap Mimi string)
+        let pack = unsafe { libc::malloc(24) as *mut i64 };
         if pack.is_null() {
             break;
+        }
+        unsafe {
+            std::ptr::write_bytes(pack as *mut u8, 0, 24);
         }
         let is_err = obj.contains("\"Err\"");
         if is_err {
@@ -15940,9 +15961,21 @@ pub extern "C" fn mimi_list_from_json_result_set_product_i64(
                 }
             }
             let c = alloc_c_string(&err_s);
+            let heap = unsafe { libc::malloc(16) as *mut i64 };
+            if !heap.is_null() {
+                unsafe {
+                    *heap = c as i64;
+                    *heap.add(1) = err_s.len() as i64;
+                }
+            }
             unsafe {
                 *pack = 0;
-                *pack.add(1) = c as i64;
+                *pack.add(1) = 0;
+                *pack.add(2) = if heap.is_null() {
+                    c as i64
+                } else {
+                    heap as i64
+                };
             }
         } else {
             let mut arr = String::from("[]");
@@ -15989,6 +16022,7 @@ pub extern "C" fn mimi_list_from_json_result_set_product_i64(
             unsafe {
                 *pack = 1;
                 *pack.add(1) = set_h as i64;
+                *pack.add(2) = 0;
             }
         }
         handles.push(pack as i64);
@@ -16164,9 +16198,13 @@ pub extern "C" fn mimi_list_from_json_result_map_product_i64(
             i += 1;
         }
         let obj = String::from_utf8_lossy(&bytes[obj_start..i]).into_owned();
-        let pack = unsafe { libc::malloc(16) as *mut i64 };
+        // disc + Ok MapHandle + Err (heap Mimi string)
+        let pack = unsafe { libc::malloc(24) as *mut i64 };
         if pack.is_null() {
             break;
+        }
+        unsafe {
+            std::ptr::write_bytes(pack as *mut u8, 0, 24);
         }
         let is_err = obj.contains("\"Err\"");
         if is_err {
@@ -16181,9 +16219,21 @@ pub extern "C" fn mimi_list_from_json_result_map_product_i64(
                 }
             }
             let c = alloc_c_string(&err_s);
+            let heap = unsafe { libc::malloc(16) as *mut i64 };
+            if !heap.is_null() {
+                unsafe {
+                    *heap = c as i64;
+                    *heap.add(1) = err_s.len() as i64;
+                }
+            }
             unsafe {
                 *pack = 0;
-                *pack.add(1) = c as i64;
+                *pack.add(1) = 0;
+                *pack.add(2) = if heap.is_null() {
+                    c as i64
+                } else {
+                    heap as i64
+                };
             }
         } else {
             let mut inner_obj = String::from("{}");
@@ -16230,6 +16280,7 @@ pub extern "C" fn mimi_list_from_json_result_map_product_i64(
             unsafe {
                 *pack = 1;
                 *pack.add(1) = mh as i64;
+                *pack.add(2) = 0;
             }
         }
         handles.push(pack as i64);
