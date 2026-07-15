@@ -631,27 +631,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .into_pointer_value();
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
-                    } else if inner.starts_with("Result")
-                        && (inner.contains('(')
-                            || inner.contains("Tuple")
-                            || self
-                                .type_defs
-                                .get(
-                                    inner
-                                        .strip_prefix("Result<")
-                                        .and_then(|s| s.split(',').next())
-                                        .map(|s| s.trim())
-                                        .unwrap_or(""),
-                                )
-                                .is_some_and(|td| {
-                                    matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                                }))
-                    {
-                        // List of Result of product-tuple / record: full layout.
-                        let raw = self.emit_list_result_product_to_json(alloca, inner)?;
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
                     } else if inner.starts_with("Result") {
+                        let ok_inner = inner
+                            .strip_prefix("Result<")
+                            .and_then(|s| s.split(',').next())
+                            .map(|s| s.trim())
+                            .unwrap_or("");
+                        // Product-tuple / named-record Ok only — not Option/Result/List Ok.
+                        let ok_is_product = ok_inner.starts_with('(')
+                            || ok_inner.contains("Tuple")
+                            || self.type_defs.get(ok_inner).is_some_and(|td| {
+                                matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                            });
+                        if ok_is_product {
+                            let raw = self.emit_list_result_product_to_json(alloca, inner)?;
+                            self.register_heap_alloc(raw);
+                            return self.wrap_c_string(raw);
+                        }
+                        // Scalar / Option / nested Result Ok — runtime i64 helper.
                         "mimi_list_result_i64_to_json"
                     } else if inner.starts_with('(') {
                         // List of product tuples: codegen loop → JSON array of arrays.
