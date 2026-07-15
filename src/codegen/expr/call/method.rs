@@ -2566,6 +2566,138 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 .into());
                                         }
                                     }
+                                    // Result of Option of List of product.
+                                    if ln == "Result" && mn == "Option" && margs.len() == 1 {
+                                        let opt_inner0 = match &margs[0] {
+                                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                                if let Some(td) = self.type_defs.get(an) {
+                                                    if let crate::ast::TypeDefKind::Alias(inner) =
+                                                        &td.kind
+                                                    {
+                                                        inner.clone()
+                                                    } else {
+                                                        margs[0].clone()
+                                                    }
+                                                } else {
+                                                    margs[0].clone()
+                                                }
+                                            }
+                                            other => other.clone(),
+                                        };
+                                        if let Type::Name(ln2, largs2) = &opt_inner0 {
+                                            if ln2 == "List" && largs2.len() == 1 {
+                                                let list_elem = match &largs2[0] {
+                                                    Type::Name(an, aargs) if aargs.is_empty() => {
+                                                        if let Some(td) = self.type_defs.get(an) {
+                                                            if let crate::ast::TypeDefKind::Alias(
+                                                                inner,
+                                                            ) = &td.kind
+                                                            {
+                                                                inner.clone()
+                                                            } else {
+                                                                largs2[0].clone()
+                                                            }
+                                                        } else {
+                                                            largs2[0].clone()
+                                                        }
+                                                    }
+                                                    other => other.clone(),
+                                                };
+                                                if let Type::Tuple(elems) = list_elem {
+                                                    let arity = elems.len() as u64;
+                                                    let func = self.get_runtime_fn(
+                                                        "mimi_map_from_json_result_option_list_product_i64",
+                                                    )?;
+                                                    let result = self.build_call(
+                                                        func,
+                                                        &[
+                                                            BasicMetadataValueEnum::PointerValue(
+                                                                raw_ptr,
+                                                            ),
+                                                            BasicMetadataValueEnum::IntValue(
+                                                                self.context
+                                                                    .i64_type()
+                                                                    .const_int(arity, false),
+                                                            ),
+                                                        ],
+                                                        "map_from_json_result_option_list_product",
+                                                    )?;
+                                                    return Ok(self
+                                                        .expect_basic_value(
+                                                            &result,
+                                                            "mimi_map_from_json_result_option_list_product_i64",
+                                                        )?
+                                                        .into());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Option of Result of List of product.
+                                    if ln == "Option" && mn == "Result" && !margs.is_empty() {
+                                        let res_ok0 = match &margs[0] {
+                                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                                if let Some(td) = self.type_defs.get(an) {
+                                                    if let crate::ast::TypeDefKind::Alias(inner) =
+                                                        &td.kind
+                                                    {
+                                                        inner.clone()
+                                                    } else {
+                                                        margs[0].clone()
+                                                    }
+                                                } else {
+                                                    margs[0].clone()
+                                                }
+                                            }
+                                            other => other.clone(),
+                                        };
+                                        if let Type::Name(ln2, largs2) = &res_ok0 {
+                                            if ln2 == "List" && largs2.len() == 1 {
+                                                let list_elem = match &largs2[0] {
+                                                    Type::Name(an, aargs) if aargs.is_empty() => {
+                                                        if let Some(td) = self.type_defs.get(an) {
+                                                            if let crate::ast::TypeDefKind::Alias(
+                                                                inner,
+                                                            ) = &td.kind
+                                                            {
+                                                                inner.clone()
+                                                            } else {
+                                                                largs2[0].clone()
+                                                            }
+                                                        } else {
+                                                            largs2[0].clone()
+                                                        }
+                                                    }
+                                                    other => other.clone(),
+                                                };
+                                                if let Type::Tuple(elems) = list_elem {
+                                                    let arity = elems.len() as u64;
+                                                    let func = self.get_runtime_fn(
+                                                        "mimi_map_from_json_option_result_list_product_i64",
+                                                    )?;
+                                                    let result = self.build_call(
+                                                        func,
+                                                        &[
+                                                            BasicMetadataValueEnum::PointerValue(
+                                                                raw_ptr,
+                                                            ),
+                                                            BasicMetadataValueEnum::IntValue(
+                                                                self.context
+                                                                    .i64_type()
+                                                                    .const_int(arity, false),
+                                                            ),
+                                                        ],
+                                                        "map_from_json_option_result_list_product",
+                                                    )?;
+                                                    return Ok(self
+                                                        .expect_basic_value(
+                                                            &result,
+                                                            "mimi_map_from_json_option_result_list_product_i64",
+                                                        )?
+                                                        .into());
+                                                }
+                                            }
+                                        }
+                                    }
                                     // Result of Option of product.
                                     if ln == "Result" && mn == "Option" && margs.len() == 1 {
                                         let opt_inner = match &margs[0] {
