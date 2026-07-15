@@ -59,10 +59,8 @@ pub func print_float(f: f64) {
 }
 
 // print_list: Prints xs to stdout using its Show representation.
-// Falls back to a fixed placeholder in the codegen path — the
-// interpreter still lowers to a real `[a, b, c]` representation.
 pub func print_list<T>(xs: List<T>) {
-    println(to_string("list-stub"))
+    println(xs)
 }
 
 // input_line: Reads a line from stdin. Returns Err on empty input.
@@ -119,18 +117,18 @@ pub func input_float() -> Result<f64, string> {
 
 
 
-// input_bool: Reads a line from stdin and parses it as "true"/"false".
+// input_bool: Reads a line from stdin; accepts true/false/yes/no/1/0 (case-insensitive).
 pub func input_bool() -> Result<bool, string> {
     let parsed = input_line()
     if parsed.is_err() {
         return Err("input_line failed")
     }
-    let line = parsed.unwrap_or("")
-    if line == "true" {
+    let line = str_to_lower(str_trim(parsed.unwrap_or("")))
+    if line == "true" || line == "yes" || line == "1" {
         return Ok(true)
     }
-    if line == "false" {
+    if line == "false" || line == "no" || line == "0" {
         return Ok(false)
     }
-    return Err("input_bool: expected 'true' or 'false'")
+    return Err("input_bool: expected true/false/yes/no/1/0")
 }
