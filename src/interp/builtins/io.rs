@@ -1,15 +1,31 @@
 use super::*;
 
+/// Display for print/println: auto-deref Shared/LocalShared so dual-backend
+/// matches codegen (which loads the payload, not the wrapper tag).
+fn print_display(v: &Value) -> String {
+    match v {
+        Value::Shared(arc) => match arc.read() {
+            Ok(inner) => print_display(&inner),
+            Err(_) => "shared(<poisoned>)".to_string(),
+        },
+        Value::LocalShared(rc) => {
+            let inner = rc.lock().unwrap_or_else(|e| e.into_inner());
+            print_display(&inner)
+        }
+        other => other.to_string(),
+    }
+}
+
 impl<'a> Interpreter<'a> {
     // === I/O ===
     pub(crate) fn builtin_println(&self, args: Vec<Value>) -> Result<Value, InterpError> {
-        let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+        let parts: Vec<String> = args.iter().map(print_display).collect();
         self.emit_stdout_line(&parts.join(" "));
         Ok(Value::Unit)
     }
 
     pub(crate) fn builtin_print(&self, args: Vec<Value>) -> Result<Value, InterpError> {
-        let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+        let parts: Vec<String> = args.iter().map(print_display).collect();
         self.emit_stdout(&parts.join(" "));
         Ok(Value::Unit)
     }
