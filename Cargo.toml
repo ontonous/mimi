@@ -37,6 +37,8 @@ regex = "1"
 [features]
 default = []
 no_std = []
+# Enable deliberate UB test symbols (test_segfault / test_abort) outside cargo test.
+test_ub_symbols = []
 
 [build-dependencies]
 # build.rs is a no-op (runtime is pure Rust since v0.15)

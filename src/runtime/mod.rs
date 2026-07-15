@@ -19300,14 +19300,10 @@ pub extern "C" fn __mimi_extern_test_json_sum(json: *const std::ffi::c_char) -> 
     sum
 }
 
-// FFI-4: The UB trigger __mimi_extern_test_segfault is compiled into the
-// staticlib because FFI safety tests link against it via the runtime .so
-// (which is built without #[cfg(test)]). The symbol name is self-documenting
-// as a test-only hazard — no production code would call __mimi_extern_test_segfault.
-// CRITICAL #14 mitigation: the function name contains "test" and "segfault",
-// making accidental invocation extremely unlikely. A feature flag
-// `mimi_no_test_symbols` could be used in future to strip these from
-// production builds.
+// M2 (pre-round6): deliberate UB test symbols must not ship in production
+// binaries. Enabled under cargo test, feature `test_ub_symbols`, or the
+// custom cfg `mimi_test_ub_symbols` (passed only by test FFI .so builds).
+#[cfg(any(test, feature = "test_ub_symbols", mimi_test_ub_symbols))]
 #[no_mangle]
 pub extern "C" fn __mimi_extern_test_segfault() {
     // Deliberate null pointer dereference — used by FFI safety tests to verify
@@ -19318,6 +19314,7 @@ pub extern "C" fn __mimi_extern_test_segfault() {
     }
 }
 
+#[cfg(any(test, feature = "test_ub_symbols", mimi_test_ub_symbols))]
 #[no_mangle]
 pub extern "C" fn __mimi_extern_test_abort() {
     std::process::abort();
@@ -19365,11 +19362,13 @@ pub extern "C" fn test_json_sum(json: *const std::ffi::c_char) -> i32 {
     __mimi_extern_test_json_sum(json)
 }
 
+#[cfg(any(test, feature = "test_ub_symbols", mimi_test_ub_symbols))]
 #[no_mangle]
 pub extern "C" fn test_segfault() {
     __mimi_extern_test_segfault()
 }
 
+#[cfg(any(test, feature = "test_ub_symbols", mimi_test_ub_symbols))]
 #[no_mangle]
 pub extern "C" fn test_abort() {
     __mimi_extern_test_abort()
