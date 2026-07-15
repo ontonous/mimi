@@ -7169,6 +7169,44 @@ fn dual_list_result_result_tuple() {
     );
 }
 
+/// Result of product-tuple with string Err to_json dual.
+#[test]
+fn dual_to_json_result_tuple_err_string() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let e: Result<(i32, i32), string> = Err("e")
+            println(e)
+            println(to_json(e))
+            0
+        }
+        "#,
+        "Err(e)\n{\"Err\":[\"e\"]}"
+    );
+}
+
+/// List of Result of Option of product-tuple dual.
+#[test]
+fn dual_list_result_option_tuple_literal() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs: List<Result<Option<(i32, i32)>, string>> = [Ok(Some((1, 2))), Ok(None), Err("e")]
+            println(xs)
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[Ok(Some((1, 2))), Ok(None()), Err(e)]\n[{\"Ok\":[{\"Some\":[[1,2]]}]},{\"Ok\":[\"None\"]},{\"Err\":[\"e\"]}]"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {
