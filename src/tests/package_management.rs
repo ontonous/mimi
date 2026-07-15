@@ -248,8 +248,11 @@ fn manifest_invalid_dependency_path() {
 fn manifest_find_nonexistent() {
     let result =
         crate::manifest::Manifest::find(std::path::Path::new("/tmp/nonexistent_path_for_test"));
-    // Should not panic, may return Err or Ok(None)
-    let _ = result;
+    // TC-H3: missing path must not invent a manifest.
+    match result {
+        Ok(None) | Err(_) => {}
+        Ok(Some(_)) => panic!("expected no manifest for nonexistent path"),
+    }
 }
 
 #[test]
