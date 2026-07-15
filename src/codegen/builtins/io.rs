@@ -1327,7 +1327,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(ok_bb);
         let ok_pay = self.build_extract_value(loaded.into(), 1, "list_res_prod_ok")?;
         let piece = if let BasicValueEnum::StructValue(ok_sv) = ok_pay {
-            let ok_json = if is_named_record {
+            let ok_fields = ok_sv.get_type().get_field_types();
+            let ok_is_nested_result = ok_fields.len() >= 3
+                && matches!(
+                    ok_fields[0],
+                    BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                );
+            let ok_json = if ok_is_nested_result {
+                self.emit_result_struct_to_json_cstr(ok_sv, &ok_inner)?
+            } else if is_named_record {
                 let rec_ty = ok_sv.get_type();
                 let rec_alloca =
                     self.build_alloca(BasicTypeEnum::StructType(rec_ty), "list_res_rec_tmp")?;
@@ -3305,7 +3313,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             matches!(td.kind, crate::ast::TypeDefKind::Record(_))
         });
         let ok_json = if let BasicValueEnum::StructValue(ok_sv) = ok_pay {
-            if is_named_record {
+            let ofields = ok_sv.get_type().get_field_types();
+            let ok_is_nested_result = ofields.len() >= 3
+                && matches!(
+                    ofields[0],
+                    BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                );
+            if ok_is_nested_result {
+                self.emit_result_struct_to_json_cstr(ok_sv, &ok_inner)?
+            } else if is_named_record {
                 let rec_ty = ok_sv.get_type();
                 let rec_alloca =
                     self.build_alloca(BasicTypeEnum::StructType(rec_ty), "res_j_rec")?;
@@ -3560,6 +3576,37 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::PointerValue(list_str),
                         ],
                         "res_ok_list_sv_snprintf",
+                    )?;
+                }
+                BasicTypeEnum::StructType(sty)
+                    if label == "ok"
+                        && sty.get_field_types().len() >= 3
+                        && matches!(
+                            sty.get_field_types()[0],
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                        ) =>
+                {
+                    // Nested Result by-value in Ok: Result<Result<…>,…>.
+                    let nested_ty = Self::strip_first_type_arg(arg_type, "Result")
+                        .unwrap_or_else(|| "Result".to_string());
+                    let nested = self.emit_result_to_string_typed(
+                        val.into_struct_value(),
+                        None,
+                        &nested_ty,
+                    )?;
+                    let fmt = self
+                        .builder
+                        .build_global_string_ptr("Ok(%s)", "res_ok_nested_fmt")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.build_call(
+                        snprintf_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::IntValue(buf_size),
+                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                            BasicMetadataValueEnum::PointerValue(nested),
+                        ],
+                        "res_ok_nested_snprintf",
                     )?;
                 }
                 BasicTypeEnum::StructType(sty)

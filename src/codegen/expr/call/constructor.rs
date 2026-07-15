@@ -99,7 +99,26 @@ impl<'ctx> CodeGenerator<'ctx> {
         if compiled_args.len() != 1 {
             return Err("Ok expects 1 argument".into());
         }
-        let val = compiled_args[0];
+        let mut val = compiled_args[0];
+        // When packing List<Result<Result<…>,…>>, inflate nested Result Ok/Err
+        // payloads to the full declared layout before wrapping in outer Ok.
+        if let Some(elem_ty) = self.pending_list_elem_type.clone() {
+            let inner_ok: Option<Type> = match &elem_ty {
+                Type::Result(ok, _) => Some((**ok).clone()),
+                Type::Name(n, args) if n == "Result" && !args.is_empty() => Some(args[0].clone()),
+                _ => None,
+            };
+            if let Some(inner) = inner_ok {
+                let is_nested_res = match &inner {
+                    Type::Result(_, _) => true,
+                    Type::Name(n, _) if n == "Result" => true,
+                    _ => false,
+                };
+                if is_nested_res {
+                    val = self.inflate_variant_struct(val, &inner)?;
+                }
+            }
+        }
         let bool_ty = self.context.bool_type();
         let i64_ty = self.context.i64_type();
         let disc = bool_ty.const_int(1, false);

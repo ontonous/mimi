@@ -7150,6 +7150,25 @@ fn dual_list_tuple_alias() {
     );
 }
 
+/// List of nested Result of product-tuple dual.
+#[test]
+fn dual_list_result_result_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs: List<Result<Result<(i32, i32), string>, string>> = [Ok(Ok((1, 2))), Ok(Err("e"))]
+            println(xs)
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[Ok(Ok((1, 2))), Ok(Err(e))]\n[{\"Ok\":[{\"Ok\":[[1,2]]}]},{\"Ok\":[{\"Err\":[\"e\"]}]}]"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {
