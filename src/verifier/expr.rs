@@ -255,6 +255,10 @@ pub(crate) fn expr_to_z3_bool(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Bool
             // back to int/real. String variables are encoded as
             // Z3Bool (nonempty) or Z3String; do not treat them as
             // "int != 0" which is type-unsound.
+            // V-H5: prefer dedicated bool vars over int!=0 encoding.
+            if let Some(v) = vars.get_bool(name) {
+                return Some(v.clone());
+            }
             if let Some(v) = vars.get_string_nonempty(name) {
                 return Some(v.clone());
             }

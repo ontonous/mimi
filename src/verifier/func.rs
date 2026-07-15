@@ -102,7 +102,7 @@ impl VerifierCtx {
             if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
                 vars.insert_real(p.name.as_str(), Z3Real::new_const(p.name.as_str()));
             } else if matches!(&p.ty, Type::Name(n, _) if n == "string") {
-                vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
+                // V-H5: strings get dedicated string vars (plus length/nonempty).
                 vars.insert_string_var(p.name.as_str(), Z3String::new_const(p.name.as_str()));
                 vars.insert_string_nonempty(
                     p.name.as_str(),
@@ -112,6 +112,9 @@ impl VerifierCtx {
                     p.name.as_str(),
                     Z3Int::new_const(format!("{}_len", p.name)),
                 );
+            } else if matches!(&p.ty, Type::Name(n, _) if n == "bool" || n == "Bool") {
+                // V-H5: bools are Z3 Bool, not opaque Int.
+                vars.insert_bool(p.name.as_str(), Z3Bool::new_const(p.name.as_str()));
             } else {
                 vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
             }
@@ -329,6 +332,10 @@ impl VerifierCtx {
             .ret
             .as_ref()
             .is_some_and(|t| matches!(t, Type::Name(n, _) if n == "f64"));
+        let returns_bool = func
+            .ret
+            .as_ref()
+            .is_some_and(|t| matches!(t, Type::Name(n, _) if n == "bool" || n == "Bool"));
 
         let mut vars = Z3VarMap::new();
         let mut old_names: Vec<String> = Vec::with_capacity(func.params.len());
@@ -337,7 +344,7 @@ impl VerifierCtx {
             if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
                 vars.insert_real(p.name.as_str(), Z3Real::new_const(p.name.as_str()));
             } else if matches!(&p.ty, Type::Name(n, _) if n == "string") {
-                vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
+                // V-H5: strings use dedicated string vars (not opaque Int).
                 vars.insert_string_nonempty(
                     p.name.as_str(),
                     Z3Bool::new_const(format!("{}_ne", p.name)),
@@ -347,6 +354,9 @@ impl VerifierCtx {
                     Z3Int::new_const(format!("{}_len", p.name)),
                 );
                 vars.insert_string_var(p.name.as_str(), Z3String::new_const(p.name.as_str()));
+            } else if matches!(&p.ty, Type::Name(n, _) if n == "bool" || n == "Bool") {
+                // V-H5: bools are Z3 Bool.
+                vars.insert_bool(p.name.as_str(), Z3Bool::new_const(p.name.as_str()));
             } else if matches!(&p.ty, Type::Name(n, args) if n == "List" && !args.is_empty()) {
                 // List parameters get a length variable for modeling sort() etc.
                 vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
@@ -366,6 +376,9 @@ impl VerifierCtx {
         if returns_real {
             let z3_result = Z3Real::new_const("result");
             vars.insert_real("result", z3_result.clone());
+        } else if returns_bool {
+            let z3_result = Z3Bool::new_const("result");
+            vars.insert_bool("result", z3_result.clone());
         } else {
             let z3_result = Z3Int::new_const("result");
             vars.insert_int("result", z3_result.clone());
@@ -376,13 +389,14 @@ impl VerifierCtx {
             if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
                 vars.insert_real(old_name, Z3Real::new_const(old_name));
             } else if matches!(&p.ty, Type::Name(n, _) if n == "string") {
-                vars.insert_int(old_name, Z3Int::new_const(old_name));
                 vars.insert_string_nonempty(
                     old_name,
                     Z3Bool::new_const(format!("{}_ne", old_name)),
                 );
                 vars.insert_string_len(old_name, Z3Int::new_const(format!("{}_len", old_name)));
                 vars.insert_string_var(old_name, Z3String::new_const(old_name));
+            } else if matches!(&p.ty, Type::Name(n, _) if n == "bool" || n == "Bool") {
+                vars.insert_bool(old_name, Z3Bool::new_const(old_name));
             } else if matches!(&p.ty, Type::Name(n, args) if n == "List" && !args.is_empty()) {
                 vars.insert_int(old_name, Z3Int::new_const(old_name));
                 let old_len_var = Z3Int::new_const(format!("{}_len", old_name));
