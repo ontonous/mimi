@@ -46,6 +46,8 @@ struct PersistentCache {
 /// LSP server for Mimi language
 pub struct LspServer {
     pub(crate) documents: HashMap<String, String>,
+    /// L-H3: last seen textDocument version per URI (None = unknown).
+    pub(crate) document_versions: HashMap<String, i64>,
     access_order: VecDeque<String>,
     workspace_root: Option<PathBuf>,
     last_cursor_line: usize,
@@ -80,6 +82,7 @@ impl LspServer {
     pub fn new() -> Self {
         LspServer {
             documents: HashMap::new(),
+            document_versions: HashMap::new(),
             access_order: VecDeque::new(),
             workspace_root: None,
             last_cursor_line: 0,

@@ -15,10 +15,20 @@ impl LspServer {
         } else if self.documents.len() >= super::MAX_DOCUMENTS {
             if let Some(lru) = self.access_order.pop_front() {
                 self.documents.remove(&lru);
+                self.document_versions.remove(&lru);
             }
         }
         self.access_order.push_back(uri.clone());
         self.documents.insert(uri, text);
+    }
+
+    /// L-H3: record the textDocument version for stale-change filtering.
+    pub(crate) fn set_document_version(&mut self, uri: &str, version: i64) {
+        self.document_versions.insert(uri.to_string(), version);
+    }
+
+    pub(crate) fn document_version(&self, uri: &str) -> Option<i64> {
+        self.document_versions.get(uri).copied()
     }
 
     /// Insert into verification cache with LRU eviction.
@@ -42,6 +52,7 @@ impl LspServer {
     pub(crate) fn cache_remove(&mut self, uri: &str) {
         self.access_order.retain(|k| k != uri);
         self.documents.remove(uri);
+        self.document_versions.remove(uri);
     }
 
     /// Parse text with error recovery, returning partial AST even on errors.

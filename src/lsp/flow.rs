@@ -170,6 +170,14 @@ fn did_open(mut server: LspServer, msg: &Value) -> (LspServer, Option<Value>) {
         None => return (server, None),
     };
     server.cache_put(uri.to_string(), text.to_string());
+    if let Some(v) = msg
+        .get("params")
+        .and_then(|p| p.get("textDocument"))
+        .and_then(|td| td.get("version"))
+        .and_then(|v| v.as_i64())
+    {
+        server.set_document_version(uri, v);
+    }
     let diagnostics = server.compute_diagnostics(text, Some(uri));
     (
         server,
@@ -241,6 +249,20 @@ fn did_change(mut server: LspServer, msg: &Value) -> (LspServer, Option<Value>) 
     };
     if changes.is_empty() {
         return (server, None);
+    }
+    // L-H3: ignore stale didChange when version is older than last applied.
+    if let Some(v) = msg
+        .get("params")
+        .and_then(|p| p.get("textDocument"))
+        .and_then(|td| td.get("version"))
+        .and_then(|v| v.as_i64())
+    {
+        if let Some(prev) = server.document_version(uri) {
+            if v < prev {
+                return (server, None);
+            }
+        }
+        server.set_document_version(uri, v);
     }
     // CL-H8 (deep audit): apply ALL contentChanges, not just the first. A single
     // change without a `range` is a full-document sync (replace); changes
