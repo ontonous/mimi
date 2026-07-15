@@ -63,6 +63,8 @@ impl<'a> Interpreter<'a> {
             return Err(InterpError::new("pop expects 1 argument (list)"));
         }
         match &args[0] {
+            // Dual with codegen: return the popped element only (list is value-copied;
+            // in-place mutation of the caller's list is codegen's by-ref path).
             Value::List(l) => {
                 if l.is_empty() {
                     return Err(InterpError::new("pop from empty list"));
@@ -71,7 +73,7 @@ impl<'a> Interpreter<'a> {
                 let popped = new_list
                     .pop()
                     .ok_or_else(|| InterpError::new("pop from empty list"))?;
-                Ok(Value::Tuple(vec![popped, Value::List(new_list)]))
+                Ok(popped)
             }
             other => Err(InterpError::new(format!(
                 "pop: argument must be a list, found {}",
