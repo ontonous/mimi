@@ -5298,6 +5298,90 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         elem.to_string()
                                     };
                                     self.emit_set_product_to_json(as_i64, &resolved, 1)?
+                                } else if let Some(opt_inner) = elem
+                                    .strip_prefix("Option<")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if opt_inner.starts_with('(')
+                                        || self.is_product_tuple_alias(opt_inner)
+                                    {
+                                        let resolved = if self
+                                            .is_product_tuple_alias(opt_inner)
+                                        {
+                                            self.resolve_alias_type_name(opt_inner)
+                                        } else {
+                                            opt_inner.to_string()
+                                        };
+                                        self.emit_set_option_product_to_json(
+                                            as_i64, &resolved, 1,
+                                        )?
+                                    } else {
+                                        let fn_name = Self::set_display_fn_for_type(arg_type);
+                                        let func = self.get_runtime_fn(fn_name)?;
+                                        self.build_call(
+                                            func,
+                                            &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                            "res_ok_set",
+                                        )?
+                                        .try_as_basic_value_opt()
+                                        .ok_or("set display void")?
+                                        .into_pointer_value()
+                                    }
+                                } else if elem.starts_with("Result<") {
+                                    if let Some(ok_ty) =
+                                        elem.strip_prefix("Result<").and_then(|s| {
+                                            let mut depth = 0i32;
+                                            for (i, ch) in s.char_indices() {
+                                                match ch {
+                                                    '<' | '(' => depth += 1,
+                                                    '>' | ')' => depth -= 1,
+                                                    ',' if depth == 0 => {
+                                                        return Some(s[..i].trim());
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                            None
+                                        })
+                                    {
+                                        if ok_ty.starts_with('(')
+                                            || self.is_product_tuple_alias(ok_ty)
+                                        {
+                                            let resolved = if self
+                                                .is_product_tuple_alias(ok_ty)
+                                            {
+                                                self.resolve_alias_type_name(ok_ty)
+                                            } else {
+                                                ok_ty.to_string()
+                                            };
+                                            self.emit_set_result_product_to_json(
+                                                as_i64, &resolved, 1,
+                                            )?
+                                        } else {
+                                            let fn_name =
+                                                Self::set_display_fn_for_type(arg_type);
+                                            let func = self.get_runtime_fn(fn_name)?;
+                                            self.build_call(
+                                                func,
+                                                &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                                "res_ok_set",
+                                            )?
+                                            .try_as_basic_value_opt()
+                                            .ok_or("set display void")?
+                                            .into_pointer_value()
+                                        }
+                                    } else {
+                                        let fn_name = Self::set_display_fn_for_type(arg_type);
+                                        let func = self.get_runtime_fn(fn_name)?;
+                                        self.build_call(
+                                            func,
+                                            &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                            "res_ok_set",
+                                        )?
+                                        .try_as_basic_value_opt()
+                                        .ok_or("set display void")?
+                                        .into_pointer_value()
+                                    }
                                 } else {
                                     let fn_name = Self::set_display_fn_for_type(arg_type);
                                     let func = self.get_runtime_fn(fn_name)?;
