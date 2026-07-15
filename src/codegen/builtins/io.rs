@@ -458,6 +458,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ));
                 }
                 if arg_type == "Set" || arg_type.starts_with("Set<") || arg_type == "set" {
+                    if let Some(elem) = arg_type
+                        .strip_prefix("Set<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                            let resolved = if self.is_product_tuple_alias(elem) {
+                                self.resolve_alias_type_name(elem)
+                            } else {
+                                elem.to_string()
+                            };
+                            let raw = self.emit_set_product_to_json(*iv, &resolved, 1)?;
+                            return Ok((
+                                BasicMetadataValueEnum::PointerValue(raw),
+                                "%s".to_string(),
+                            ));
+                        }
+                    }
                     let fn_name = if arg_type.contains("Set<string>") {
                         "mimi_set_to_display_string"
                     } else if arg_type.contains("Set<bool>") {
@@ -4940,6 +4957,57 @@ impl<'ctx> CodeGenerator<'ctx> {
             "list_map_prod_close_cat",
         )?;
         Ok(buf)
+    }
+
+    /// Set of product-tuple values.
+    pub(in crate::codegen) fn emit_set_product_to_json(
+        &self,
+        set_handle: inkwell::values::IntValue<'ctx>,
+        product_type: &str,
+        display_style: i64,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let inner = product_type
+            .strip_prefix('(')
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap_or(product_type);
+        let mut arity: i64 = 0;
+        let mut depth = 0i32;
+        let mut any = false;
+        for ch in inner.chars() {
+            match ch {
+                '<' | '(' => depth += 1,
+                '>' | ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    arity += 1;
+                    any = true;
+                }
+                c if !c.is_whitespace() => any = true,
+                _ => {}
+            }
+        }
+        if any {
+            arity += 1;
+        }
+        if arity <= 0 {
+            arity = 2;
+        }
+        let func = self.get_runtime_fn("mimi_set_to_json_product_i64")?;
+        Ok(self
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(set_handle),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
+                    BasicMetadataValueEnum::IntValue(
+                        i64_ty.const_int(display_style as u64, false),
+                    ),
+                ],
+                "set_product_json",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("set product to_json void")?
+            .into_pointer_value())
     }
 
     /// Map of List of product-tuple values.

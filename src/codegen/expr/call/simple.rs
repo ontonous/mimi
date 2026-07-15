@@ -913,6 +913,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )))
                         }
                     };
+                    if let Some(elem) = obj_type
+                        .strip_prefix("Set<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                            let resolved = if self.is_product_tuple_alias(elem) {
+                                self.resolve_alias_type_name(elem)
+                            } else {
+                                elem.to_string()
+                            };
+                            let raw = self.emit_set_product_to_json(handle, &resolved, 0)?;
+                            self.register_heap_alloc(raw);
+                            return self.wrap_c_string(raw);
+                        }
+                    }
                     let fn_name = if obj_type.contains("Set<string>") {
                         "mimi_set_to_json_string"
                     } else if obj_type.contains("Set<bool>") {

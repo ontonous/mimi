@@ -407,16 +407,9 @@ pub(crate) fn is_json_serializable(t: &Type) -> bool {
                 let val_ok = is_json_serializable(&args[1]);
                 return key_ok && val_ok;
             }
-            // Set<i32|i64|bool|f32|f64|string> via typed set JSON/display helpers.
+            // Set<V> when V is serializable (scalars or product tuples).
             if n == "Set" && args.len() == 1 {
-                return matches!(
-                    &args[0],
-                    Type::Name(v, _)
-                        if matches!(
-                            v.as_str(),
-                            "i32" | "i64" | "bool" | "f32" | "f64" | "string"
-                        )
-                );
+                return is_json_serializable(&args[0]);
             }
             // Option<T> / Result<T,E> when payload types are serializable.
             if n == "Option" && args.len() == 1 {

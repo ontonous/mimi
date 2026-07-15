@@ -1932,6 +1932,34 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Type::Name(n, args) if n == "Set" => {
                 let elem_ty = args.first();
+                let resolved_elem = elem_ty.map(|t| match t {
+                    Type::Name(an, aargs) if aargs.is_empty() => {
+                        if let Some(td) = self.type_defs.get(an) {
+                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
+                                return inner.clone();
+                            }
+                        }
+                        t.clone()
+                    }
+                    other => other.clone(),
+                });
+                if let Some(Type::Tuple(elems)) = resolved_elem.as_ref() {
+                    let arity = elems.len() as u64;
+                    let func = self.get_runtime_fn("mimi_set_from_json_product_i64")?;
+                    let result = self.build_call(
+                        func,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(raw_ptr),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(arity, false),
+                            ),
+                        ],
+                        "set_from_json_product",
+                    )?;
+                    return Ok(self
+                        .expect_basic_value(&result, "mimi_set_from_json_product_i64")?
+                        .into());
+                }
                 let elem_is_int = elem_ty
                     .map(|t| {
                         matches!(
@@ -1948,7 +1976,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .unwrap_or(false);
                 if !elem_is_int && !elem_is_float && !elem_is_string {
                     return Err(CompileError::Generic(
-                        "from_json::<Set>: only Set<i32|i64|bool|f32|f64|string> is supported in codegen"
+                        "from_json::<Set>: only Set of scalar|product-tuple is supported in codegen"
                             .into(),
                     ));
                 }
