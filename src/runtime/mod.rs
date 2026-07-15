@@ -19803,17 +19803,51 @@ pub extern "C" fn mimi_cap_register(name: *const std::ffi::c_char) -> i64 {
 // ─── MimiFuture + MimiExecutor (poll-based async runtime) ──────
 //
 // Future memory layout (managed by codegen):
-//   offset 0: i32 (completed flag: 0=pending, 1=ready)
-//   offset 4: [padding 4 bytes]
+//   offset 0: i32 (completed flag: 0=pending, 1=ready, -1=freed intent)
+//   offset 4: i32 (refcount; starts at 1)
 //   offset 8: <result> (8-byte aligned, up to 64 bytes)
 //
-// Uses Box (Rust allocator) for consistent memory management.
+// R-C5: free/poll must not UAF. Use atomic refcount so free only drops
+// when the last concurrent accessor releases.
 
 #[repr(C)]
 struct MimiFutureRepr {
     completed: std::sync::atomic::AtomicI32,
-    _pad: [u8; 4],
+    refs: std::sync::atomic::AtomicI32,
     data: [u8; 64],
+}
+
+/// Try to retain a live future. Returns false if already fully freed (refs==0).
+/// SAFETY: `fut` must be null or a pointer from `mimi_future_alloc` that has
+/// not yet been fully deallocated (refs may still be > 0 during free races).
+unsafe fn future_try_retain(fut: *mut MimiFutureRepr) -> bool {
+    use std::sync::atomic::Ordering;
+    let rep = &*fut;
+    let mut cur = rep.refs.load(Ordering::Acquire);
+    loop {
+        if cur <= 0 {
+            return false;
+        }
+        match rep
+            .refs
+            .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => return true,
+            Err(c) => cur = c,
+        }
+    }
+}
+
+/// Release one ref; drop allocation when last ref is gone.
+/// SAFETY: `fut` must have been successfully retained or be the owner ref.
+unsafe fn future_release(fut: *mut MimiFutureRepr) {
+    use std::sync::atomic::Ordering;
+    let rep = &*fut;
+    if rep.refs.fetch_sub(1, Ordering::Release) == 1 {
+        // Ensure all prior accesses complete before deallocation.
+        std::sync::atomic::fence(Ordering::Acquire);
+        drop(Box::from_raw(fut));
+    }
 }
 
 #[no_mangle]
@@ -19821,7 +19855,7 @@ pub extern "C" fn mimi_future_alloc(_result_size: u64) -> *mut std::ffi::c_void 
     use std::sync::atomic::AtomicI32;
     let b = Box::new(MimiFutureRepr {
         completed: AtomicI32::new(0),
-        _pad: [0; 4],
+        refs: AtomicI32::new(1),
         data: [0; 64],
     });
     Box::into_raw(b) as *mut std::ffi::c_void
@@ -19832,15 +19866,12 @@ pub extern "C" fn mimi_future_free(fut: *mut std::ffi::c_void) {
     if fut.is_null() {
         return;
     }
-    // C13: atomically set completed to -1 (freed sentinel) so any racing
-    // mimi_future_set_completed will see the sentinel and skip writing.
+    // SAFETY: non-null pointer from mimi_future_alloc (or already freed → retain fails).
     unsafe {
-        let rep = &*(fut as *const MimiFutureRepr);
-        rep.completed.store(-1, Ordering::Release);
-    }
-    // SAFETY: `fut` was checked non-null; reconstructing the Box allocated by `mimi_future_alloc`.
-    unsafe {
-        drop(Box::from_raw(fut as *mut MimiFutureRepr));
+        let fut = fut as *mut MimiFutureRepr;
+        // Mark freed-intent so set_completed CAS fails; then drop owner ref.
+        (*fut).completed.store(-1, Ordering::Release);
+        future_release(fut);
     }
 }
 
@@ -19850,17 +19881,17 @@ pub extern "C" fn mimi_future_set_completed(fut: *mut std::ffi::c_void) {
         return;
     }
     use std::sync::atomic::Ordering;
-    // C13 (deep audit): the previous check-then-act (`load == 0` then `store 1`)
-    // had a race window — a concurrent `mimi_future_free` could store -1 and
-    // deallocate between the load and the store, so the store would land in
-    // freed memory (UAF write). Use a single atomic compare_exchange: it only
-    // transitions 0 -> 1, and fails (no write) if the future was concurrently
-    // freed (completed == -1) or already completed (== 1).
+    // R-C5: retain for the duration of the CAS so free cannot drop under us.
     unsafe {
-        let rep = &*(fut as *const MimiFutureRepr);
+        let fut = fut as *mut MimiFutureRepr;
+        if !future_try_retain(fut) {
+            return;
+        }
+        let rep = &*fut;
         let _ = rep
             .completed
             .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
+        future_release(fut);
     }
 }
 
@@ -19870,10 +19901,19 @@ pub extern "C" fn mimi_future_is_completed(fut: *mut std::ffi::c_void) -> i32 {
         return 1;
     }
     use std::sync::atomic::Ordering;
-    // SAFETY: `fut` was checked non-null; `MimiFutureRepr` is valid.
+    // R-C5: retain before reading so concurrent free cannot UAF.
     unsafe {
-        let rep = &*(fut as *const MimiFutureRepr);
-        rep.completed.load(Ordering::Acquire)
+        let fut = fut as *mut MimiFutureRepr;
+        if !future_try_retain(fut) {
+            return 1; // already freed — treat as completed/dead
+        }
+        let v = (*fut).completed.load(Ordering::Acquire);
+        future_release(fut);
+        if v < 0 {
+            1
+        } else {
+            v
+        }
     }
 }
 
@@ -19917,10 +19957,22 @@ pub extern "C" fn mimi_spawn_future(
     if future.is_null() {
         return std::ptr::null_mut();
     }
+    // R-C5: retain one ref for the worker thread; release when poll_fn returns.
+    // SAFETY: non-null pointer from mimi_future_alloc.
+    unsafe {
+        let fut = future as *mut MimiFutureRepr;
+        if !future_try_retain(fut) {
+            return std::ptr::null_mut();
+        }
+    }
     let future_addr = future as usize;
     let handle = std::thread::spawn(move || {
-        // SAFETY: the spawned thread owns the future pointer for the duration of `poll_fn`; it was checked non-null.
-        unsafe { poll_fn(future_addr as *mut std::ffi::c_void) };
+        // SAFETY: retained above for this thread's lifetime.
+        unsafe {
+            let fut = future_addr as *mut MimiFutureRepr;
+            poll_fn(fut as *mut std::ffi::c_void);
+            future_release(fut);
+        }
     });
     if let Ok(mut handles) = get_spawn_handles().lock() {
         handles.push(handle);
@@ -19949,24 +20001,24 @@ pub extern "C" fn mimi_await_future(future: *mut std::ffi::c_void) {
         return;
     }
     use std::sync::atomic::Ordering;
-    // Spin until completed (the spawned thread sets completed=1 after poll_fn returns)
-    // Uses Acquire ordering to synchronize-with the Release store in set_completed,
-    // ensuring result data written before the completed flag is visible.
-    // P2-12 fix: bounded spin with max iterations to prevent infinite CPU spin on bug.
-    // SAFETY: `future` was checked non-null; `MimiFutureRepr` is valid and accessed atomically.
+    // R-C5: retain for the spin so concurrent free cannot free under us.
+    // SAFETY: non-null pointer from mimi_future_alloc.
     unsafe {
-        let rep = &*(future as *const MimiFutureRepr);
+        let fut = future as *mut MimiFutureRepr;
+        if !future_try_retain(fut) {
+            return;
+        }
         let mut iterations: u64 = 0;
         const MAX_SPIN_ITERATIONS: u64 = 1_000_000;
-        while rep.completed.load(Ordering::Acquire) == 0 {
+        while (*fut).completed.load(Ordering::Acquire) == 0 {
             std::thread::yield_now();
             iterations += 1;
             if iterations >= MAX_SPIN_ITERATIONS {
-                // Future not completed after max spin iterations — abort rather than
-                // spin forever (which would consume 100% CPU indefinitely on bug).
+                future_release(fut);
                 std::process::abort();
             }
         }
+        future_release(fut);
     }
 }
 
@@ -20022,11 +20074,21 @@ pub extern "C" fn mimi_executor_run() {
             let mut found = None;
             for i in 0..queue.len() {
                 let (_, future) = &queue[i];
-                use std::sync::atomic::Ordering;
-                // SAFETY: future pointer came from the executor queue and `MimiFutureRepr` is valid.
+                // SAFETY: future pointer came from the executor queue.
+                // R-C5: retain while reading completed so free cannot UAF.
                 let completed = unsafe {
-                    let rep = &*(future.0 as *const MimiFutureRepr);
-                    rep.completed.load(Ordering::Acquire)
+                    let fut = future.0 as *mut MimiFutureRepr;
+                    if !future_try_retain(fut) {
+                        1 // freed — treat as done
+                    } else {
+                        let v = (*fut).completed.load(Ordering::Acquire);
+                        future_release(fut);
+                        if v < 0 {
+                            1
+                        } else {
+                            v
+                        }
+                    }
                 };
                 if completed == 0 {
                     found = Some(i);
@@ -20045,8 +20107,14 @@ pub extern "C" fn mimi_executor_run() {
             }
         };
         if let Some((poll_fn, future)) = entry {
-            // SAFETY: `poll_fn` and `future` were taken from the executor queue; no aliased access while polling.
-            unsafe { poll_fn(future) };
+            // SAFETY: retain for poll duration (R-C5).
+            unsafe {
+                let fut = future as *mut MimiFutureRepr;
+                if future_try_retain(fut) {
+                    poll_fn(future);
+                    future_release(fut);
+                }
+            }
         }
     }
 }
@@ -22919,9 +22987,12 @@ struct ConcurrencyMutex {
 /// transmute because the Arc guarantees the Mutex is never deallocated
 /// while the guard exists. The guard is stored in thread-local storage
 /// (single-thread access) until `mimi_mutex_unlock` removes it.
+///
+/// R-C10: field order matters — Rust drops fields in declaration order, so
+/// `guard` must be declared before `_arc` so unlock runs before Arc drop.
 struct HeldMutexGuard {
-    _arc: Arc<std::sync::Mutex<i64>>,
     guard: std::sync::MutexGuard<'static, i64>,
+    _arc: Arc<std::sync::Mutex<i64>>,
 }
 
 thread_local! {
@@ -23171,7 +23242,7 @@ pub extern "C" fn mimi_mutex_lock(handle: i64) -> i64 {
     // This avoids the type-system limitation where MutexGuard's lifetime is
     // syntactically tied to the stack frame, not the Arc's heap lifetime.
     let guard: std::sync::MutexGuard<'static, i64> = unsafe { std::mem::transmute(guard) };
-    let held = HeldMutexGuard { _arc: arc, guard };
+    let held = HeldMutexGuard { guard, _arc: arc };
     let id = MIMI_MUTEX_GUARD_NEXT_ID.fetch_add(1, Ordering::SeqCst);
     MIMI_MUTEX_GUARDS.with(|guards| {
         guards.borrow_mut().insert(id, held);
