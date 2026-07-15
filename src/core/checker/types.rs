@@ -35,7 +35,11 @@ impl<'a> Checker<'a> {
                     // This is a newtype - wrap the resolved inner type in Type::Newtype with name
                     Type::Newtype(name.clone(), Box::new(self.resolve_type(inner_ty)))
                 } else {
-                    Type::Name(name.clone(), args.clone())
+                    // Recursively resolve type args so `Option<Pair>` expands
+                    // `Pair` when `type Pair = (i32, i32)`.
+                    let resolved_args: Vec<Type> =
+                        args.iter().map(|a| self.resolve_type(a)).collect();
+                    Type::Name(name.clone(), resolved_args)
                 }
             }
             Type::Ref(lt, inner) => Type::Ref(lt.clone(), Box::new(self.resolve_type(inner))),
