@@ -2074,7 +2074,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 .into());
                                         }
                                     }
-                                    if ln == "Option" && mn == "Set" && margs.len() == 1 {
+                                    if mn == "Set" && margs.len() == 1 {
                                         let set_elem = match &margs[0] {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
@@ -2093,9 +2093,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         };
                                         if let Type::Tuple(elems) = set_elem {
                                             let arity = elems.len() as u64;
-                                            let func = self.get_runtime_fn(
-                                                "mimi_map_from_json_option_set_product_i64",
-                                            )?;
+                                            let (fn_name, label) = if ln == "Option" {
+                                                (
+                                                    "mimi_map_from_json_option_set_product_i64",
+                                                    "map_from_json_option_set_product",
+                                                )
+                                            } else {
+                                                (
+                                                    "mimi_map_from_json_result_set_product_i64",
+                                                    "map_from_json_result_set_product",
+                                                )
+                                            };
+                                            let func = self.get_runtime_fn(fn_name)?;
                                             let result = self.build_call(
                                                 func,
                                                 &[
@@ -2106,13 +2115,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                             .const_int(arity, false),
                                                     ),
                                                 ],
-                                                "map_from_json_option_set_product",
+                                                label,
                                             )?;
                                             return Ok(self
-                                                .expect_basic_value(
-                                                    &result,
-                                                    "mimi_map_from_json_option_set_product_i64",
-                                                )?
+                                                .expect_basic_value(&result, fn_name)?
                                                 .into());
                                         }
                                     }
