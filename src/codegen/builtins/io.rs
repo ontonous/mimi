@@ -3561,8 +3561,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.build_store(tmp, psv)?;
                     let rec_str = self.emit_record_display(rec_name, tmp)?;
                     OptPay::StrPtr(rec_str)
-                } else if pfields.len() >= 2 {
-                    // Product tuple / multi-field struct by-value in Option payload.
+                } else if pfields.len() == 2
+                    && matches!(
+                        pfields[0],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                    )
+                    && matches!(pfields[1], BasicTypeEnum::PointerType(_))
+                {
+                    // List by-value in Option payload: {i64,ptr}.
+                    let list_str = if arg_type.contains("List<string>") {
+                        self.emit_list_string_to_string(psv)?
+                    } else if arg_type.contains("Map<") {
+                        self.emit_list_map_to_string(psv, "List")?
+                    } else {
+                        self.emit_list_i32_to_string(psv)?
+                    };
+                    OptPay::StrPtr(list_str)
+                } else if pfields.len() >= 2
+                    && !matches!(
+                        pfields[0],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                    )
+                {
+                    // Product tuple / multi-field struct by-value (not nested
+                    // Option/Result and not List {i64,ptr}).
                     let tup_str = self.emit_product_tuple_to_string(psv)?;
                     OptPay::StrPtr(tup_str)
                 } else {

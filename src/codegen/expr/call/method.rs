@@ -2525,22 +2525,37 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let bool_ty = self.context.bool_type();
         let i64_ty = self.context.i64_type();
-        // Prefer full Option layout from the type map (by-value tuple payload).
-        let option_sty = self
-            .llvm_type_for(&crate::ast::Type::Option(Box::new(inner.clone())))
-            .and_then(|t| match t {
-                BasicTypeEnum::StructType(s) => Some(s),
-                _ => None,
-            })
-            .unwrap_or_else(|| {
-                self.context.struct_type(
-                    &[
-                        BasicTypeEnum::IntType(bool_ty),
-                        BasicTypeEnum::IntType(i64_ty),
-                    ],
-                    false,
-                )
-            });
+        // List and nested Option stay on the classic {i1,i64} heap-pack ABI
+        // (Display/to_json helpers expect ptrtoint handles). Product tuples,
+        // named records, and Result of those may use by-value payload slots.
+        let force_heap = matches!(
+            inner,
+            crate::ast::Type::Name(n, _) if n == "List" || n == "Option"
+        ) || matches!(inner, crate::ast::Type::Option(_));
+        let option_sty = if force_heap {
+            self.context.struct_type(
+                &[
+                    BasicTypeEnum::IntType(bool_ty),
+                    BasicTypeEnum::IntType(i64_ty),
+                ],
+                false,
+            )
+        } else {
+            self.llvm_type_for(&crate::ast::Type::Option(Box::new(inner.clone())))
+                .and_then(|t| match t {
+                    BasicTypeEnum::StructType(s) => Some(s),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    self.context.struct_type(
+                        &[
+                            BasicTypeEnum::IntType(bool_ty),
+                            BasicTypeEnum::IntType(i64_ty),
+                        ],
+                        false,
+                    )
+                })
+        };
         let function = self
             .current_function()
             .ok_or_else(|| "codegen: no function for Option field".to_string())?;
@@ -2618,13 +2633,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(BasicTypeEnum::StructType(option_sty), some_slot, 1, "p")
             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
-        // Product tuples / by-value structs: store payload as-is when field 1
-        // is a matching StructType. Nested Option/Result/List still heap-pack
-        // into i64 slots.
+        // Product tuples / named records: store payload as-is when field 1 is
+        // a matching StructType. Nested Option/Result/List still heap-pack into
+        // i64 slots (Display/to_json expect ptrtoint handles for those).
         let pay_fields = option_sty.get_field_types();
-        let payload_is_struct = pay_fields
-            .get(1)
-            .is_some_and(|t| matches!(t, BasicTypeEnum::StructType(_)));
+        let payload_is_struct = !force_heap
+            && pay_fields
+                .get(1)
+                .is_some_and(|t| matches!(t, BasicTypeEnum::StructType(_)));
         match (&inner_val, payload_is_struct) {
             (BasicValueEnum::StructValue(sv), true) => {
                 // Coerce to the Option payload LLVM type if needed.
