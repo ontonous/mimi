@@ -5125,6 +5125,178 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_pointer_value())
     }
 
+    /// List of Option of Set of product — JSON array of option set product.
+    pub(in crate::codegen) fn emit_list_option_set_product_to_json(
+        &self,
+        list_alloca: inkwell::values::PointerValue<'ctx>,
+        arity: i64,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        // Reuse list option map-style loop: each element is Option {i1, i64 set handle}.
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let list_ty = self.list_struct_type();
+        let len = self.load_list_len(list_alloca)?;
+        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_opt_set_buf")?;
+        let open = self
+            .builder
+            .build_global_string_ptr("[", "list_opt_set_open")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+        let strcat_fn = self.get_runtime_fn("strcat")?;
+        self.build_call(
+            strcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
+            ],
+            "list_opt_set_open_cpy",
+        )?;
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
+        let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_opt_set_i")?;
+        self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
+        let loop_bb = self.context.append_basic_block(parent, "list_opt_set_loop");
+        let body_bb = self.context.append_basic_block(parent, "list_opt_set_body");
+        let done_bb = self.context.append_basic_block(parent, "list_opt_set_done");
+        self.builder
+            .build_unconditional_branch(loop_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(loop_bb);
+        let idx = self
+            .builder
+            .build_load(i64_ty, idx_alloca, "list_opt_set_idx")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_int_value();
+        let cont = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, idx, len, "list_opt_set_cont")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder
+            .build_conditional_branch(cont, body_bb, done_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(body_bb);
+        let zero = i64_ty.const_int(0, false);
+        let need_comma = self
+            .builder
+            .build_int_compare(IntPredicate::UGT, idx, zero, "list_opt_set_comma")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let comma_bb = self.context.append_basic_block(parent, "list_opt_set_comma_bb");
+        let elem_bb = self.context.append_basic_block(parent, "list_opt_set_elem");
+        self.builder
+            .build_conditional_branch(need_comma, comma_bb, elem_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(comma_bb);
+        let comma = self
+            .builder
+            .build_global_string_ptr(",", "list_opt_set_comma_s")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
+            ],
+            "list_opt_set_strcat_comma",
+        )?;
+        self.builder
+            .build_unconditional_branch(elem_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(elem_bb);
+        let data_gep = self
+            .gep()
+            .build_struct_gep(list_ty, list_alloca, 1, "list_opt_set_data_gep")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let data_ptr = self
+            .builder
+            .build_load(i8_ptr, data_gep, "list_opt_set_data")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_pointer_value();
+        let elem_slot = unsafe {
+            self.builder
+                .build_gep(i64_ty, data_ptr, &[idx], "list_opt_set_slot")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+        };
+        let handle_i64 = self
+            .builder
+            .build_load(i64_ty, elem_slot, "list_opt_set_h")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_int_value();
+        // Option heap pack {i1, i64}: load disc and payload via inttoptr.
+        let opt_ptr = self
+            .builder
+            .build_int_to_ptr(handle_i64, i8_ptr, "list_opt_set_opt_ptr")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let disc_ptr = opt_ptr;
+        let disc_i8 = self
+            .builder
+            .build_load(self.context.i8_type(), disc_ptr, "list_opt_set_disc")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_int_value();
+        let disc_i64 = self
+            .builder
+            .build_int_z_extend(disc_i8, i64_ty, "list_opt_set_disc_i64")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let pay_slot = unsafe {
+            self.builder
+                .build_gep(i64_ty, opt_ptr, &[i64_ty.const_int(1, false)], "list_opt_set_pay")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+        };
+        let set_h = self
+            .builder
+            .build_load(i64_ty, pay_slot, "list_opt_set_pay_h")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_int_value();
+        // mode = 10 + arity for product set.
+        let mode = i64_ty.const_int((10 + arity) as u64, false);
+        let opt_fn = self.get_runtime_fn("mimi_option_set_to_json")?;
+        let piece = self
+            .build_call(
+                opt_fn,
+                &[
+                    BasicMetadataValueEnum::IntValue(disc_i64),
+                    BasicMetadataValueEnum::IntValue(set_h),
+                    BasicMetadataValueEnum::IntValue(mode),
+                ],
+                "list_opt_set_piece",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("option set to_json void")?
+            .into_pointer_value();
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(piece),
+            ],
+            "list_opt_set_strcat",
+        )?;
+        let next = self
+            .builder
+            .build_int_add(idx, i64_ty.const_int(1, false), "list_opt_set_next")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_store(idx_alloca, next)?;
+        self.builder
+            .build_unconditional_branch(loop_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(done_bb);
+        let close = self
+            .builder
+            .build_global_string_ptr("]", "list_opt_set_close")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
+            ],
+            "list_opt_set_close_cat",
+        )?;
+        Ok(buf)
+    }
+
     /// Map of Set of product-tuple values.
     pub(in crate::codegen) fn emit_map_set_product_to_json(
         &self,
