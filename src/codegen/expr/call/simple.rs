@@ -1239,7 +1239,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 pay_fields[1],
                                 BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
                             );
-                        if !pay_is_string {
+                        // Nested Option/Result start with i1 disc — never product-tuple.
+                        let pay_is_nested_wrapper = !pay_fields.is_empty()
+                            && matches!(
+                                pay_fields[0],
+                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
+                            );
+                        // List layout {i64,ptr} is not a product tuple.
+                        let pay_is_list = pay_fields.len() == 2
+                            && matches!(
+                                pay_fields[0],
+                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                            )
+                            && matches!(pay_fields[1], BasicTypeEnum::PointerType(_));
+                        if !pay_is_string && !pay_is_nested_wrapper && !pay_is_list {
                             let mut inner_name = obj_type
                                 .strip_prefix("Option<")
                                 .and_then(|s| s.strip_suffix('>'))
@@ -1583,6 +1596,403 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.register_heap_alloc(raw);
                                 return self.wrap_c_string(raw);
                             }
+                        }
+                    }
+                    // Nested Option / List by-value as StructValue payload.
+                    if let BasicValueEnum::StructValue(pay_sv) = payload_bv {
+                        let pay_fields = pay_sv.get_type().get_field_types();
+                        // Option of List by-value: {i64,ptr} list struct.
+                        let pay_is_list = pay_fields.len() == 2
+                            && matches!(
+                                pay_fields[0],
+                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                            )
+                            && matches!(pay_fields[1], BasicTypeEnum::PointerType(_));
+                        if pay_is_list
+                            && (obj_type.contains("List") || obj_type.contains("list"))
+                        {
+                            let list_ty = self.list_struct_type();
+                            let list_alloca = self.build_alloca(
+                                BasicTypeEnum::StructType(list_ty),
+                                "opt_list_bv",
+                            )?;
+                            self.build_store(list_alloca, pay_sv)?;
+                            // Reuse Option of List path: build {"Some":[list_json]} / None.
+                            let disc_is_some = self
+                                .builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::NE,
+                                    disc_i64,
+                                    self.context.i64_type().const_int(0, false),
+                                    "opt_list_bv_some",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let function = self.current_function().ok_or("no function")?;
+                            let some_bb = self
+                                .context
+                                .append_basic_block(function, "toj_opt_list_bv_some");
+                            let none_bb = self
+                                .context
+                                .append_basic_block(function, "toj_opt_list_bv_none");
+                            let merge_bb = self
+                                .context
+                                .append_basic_block(function, "toj_opt_list_bv_merge");
+                            let i8_ptr_ty =
+                                self.context.ptr_type(inkwell::AddressSpace::default());
+                            let out_alloca = self.build_alloca(
+                                BasicTypeEnum::PointerType(i8_ptr_ty),
+                                "toj_opt_list_bv_out",
+                            )?;
+                            self.builder
+                                .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(some_bb);
+                            // Dispatch list to_json helper by element type.
+                            let list_json = if obj_type.contains("Map<") {
+                                let mode = if obj_type.contains("Map<string, string>") {
+                                    1i64
+                                } else if obj_type.contains("Map<string, bool>") {
+                                    2
+                                } else if obj_type.contains("Map<string, f64>")
+                                    || obj_type.contains("Map<string, f32>")
+                                {
+                                    3
+                                } else {
+                                    0
+                                };
+                                let fn_ty = i8_ptr_ty.fn_type(
+                                    &[
+                                        BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                                        BasicMetadataTypeEnum::IntType(
+                                            self.context.i64_type(),
+                                        ),
+                                    ],
+                                    false,
+                                );
+                                let callee = self
+                                    .module
+                                    .get_function("mimi_list_map_to_json")
+                                    .unwrap_or_else(|| {
+                                        self.module.add_function(
+                                            "mimi_list_map_to_json",
+                                            fn_ty,
+                                            Some(inkwell::module::Linkage::External),
+                                        )
+                                    });
+                                // Prefer typed string helper name if present.
+                                let map_fn = if obj_type.contains("Map<string, string>") {
+                                    "mimi_list_map_to_json_string"
+                                } else {
+                                    "mimi_list_map_to_json"
+                                };
+                                let map_callee =
+                                    self.module.get_function(map_fn).unwrap_or(callee);
+                                let raw = if map_fn == "mimi_list_map_to_json_string" {
+                                    self.build_call(
+                                        map_callee,
+                                        &[BasicMetadataValueEnum::PointerValue(list_alloca)],
+                                        "opt_list_map_json",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("list map to_json void")?
+                                    .into_pointer_value()
+                                } else {
+                                    self.build_call(
+                                        map_callee,
+                                        &[
+                                            BasicMetadataValueEnum::PointerValue(list_alloca),
+                                            BasicMetadataValueEnum::IntValue(
+                                                self.context
+                                                    .i64_type()
+                                                    .const_int(mode as u64, false),
+                                            ),
+                                        ],
+                                        "opt_list_map_json",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("list map to_json void")?
+                                    .into_pointer_value()
+                                };
+                                raw
+                            } else {
+                                let rt_fn = if obj_type.contains("List<string>") {
+                                    "mimi_list_str_to_json"
+                                } else if obj_type.contains("f64") || obj_type.contains("f32") {
+                                    "mimi_list_f64_to_json"
+                                } else if obj_type.contains("bool") {
+                                    "mimi_list_bool_to_json"
+                                } else {
+                                    "mimi_list_i64_to_json"
+                                };
+                                let fn_ty = i8_ptr_ty.fn_type(
+                                    &[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)],
+                                    false,
+                                );
+                                let callee = self.module.get_function(rt_fn).unwrap_or_else(|| {
+                                    self.module.add_function(
+                                        rt_fn,
+                                        fn_ty,
+                                        Some(inkwell::module::Linkage::External),
+                                    )
+                                });
+                                self.build_call(
+                                    callee,
+                                    &[BasicMetadataValueEnum::PointerValue(list_alloca)],
+                                    "opt_list_json",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("list to_json void")?
+                                .into_pointer_value()
+                            };
+                            let buf = self.malloc_or_abort(
+                                self.context.i64_type().const_int(1024, false),
+                                "opt_list_bv_buf",
+                            )?;
+                            let fmt = self
+                                .builder
+                                .build_global_string_ptr(
+                                    "{\"Some\":[%s]}",
+                                    "opt_list_bv_fmt",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                            self.build_call(
+                                snprintf_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(buf),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(1024, false),
+                                    ),
+                                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                    BasicMetadataValueEnum::PointerValue(list_json),
+                                ],
+                                "opt_list_bv_sn",
+                            )?;
+                            self.build_store(out_alloca, buf)?;
+                            self.builder
+                                .build_unconditional_branch(merge_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(none_bb);
+                            let none_heap = self.malloc_or_abort(
+                                self.context.i64_type().const_int(8, false),
+                                "opt_list_bv_none",
+                            )?;
+                            let none_lit = self
+                                .builder
+                                .build_global_string_ptr("\"None\"", "opt_list_bv_none_lit")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                            self.build_call(
+                                strcpy_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(none_heap),
+                                    BasicMetadataValueEnum::PointerValue(
+                                        none_lit.as_pointer_value(),
+                                    ),
+                                ],
+                                "opt_list_bv_ncpy",
+                            )?;
+                            self.build_store(out_alloca, none_heap)?;
+                            self.builder
+                                .build_unconditional_branch(merge_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(merge_bb);
+                            let raw = self
+                                .build_load(
+                                    BasicTypeEnum::PointerType(i8_ptr_ty),
+                                    out_alloca,
+                                    "opt_list_bv_result",
+                                )?
+                                .into_pointer_value();
+                            self.register_heap_alloc(raw);
+                            return self.wrap_c_string(raw);
+                        }
+                        if !pay_fields.is_empty()
+                            && matches!(
+                                pay_fields[0],
+                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
+                            )
+                            && obj_type
+                                .strip_prefix("Option<")
+                                .and_then(|s| s.strip_suffix('>'))
+                                .is_some_and(|inner| inner.starts_with("Option"))
+                        {
+                            // Heap-pack nested Option and reuse nested path via i64.
+                            let sty = pay_sv.get_type();
+                            let size =
+                                self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                            let heap = self.malloc_or_abort(
+                                self.context.i64_type().const_int(size, false),
+                                "opt_nest_bv_heap",
+                            )?;
+                            let i8_ptr =
+                                self.context.ptr_type(inkwell::AddressSpace::default());
+                            let typed = self
+                                .build_bit_cast(
+                                    heap.into(),
+                                    BasicTypeEnum::PointerType(i8_ptr),
+                                    "opt_nest_bv_ptr",
+                                )?
+                                .into_pointer_value();
+                            self.build_store(typed, pay_sv)?;
+                            let payload_i64 = self
+                                .builder
+                                .build_ptr_to_int(
+                                    typed,
+                                    self.context.i64_type(),
+                                    "opt_nest_bv_i64",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            // Fall through into nested Option rebuild using payload_i64.
+                            let disc_is_some = self
+                                .builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::NE,
+                                    disc_i64,
+                                    self.context.i64_type().const_int(0, false),
+                                    "opt_nest_bv_some",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let function = self.current_function().ok_or("no function")?;
+                            let some_bb = self
+                                .context
+                                .append_basic_block(function, "toj_opt_nest_bv_some");
+                            let none_bb = self
+                                .context
+                                .append_basic_block(function, "toj_opt_nest_bv_none");
+                            let merge_bb = self
+                                .context
+                                .append_basic_block(function, "toj_opt_nest_bv_merge");
+                            let out_alloca = self.build_alloca(
+                                BasicTypeEnum::PointerType(i8_ptr),
+                                "toj_opt_nest_bv_out",
+                            )?;
+                            self.builder
+                                .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(some_bb);
+                            let nested_ptr = self
+                                .builder
+                                .build_int_to_ptr(payload_i64, i8_ptr, "opt_nest_bv_ld_ptr")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let opt_sty = self.context.struct_type(
+                                &[
+                                    self.context.bool_type().into(),
+                                    self.context.i64_type().into(),
+                                ],
+                                false,
+                            );
+                            let nested_sv = self
+                                .builder
+                                .build_load(
+                                    BasicTypeEnum::StructType(opt_sty),
+                                    nested_ptr,
+                                    "opt_nest_bv_ld",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                .into_struct_value();
+                            let n_disc = self
+                                .build_extract_value(nested_sv.into(), 0, "n_disc_bv")?
+                                .into_int_value();
+                            let n_disc_i64 = self
+                                .builder
+                                .build_int_z_extend(
+                                    n_disc,
+                                    self.context.i64_type(),
+                                    "n_disc_bv_i64",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let n_pay = self
+                                .build_extract_value(nested_sv.into(), 1, "n_pay_bv")?
+                                .into_int_value();
+                            let n_pay_i64 = if n_pay.get_type().get_bit_width() < 64 {
+                                self.builder
+                                    .build_int_s_extend(
+                                        n_pay,
+                                        self.context.i64_type(),
+                                        "n_pay_bv_i64",
+                                    )
+                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                            } else {
+                                n_pay
+                            };
+                            let opt_fn = self.get_runtime_fn("mimi_option_i64_to_json")?;
+                            let nested_json = self
+                                .build_call(
+                                    opt_fn,
+                                    &[
+                                        BasicMetadataValueEnum::IntValue(n_disc_i64),
+                                        BasicMetadataValueEnum::IntValue(n_pay_i64),
+                                    ],
+                                    "opt_nest_bv_json",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("option to_json void")?
+                                .into_pointer_value();
+                            let buf = self.malloc_or_abort(
+                                self.context.i64_type().const_int(512, false),
+                                "opt_nest_bv_buf",
+                            )?;
+                            let fmt = self
+                                .builder
+                                .build_global_string_ptr(
+                                    "{\"Some\":[%s]}",
+                                    "opt_nest_bv_fmt",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                            self.build_call(
+                                snprintf_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(buf),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(512, false),
+                                    ),
+                                    BasicMetadataValueEnum::PointerValue(
+                                        fmt.as_pointer_value(),
+                                    ),
+                                    BasicMetadataValueEnum::PointerValue(nested_json),
+                                ],
+                                "opt_nest_bv_sn",
+                            )?;
+                            self.build_store(out_alloca, buf)?;
+                            self.builder
+                                .build_unconditional_branch(merge_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(none_bb);
+                            let none_heap = self.malloc_or_abort(
+                                self.context.i64_type().const_int(8, false),
+                                "opt_nest_bv_none",
+                            )?;
+                            let none_lit = self
+                                .builder
+                                .build_global_string_ptr("\"None\"", "opt_nest_bv_none_lit")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                            self.build_call(
+                                strcpy_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(none_heap),
+                                    BasicMetadataValueEnum::PointerValue(
+                                        none_lit.as_pointer_value(),
+                                    ),
+                                ],
+                                "opt_nest_bv_ncpy",
+                            )?;
+                            self.build_store(out_alloca, none_heap)?;
+                            self.builder
+                                .build_unconditional_branch(merge_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(merge_bb);
+                            let raw = self
+                                .build_load(
+                                    BasicTypeEnum::PointerType(i8_ptr),
+                                    out_alloca,
+                                    "opt_nest_bv_result",
+                                )?
+                                .into_pointer_value();
+                            self.register_heap_alloc(raw);
+                            return self.wrap_c_string(raw);
                         }
                     }
                     let payload_i64 = match payload_bv {
@@ -2738,7 +3148,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 ok_fields[1],
                                 BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
                             );
-                        if !ok_is_string && !ok_fields.is_empty() {
+                        // Nested Option/Result Ok payloads start with i1 — not product tuples.
+                        let ok_is_nested_wrapper = !ok_fields.is_empty()
+                            && matches!(
+                                ok_fields[0],
+                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
+                            );
+                        let ok_is_list = ok_fields.len() == 2
+                            && matches!(
+                                ok_fields[0],
+                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                            )
+                            && matches!(ok_fields[1], BasicTypeEnum::PointerType(_));
+                        if !ok_is_string
+                            && !ok_fields.is_empty()
+                            && !ok_is_nested_wrapper
+                            && !ok_is_list
+                        {
                             let mut ok_inner = obj_type
                                 .strip_prefix("Result<")
                                 .and_then(|s| s.split(',').next())
