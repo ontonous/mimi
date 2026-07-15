@@ -1059,15 +1059,25 @@ impl<'a> Checker<'a> {
                                 Expr::Literal(_) => true,
                                 // List literal → realloc (allocates new backing store)
                                 Expr::List(_) => true,
+                                // Set / map literals also allocate fresh containers.
+                                Expr::SetLiteral(_) | Expr::MapLiteral { .. } => true,
                                 // M8-fix: Record construction is allowed for mutate
                                 // params — the common pattern `param = Record { ...fields,
-                                // modified_field: new_val }` is a legitimate read-modify-write
-                                // that reads existing fields and constructs a new record.
-                                // Previously this was flagged as wholesale realloc (E0417).
+                                // modified_field: new_val }` is a legitimate read-modify-write.
                                 Expr::Record { .. } => false,
                                 // Assignment to an ident that isn't self → replacement
                                 Expr::Ident(rhs) if rhs != name => true,
-                                // Otherwise (math/binop/field/call) → likely read-modify-write, allow
+                                // T-H2: bare function calls allocate/return a fresh value
+                                // (e.g. `xs = clone_list()`); only method calls on the
+                                // param itself (`xs = xs.sorted()`) are read-modify-write.
+                                Expr::Call(callee, _) => match callee.as_ref() {
+                                    Expr::Field(obj, _) => !matches!(
+                                        obj.as_ref(),
+                                        Expr::Ident(n) if n == name
+                                    ),
+                                    _ => true,
+                                },
+                                // Otherwise (math/binop/field) → likely read-modify-write, allow
                                 _ => false,
                             };
                             if is_wholesale_replace {

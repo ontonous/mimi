@@ -1838,3 +1838,24 @@ func main() -> i32 {
     let r = crate::parser::Parser::new(tokens.unwrap()).parse_file();
     assert!(r.is_err(), "expected trailing-token error, got {:?}", r);
 }
+
+
+#[test]
+fn mutate_param_call_realloc_rejected() {
+    // T-H2: assigning a fresh call result to mutate param is realloc.
+    let src = r#"
+func empty() -> List<i32> { [] }
+func clear(xs: mutate List<i32>) {
+    xs = empty()
+}
+func main() -> i32 { 0 }
+"#;
+    let r = check_source(src);
+    assert!(r.is_err(), "expected mutate realloc error");
+    let msgs: String = r.unwrap_err().iter().map(|d| d.message.clone()).collect::<Vec<_>>().join(";");
+    assert!(
+        msgs.contains("mutate") || msgs.contains("realloc") || msgs.contains("E0417"),
+        "unexpected: {}",
+        msgs
+    );
+}
