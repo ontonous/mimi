@@ -3287,12 +3287,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     other => Ok(other),
                 }
             }
-            // Nested Result (e.g. Option<Result<i32,i32>>): bare JSON → Ok(T).
+            // Nested Result (e.g. Option<Result<…>>): tagged Ok/Err or bare.
             crate::ast::Type::Name(n, args) if n == "Result" && !args.is_empty() => {
-                let ok_val = self.compile_from_json_scalar_ok(&args[0], raw_val)?;
-                self.compile_constructor("Ok", vec![ok_val])
+                self.compile_from_json_result_value(&args[0], args.get(1), raw_val)
             }
-            // Product tuple (e.g. Option<(i32,i32)>, Result<(i32,string),_>).
+            crate::ast::Type::Result(ok, err) => {
+                self.compile_from_json_result_value(ok, Some(err), raw_val)
+            }
+            // Product tuple (e.g. Option<(i32,i32)>).
             crate::ast::Type::Tuple(elems) if !elems.is_empty() => {
                 self.compile_from_json_turbofish_with_ptr(
                     &[crate::ast::Type::Tuple(elems.clone())],
