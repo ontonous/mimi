@@ -4127,7 +4127,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .and_then(|s| s.strip_prefix("List<"))
                             .and_then(|s| s.strip_suffix('>'))
                         {
-                            if inner.starts_with('(') || self.is_product_tuple_alias(inner) {
+                            if inner.starts_with("List<") {
+                                let mid = Self::strip_first_type_arg(
+                                    &format!("List<{}>", inner),
+                                    "List",
+                                )
+                                .unwrap_or_else(|| inner.to_string());
+                                let mid_elem = Self::strip_first_type_arg(&mid, "List")
+                                    .unwrap_or_else(|| mid.clone());
+                                if mid_elem.starts_with('(')
+                                    || self.is_product_tuple_alias(&mid_elem)
+                                {
+                                    let elem = if self.is_product_tuple_alias(&mid_elem) {
+                                        self.resolve_alias_type_name(&mid_elem)
+                                    } else {
+                                        mid_elem
+                                    };
+                                    self.emit_list_list_product_tuple_to_string(loaded, &elem)?
+                                } else {
+                                    self.emit_list_i32_to_string(loaded)?
+                                }
+                            } else if inner.starts_with('(') || self.is_product_tuple_alias(inner)
+                            {
                                 let elem = if self.is_product_tuple_alias(inner) {
                                     self.resolve_alias_type_name(inner)
                                 } else {
@@ -4191,7 +4212,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .and_then(|s| s.strip_prefix("List<"))
                         .and_then(|s| s.strip_suffix('>'))
                     {
-                        if inner.starts_with('(') || self.is_product_tuple_alias(inner) {
+                        if inner.starts_with("List<") {
+                            let mid_elem = Self::strip_first_type_arg(
+                                &format!("List<{}>", inner),
+                                "List",
+                            )
+                            .and_then(|mid| Self::strip_first_type_arg(&mid, "List"))
+                            .unwrap_or_else(|| inner.to_string());
+                            if mid_elem.starts_with('(')
+                                || self.is_product_tuple_alias(&mid_elem)
+                            {
+                                let elem = if self.is_product_tuple_alias(&mid_elem) {
+                                    self.resolve_alias_type_name(&mid_elem)
+                                } else {
+                                    mid_elem
+                                };
+                                self.emit_list_list_product_tuple_to_string(loaded, &elem)?
+                            } else {
+                                self.emit_list_i32_to_string(loaded)?
+                            }
+                        } else if inner.starts_with('(') || self.is_product_tuple_alias(inner)
+                        {
                             let elem = if self.is_product_tuple_alias(inner) {
                                 self.resolve_alias_type_name(inner)
                             } else {
@@ -5126,7 +5167,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Format `List<List<(…)>>` by reconstructing each inner list of product tuples.
-    fn emit_list_list_product_tuple_to_string(
+    pub(in crate::codegen) fn emit_list_list_product_tuple_to_string(
         &self,
         sv: inkwell::values::StructValue<'ctx>,
         elem_type_str: &str,

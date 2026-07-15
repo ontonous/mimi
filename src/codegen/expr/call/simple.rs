@@ -2271,19 +2271,47 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                         // Product-tuple list elements need codegen JSON helpers.
-                        let list_elem = obj_type
+                        let list_inner = obj_type
                             .strip_prefix("Option<")
                             .and_then(|s| s.strip_suffix('>'))
                             .and_then(|s| s.strip_prefix("List<"))
                             .and_then(|s| s.strip_suffix('>'))
                             .unwrap_or("");
-                        let list_json = if list_elem.starts_with('(')
-                            || self.is_product_tuple_alias(list_elem)
-                        {
-                            let elem = if self.is_product_tuple_alias(list_elem) {
-                                self.resolve_alias_type_name(list_elem)
+                        let list_json = if list_inner.starts_with("List<") {
+                            let mid_elem = Self::strip_first_type_arg(
+                                &format!("List<{}>", list_inner),
+                                "List",
+                            )
+                            .and_then(|mid| Self::strip_first_type_arg(&mid, "List"))
+                            .unwrap_or_else(|| list_inner.to_string());
+                            if mid_elem.starts_with('(')
+                                || self.is_product_tuple_alias(&mid_elem)
+                            {
+                                let elem = if self.is_product_tuple_alias(&mid_elem) {
+                                    self.resolve_alias_type_name(&mid_elem)
+                                } else {
+                                    mid_elem
+                                };
+                                self.emit_list_list_product_tuple_to_json(list_ptr, &elem)?
                             } else {
-                                list_elem.to_string()
+                                // fall through to scalar helpers below
+                                let list_fn = self.get_runtime_fn("mimi_list_i64_to_json")?;
+                                self.build_call(
+                                    list_fn,
+                                    &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                                    "opt_list_json",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("list to_json void")?
+                                .into_pointer_value()
+                            }
+                        } else if list_inner.starts_with('(')
+                            || self.is_product_tuple_alias(list_inner)
+                        {
+                            let elem = if self.is_product_tuple_alias(list_inner) {
+                                self.resolve_alias_type_name(list_inner)
+                            } else {
+                                list_inner.to_string()
                             };
                             self.emit_list_product_tuple_to_json(list_ptr, &elem)?
                         } else {
