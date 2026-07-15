@@ -110,6 +110,12 @@ impl<'a> Lexer<'a> {
                 continue;
             }
 
+            // LX-H2: bare `#` (not `#[` attribute) is a line comment.
+            if c == '#' && self.chars.clone().next() != Some('[') {
+                self.skip_line_comment();
+                continue;
+            }
+
             self.at_line_start = false;
             let kind = self.scan_token(c, line, col)?;
             tokens.push(Token { kind, line, col });

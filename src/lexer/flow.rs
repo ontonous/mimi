@@ -858,6 +858,16 @@ impl<'a> LexerState<'a> {
                     }
                 }
 
+                // LX-H2: bare `#` (not `#[` attribute / shebang) is a line comment
+                // so Python-style `# comment` does not emit a stray Hash token.
+                if c == '#' {
+                    let next = pos.chars.clone().next();
+                    if next != Some('[') {
+                        let pos = pos.skip_line_comment();
+                        return state_continue!(LineStart {}, pos, mode, true, acc);
+                    }
+                }
+
                 let (pos, kind) = lex_scan_token(pos, c, line, col)?;
                 acc.tokens.push(Token { kind, line, col });
                 state_continue!(LineStart {}, pos, mode, false, acc)
