@@ -1193,3 +1193,23 @@ func main() -> i32 {
 "#;
     assert_eq!(run_source(src), crate::interp::Value::Int(42));
 }
+
+
+#[test]
+fn for_loop_return_propagates() {
+    // I-H1 / TC-H8: return inside for must exit the function.
+    let src = r#"
+func first_pos(xs: List<i32>) -> i32 {
+    for x in xs {
+        if x > 0 {
+            return x
+        }
+    }
+    -1
+}
+func main() -> i32 {
+    first_pos([-2, -1, 7, 9])
+}
+"#;
+    assert_eq!(run_source(src), crate::interp::Value::Int(7));
+}
