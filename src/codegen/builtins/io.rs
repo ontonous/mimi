@@ -1001,6 +1001,72 @@ impl<'ctx> CodeGenerator<'ctx> {
                 };
                 // Display style for println of List<Map product>.
                 self.emit_map_product_to_json(handle, &elem, 1)?
+            } else if let Some(opt_elem) = val_ty
+                .strip_prefix("Option<")
+                .and_then(|s| s.strip_suffix('>'))
+            {
+                if opt_elem.starts_with('(') || self.is_product_tuple_alias(opt_elem) {
+                    let elem = if self.is_product_tuple_alias(opt_elem) {
+                        self.resolve_alias_type_name(opt_elem)
+                    } else {
+                        opt_elem.to_string()
+                    };
+                    self.emit_map_option_product_to_json(handle, &elem, 1)?
+                } else {
+                    let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                    self.build_call(
+                        map_fn,
+                        &[BasicMetadataValueEnum::IntValue(handle)],
+                        "list_map_json",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("map to_json void")?
+                    .into_pointer_value()
+                }
+            } else if val_ty.starts_with("Result<") {
+                if let Some(ok_ty) = val_ty.strip_prefix("Result<").and_then(|s| {
+                    let mut depth = 0i32;
+                    for (i, ch) in s.char_indices() {
+                        match ch {
+                            '<' | '(' => depth += 1,
+                            '>' | ')' => depth -= 1,
+                            ',' if depth == 0 => {
+                                return Some(s[..i].trim());
+                            }
+                            _ => {}
+                        }
+                    }
+                    None
+                }) {
+                    if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
+                        let elem = if self.is_product_tuple_alias(ok_ty) {
+                            self.resolve_alias_type_name(ok_ty)
+                        } else {
+                            ok_ty.to_string()
+                        };
+                        self.emit_map_result_product_to_json(handle, &elem, 1)?
+                    } else {
+                        let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                        self.build_call(
+                            map_fn,
+                            &[BasicMetadataValueEnum::IntValue(handle)],
+                            "list_map_json",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("map to_json void")?
+                        .into_pointer_value()
+                    }
+                } else {
+                    let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
+                    self.build_call(
+                        map_fn,
+                        &[BasicMetadataValueEnum::IntValue(handle)],
+                        "list_map_json",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("map to_json void")?
+                    .into_pointer_value()
+                }
             } else if let Some(set_elem) = val_ty
                 .strip_prefix("Set<")
                 .and_then(|s| s.strip_suffix('>'))
@@ -3703,6 +3769,44 @@ impl<'ctx> CodeGenerator<'ctx> {
             };
             return 10 + product_arity(&elem);
         }
+        if let Some(opt_elem) = val_ty
+            .strip_prefix("Option<")
+            .and_then(|s| s.strip_suffix('>'))
+        {
+            if opt_elem.starts_with('(') || self.is_product_tuple_alias(opt_elem) {
+                let elem = if self.is_product_tuple_alias(opt_elem) {
+                    self.resolve_alias_type_name(opt_elem)
+                } else {
+                    opt_elem.to_string()
+                };
+                return 50 + product_arity(&elem);
+            }
+        }
+        if val_ty.starts_with("Result<") {
+            if let Some(ok_ty) = val_ty.strip_prefix("Result<").and_then(|s| {
+                let mut depth = 0i32;
+                for (i, ch) in s.char_indices() {
+                    match ch {
+                        '<' | '(' => depth += 1,
+                        '>' | ')' => depth -= 1,
+                        ',' if depth == 0 => {
+                            return Some(s[..i].trim());
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }) {
+                if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
+                    let elem = if self.is_product_tuple_alias(ok_ty) {
+                        self.resolve_alias_type_name(ok_ty)
+                    } else {
+                        ok_ty.to_string()
+                    };
+                    return 60 + product_arity(&elem);
+                }
+            }
+        }
         if let Some(list_elem) = val_ty
             .strip_prefix("List<")
             .and_then(|s| s.strip_suffix('>'))
@@ -5725,27 +5829,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_int_value();
         let mode = self.map_nested_product_mode(map_type);
-        // Reuse option-map free path: mode selects nested product encoding;
-        // wrap as bare map JSON via result map disc=1 err=0.
-        let res_fn = self.get_runtime_fn("mimi_result_map_to_json")?;
-        let map_str = self
-            .build_call(
-                res_fn,
-                &[
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(1, false)),
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(0, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(mode as u64, false)),
-                ],
-                "list_map_nest_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map nest to_json void")?
-            .into_pointer_value();
-        // result map returns {"Ok":[...]} — strip wrapper by calling nested map helpers directly.
-        // Prefer direct nested product helpers when mode encodes them.
+        // Direct nested product helpers (mode 10+); never route 50+/60+ through
+        // mimi_result_map_to_json (only understands 0-3 and 10-40).
         let map_str = if mode >= 10 {
-            let (fn_name, arity) = if mode >= 40 {
+            let (fn_name, arity) = if mode >= 60 {
+                ("mimi_map_to_json_result_product_i64", mode - 60)
+            } else if mode >= 50 {
+                ("mimi_map_to_json_option_product_i64", mode - 50)
+            } else if mode >= 40 {
                 ("mimi_map_to_json_map_product_i64", mode - 40)
             } else if mode >= 30 {
                 ("mimi_map_to_json_set_product_i64", mode - 30)
@@ -5768,7 +5859,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or("map nest direct void")?
             .into_pointer_value()
         } else {
-            map_str
+            let map_fn = self.get_runtime_fn("mimi_map_to_json_i64")?;
+            self.build_call(
+                map_fn,
+                &[BasicMetadataValueEnum::IntValue(handle)],
+                "list_map_nest_scalar",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("map nest scalar void")?
+            .into_pointer_value()
         };
         self.build_call(
             strcat_fn,
