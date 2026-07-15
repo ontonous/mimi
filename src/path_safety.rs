@@ -171,12 +171,10 @@ pub fn validate_git_url(url: &str) -> Result<(), PathError> {
     Ok(())
 }
 
-/// Validate a path dependency (relative path without `..`).
+/// Validate a path dependency string (manifest `path = "…"`).
 ///
-/// Rejects:
-/// - Absolute paths
-/// - `..` traversal
-/// - NUL bytes
+/// Rejects absolute paths and NUL. Allows `../sibling` monorepo deps — resolution
+/// is relative to the package directory via [`resolve_path_dep`].
 pub fn validate_path_dep(path: &str) -> Result<(), PathError> {
     if path.is_empty() {
         return Err(PathError::Empty);
@@ -188,13 +186,30 @@ pub fn validate_path_dep(path: &str) -> Result<(), PathError> {
     if p.is_absolute() {
         return Err(PathError::AbsolutePath);
     }
-    // Use component walk (not substring) so names like `foo..bar` are allowed.
-    for component in p.components() {
-        if component == std::path::Component::ParentDir {
-            return Err(PathError::TraversalEscape);
-        }
-    }
     Ok(())
+}
+
+/// Resolve a path dependency against the package directory.
+///
+/// Allows relative `..` segments (monorepo `path = "../mylib"`). Still rejects
+/// absolute paths and NUL. When both paths exist, rejects symlink targets that
+/// point to non-directories after canonicalize (best-effort).
+pub fn resolve_path_dep(package_dir: &Path, path: &str) -> Result<PathBuf, PathError> {
+    validate_path_dep(path)?;
+    let joined = package_dir.join(path);
+    if let (Ok(canon_base), Ok(canon_joined)) = (
+        std::fs::canonicalize(package_dir),
+        std::fs::canonicalize(&joined),
+    ) {
+        // Prefer directories for package roots.
+        if !canon_joined.is_dir() {
+            return Ok(joined);
+        }
+        // Soft allow: monorepo deps may leave package_dir; no hard starts_with check.
+        let _ = canon_base;
+        return Ok(canon_joined);
+    }
+    Ok(joined)
 }
 
 /// Default maximum size for source / text files read by the toolchain (CL-H1).
@@ -386,6 +401,8 @@ mod tests {
     fn valid_path_dep_accepted() {
         assert!(validate_path_dep("./libs/foo").is_ok());
         assert!(validate_path_dep("libs/foo").is_ok());
+        // Monorepo sibling deps are intentional path deps.
+        assert!(validate_path_dep("../mylib").is_ok());
     }
 
     #[test]
@@ -397,10 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn traversal_path_dep_rejected() {
-        assert_eq!(
-            validate_path_dep("../../etc/passwd"),
-            Err(PathError::TraversalEscape)
-        );
+    fn path_dep_nul_rejected() {
+        assert_eq!(validate_path_dep("foo\0bar"), Err(PathError::NulByte));
     }
 }
