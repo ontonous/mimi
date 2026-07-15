@@ -1188,6 +1188,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         return self.wrap_c_string(raw);
                                     }
                                 }
+                                if let Some(opt_elem) = ok_ty
+                                    .strip_prefix("Option<")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if opt_elem.starts_with('(')
+                                        || self.is_product_tuple_alias(opt_elem)
+                                    {
+                                        let elem = if self.is_product_tuple_alias(opt_elem)
+                                        {
+                                            self.resolve_alias_type_name(opt_elem)
+                                        } else {
+                                            opt_elem.to_string()
+                                        };
+                                        let raw = self
+                                            .emit_map_result_option_product_to_json(
+                                                handle, &elem, 0,
+                                            )?;
+                                        self.register_heap_alloc(raw);
+                                        return self.wrap_c_string(raw);
+                                    }
+                                }
                             }
                         }
                         if val_ty.starts_with("Map<string, ") {

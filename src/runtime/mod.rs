@@ -4283,6 +4283,407 @@ pub extern "C" fn mimi_map_to_json_result_map_product_i64(
 
 
 
+
+/// Map of Result of Option of product from JSON.
+/// Pack: `{i64 disc, i64[n+1]}` where disc 1=Ok Option-product pack, 0=Err string.
+/// Ok pack reuses option product layout: `{i64 opt_disc, i64[n] fields}`.
+#[no_mangle]
+pub extern "C" fn mimi_map_from_json_result_option_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> MapHandle {
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return mimi_map_new();
+    }
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_map_new();
+    if handle == 0 {
+        return 0;
+    }
+    let n = arity as usize;
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'{' {
+        return handle;
+    }
+    i += 1;
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b'}' {
+            break;
+        }
+        if bytes[i] != b'"' {
+            break;
+        }
+        i += 1;
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'"' {
+            if bytes[i] == b'\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let key = String::from_utf8_lossy(&bytes[start..i]).into_owned();
+        i += 1;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        // Heap Result: {i64 disc, i64 opt_or_err_handle}
+        let pack = unsafe { libc::malloc(16) as *mut i64 };
+        if pack.is_null() {
+            continue;
+        }
+        if bytes[i] != b'{' {
+            // bare product array → Ok(Some(product))
+            if bytes[i] == b'[' {
+                let arr_start = i;
+                let mut depth = 0i32;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'[' => depth += 1,
+                        b']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                i += 1;
+                                break;
+                            }
+                        }
+                        b'"' => {
+                            i += 1;
+                            while i < bytes.len() && bytes[i] != b'"' {
+                                if bytes[i] == b'\\' {
+                                    i += 1;
+                                }
+                                i += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                let arr = String::from_utf8_lossy(&bytes[arr_start..i]).into_owned();
+                let c_arr = alloc_c_string(&format!("[{}]", arr.trim_start_matches('[').trim_end_matches(']')));
+                // Parse as option product: wrap array as single Some element JSON
+                let opt_json = format!("[{}]", &arr);
+                let c_opt = alloc_c_string(&opt_json);
+                // Manual option product pack from bare [1,2]
+                let opt_pack_size = 8 + n * 8;
+                let opt_ptr = unsafe { libc::malloc(opt_pack_size) as *mut i64 };
+                if opt_ptr.is_null() {
+                    unsafe {
+                        libc::free(pack as *mut _);
+                        if !c_opt.is_null() {
+                            libc::free(c_opt as *mut _);
+                        }
+                        if !c_arr.is_null() {
+                            libc::free(c_arr as *mut _);
+                        }
+                    }
+                    break;
+                }
+                // parse fields from arr
+                let ab = arr.as_bytes();
+                let mut j = 0usize;
+                while j < ab.len() && ab[j] != b'[' {
+                    j += 1;
+                }
+                if j < ab.len() && ab[j] == b'[' {
+                    j += 1;
+                }
+                let mut fields = vec![0i64; n];
+                for fi in 0..n {
+                    while j < ab.len() && (ab[j].is_ascii_whitespace() || ab[j] == b',') {
+                        j += 1;
+                    }
+                    let neg = j < ab.len() && ab[j] == b'-';
+                    if neg {
+                        j += 1;
+                    }
+                    let mut v: i64 = 0;
+                    while j < ab.len() && ab[j].is_ascii_digit() {
+                        v = v.saturating_mul(10).saturating_add((ab[j] - b'0') as i64);
+                        j += 1;
+                    }
+                    if neg {
+                        v = -v;
+                    }
+                    fields[fi] = v;
+                }
+                unsafe {
+                    *opt_ptr = 1;
+                    std::ptr::copy_nonoverlapping(fields.as_ptr(), opt_ptr.add(1), n);
+                    *pack = 1;
+                    *pack.add(1) = opt_ptr as i64;
+                }
+                if !c_opt.is_null() {
+                    unsafe {
+                        libc::free(c_opt as *mut _);
+                    }
+                }
+                if !c_arr.is_null() {
+                    unsafe {
+                        libc::free(c_arr as *mut _);
+                    }
+                }
+            } else {
+                unsafe {
+                    libc::free(pack as *mut _);
+                }
+                break;
+            }
+        } else {
+            // tagged object
+            let obj_start = i;
+            let mut depth = 0i32;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    b'"' => {
+                        i += 1;
+                        while i < bytes.len() && bytes[i] != b'"' {
+                            if bytes[i] == b'\\' {
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            let obj = String::from_utf8_lossy(&bytes[obj_start..i]).into_owned();
+            if obj.contains("\"Err\"") {
+                let mut err_s = String::new();
+                if let Some(pos) = obj.find("\"Err\"") {
+                    let rest = &obj[pos + 5..];
+                    if let Some(q1) = rest.find('"') {
+                        let r2 = &rest[q1 + 1..];
+                        if let Some(q2) = r2.find('"') {
+                            err_s = r2[..q2].to_string();
+                        }
+                    }
+                }
+                let c = alloc_c_string(&err_s);
+                unsafe {
+                    *pack = 0;
+                    *pack.add(1) = c as i64;
+                }
+            } else {
+                // Ok: value may be null, product array, or nested
+                let mut val = String::from("null");
+                if let Some(pos) = obj.find("\"Ok\"") {
+                    let rest = &obj[pos + 4..];
+                    let rb = rest.as_bytes();
+                    let mut k = 0usize;
+                    while k < rb.len() && rb[k].is_ascii_whitespace() || (k < rb.len() && rb[k] == b':') {
+                        k += 1;
+                    }
+                    // skip :
+                    while k < rb.len() && (rb[k].is_ascii_whitespace() || rb[k] == b':') {
+                        k += 1;
+                    }
+                    if k < rb.len() {
+                        let start = k;
+                        if rb[k] == b'n' {
+                            val = String::from("null");
+                        } else if rb[k] == b'[' {
+                            let mut depth = 0i32;
+                            while k < rb.len() {
+                                match rb[k] {
+                                    b'[' => depth += 1,
+                                    b']' => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            k += 1;
+                                            break;
+                                        }
+                                    }
+                                    b'"' => {
+                                        k += 1;
+                                        while k < rb.len() && rb[k] != b'"' {
+                                            if rb[k] == b'\\' {
+                                                k += 1;
+                                            }
+                                            k += 1;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                k += 1;
+                            }
+                            val = rest[start..k].to_string();
+                        }
+                    }
+                }
+                let opt_pack_size = 8 + n * 8;
+                let opt_ptr = unsafe { libc::malloc(opt_pack_size) as *mut i64 };
+                if opt_ptr.is_null() {
+                    unsafe {
+                        libc::free(pack as *mut _);
+                    }
+                    break;
+                }
+                if val == "null" || val == "\"None\"" {
+                    unsafe {
+                        *opt_ptr = 0;
+                        for fi in 0..n {
+                            *opt_ptr.add(1 + fi) = 0;
+                        }
+                    }
+                } else {
+                    // parse product array
+                    let ab = val.as_bytes();
+                    let mut j = 0usize;
+                    while j < ab.len() && ab[j] != b'[' {
+                        j += 1;
+                    }
+                    if j < ab.len() && ab[j] == b'[' {
+                        j += 1;
+                    }
+                    // nested [[1,2]]
+                    while j < ab.len() && ab[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < ab.len() && ab[j] == b'[' {
+                        j += 1;
+                    }
+                    let mut fields = vec![0i64; n];
+                    for fi in 0..n {
+                        while j < ab.len() && (ab[j].is_ascii_whitespace() || ab[j] == b',') {
+                            j += 1;
+                        }
+                        let neg = j < ab.len() && ab[j] == b'-';
+                        if neg {
+                            j += 1;
+                        }
+                        let mut v: i64 = 0;
+                        while j < ab.len() && ab[j].is_ascii_digit() {
+                            v = v.saturating_mul(10).saturating_add((ab[j] - b'0') as i64);
+                            j += 1;
+                        }
+                        if neg {
+                            v = -v;
+                        }
+                        fields[fi] = v;
+                    }
+                    unsafe {
+                        *opt_ptr = 1;
+                        std::ptr::copy_nonoverlapping(fields.as_ptr(), opt_ptr.add(1), n);
+                    }
+                }
+                unsafe {
+                    *pack = 1;
+                    *pack.add(1) = opt_ptr as i64;
+                }
+            }
+        }
+        unsafe {
+            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+        }
+    }
+    handle
+}
+
+/// Map of Result of Option of product Display/JSON.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_result_option_product_i64(
+    handle: MapHandle,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if handle == 0 || arity <= 0 || arity > 16 {
+        return alloc_c_string("{}");
+    }
+    let map = unsafe { &*map_from_handle(handle) };
+    if map.inner.len() > 1_000_000 {
+        return alloc_c_string("{...}");
+    }
+    let mut entries: Vec<_> = map.inner.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 2 + 2);
+    parts.push(String::from("{"));
+    let n = arity as usize;
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        parts.push(json_escape_string(k));
+        parts.push(String::from(":"));
+        let vh = **v;
+        if vh == 0 {
+            if display_style != 0 {
+                parts.push(String::from("Err()"));
+            } else {
+                parts.push(String::from("{\"Err\":[\"\"]}"));
+            }
+            continue;
+        }
+        let base = vh as *const i64;
+        let disc = unsafe { *base };
+        if disc == 0 {
+            let err_ptr = unsafe { *base.add(1) } as *const std::ffi::c_char;
+            let err_s = if err_ptr.is_null() {
+                String::new()
+            } else {
+                unsafe { cstr_to_string(err_ptr) }
+            };
+            if display_style != 0 {
+                parts.push(format!("Err({})", err_s));
+            } else {
+                parts.push(format!("{{\"Err\":[{}]}}", json_escape_string(&err_s)));
+            }
+        } else {
+            let opt_h = unsafe { *base.add(1) } as *const i64;
+            if opt_h.is_null() {
+                if display_style != 0 {
+                    parts.push(String::from("Ok(None())"));
+                } else {
+                    parts.push(String::from("{\"Ok\":[\"None\"]}"));
+                }
+            } else {
+                let opt_disc = unsafe { *opt_h };
+                if opt_disc == 0 {
+                    if display_style != 0 {
+                        parts.push(String::from("Ok(None())"));
+                    } else {
+                        parts.push(String::from("{\"Ok\":[\"None\"]}"));
+                    }
+                } else {
+                    let fields: Vec<i64> =
+                        unsafe { std::slice::from_raw_parts(opt_h.add(1), n).to_vec() };
+                    if display_style != 0 {
+                        let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
+                        parts.push(format!("Ok(Some(({})))", body.join(", ")));
+                    } else {
+                        let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
+                        parts.push(format!("{{\"Ok\":[{{\"Some\":[[{}]]}}]}}", body.join(",")));
+                    }
+                }
+            }
+        }
+    }
+    parts.push(String::from("}"));
+    alloc_c_string(&parts.join(""))
+}
+
 /// Map of Result of Set of product from JSON.
 /// Pack: `{i64 disc, i64 set_or_err}` disc 1=Ok set handle, 0=Err string ptr.
 #[no_mangle]
