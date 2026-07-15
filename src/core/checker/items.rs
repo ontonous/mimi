@@ -1293,10 +1293,11 @@ impl<'a> Checker<'a> {
                             .and_then(|s| s.payload.as_ref());
                         let mut scopes: Vec<std::collections::HashMap<String, Type>> =
                             vec![std::collections::HashMap::new()];
-                        // Add self with from-state's payload as a Record type
+                        // CK-H9: self uses the unqualified state name so it
+                        // unifies with bare record literals (Zero { … }) and
+                        // with Type::Name(state) registered under short names.
                         if from_payload.is_some() {
-                            let type_name = format!("{}::{}", qualified, t.from_state);
-                            let self_ty = Type::Name(type_name, vec![]);
+                            let self_ty = Type::Name(t.from_state.clone(), vec![]);
                             scopes[0].insert("self".to_string(), self_ty);
                         } else {
                             // No payload: self is unit
