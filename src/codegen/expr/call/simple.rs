@@ -1658,6 +1658,38 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.register_heap_alloc(raw);
                                 return self.wrap_c_string(raw);
                             }
+                            if let Some(res_ok) = opt_elem
+                                .strip_prefix("Result<")
+                                .and_then(|s| {
+                                    let mut depth = 0i32;
+                                    for (i, ch) in s.char_indices() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                return Some(s[..i].trim());
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    None
+                                })
+                            {
+                                if res_ok.starts_with('(')
+                                    || self.is_product_tuple_alias(res_ok)
+                                {
+                                    let resolved = if self.is_product_tuple_alias(res_ok) {
+                                        self.resolve_alias_type_name(res_ok)
+                                    } else {
+                                        res_ok.to_string()
+                                    };
+                                    let raw = self.emit_set_option_result_product_to_json(
+                                        handle, &resolved, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return self.wrap_c_string(raw);
+                                }
+                            }
                         }
                         if elem.starts_with("Result<") {
                             if let Some(ok_ty) = elem.strip_prefix("Result<").and_then(|s| {
