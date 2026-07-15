@@ -599,6 +599,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 return self.wrap_c_string(raw);
                             }
                         }
+                        if set_elem.starts_with("Map<string, ") {
+                            if let Some(val_ty) = set_elem
+                                .strip_prefix("Map<string, ")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if val_ty.starts_with('(')
+                                    || self.is_product_tuple_alias(val_ty)
+                                {
+                                    let resolved = if self.is_product_tuple_alias(val_ty) {
+                                        self.resolve_alias_type_name(val_ty)
+                                    } else {
+                                        val_ty.to_string()
+                                    };
+                                    let raw = self.emit_list_set_map_product_to_json(
+                                        alloca, &resolved, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return self.wrap_c_string(raw);
+                                }
+                            }
+                        }
                         if set_elem.starts_with("Result<") {
                             if let Some(ok_ty) = set_elem.strip_prefix("Result<").and_then(|s| {
                                 let mut depth = 0i32;

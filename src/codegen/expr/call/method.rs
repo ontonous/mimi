@@ -1319,7 +1319,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                 }
-                // List of Set of product.
+                // List of Set of product / Set of Map of product.
                 if let Type::Name(sn, sargs) = inner_ty {
                     if sn == "Set" && sargs.len() == 1 {
                         let set_elem = match &sargs[0] {
@@ -1336,6 +1336,56 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             other => other.clone(),
                         };
+                        if let Type::Name(mn, margs) = &set_elem {
+                            if mn == "Map" && margs.len() == 2 {
+                                let map_val = match &margs[1] {
+                                    Type::Name(an, aargs) if aargs.is_empty() => {
+                                        if let Some(td) = self.type_defs.get(an) {
+                                            if let crate::ast::TypeDefKind::Alias(inner) =
+                                                &td.kind
+                                            {
+                                                inner.clone()
+                                            } else {
+                                                margs[1].clone()
+                                            }
+                                        } else {
+                                            margs[1].clone()
+                                        }
+                                    }
+                                    other => other.clone(),
+                                };
+                                if let Type::Tuple(elems) = map_val {
+                                    let arity = elems.len() as u64;
+                                    let func = self.get_runtime_fn(
+                                        "mimi_list_from_json_set_map_product_i64",
+                                    )?;
+                                    let list_ptr = self
+                                        .build_call(
+                                            func,
+                                            &[
+                                                BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                                BasicMetadataValueEnum::IntValue(
+                                                    i64_ty.const_int(arity, false),
+                                                ),
+                                            ],
+                                            "list_from_json_set_map_product",
+                                        )?
+                                        .try_as_basic_value_opt()
+                                        .ok_or("list from_json set map product void")?
+                                        .into_pointer_value();
+                                    let list_ty = self.list_struct_type();
+                                    let loaded = self
+                                        .builder
+                                        .build_load(
+                                            BasicTypeEnum::StructType(list_ty),
+                                            list_ptr,
+                                            "list_set_map_prod_ld",
+                                        )
+                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                                    return Ok(loaded.into());
+                                }
+                            }
+                        }
                         if let Type::Tuple(elems) = set_elem {
                             let arity = elems.len() as u64;
                             let func =
