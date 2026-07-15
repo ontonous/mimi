@@ -12061,3 +12061,41 @@ fn dual_from_json_set_result_product_tuple() {
         "Set{Err(e), Ok((1, 2))}\n[{\"Err\":[\"e\"]},{\"Ok\":[[1,2]]}]"
     );
 }
+
+/// from_json Option of Set of product-tuple dual.
+#[test]
+fn dual_from_json_option_set_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let o = from_json::<Option<Set<(i32, i32)>>>("[[1,2]]")
+            println(o)
+            println(to_json(o))
+            0
+        }
+        "#,
+        "Some(Set{(1, 2)})\n{\"Some\":[[[1,2]]]}"
+    );
+}
+
+/// from_json Result of Set of product-tuple dual (bare Ok array).
+#[test]
+fn dual_from_json_result_set_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let r = from_json::<Result<Set<(i32, i32)>, string>>("[[1,2]]")
+            println(r)
+            println(to_json(r))
+            0
+        }
+        "#,
+        "Ok(Set{(1, 2)})\n{\"Ok\":[[[1,2]]]}"
+    );
+}
