@@ -3361,6 +3361,241 @@ pub extern "C" fn mimi_map_to_json_product_i64(
     alloc_c_string(&parts.join(""))
 }
 
+/// Serialize Map values that are heap-packed List of product-tuples.
+/// List layout: `{i64 len, ptr data}` where data is `i64` product handles.
+/// `display_style`: 0 = JSON `[[1,2]]`, 1 = Display `[(1, 2)]`.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_list_product_i64(
+    handle: MapHandle,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if handle == 0 || arity <= 0 || arity > 16 {
+        return alloc_c_string("{}");
+    }
+    let map = unsafe { &*map_from_handle(handle) };
+    if map.inner.len() > 1_000_000 {
+        return alloc_c_string("{...}");
+    }
+    let mut entries: Vec<_> = map.inner.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 2 + 2);
+    parts.push(String::from("{"));
+    let n = arity as usize;
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        parts.push(json_escape_string(k));
+        parts.push(String::from(":"));
+        let vh = **v;
+        if vh == 0 {
+            parts.push(String::from("[]"));
+            continue;
+        }
+        // SAFETY: map_set packs List as heap {i64 len, ptr data}.
+        let list_base = vh as *const u8;
+        let len = unsafe { *(list_base as *const i64) };
+        let data = unsafe { *(list_base.add(8) as *const *const i64) };
+        if len <= 0 || data.is_null() || len > 1_000_000 {
+            parts.push(String::from("[]"));
+            continue;
+        }
+        let mut list_parts: Vec<String> = Vec::with_capacity(len as usize + 2);
+        list_parts.push(String::from("["));
+        for j in 0..len as isize {
+            if j > 0 {
+                list_parts.push(String::from(", "));
+            }
+            let prod_h = unsafe { *data.offset(j) };
+            let fields: Vec<i64> = if prod_h == 0 {
+                vec![0; n]
+            } else {
+                let ptr = prod_h as *const i64;
+                if ptr.is_null() {
+                    vec![0; n]
+                } else {
+                    unsafe { std::slice::from_raw_parts(ptr, n).to_vec() }
+                }
+            };
+            if display_style != 0 {
+                let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
+                list_parts.push(format!("({})", body.join(", ")));
+            } else {
+                let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
+                list_parts.push(format!("[{}]", body.join(",")));
+            }
+        }
+        // JSON list uses no spaces after commas for dual with to_json.
+        if display_style == 0 {
+            list_parts.clear();
+            list_parts.push(String::from("["));
+            for j in 0..len as isize {
+                if j > 0 {
+                    list_parts.push(String::from(","));
+                }
+                let prod_h = unsafe { *data.offset(j) };
+                let fields: Vec<i64> = if prod_h == 0 {
+                    vec![0; n]
+                } else {
+                    let ptr = prod_h as *const i64;
+                    if ptr.is_null() {
+                        vec![0; n]
+                    } else {
+                        unsafe { std::slice::from_raw_parts(ptr, n).to_vec() }
+                    }
+                };
+                let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
+                list_parts.push(format!("[{}]", body.join(",")));
+            }
+        }
+        list_parts.push(String::from("]"));
+        parts.push(list_parts.join(""));
+    }
+    parts.push(String::from("}"));
+    alloc_c_string(&parts.join(""))
+}
+
+/// Build Map from JSON object whose values are arrays of product arrays:
+/// `"a":[[1,2],[3,4]]`. Each list is heap-packed as List of product handles.
+#[no_mangle]
+pub extern "C" fn mimi_map_from_json_list_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> MapHandle {
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return mimi_map_new();
+    }
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_map_new();
+    if handle == 0 {
+        return 0;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'{' {
+        return handle;
+    }
+    i += 1;
+    let n = arity as usize;
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b'}' {
+            break;
+        }
+        if bytes[i] != b'"' {
+            break;
+        }
+        i += 1;
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'"' {
+            if bytes[i] == b'\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let key = String::from_utf8_lossy(&bytes[start..i]).into_owned();
+        i += 1;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'[' {
+            break;
+        }
+        i += 1; // outer list
+        let mut prod_handles: Vec<i64> = Vec::new();
+        loop {
+            while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+                i += 1;
+            }
+            if i >= bytes.len() || bytes[i] == b']' {
+                if i < bytes.len() {
+                    i += 1;
+                }
+                break;
+            }
+            if bytes[i] != b'[' {
+                break;
+            }
+            i += 1;
+            let mut fields = vec![0i64; n];
+            for fi in 0..n {
+                while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+                    i += 1;
+                }
+                let neg = i < bytes.len() && bytes[i] == b'-';
+                if neg {
+                    i += 1;
+                }
+                let mut v: i64 = 0;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    v = v
+                        .saturating_mul(10)
+                        .saturating_add((bytes[i] - b'0') as i64);
+                    i += 1;
+                }
+                if neg {
+                    v = -v;
+                }
+                fields[fi] = v;
+            }
+            while i < bytes.len() && bytes[i] != b']' {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b']' {
+                i += 1;
+            }
+            let data_size = n * std::mem::size_of::<i64>();
+            let ptr = unsafe { libc::malloc(data_size) as *mut i64 };
+            if ptr.is_null() {
+                continue;
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(fields.as_ptr(), ptr, n);
+            }
+            prod_handles.push(ptr as i64);
+        }
+        // Pack list {i64 len, ptr data}.
+        let list_size = 16usize;
+        let list_ptr = unsafe { libc::malloc(list_size) as *mut u8 };
+        if list_ptr.is_null() {
+            continue;
+        }
+        let data_size = prod_handles.len() * std::mem::size_of::<i64>();
+        let data_ptr = if data_size > 0 {
+            unsafe { libc::malloc(data_size) as *mut i64 }
+        } else {
+            std::ptr::null_mut()
+        };
+        if !data_ptr.is_null() && !prod_handles.is_empty() {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    prod_handles.as_ptr(),
+                    data_ptr,
+                    prod_handles.len(),
+                );
+            }
+        }
+        unsafe {
+            *(list_ptr as *mut i64) = prod_handles.len() as i64;
+            *(list_ptr.add(8) as *mut *mut i64) = data_ptr;
+        }
+        let vh = list_ptr as ValueHandle;
+        unsafe {
+            (*map_from_handle(handle)).inner.insert(key, vh);
+        }
+    }
+    handle
+}
+
 /// Build a MapHandle from a JSON object whose values are product-tuple arrays
 /// of integers (e.g. `"a":[1,2]`). Each value is heap-packed as i64[arity]
 /// matching `map_set` of product tuples / `mimi_map_to_json_product_i64`.

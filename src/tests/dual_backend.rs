@@ -11532,3 +11532,42 @@ fn dual_option_list_map_product_tuple() {
         "Some([{\"a\":(1, 2)}])\n{\"Some\":[[{\"a\":[1,2]}]]}"
     );
 }
+
+/// Map of List of product-tuple dual (map_set + Display/to_json).
+#[test]
+fn dual_map_list_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = map_new()
+            let m2 = map_set(m, "a", [(1, 2), (3, 4)])
+            println(m2)
+            println(to_json(m2))
+            0
+        }
+        "#,
+        "{\"a\":[(1, 2), (3, 4)]}\n{\"a\":[[1,2],[3,4]]}"
+    );
+}
+
+/// from_json Map of List of product-tuple dual.
+#[test]
+fn dual_from_json_map_list_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, List<(i32, i32)>>>("{\"a\":[[1,2],[3,4]]}")
+            println(m)
+            println(to_json(m))
+            0
+        }
+        "#,
+        "{\"a\":[(1, 2), (3, 4)]}\n{\"a\":[[1,2],[3,4]]}"
+    );
+}
