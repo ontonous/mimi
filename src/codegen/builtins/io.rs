@@ -614,6 +614,49 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     ));
                                 }
                             }
+                            if let Some(res_ok) = opt_elem
+                                .strip_prefix("Result<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                let product = if res_ok.starts_with('(') {
+                                    let mut depth = 0i32;
+                                    let mut end = 0usize;
+                                    for (i, ch) in res_ok.char_indices() {
+                                        match ch {
+                                            '(' => depth += 1,
+                                            ')' => {
+                                                depth -= 1;
+                                                if depth == 0 {
+                                                    end = i + 1;
+                                                    break;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    res_ok[..end].to_string()
+                                } else if let Some(c) = res_ok.find(',') {
+                                    res_ok[..c].to_string()
+                                } else {
+                                    res_ok.to_string()
+                                };
+                                if product.starts_with('(')
+                                    || self.is_product_tuple_alias(&product)
+                                {
+                                    let elem = if self.is_product_tuple_alias(&product) {
+                                        self.resolve_alias_type_name(&product)
+                                    } else {
+                                        product
+                                    };
+                                    let raw = self.emit_map_option_result_product_to_json(
+                                        *iv, &elem, 1,
+                                    )?;
+                                    return Ok((
+                                        BasicMetadataValueEnum::PointerValue(raw),
+                                        "%s".to_string(),
+                                    ));
+                                }
+                            }
                         }
                         if val_ty.starts_with("Result<") {
                             if let Some(ok_ty) = val_ty.strip_prefix("Result<").and_then(|s| {
@@ -6915,6 +6958,57 @@ impl<'ctx> CodeGenerator<'ctx> {
             )?
             .try_as_basic_value_opt()
             .ok_or("map option product to_json void")?
+            .into_pointer_value())
+    }
+
+    /// Map of Option of Result of product-tuple values.
+    pub(in crate::codegen) fn emit_map_option_result_product_to_json(
+        &self,
+        handle: inkwell::values::IntValue<'ctx>,
+        product_type: &str,
+        display_style: i64,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let arity = {
+            let body = product_type
+                .strip_prefix('(')
+                .and_then(|s| s.strip_suffix(')'))
+                .unwrap_or(product_type);
+            let mut arity = 0i64;
+            let mut depth = 0i32;
+            let mut any = false;
+            for ch in body.chars() {
+                match ch {
+                    '<' | '(' => depth += 1,
+                    '>' | ')' => depth -= 1,
+                    ',' if depth == 0 => {
+                        arity += 1;
+                        any = true;
+                    }
+                    c if !c.is_whitespace() => any = true,
+                    _ => {}
+                }
+            }
+            if any {
+                arity += 1;
+            }
+            arity.max(1)
+        };
+        let func = self.get_runtime_fn("mimi_map_to_json_option_result_product_i64")?;
+        let i64_ty = self.context.i64_type();
+        Ok(self
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(handle),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
+                    BasicMetadataValueEnum::IntValue(
+                        i64_ty.const_int(display_style as u64, false),
+                    ),
+                ],
+                "map_option_result_product_json",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("map option result product to_json void")?
             .into_pointer_value())
     }
 

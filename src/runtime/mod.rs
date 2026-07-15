@@ -4284,6 +4284,253 @@ pub extern "C" fn mimi_map_to_json_result_map_product_i64(
 
 
 
+
+/// Map of Option of Result of product from JSON.
+/// Pack: `{i64 disc, i64 res_handle}` disc 0=None; res_handle is Result product pack
+/// `{i64 res_disc, i64[n] fields or err}` (same as map result product).
+#[no_mangle]
+pub extern "C" fn mimi_map_from_json_option_result_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> MapHandle {
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return mimi_map_new();
+    }
+    // Reuse result product from_json for object values, wrap with option disc.
+    // Parse outer map manually.
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_map_new();
+    if handle == 0 {
+        return 0;
+    }
+    let n = arity as usize;
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'{' {
+        return handle;
+    }
+    i += 1;
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b'}' {
+            break;
+        }
+        if bytes[i] != b'"' {
+            break;
+        }
+        i += 1;
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'"' {
+            if bytes[i] == b'\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let key = String::from_utf8_lossy(&bytes[start..i]).into_owned();
+        i += 1;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let pack = unsafe { libc::malloc(16) as *mut i64 };
+        if pack.is_null() {
+            continue;
+        }
+        let is_none = if bytes[i] == b'n'
+            && i + 4 <= bytes.len()
+            && &bytes[i..i + 4] == b"null"
+        {
+            i += 4;
+            true
+        } else {
+            false
+        };
+        if is_none {
+            unsafe {
+                *pack = 0;
+                *pack.add(1) = 0;
+            }
+        } else {
+            // Extract value as JSON substring and parse as Result product via one-entry map
+            let val_start = i;
+            if bytes[i] == b'{' {
+                let mut depth = 0i32;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                i += 1;
+                                break;
+                            }
+                        }
+                        b'"' => {
+                            i += 1;
+                            while i < bytes.len() && bytes[i] != b'"' {
+                                if bytes[i] == b'\\' {
+                                    i += 1;
+                                }
+                                i += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            } else if bytes[i] == b'[' {
+                let mut depth = 0i32;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'[' => depth += 1,
+                        b']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                i += 1;
+                                break;
+                            }
+                        }
+                        b'"' => {
+                            i += 1;
+                            while i < bytes.len() && bytes[i] != b'"' {
+                                if bytes[i] == b'\\' {
+                                    i += 1;
+                                }
+                                i += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            } else {
+                unsafe {
+                    libc::free(pack as *mut _);
+                }
+                break;
+            }
+            let val = String::from_utf8_lossy(&bytes[val_start..i]).into_owned();
+            // Build single-key map JSON for result product helper
+            let one = format!("{{\"_\":{}}}", val);
+            let c_one = alloc_c_string(&one);
+            let tmp_map = mimi_map_from_json_result_product_i64(c_one, arity);
+            if !c_one.is_null() {
+                unsafe {
+                    libc::free(c_one as *mut _);
+                }
+            }
+            // Extract the single value handle from tmp_map
+            let mut res_h: i64 = 0;
+            if tmp_map != 0 {
+                let m = unsafe { &*map_from_handle(tmp_map) };
+                if let Some(v) = m.inner.values().next() {
+                    res_h = *v as i64;
+                }
+            }
+            unsafe {
+                *pack = 1;
+                *pack.add(1) = res_h;
+            }
+            let _ = n;
+        }
+        unsafe {
+            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+        }
+    }
+    handle
+}
+
+/// Map of Option of Result of product Display/JSON.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_option_result_product_i64(
+    handle: MapHandle,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if handle == 0 || arity <= 0 || arity > 16 {
+        return alloc_c_string("{}");
+    }
+    let map = unsafe { &*map_from_handle(handle) };
+    if map.inner.len() > 1_000_000 {
+        return alloc_c_string("{...}");
+    }
+    let mut entries: Vec<_> = map.inner.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 2 + 2);
+    parts.push(String::from("{"));
+    let n = arity as usize;
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        parts.push(json_escape_string(k));
+        parts.push(String::from(":"));
+        let vh = **v;
+        if vh == 0 {
+            if display_style != 0 {
+                parts.push(String::from("None()"));
+            } else {
+                parts.push(String::from("\"None\""));
+            }
+            continue;
+        }
+        let base = vh as *const i64;
+        let disc = unsafe { *base };
+        if disc == 0 {
+            if display_style != 0 {
+                parts.push(String::from("None()"));
+            } else {
+                parts.push(String::from("\"None\""));
+            }
+        } else {
+            let res_h = unsafe { *base.add(1) };
+            let tmp = mimi_map_new();
+            if tmp != 0 {
+                unsafe {
+                    (*map_from_handle(tmp))
+                        .inner
+                        .insert("_".into(), res_h as ValueHandle);
+                }
+                let json_ptr = mimi_map_to_json_result_product_i64(tmp, arity, display_style);
+                let s = unsafe { cstr_to_string(json_ptr) };
+                if !json_ptr.is_null() {
+                    unsafe {
+                        libc::free(json_ptr as *mut _);
+                    }
+                }
+                // format is {"_":VALUE} — strip only the outer map braces once.
+                let val = if let Some(colon) = s.find(':') {
+                    let mut rest = s[colon + 1..].to_string();
+                    if rest.ends_with('}') {
+                        rest.pop();
+                    }
+                    rest
+                } else {
+                    s
+                };
+                if display_style != 0 {
+                    parts.push(format!("Some({})", val));
+                } else {
+                    parts.push(format!("{{\"Some\":[{}]}}", val));
+                }
+            }
+            let _ = n;
+        }
+    }
+    parts.push(String::from("}"));
+    alloc_c_string(&parts.join(""))
+}
+
 /// Map of Result of Option of product from JSON.
 /// Pack: `{i64 disc, i64[n+1]}` where disc 1=Ok Option-product pack, 0=Err string.
 /// Ok pack reuses option product layout: `{i64 opt_disc, i64[n] fields}`.
