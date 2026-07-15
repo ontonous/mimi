@@ -1054,6 +1054,29 @@ impl<'a> Checker<'a> {
                                 ),
                             );
                         }
+                        // T-C2: reject writes while a shared/mut borrow of the place is live.
+                        if let Some(state) = self.lookup_borrow(name) {
+                            match state {
+                                crate::core::borrow::BorrowState::BorrowedImm { span }
+                                | crate::core::borrow::BorrowState::BorrowedMut { span } => {
+                                    self.errors.push(
+                                        crate::diagnostic::Diagnostic::error_code(
+                                            crate::diagnostic::codes::E0302,
+                                            format!(
+                                                "cannot assign to '{}' while it is borrowed",
+                                                name
+                                            ),
+                                            crate::span::Span::single(
+                                                self.current_line,
+                                                self.current_col,
+                                            ),
+                                        )
+                                        .with_note("borrow occurs here", *span),
+                                    );
+                                }
+                                crate::core::borrow::BorrowState::Unborrowed => {}
+                            }
+                        }
                         // v0.29.29: mutate params can be read-modify-written (x = f(x)),
                         // but wholesale realloc of owned memory (e.g. `xs = [1,2]` on a List)
                         // is banned as it would invalidate the borrow semantics.

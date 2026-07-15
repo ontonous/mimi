@@ -1874,3 +1874,30 @@ func main() -> i32 { 0 }
     // May fail parse if delegate syntax needs flow context — accept type or parse error.
     assert!(r.is_err(), "expected error for mutate-of-view delegate");
 }
+
+
+#[test]
+fn assign_while_borrowed_rejected() {
+    // T-C2: cannot assign to x while &x is live.
+    let src = r#"
+func main() -> i32 {
+    let mut x = 1
+    let r = &x
+    x = 2
+    *r
+}
+"#;
+    let r = check_source(src);
+    assert!(r.is_err(), "expected assign-while-borrowed error");
+    let msgs: String = r
+        .unwrap_err()
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join(";");
+    assert!(
+        msgs.contains("borrow") || msgs.contains("E0302") || msgs.contains("assign"),
+        "unexpected: {}",
+        msgs
+    );
+}
