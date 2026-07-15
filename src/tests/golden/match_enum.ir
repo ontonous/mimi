@@ -30,6 +30,8 @@ declare ptr @strcat(ptr, ptr)
 
 declare ptr @memcpy(ptr, ptr, i64)
 
+declare ptr @memset(ptr, i32, i64)
+
 declare ptr @realloc(ptr, i64)
 
 declare void @mimi_list_push_i64(ptr, i64)
@@ -45,6 +47,284 @@ declare i32 @snprintf(ptr, i64, ptr, ...)
 declare void @exit(i32)
 
 declare i64 @mimi_map_new()
+
+declare i64 @mimi_map_from_json_i64(ptr)
+
+declare i64 @mimi_map_from_json_string(ptr)
+
+declare i64 @mimi_map_from_json_f64(ptr)
+
+declare ptr @mimi_map_to_json_i64(i64)
+
+declare ptr @mimi_map_to_json_bool(i64)
+
+declare ptr @mimi_map_to_json_f64(i64)
+
+declare ptr @mimi_map_to_json_f64_serde(i64)
+
+declare ptr @mimi_map_to_json_string(i64)
+
+declare ptr @mimi_map_to_json_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_list_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_list_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_set_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_set_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_map_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_map_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_option_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_option_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_result_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_result_product_i64(ptr, i64)
+
+declare ptr @mimi_set_to_json_option_product_i64(i64, i64, i64)
+
+declare i64 @mimi_set_from_json_option_product_i64(ptr, i64)
+
+declare ptr @mimi_list_set_result_product_to_json(ptr, i64, i64)
+
+declare ptr @mimi_list_set_option_product_to_json(ptr, i64, i64)
+
+declare ptr @mimi_list_set_map_product_to_json(ptr, i64, i64)
+
+declare ptr @mimi_set_to_json_map_product_i64(i64, i64, i64)
+
+declare ptr @mimi_set_to_json_list_map_product_i64(i64, i64, i64)
+
+declare i64 @mimi_set_from_json_list_map_product_i64(ptr, i64)
+
+declare ptr @mimi_set_to_json_option_map_product_i64(i64, i64, i64)
+
+declare ptr @mimi_set_to_json_result_map_product_i64(i64, i64, i64)
+
+declare ptr @mimi_set_to_json_result_list_product_i64(i64, i64, i64)
+
+declare i64 @mimi_set_from_json_result_list_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_list_map_list_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_list_map_list_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_option_map_list_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_option_map_list_product_i64(ptr, i64)
+
+declare i64 @mimi_set_from_json_result_map_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_map_list_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_map_result_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_map_result_product_i64(ptr, i64)
+
+declare ptr @mimi_set_to_json_map_list_product_i64(i64, i64, i64)
+
+declare ptr @mimi_set_to_json_map_set_product_i64(i64, i64, i64)
+
+declare i64 @mimi_set_from_json_map_set_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_set_map_list_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_set_map_list_product_i64(ptr, i64)
+
+declare i64 @mimi_set_from_json_map_list_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_map_list_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_map_option_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_map_option_product_i64(ptr, i64)
+
+declare i64 @mimi_set_from_json_option_map_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_map_set_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_map_set_product_i64(ptr, i64)
+
+declare i64 @mimi_set_from_json_map_product_i64(ptr, i64)
+
+declare ptr @mimi_list_from_json_set_map_product_i64(ptr, i64)
+
+declare ptr @mimi_list_from_json_set_product_i64(ptr, i64)
+
+declare ptr @mimi_list_from_json_set_option_product_i64(ptr, i64)
+
+declare ptr @mimi_list_from_json_set_result_product_i64(ptr, i64)
+
+declare ptr @mimi_list_from_json_result_product_i64(ptr, i64)
+
+declare ptr @mimi_list_result_product_to_json(ptr, i64, i64)
+
+declare ptr @mimi_set_to_json_result_product_i64(i64, i64, i64)
+
+declare ptr @mimi_set_to_json_result_option_product_i64(i64, i64, i64)
+
+declare ptr @mimi_set_to_json_option_result_product_i64(i64, i64, i64)
+
+declare i64 @mimi_set_from_json_option_result_product_i64(ptr, i64)
+
+declare i64 @mimi_set_from_json_result_option_product_i64(ptr, i64)
+
+declare i64 @mimi_set_from_json_result_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_option_map_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_option_map_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_result_map_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_result_map_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_option_set_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_option_set_list_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_option_set_list_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_option_set_product_i64(ptr, i64)
+
+declare ptr @mimi_list_from_json_result_map_product_i64(ptr, i64)
+
+declare ptr @mimi_list_result_map_product_to_json(ptr, i64, i64)
+
+declare ptr @mimi_map_to_json_result_set_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_result_set_list_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_result_set_map_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_result_set_map_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_option_set_map_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_option_set_map_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_result_list_map_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_result_list_map_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_option_list_map_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_option_list_map_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_result_set_list_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_result_set_product_i64(ptr, i64)
+
+declare ptr @mimi_list_from_json_result_set_product_i64(ptr, i64)
+
+declare ptr @mimi_list_result_set_product_to_json(ptr, i64, i64)
+
+declare ptr @mimi_map_to_json_result_option_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_option_result_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_result_list_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_option_list_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_list_result_product_i64(i64, i64, i64)
+
+declare ptr @mimi_list_option_product_to_json(ptr, i64, i64)
+
+declare ptr @mimi_list_from_json_option_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_list_option_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_list_option_set_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_list_option_set_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_list_option_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_set_result_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_set_option_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_result_list_option_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_result_option_list_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_list_result_option_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_list_result_option_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_result_option_list_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_option_result_list_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_option_result_list_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_result_list_option_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_set_option_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_set_result_option_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_set_result_option_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_set_result_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_list_set_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_list_set_option_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_list_set_result_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_list_set_result_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_list_set_option_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_set_list_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_list_map_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_list_map_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_set_map_product_i64(i64, i64, i64)
+
+declare ptr @mimi_map_to_json_list_set_map_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_list_set_map_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_set_list_map_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_set_list_map_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_set_map_product_i64(ptr, i64)
+
+declare ptr @mimi_list_map_product_to_json(ptr, i64, i64)
+
+declare ptr @mimi_list_from_json_map_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_set_list_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_list_set_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_list_result_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_option_list_product_i64(ptr, i64)
+
+declare ptr @mimi_map_to_json_result_list_set_product_i64(i64, i64, i64)
+
+declare i64 @mimi_map_from_json_result_list_set_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_result_list_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_option_result_product_i64(ptr, i64)
+
+declare i64 @mimi_map_from_json_result_option_product_i64(ptr, i64)
 
 declare void @mimi_map_destroy(i64)
 
@@ -71,6 +351,10 @@ declare ptr @mimi_str_split(ptr, ptr)
 declare ptr @mimi_str_join(ptr, ptr)
 
 declare ptr @mimi_str_concat(ptr, ptr)
+
+declare ptr @mimi_str_char_at(ptr, i64)
+
+declare ptr @mimi_str_substring(ptr, i64, i64)
 
 declare ptr @mimi_str_replace(ptr, ptr, ptr)
 
@@ -172,6 +456,58 @@ declare i64 @mimi_json_as_bool(ptr)
 
 declare i64 @mimi_set_new()
 
+declare i64 @mimi_set_from_json_i64(ptr)
+
+declare i64 @mimi_set_from_json_product_i64(ptr, i64)
+
+declare ptr @mimi_set_to_json_product_i64(i64, i64, i64)
+
+declare ptr @mimi_list_set_product_to_json(ptr, i64)
+
+declare ptr @mimi_list_set_product_to_string(ptr, i64)
+
+declare i64 @mimi_set_from_json_string(ptr)
+
+declare i64 @mimi_set_from_json_f64(ptr)
+
+declare ptr @mimi_set_to_json_i64(i64)
+
+declare ptr @mimi_set_to_json_string(i64)
+
+declare ptr @mimi_set_to_json_bool(i64)
+
+declare ptr @mimi_set_to_json_f64(i64)
+
+declare ptr @mimi_set_to_display(i64)
+
+declare ptr @mimi_set_to_display_bool(i64)
+
+declare ptr @mimi_set_to_display_string(i64)
+
+declare ptr @mimi_set_to_display_f64(i64)
+
+declare ptr @mimi_option_i64_to_json(i64, i64)
+
+declare ptr @mimi_option_map_to_json(i64, i64, i64)
+
+declare ptr @mimi_option_set_to_json(i64, i64, i64)
+
+declare ptr @mimi_result_map_to_json(i64, i64, i64, i64)
+
+declare ptr @mimi_result_set_to_json(i64, i64, i64, i64)
+
+declare ptr @mimi_list_map_to_json_string(ptr)
+
+declare ptr @mimi_list_map_to_string(ptr)
+
+declare ptr @mimi_list_option_i64_to_json(ptr)
+
+declare ptr @mimi_list_result_i64_to_json(ptr)
+
+declare ptr @mimi_list_result_map_to_json(ptr, i64)
+
+declare ptr @mimi_result_i64_to_json(i64, i64, i64)
+
 declare void @mimi_set_destroy(i64)
 
 declare i64 @mimi_set_insert(i64, i64)
@@ -246,6 +582,8 @@ declare void @mimi_exec_free(ptr)
 
 declare void @mimi_exec_free_struct(ptr)
 
+declare ptr @mimi_exec_safe(ptr, ptr)
+
 declare void @mimi_file_stat_free(ptr)
 
 declare ptr @mimi_file_stat(ptr, ptr)
@@ -264,7 +602,11 @@ declare i64 @mimi_write_file_bytes(ptr, ptr)
 
 declare ptr @mimi_read_lines_json(ptr)
 
+declare i64 @mimi_read_lines_each(ptr, ptr)
+
 declare ptr @mimi_sha256(ptr)
+
+declare ptr @mimi_sha256_n(ptr, i64)
 
 declare ptr @mimi_base64_encode(ptr)
 
