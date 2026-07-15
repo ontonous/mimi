@@ -2041,7 +2041,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .expect_basic_value(&result, "mimi_set_from_json_product_i64")?
                         .into());
                 }
-                // Set of Option of product.
+                // Set of Option/Result of product.
                 if let Some(Type::Name(ln, largs)) = resolved_elem.as_ref() {
                     if ln == "Option" && largs.len() == 1 {
                         let inner = match &largs[0] {
@@ -2076,6 +2076,43 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .expect_basic_value(
                                     &result,
                                     "mimi_set_from_json_option_product_i64",
+                                )?
+                                .into());
+                        }
+                    }
+                    if ln == "Result" && largs.len() == 2 {
+                        let inner = match &largs[0] {
+                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                if let Some(td) = self.type_defs.get(an) {
+                                    if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
+                                        inner.clone()
+                                    } else {
+                                        largs[0].clone()
+                                    }
+                                } else {
+                                    largs[0].clone()
+                                }
+                            }
+                            other => other.clone(),
+                        };
+                        if let Type::Tuple(elems) = inner {
+                            let arity = elems.len() as u64;
+                            let func =
+                                self.get_runtime_fn("mimi_set_from_json_result_product_i64")?;
+                            let result = self.build_call(
+                                func,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(arity, false),
+                                    ),
+                                ],
+                                "set_from_json_result_product",
+                            )?;
+                            return Ok(self
+                                .expect_basic_value(
+                                    &result,
+                                    "mimi_set_from_json_result_product_i64",
                                 )?
                                 .into());
                         }
