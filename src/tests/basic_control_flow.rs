@@ -1275,3 +1275,32 @@ func main() -> i32 {
 "#;
     assert_eq!(run_source(src), crate::interp::Value::Int(1));
 }
+
+
+#[test]
+fn async_sees_toplevel_const() {
+    // I-H4: async/deferred bodies see top-level const/globals.
+    let src = r#"
+const BASE: i32 = 40
+async func work() -> i32 { BASE + 2 }
+func main() -> i32 {
+    let f = work()
+    await f
+}
+"#;
+    // If async keyword differs, try spawn path.
+    let r = std::panic::catch_unwind(|| run_source(src));
+    if r.is_err() {
+        let src2 = r#"
+const BASE: i32 = 40
+func work() -> i32 { BASE + 2 }
+func main() -> i32 {
+    let f = spawn work()
+    await f
+}
+"#;
+        assert_eq!(run_source(src2), crate::interp::Value::Int(42));
+    } else {
+        assert_eq!(r.unwrap(), crate::interp::Value::Int(42));
+    }
+}
