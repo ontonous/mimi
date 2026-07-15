@@ -666,6 +666,29 @@ func main() -> i32 {
 }
 
 #[test]
+fn slice_full_unicode_string() {
+    let src = r#"
+func main() -> string {
+    "你好"[..]
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::String("你好".into()));
+}
+
+#[test]
+fn slice_of_slice_keeps_parent_offset() {
+    let src = r#"
+func main() -> i32 {
+    let xs = [10, 20, 30, 40, 50]
+    let inner = xs[1..4]
+    let nested = inner[1..2]
+    nested[0]
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(30));
+}
+
+#[test]
 fn slice_out_of_bounds() {
     let src = r#"
 func main() -> i32 {

@@ -1189,7 +1189,7 @@ impl<'a> Interpreter<'a> {
                 start: s,
                 end: e,
             } => e - s,
-            Value::String(s) => s.len(),
+            Value::String(s) => s.chars().count(),
             _ => return Err(InterpError::new("cannot slice non-sequence value")),
         };
         let start_idx = match start {
@@ -1240,14 +1240,14 @@ impl<'a> Interpreter<'a> {
             }),
             Value::Slice {
                 source,
-                start: _,
+                start: parent_start,
                 end: _,
             } => {
                 // Re-slice: adjust indices relative to the original source
                 Ok(Value::Slice {
                     source,
-                    start: start_idx,
-                    end: end_idx,
+                    start: parent_start + start_idx,
+                    end: parent_start + end_idx,
                 })
             }
             Value::String(s) => {
