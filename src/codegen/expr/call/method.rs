@@ -2114,6 +2114,35 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
             }
             Type::Name(n, args) if n == "Map" => {
+                let val_ty = args.get(1);
+                let resolved_val = val_ty.map(|t| match t {
+                    Type::Name(an, aargs) if aargs.is_empty() => {
+                        if let Some(td) = self.type_defs.get(an) {
+                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
+                                return inner.clone();
+                            }
+                        }
+                        t.clone()
+                    }
+                    other => other.clone(),
+                });
+                if let Some(Type::Tuple(elems)) = resolved_val.as_ref() {
+                    let arity = elems.len() as u64;
+                    let func = self.get_runtime_fn("mimi_map_from_json_product_i64")?;
+                    let result = self.build_call(
+                        func,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(raw_ptr),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(arity, false),
+                            ),
+                        ],
+                        "map_from_json_product_ok",
+                    )?;
+                    return Ok(self
+                        .expect_basic_value(&result, "mimi_map_from_json_product_i64")?
+                        .into());
+                }
                 let val_is_string = args
                     .get(1)
                     .map(|t| matches!(t, Type::Name(tn, _) if tn == "string"))
@@ -2478,6 +2507,35 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             // Nested Map (e.g. Option<Map<string,i32>>).
             crate::ast::Type::Name(n, args) if n == "Map" => {
+                let val_ty = args.get(1);
+                let resolved_val = val_ty.map(|t| match t {
+                    crate::ast::Type::Name(an, aargs) if aargs.is_empty() => {
+                        if let Some(td) = self.type_defs.get(an) {
+                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
+                                return inner.clone();
+                            }
+                        }
+                        t.clone()
+                    }
+                    other => other.clone(),
+                });
+                if let Some(crate::ast::Type::Tuple(elems)) = resolved_val.as_ref() {
+                    let arity = elems.len() as u64;
+                    let func = self.get_runtime_fn("mimi_map_from_json_product_i64")?;
+                    let result = self.build_call(
+                        func,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(raw_val),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(arity, false),
+                            ),
+                        ],
+                        "map_from_json_product_field",
+                    )?;
+                    return Ok(self
+                        .expect_basic_value(&result, "mimi_map_from_json_product_i64")?
+                        .into());
+                }
                 let val_is_string = args
                     .get(1)
                     .map(|t| matches!(t, crate::ast::Type::Name(tn, _) if tn == "string"))
