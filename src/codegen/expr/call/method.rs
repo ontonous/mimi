@@ -1681,6 +1681,43 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )));
                         }
                     }
+                    Type::Tuple(elems) if !elems.is_empty() => {
+                        // List of product tuples: recursive from_json → heap-pack → i64.
+                        let nested_ty = Type::Tuple(elems.clone());
+                        let nested =
+                            self.compile_from_json_turbofish_with_ptr(&[nested_ty], elem_json)?;
+                        match nested {
+                            BasicValueEnum::StructValue(sv) => {
+                                let sty = sv.get_type();
+                                let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                                let heap = self.malloc_or_abort(
+                                    i64_ty.const_int(size, false),
+                                    "list_tup_heap",
+                                )?;
+                                let i8_ptr =
+                                    self.context.ptr_type(inkwell::AddressSpace::default());
+                                let typed = self
+                                    .build_bit_cast(
+                                        heap.into(),
+                                        BasicTypeEnum::PointerType(i8_ptr),
+                                        "list_tup_ptr",
+                                    )?
+                                    .into_pointer_value();
+                                self.build_store(typed, sv)?;
+                                self.build_ptr_to_int(typed, i64_ty, "list_tup_as_i64")?
+                            }
+                            BasicValueEnum::PointerValue(pv) => {
+                                self.build_ptr_to_int(pv, i64_ty, "list_tup_ptr_i64")?
+                            }
+                            BasicValueEnum::IntValue(iv) => iv,
+                            other => {
+                                return Err(CompileError::Generic(format!(
+                                    "from_json List Tuple: unexpected {:?}",
+                                    other.get_type()
+                                )));
+                            }
+                        }
+                    }
                     _ => {
                         return Err(CompileError::Generic(format!(
                             "from_json::<List<T>>: unsupported element type {:?}",

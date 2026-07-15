@@ -575,8 +575,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             if let Some(full) = self.get_full_type_name(ta) {
                                                 self.var_type_names.insert(name.clone(), full);
                                             }
+                                            self.var_types.insert(name.clone(), ta.clone());
+                                            self.register_list_elem_type(name, ta);
                                         } else {
                                             self.var_type_names.insert(name.clone(), tn.clone());
+                                            self.var_types.insert(name.clone(), ta.clone());
                                         }
                                     }
                                 }
@@ -587,6 +590,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if let Pattern::Variable(name) = pat {
                         if let Some(decl_ty) = &ty {
                             self.register_list_elem_type(name, decl_ty);
+                            self.var_types.insert(name.clone(), decl_ty.clone());
                         }
                         // Track standalone turbofish type (e.g. from_json::<List<f64>>("..."))
                         if let Expr::Turbofish(_func_name, turbo_type_args, _) = init {
@@ -596,8 +600,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if let Some(full) = self.get_full_type_name(ta) {
                                             self.var_type_names.insert(name.clone(), full);
                                         }
+                                        self.var_types.insert(name.clone(), ta.clone());
+                                        self.register_list_elem_type(name, ta);
                                     } else {
                                         self.var_type_names.insert(name.clone(), tn.clone());
+                                        self.var_types.insert(name.clone(), ta.clone());
                                     }
                                 }
                             }

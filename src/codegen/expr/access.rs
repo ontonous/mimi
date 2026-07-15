@@ -90,17 +90,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                             return Ok(Some(BasicValueEnum::FloatValue(fv)));
                         }
                     }
-                    if let Some(BasicTypeEnum::StructType(sty)) =
-                        types::mimi_type_to_llvm(self.context, elem_ty)
+                    // Product tuples / records / nested structs: ptrtoint slots.
+                    if matches!(elem_ty, Type::Tuple(_))
+                        || matches!(
+                            types::mimi_type_to_llvm(self.context, elem_ty),
+                            Some(BasicTypeEnum::StructType(_))
+                        )
                     {
-                        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")?;
-                        let struct_val = self.build_load(
-                            BasicTypeEnum::StructType(sty),
-                            elem_ptr,
-                            "elem_struct",
-                        )?;
-                        return Ok(Some(struct_val));
+                        if let Some(BasicTypeEnum::StructType(sty)) =
+                            types::mimi_type_to_llvm(self.context, elem_ty)
+                        {
+                            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                            let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")?;
+                            let struct_val = self.build_load(
+                                BasicTypeEnum::StructType(sty),
+                                elem_ptr,
+                                "elem_struct",
+                            )?;
+                            return Ok(Some(struct_val));
+                        }
                     }
                 }
             }
