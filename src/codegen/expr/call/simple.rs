@@ -534,6 +534,60 @@ impl<'ctx> CodeGenerator<'ctx> {
                             return self.wrap_c_string(raw);
                         }
                     }
+                    // List of Set of product.
+                    if let Some(set_elem) = inner
+                        .strip_prefix("Set<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
+                            let resolved = if self.is_product_tuple_alias(set_elem) {
+                                self.resolve_alias_type_name(set_elem)
+                            } else {
+                                set_elem.to_string()
+                            };
+                            let mut arity: i64 = 0;
+                            let mut depth = 0i32;
+                            let mut any = false;
+                            let body = resolved
+                                .strip_prefix('(')
+                                .and_then(|s| s.strip_suffix(')'))
+                                .unwrap_or(resolved.as_str());
+                            for ch in body.chars() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' | ')' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        arity += 1;
+                                        any = true;
+                                    }
+                                    c if !c.is_whitespace() => any = true,
+                                    _ => {}
+                                }
+                            }
+                            if any {
+                                arity += 1;
+                            }
+                            let func = self.get_runtime_fn("mimi_list_set_product_to_json")?;
+                            let raw = self
+                                .build_call(
+                                    func,
+                                    &[
+                                        BasicMetadataValueEnum::PointerValue(alloca),
+                                        BasicMetadataValueEnum::IntValue(
+                                            self.context
+                                                .i64_type()
+                                                .const_int(arity.max(1) as u64, false),
+                                        ),
+                                    ],
+                                    "list_set_product_json",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("list set product to_json void")?
+                                .into_pointer_value();
+                            self.register_heap_alloc(raw);
+                            return self.wrap_c_string(raw);
+                        }
+                    }
                     let rt_fn_name = if inner.starts_with("Map") {
                         if inner.contains("Map<string, string>") {
                             "mimi_list_map_to_json_string"
@@ -4012,6 +4066,57 @@ impl<'ctx> CodeGenerator<'ctx> {
                             2
                         } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>") {
                             3
+                        } else if let Some(elem) = obj_type
+                            .strip_prefix("Result<")
+                            .and_then(|s| {
+                                let mut depth = 0i32;
+                                for (i, ch) in s.char_indices() {
+                                    match ch {
+                                        '<' => depth += 1,
+                                        '>' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            return Some(s[..i].trim());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                None
+                            })
+                            .and_then(|s| s.strip_prefix("Set<"))
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                                let resolved = if self.is_product_tuple_alias(elem) {
+                                    self.resolve_alias_type_name(elem)
+                                } else {
+                                    elem.to_string()
+                                };
+                                let mut arity: i64 = 0;
+                                let mut depth = 0i32;
+                                let mut any = false;
+                                let body = resolved
+                                    .strip_prefix('(')
+                                    .and_then(|s| s.strip_suffix(')'))
+                                    .unwrap_or(resolved.as_str());
+                                for ch in body.chars() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            arity += 1;
+                                            any = true;
+                                        }
+                                        c if !c.is_whitespace() => any = true,
+                                        _ => {}
+                                    }
+                                }
+                                if any {
+                                    arity += 1;
+                                }
+                                10 + arity.max(1)
+                            } else {
+                                0
+                            }
                         } else {
                             0
                         };

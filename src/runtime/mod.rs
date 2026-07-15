@@ -1801,11 +1801,16 @@ pub extern "C" fn mimi_result_set_to_json(
     mode: i64,
 ) -> *mut std::ffi::c_char {
     if disc != 0 {
-        let json_ptr = match mode {
-            1 => mimi_set_to_json_string(ok_handle),
-            2 => mimi_set_to_json_bool(ok_handle),
-            3 => mimi_set_to_json_f64(ok_handle),
-            _ => mimi_set_to_json_i64(ok_handle),
+        // mode >= 10 encodes product arity as (10 + arity).
+        let json_ptr = if mode >= 10 {
+            mimi_set_to_json_product_i64(ok_handle, mode - 10, 0)
+        } else {
+            match mode {
+                1 => mimi_set_to_json_string(ok_handle),
+                2 => mimi_set_to_json_bool(ok_handle),
+                3 => mimi_set_to_json_f64(ok_handle),
+                _ => mimi_set_to_json_i64(ok_handle),
+            }
         };
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
@@ -1813,7 +1818,8 @@ pub extern "C" fn mimi_result_set_to_json(
         }
         alloc_c_string(&format!("{{\"Ok\":[{}]}}", s))
     } else {
-        alloc_c_string(&format!("{{\"Err\":[{}]}}", err))
+        let err_s = decode_result_err_string(err);
+        alloc_c_string(&format!("{{\"Err\":[{}]}}", err_s))
     }
 }
 
@@ -1841,6 +1847,74 @@ pub extern "C" fn mimi_list_set_to_json(list: *const MimiList) -> *mut std::ffi:
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
             unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+        }
+        parts.push(s);
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
+/// Render `List<Set<product>>` as JSON array of product-set JSON arrays.
+#[no_mangle]
+pub extern "C" fn mimi_list_set_product_to_json(
+    list: *const MimiList,
+    arity: i64,
+) -> *mut std::ffi::c_char {
+    if list.is_null() || arity <= 0 {
+        return alloc_c_string("[]");
+    }
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        let handle = unsafe { *(lst.data as *const i64).offset(i) } as SetHandle;
+        let json_ptr = mimi_set_to_json_product_i64(handle, arity, 0);
+        let s = unsafe { cstr_to_string(json_ptr) };
+        if !json_ptr.is_null() {
+            unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+        }
+        parts.push(s);
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
+/// Render `List<Set<product>>` Display as `[Set{(1, 2)}, ...]`.
+#[no_mangle]
+pub extern "C" fn mimi_list_set_product_to_string(
+    list: *const MimiList,
+    arity: i64,
+) -> *mut std::ffi::c_char {
+    if list.is_null() || arity <= 0 {
+        return alloc_c_string("[]");
+    }
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(String::from(", "));
+        }
+        let handle = unsafe { *(lst.data as *const i64).offset(i) } as SetHandle;
+        let disp = mimi_set_to_json_product_i64(handle, arity, 1);
+        let s = unsafe { cstr_to_string(disp) };
+        if !disp.is_null() {
+            unsafe { libc::free(disp as *mut std::ffi::c_void) };
         }
         parts.push(s);
     }
