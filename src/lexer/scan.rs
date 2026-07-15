@@ -745,6 +745,8 @@ impl<'a> super::Lexer<'a> {
                     self.advance();
                     Ok(TokenKind::Ne)
                 } else {
+                    // LX-H9: Bang required for `quote!` macro invoke; NotOp is
+                    // a soft alias accepted by the parser for unary not.
                     Ok(TokenKind::Bang)
                 }
             }
