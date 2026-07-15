@@ -2680,9 +2680,53 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                 }
                             }
-                            // Map of Map of List/Set/Option of product.
+                            // Map of Map of List/Set/Option/Result of product.
                             if ln == "Map" {
                                 if let Type::Name(sn, sargs) = &le {
+                                    if sn == "Result" && sargs.len() == 2 {
+                                        let res_ok = match &sargs[0] {
+                                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                                if let Some(td) = self.type_defs.get(an) {
+                                                    if let crate::ast::TypeDefKind::Alias(inner) =
+                                                        &td.kind
+                                                    {
+                                                        inner.clone()
+                                                    } else {
+                                                        sargs[0].clone()
+                                                    }
+                                                } else {
+                                                    sargs[0].clone()
+                                                }
+                                            }
+                                            other => other.clone(),
+                                        };
+                                        if let Type::Tuple(elems) = res_ok {
+                                            let arity = elems.len() as u64;
+                                            let func = self.get_runtime_fn(
+                                                "mimi_map_from_json_map_result_product_i64",
+                                            )?;
+                                            let result = self.build_call(
+                                                func,
+                                                &[
+                                                    BasicMetadataValueEnum::PointerValue(
+                                                        raw_ptr,
+                                                    ),
+                                                    BasicMetadataValueEnum::IntValue(
+                                                        self.context
+                                                            .i64_type()
+                                                            .const_int(arity, false),
+                                                    ),
+                                                ],
+                                                "map_from_json_map_result_product",
+                                            )?;
+                                            return Ok(self
+                                                .expect_basic_value(
+                                                    &result,
+                                                    "mimi_map_from_json_map_result_product_i64",
+                                                )?
+                                                .into());
+                                        }
+                                    }
                                     if sn == "List" && sargs.len() == 1 {
                                         let list_elem = match &sargs[0] {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
@@ -4492,6 +4536,67 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         .expect_basic_value(
                                             &result,
                                             "mimi_set_from_json_option_map_product_i64",
+                                        )?
+                                        .into());
+                                }
+                            }
+                        }
+                    }
+                }
+                // Set of Map of List of product.
+                if let Some(Type::Name(mn, margs)) = elem_ty {
+                    if mn == "Map" && margs.len() == 2 {
+                        let map_val = match &margs[1] {
+                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                if let Some(td) = self.type_defs.get(an) {
+                                    if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
+                                        inner.clone()
+                                    } else {
+                                        margs[1].clone()
+                                    }
+                                } else {
+                                    margs[1].clone()
+                                }
+                            }
+                            other => other.clone(),
+                        };
+                        if let Type::Name(ln, largs) = &map_val {
+                            if ln == "List" && largs.len() == 1 {
+                                let list_elem = match &largs[0] {
+                                    Type::Name(an, aargs) if aargs.is_empty() => {
+                                        if let Some(td) = self.type_defs.get(an) {
+                                            if let crate::ast::TypeDefKind::Alias(inner) =
+                                                &td.kind
+                                            {
+                                                inner.clone()
+                                            } else {
+                                                largs[0].clone()
+                                            }
+                                        } else {
+                                            largs[0].clone()
+                                        }
+                                    }
+                                    other => other.clone(),
+                                };
+                                if let Type::Tuple(elems) = list_elem {
+                                    let arity = elems.len() as u64;
+                                    let func = self.get_runtime_fn(
+                                        "mimi_set_from_json_map_list_product_i64",
+                                    )?;
+                                    let result = self.build_call(
+                                        func,
+                                        &[
+                                            BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                            BasicMetadataValueEnum::IntValue(
+                                                self.context.i64_type().const_int(arity, false),
+                                            ),
+                                        ],
+                                        "set_from_json_map_list_product",
+                                    )?;
+                                    return Ok(self
+                                        .expect_basic_value(
+                                            &result,
+                                            "mimi_set_from_json_map_list_product_i64",
                                         )?
                                         .into());
                                 }
