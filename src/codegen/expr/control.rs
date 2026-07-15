@@ -59,13 +59,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             (Some(v), reaches)
         } else {
+            // CG-H5: no else arm — produce a zero/unit value of then type so the
+            // PHI has an incoming from else_bb (LLVM requires all predecessors).
             let reaches = !self.block_has_terminator();
+            let zero = self.const_zero_for_type(then_val.get_type());
             if reaches {
                 self.builder
                     .build_unconditional_branch(merge_bb)
                     .map_err(|e| CompileError::LlvmError(format!("branch error: {}", e)))?;
             }
-            (None, reaches)
+            (Some(zero), reaches)
         };
         let else_bb_end = else_reaches
             .then(|| self.builder.get_insert_block())
@@ -82,10 +85,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some(bb) = then_bb_end {
             phi.add_incoming(&[(&then_val as &dyn inkwell::values::BasicValue, bb)]);
         }
-        // Only add else incoming when we have an actual else value.
-        // When else_val is None (no else block), the implicit unit value should not
-        // be phi'd with a then_val of different type (e.g. struct).
         if let (Some(bb), Some(ev)) = (else_bb_end, else_val) {
+            // When types differ (rare after zero fill), refuse silent mismatch.
+            if ev.get_type() != ty {
+                return Err(CompileError::TypeMismatch(format!(
+                    "if expression branches have incompatible types ({:?} vs {:?})",
+                    ty,
+                    ev.get_type()
+                )));
+            }
             phi.add_incoming(&[(&ev as &dyn inkwell::values::BasicValue, bb)]);
         }
         Ok(phi.as_basic_value())
