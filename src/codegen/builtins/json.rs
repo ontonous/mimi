@@ -36,31 +36,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .module
             .get_function("strcpy")
             .ok_or_else(|| "strcpy not declared".to_string())?;
-        let alloc_size = match &args[0] {
-            BasicMetadataValueEnum::StructValue(sv) => {
-                let str_len = self
-                    .builder
-                    .build_extract_value(*sv, 1, "str_len")
-                    .map_err(|e| format!("extract str_len error: {}", e))?;
-                let three = i64_ty.const_int(3, false);
-                match str_len {
-                    BasicValueEnum::IntValue(iv) => self
-                        .builder
-                        .build_int_add(iv, three, "buf_size")
-                        .map_err(|e| format!("add error: {}", e))?,
-                    _ => {
-                        return Err(CompileError::Generic(
-                            "string length field is not i64".into(),
-                        ))
-                    }
-                }
-            }
-            _ => i64_ty.const_int(512, false), // B3: was 64, %f can produce 317+ chars
-        };
-        let buf = self.malloc_or_abort(alloc_size, "json_malloc")?;
-        // NOTE: not registered — returned value owns the allocation
         match args[0] {
             BasicMetadataValueEnum::FloatValue(fv) => {
+                // B3: was 64, %f can produce 317+ chars.
+                let alloc_size = i64_ty.const_int(512, false);
+                let buf = self.malloc_or_abort(alloc_size, "json_malloc")?;
+                // NOTE: not registered — returned value owns the allocation.
                 let fmt = self
                     .builder
                     .build_global_string_ptr("%f", "json_float_fmt")
@@ -81,6 +62,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             BasicMetadataValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => {
                 // Bool: true→"true", false→"false"
+                let alloc_size = i64_ty.const_int(512, false);
+                let buf = self.malloc_or_abort(alloc_size, "json_malloc")?;
+                // NOTE: not registered — returned value owns the allocation.
                 let true_str = self
                     .builder
                     .build_global_string_ptr("true", "json_true")
@@ -142,6 +126,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             BasicMetadataValueEnum::IntValue(iv) => {
                 // Integer: snprintf(buf, size, "%ld", iv)
+                let alloc_size = i64_ty.const_int(512, false);
+                let buf = self.malloc_or_abort(alloc_size, "json_malloc")?;
+                // NOTE: not registered — returned value owns the allocation.
                 let fmt = self
                     .builder
                     .build_global_string_ptr("%ld", "json_int_fmt")
@@ -176,30 +163,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .try_as_basic_value_opt()
                         .ok_or("mimi_json_escape_string returned void")?
                         .into_pointer_value();
-                    // Copy escaped string into buf (which is already allocated with str_len+3).
-                    // The escaped string may be longer than the original if it contains
-                    // special chars. Use strcpy which copies until null terminator.
-                    self.builder
-                        .build_call(
-                            strcpy_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(buf),
-                                BasicMetadataValueEnum::PointerValue(escaped),
-                            ],
-                            "json_strcpy_escaped",
-                        )
-                        .map_err(|e| format!("strcpy error: {}", e))?;
-                    // Free the escaped string (it's heap-allocated by the runtime).
-                    let free_fn = self
-                        .module
-                        .get_function("free")
-                        .ok_or_else(|| CompileError::LlvmError("free not declared".into()))?;
-                    let _ = self.build_call(
-                        free_fn,
-                        &[BasicMetadataValueEnum::PointerValue(escaped)],
-                        "free_escaped",
-                    );
-                    Ok(buf.into())
+                    // The runtime already returns an exactly-sized owned allocation.
+                    // Returning it directly avoids a second allocation and prevents
+                    // escaped content from overflowing an input-length-sized buffer.
+                    Ok(escaped.into())
                 } else {
                     // Untyped pointer path: List/Record/Map/Set are handled in compile_call
                     // (simple.rs) before reaching here when type names are known.

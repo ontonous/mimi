@@ -5,6 +5,17 @@ use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
 use mimi::verifier::VerifStatus;
 use mimi::{lexer, loader, parser};
 
+fn verification_blocks_success(
+    status: &VerifStatus,
+    constraint_count: usize,
+    message: &str,
+) -> bool {
+    let no_contracts = *status == VerifStatus::Unknown
+        && constraint_count == 0
+        && matches!(message, "no contracts" | "no contracts to verify");
+    *status == VerifStatus::Failed || (*status == VerifStatus::Unknown && !no_contracts)
+}
+
 pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
@@ -104,7 +115,7 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
                 );
             }
 
-            if r.status == VerifStatus::Failed {
+            if verification_blocks_success(&r.status, r.constraint_count, &r.message) {
                 all_passed = false;
             }
         }
@@ -141,8 +152,37 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
         }
 
         if !all_passed {
-            return Err("verification failed".into());
+            return Err("verification failed or was inconclusive".into());
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verification_blocks_success;
+    use mimi::verifier::VerifStatus;
+
+    #[test]
+    fn genuine_unknown_blocks_cli_success() {
+        assert!(verification_blocks_success(
+            &VerifStatus::Unknown,
+            1,
+            "could not encode ensures"
+        ));
+        assert!(verification_blocks_success(
+            &VerifStatus::Unknown,
+            0,
+            "Z3 solver not available"
+        ));
+    }
+
+    #[test]
+    fn no_contract_result_is_neutral() {
+        assert!(!verification_blocks_success(
+            &VerifStatus::Unknown,
+            0,
+            "no contracts to verify"
+        ));
+    }
 }

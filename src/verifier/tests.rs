@@ -27,6 +27,36 @@ func identity(x: i32) -> i32 {
 }
 
 #[test]
+fn verify_unencodable_ensures_is_unknown() {
+    require_z3!();
+    let src = r#"
+func preserve(xs: List<i32>) -> List<i32> {
+    ensures: result[0] == xs[0]
+    xs
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, VerifStatus::Unknown);
+    assert!(results[0].message.contains("could not encode ensures"));
+}
+
+#[test]
+fn verify_unencodable_requires_is_unknown() {
+    require_z3!();
+    let src = r#"
+func first(xs: List<i32>) -> i32 {
+    requires: xs[0] > 0
+    1
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, VerifStatus::Unknown);
+    assert!(results[0].message.contains("could not encode requires"));
+}
+
+#[test]
 fn verify_body_satisfies_ensures() {
     require_z3!();
     let src = r#"

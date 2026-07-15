@@ -100,8 +100,18 @@ impl VerifierCtx {
             (requires_expr.is_some() as usize) + (ensures_expr.is_some() as usize);
 
         if let Some(req) = requires_expr {
-            if let Some(z3_bool) = expr::expr_to_z3_bool(req, &mut vars) {
-                session.assert(&z3_bool);
+            match expr::expr_to_z3_bool(req, &mut vars) {
+                Some(z3_bool) => session.assert(&z3_bool),
+                None => {
+                    return VerificationResult {
+                        func_name: format!("extern {}", func.name),
+                        status: VerifStatus::Unknown,
+                        message: "could not encode extern requires for Z3".into(),
+                        diagnostic: None,
+                        duration_us: start.elapsed().as_micros() as u64,
+                        constraint_count,
+                    };
+                }
             }
         }
 
@@ -607,6 +617,9 @@ impl VerifierCtx {
                                     // This ensures holds; continue checking.
                                 }
                             }
+                        } else {
+                            parse_errors
+                                .push(format!("could not encode ensures: {}", format_expr(e)));
                         }
                     }
                     if found_violation {
@@ -646,23 +659,53 @@ impl VerifierCtx {
                             constraint_count,
                         }
                     } else {
+                        if parse_errors.is_empty() {
+                            VerificationResult {
+                                func_name: func.name.clone(),
+                                status: VerifStatus::Verified,
+                                message: "postconditions verified".into(),
+                                diagnostic: None,
+                                duration_us: start.elapsed().as_micros() as u64,
+                                constraint_count,
+                            }
+                        } else {
+                            VerificationResult {
+                                func_name: func.name.clone(),
+                                status: VerifStatus::Unknown,
+                                message: format!(
+                                    "verification incomplete for '{}': {}",
+                                    func.name,
+                                    parse_errors.join("; ")
+                                ),
+                                diagnostic: annotate_parse_errors(None, &parse_errors),
+                                duration_us: start.elapsed().as_micros() as u64,
+                                constraint_count,
+                            }
+                        }
+                    }
+                } else {
+                    if parse_errors.is_empty() {
                         VerificationResult {
                             func_name: func.name.clone(),
                             status: VerifStatus::Verified,
-                            message: "postconditions verified".into(),
+                            message: "preconditions satisfiable, no postconditions".into(),
+                            diagnostic: None,
+                            duration_us: start.elapsed().as_micros() as u64,
+                            constraint_count,
+                        }
+                    } else {
+                        VerificationResult {
+                            func_name: func.name.clone(),
+                            status: VerifStatus::Unknown,
+                            message: format!(
+                                "verification incomplete for '{}': {}",
+                                func.name,
+                                parse_errors.join("; ")
+                            ),
                             diagnostic: annotate_parse_errors(None, &parse_errors),
                             duration_us: start.elapsed().as_micros() as u64,
                             constraint_count,
                         }
-                    }
-                } else {
-                    VerificationResult {
-                        func_name: func.name.clone(),
-                        status: VerifStatus::Verified,
-                        message: "preconditions satisfiable, no postconditions".into(),
-                        diagnostic: annotate_parse_errors(None, &parse_errors),
-                        duration_us: start.elapsed().as_micros() as u64,
-                        constraint_count,
                     }
                 }
             }

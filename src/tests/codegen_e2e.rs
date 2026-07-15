@@ -754,6 +754,24 @@ fn e2e_json_to_json_string() {
 }
 
 #[test]
+fn e2e_json_to_json_string_expanding_escapes() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = compile_and_run(
+        r#"
+        func main() -> i32 {
+            println(to_json("\n\n\n\n\n\n\n\n"))
+            0
+        }
+    "#,
+    )
+    .expect("JSON escaping expansion should not overflow");
+    assert_eq!(stdout.trim(), "\"\\n\\n\\n\\n\\n\\n\\n\\n\"");
+}
+
+#[test]
 fn e2e_json_to_json_bool() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
