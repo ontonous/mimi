@@ -846,25 +846,48 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i64_ty, elem_slot, "list_set_handle")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_int_value();
-        let set_fn_name = if set_type.contains("Set<string>") {
-            "mimi_set_to_display_string"
-        } else if set_type.contains("Set<bool>") {
-            "mimi_set_to_display_bool"
-        } else if set_type.contains("Set<f64>") || set_type.contains("Set<f32>") {
-            "mimi_set_to_display_f64"
+        let set_str = if let Some(elem) = set_type
+            .strip_prefix("Set<")
+            .and_then(|s| s.strip_suffix('>'))
+        {
+            if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                let resolved = if self.is_product_tuple_alias(elem) {
+                    self.resolve_alias_type_name(elem)
+                } else {
+                    elem.to_string()
+                };
+                self.emit_set_product_to_json(handle, &resolved, 1)?
+            } else {
+                let set_fn_name = if set_type.contains("Set<string>") {
+                    "mimi_set_to_display_string"
+                } else if set_type.contains("Set<bool>") {
+                    "mimi_set_to_display_bool"
+                } else if set_type.contains("Set<f64>") || set_type.contains("Set<f32>") {
+                    "mimi_set_to_display_f64"
+                } else {
+                    "mimi_set_to_display"
+                };
+                let set_fn = self.get_runtime_fn(set_fn_name)?;
+                self.build_call(
+                    set_fn,
+                    &[BasicMetadataValueEnum::IntValue(handle)],
+                    "list_set_disp",
+                )?
+                .try_as_basic_value_opt()
+                .ok_or("set display void")?
+                .into_pointer_value()
+            }
         } else {
-            "mimi_set_to_display"
-        };
-        let set_fn = self.get_runtime_fn(set_fn_name)?;
-        let set_str = self
-            .build_call(
+            let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
+            self.build_call(
                 set_fn,
                 &[BasicMetadataValueEnum::IntValue(handle)],
                 "list_set_disp",
             )?
             .try_as_basic_value_opt()
             .ok_or("set display void")?
-            .into_pointer_value();
+            .into_pointer_value()
+        };
         self.build_call(
             strcat_fn,
             &[
@@ -3902,16 +3925,59 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .into_pointer_value()
                             }
                         } else {
-                            let fn_name = Self::set_display_fn_for_type(arg_type);
-                            let func = self.get_runtime_fn(fn_name)?;
-                            self.build_call(
-                                func,
-                                &[BasicMetadataValueEnum::IntValue(as_i64)],
-                                "res_ok_set",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("set display void")?
-                            .into_pointer_value()
+                            // Result of Set — product or scalar.
+                            let set_inner = arg_type
+                                .strip_prefix("Result<")
+                                .and_then(|s| {
+                                    let mut depth = 0i32;
+                                    for (i, ch) in s.char_indices() {
+                                        match ch {
+                                            '<' => depth += 1,
+                                            '>' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                return Some(s[..i].trim());
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    None
+                                })
+                                .unwrap_or(arg_type);
+                            if let Some(elem) = set_inner
+                                .strip_prefix("Set<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                                    let resolved = if self.is_product_tuple_alias(elem) {
+                                        self.resolve_alias_type_name(elem)
+                                    } else {
+                                        elem.to_string()
+                                    };
+                                    self.emit_set_product_to_json(as_i64, &resolved, 1)?
+                                } else {
+                                    let fn_name = Self::set_display_fn_for_type(arg_type);
+                                    let func = self.get_runtime_fn(fn_name)?;
+                                    self.build_call(
+                                        func,
+                                        &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                        "res_ok_set",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("set display void")?
+                                    .into_pointer_value()
+                                }
+                            } else {
+                                let fn_name = Self::set_display_fn_for_type(arg_type);
+                                let func = self.get_runtime_fn(fn_name)?;
+                                self.build_call(
+                                    func,
+                                    &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                    "res_ok_set",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("set display void")?
+                                .into_pointer_value()
+                            }
                         };
                         let fmt = self
                             .builder
