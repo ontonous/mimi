@@ -228,6 +228,34 @@ fn default_type_value_depth(ty: &Type, shapes: &HashMap<String, Vec<Field>>, dep
             let _ = args;
             Expr::List(vec![])
         }
+        // T-H11: Option / Result / Tuple / Map / Set defaults (not unit).
+        Type::Name(n, args) if n == "Option" || n == "option" => {
+            let _ = args;
+            Expr::Ident("None".into())
+        }
+        Type::Name(n, args) if n == "Result" || n == "result" => {
+            // Prefer Err with empty string when second type arg is string-like;
+            // otherwise unit-wrapped Err is still better than bare unit.
+            let err_payload = args
+                .get(1)
+                .map(|t| default_type_value_depth(t, shapes, depth + 1))
+                .unwrap_or_else(|| Expr::Literal(Lit::String(String::new())));
+            Expr::Call(Box::new(Expr::Ident("Err".into())), vec![err_payload])
+        }
+        Type::Name(n, args) if n == "Map" || n == "map" => {
+            let _ = args;
+            Expr::Call(Box::new(Expr::Ident("map_new".into())), vec![])
+        }
+        Type::Name(n, args) if n == "Set" || n == "set" => {
+            let _ = args;
+            Expr::SetLiteral(vec![])
+        }
+        Type::Tuple(elems) => Expr::Tuple(
+            elems
+                .iter()
+                .map(|e| default_type_value_depth(e, shapes, depth + 1))
+                .collect(),
+        ),
         _ => Expr::Literal(Lit::Unit),
     }
 }
