@@ -1745,6 +1745,37 @@ func main() -> i32 { 0 }
     );
 }
 
+/// V-H1: assigning a free variable of the invariant inside a loop degrades status.
+#[test]
+fn verify_invariant_preserve_assign_degrades() {
+    require_z3!();
+    // Keep body simple: assign inv free var `x` to a constant inside while.
+    // Avoid `x = x` which can create a cyclic let-subst expand.
+    let src = r#"
+func loop_mut(x: i32) -> i32 {
+    requires: x >= 0
+    invariant: x >= 0
+    ensures: result >= 0
+    while false {
+        x = 0
+    }
+    x
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("src/verifier/tests.rs: invariant_preserve_assign");
+    let f = results
+        .iter()
+        .find(|r| r.func_name == "loop_mut")
+        .expect("loop_mut present");
+    assert_ne!(
+        f.status,
+        VerifStatus::Verified,
+        "assigning inv free var in loop must not Verified: {:?}",
+        f
+    );
+}
+
 /// V1: extract_body_return handles if-else branching in body.
 /// The Z3 layer should receive an Expr::If encoding for the conditional paths.
 #[test]
