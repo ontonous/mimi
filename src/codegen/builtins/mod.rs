@@ -3503,8 +3503,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             "session_send" => self.compile_session_send(args),
             "session_recv" => self.compile_session_recv(args),
             "session_close" => self.compile_session_close(args),
-            "session_open" | "session_pair" => self.compile_session_open(args),
-            "protocol_methods" => Ok(self.context.i64_type().const_int(0, false).into()),
+            "session_open" => Err(CompileError::Unsupported(
+                "session_open does not yet lower to a typed SessionChan endpoint".into(),
+            )),
+            "session_pair" => self.compile_session_open(args),
+            "protocol_methods" => Err(CompileError::Unsupported(
+                "protocol_methods requires runtime protocol metadata".into(),
+            )),
             "actor_mailbox_depth" => {
                 self.compile_actor_mailbox_query(args, "mimi_actor_mailbox_depth")
             }
@@ -3521,84 +3526,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "bare spawn_detached(name) is unsupported; use ActorType.spawn_detached()"
                     .to_string(),
             )),
-            // v0.29.38: assert_state — test utility. In codegen, we extract the
-            // expected state name string and call mimi_assert_state. The actual
-            // state is passed as null because LLVM struct type names are not
-            // available at runtime. The interp path does the full check.
-            "assert_state" => {
-                if args.len() != 2 {
-                    return Err(CompileError::WrongArgCount(
-                        "assert_state expects 2 arguments".to_string(),
-                    ));
-                }
-                // Extract the expected state name (arg[1]) as a C string pointer
-                let expected_ptr = self.extract_raw_str_ptr(&args[1])?;
-                let null_ptr = self
-                    .context
-                    .ptr_type(inkwell::AddressSpace::default())
-                    .const_null();
-                let fn_ty = self.context.i64_type().fn_type(
-                    &[
-                        inkwell::types::BasicMetadataTypeEnum::PointerType(
-                            self.context.ptr_type(inkwell::AddressSpace::default()),
-                        ),
-                        inkwell::types::BasicMetadataTypeEnum::PointerType(
-                            self.context.ptr_type(inkwell::AddressSpace::default()),
-                        ),
-                    ],
-                    false,
-                );
-                let func = self
-                    .module
-                    .get_function("mimi_assert_state")
-                    .unwrap_or_else(|| self.module.add_function("mimi_assert_state", fn_ty, None));
-                let call = self
-                    .builder
-                    .build_call(
-                        func,
-                        &[null_ptr.into(), expected_ptr.into()],
-                        "assert_state_call",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
-                call.try_as_basic_value_opt().ok_or_else(|| {
-                    CompileError::LlvmError("mimi_assert_state returned void".into())
-                })
-            }
-            // v0.29.38: inject_fault — test utility. In codegen, we call
-            // mimi_inject_fault which prints a message and aborts. The interp
-            // path constructs a proper Fault record with SystemTrace.
-            "inject_fault" => {
-                if args.is_empty() {
-                    return Err(CompileError::WrongArgCount(
-                        "inject_fault expects 1 argument".to_string(),
-                    ));
-                }
-                // Prefer state name string when provided; else null.
-                let state_ptr = self
-                    .extract_raw_str_ptr(&args[0])
-                    .unwrap_or_else(|_| {
-                        self.context
-                            .ptr_type(inkwell::AddressSpace::default())
-                            .const_null()
-                    });
-                let fn_ty = self.context.i64_type().fn_type(
-                    &[inkwell::types::BasicMetadataTypeEnum::PointerType(
-                        self.context.ptr_type(inkwell::AddressSpace::default()),
-                    )],
-                    false,
-                );
-                let func = self
-                    .module
-                    .get_function("mimi_inject_fault")
-                    .unwrap_or_else(|| self.module.add_function("mimi_inject_fault", fn_ty, None));
-                let call = self
-                    .builder
-                    .build_call(func, &[state_ptr.into()], "inject_fault_call")
-                    .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
-                call.try_as_basic_value_opt().ok_or_else(|| {
-                    CompileError::LlvmError("mimi_inject_fault returned void".into())
-                })
-            }
+            "assert_state" => Err(CompileError::Unsupported(
+                "assert_state cannot inspect flow state identity".into(),
+            )),
+            "inject_fault" => Err(CompileError::Unsupported(
+                "inject_fault cannot construct a Fault/SystemTrace value".into(),
+            )),
             // v0.29.44: shadow memory tagging builtins
             "shadow_alloc" => {
                 // Delegates to mimi_shadow_alloc(size, tag, label) -> ptr
@@ -3612,8 +3545,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.context.i64_type().const_int(0, false),
                 ))
             }
-            // v0.29.48: test_sandbox — returns empty list in codegen (stub)
-            "test_sandbox" => Ok(self.context.i64_type().const_int(0, false).into()),
+            "test_sandbox" => Err(CompileError::Unsupported(
+                "test_sandbox is interpreter-only".into(),
+            )),
             "channel_try_recv" => self.compile_channel_try_recv(args),
             "channel_drop" => {
                 self.compile_atomic_drop_helper("mimi_channel_drop", args)?;

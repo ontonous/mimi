@@ -56,6 +56,8 @@ pub enum CompileError {
     UnsupportedExpr(String),
     #[error("unsupported statement in codegen: {0}")]
     UnsupportedStmt(String),
+    #[error("unsupported in LLVM codegen: {0}")]
+    Unsupported(String),
     #[error("cannot call {0}: expected a function or closure")]
     NotCallable(String),
 
@@ -146,6 +148,7 @@ impl CompileError {
             Self::UnsupportedBinOp(_) => E0721,
             Self::UnsupportedExpr(_) => E0722,
             Self::UnsupportedStmt(_) => E0702,
+            Self::Unsupported(_) => E0722,
             Self::NotCallable(_) => E0742,
             Self::ContractCondition(_) => E0500,
             Self::BreakOutsideLoop => E0404,

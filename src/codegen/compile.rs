@@ -339,6 +339,12 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Compile all transitions of a flow as ordinary LLVM functions.
     pub(super) fn compile_flow(&mut self, flow: &FlowDef) -> MimiResult<()> {
+        if !flow.transactional_fields.is_empty() {
+            return Err(CompileError::Unsupported(format!(
+                "transactional recovery for flow '{}' is not implemented",
+                flow.name
+            )));
+        }
         for t in &flow.transitions {
             if t.body.is_none() {
                 continue; // abstract / protocol-style transition — no body
