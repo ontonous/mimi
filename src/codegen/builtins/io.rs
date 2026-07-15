@@ -2256,6 +2256,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "res_ok_list_sv_snprintf",
                     )?;
                 }
+                BasicTypeEnum::StructType(sty)
+                    if label == "ok"
+                        && sty.get_field_types().len() >= 2
+                        && !matches!(
+                            sty.get_field_types()[0],
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                        ) =>
+                {
+                    // Product tuple by-value in Result Ok: e.g. (i32,i32).
+                    let tup_str =
+                        self.emit_product_tuple_to_string(val.into_struct_value())?;
+                    let fmt = self
+                        .builder
+                        .build_global_string_ptr("Ok(%s)", "res_ok_tup_fmt")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.build_call(
+                        snprintf_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::IntValue(buf_size),
+                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                            BasicMetadataValueEnum::PointerValue(tup_str),
+                        ],
+                        "res_ok_tup_snprintf",
+                    )?;
+                }
                 BasicTypeEnum::IntType(_) => {
                     let iv = val.into_int_value();
                     let as_i64 = if iv.get_type().get_bit_width() < 64 {
@@ -2869,6 +2895,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .build_extract_value(psv.into(), 0, "opt_str_ptr")?
                         .into_pointer_value();
                     OptPay::StrPtr(dp)
+                } else if pfields.len() >= 2 {
+                    // Product tuple / multi-field struct by-value in Option payload.
+                    let tup_str = self.emit_product_tuple_to_string(psv)?;
+                    OptPay::StrPtr(tup_str)
                 } else {
                     OptPay::Int(i64_ty.const_int(0, false))
                 }

@@ -6711,6 +6711,66 @@ fn dual_list_tuple_literal() {
     );
 }
 
+/// from_json Option of product tuple + Display/to_json (by-value payload).
+#[test]
+fn dual_from_json_option_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let x = from_json::<Option<(i32, i32)>>("[1,2]")
+            println(x)
+            println(to_json(x))
+            let n = from_json::<Option<(i32, i32)>>("null")
+            println(n)
+            println(to_json(n))
+            0
+        }
+        "#,
+        "Some((1, 2))\n{\"Some\":[[1,2]]}\nNone()\n\"None\""
+    );
+}
+
+/// from_json Result of product tuple + Display/to_json.
+#[test]
+fn dual_from_json_result_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let x = from_json::<Result<(i32, i32), string>>("[3,4]")
+            println(x)
+            println(to_json(x))
+            0
+        }
+        "#,
+        "Ok((3, 4))\n{\"Ok\":[[3,4]]}"
+    );
+}
+
+/// Option of hetero product tuple (i32, string).
+#[test]
+fn dual_from_json_option_tuple_string() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let x = from_json::<Option<(i32, string)>>("[1,\"hi\"]")
+            println(x)
+            println(to_json(x))
+            0
+        }
+        "#,
+        "Some((1, hi))\n{\"Some\":[[1,\"hi\"]]}"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {

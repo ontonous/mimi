@@ -2106,6 +2106,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )?;
                 Ok(self.expect_basic_value(&result, fn_name)?.into())
             }
+            Type::Tuple(elems) if !elems.is_empty() => self.compile_from_json_turbofish_with_ptr(
+                &[Type::Tuple(elems.clone())],
+                raw_ptr,
+            ),
             _ => Err(CompileError::Generic(format!(
                 "from_json::<Result<{:?},_>>: unsupported Ok type",
                 ok_ty
@@ -2374,6 +2378,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let ok_val = self.compile_from_json_scalar_ok(&args[0], raw_val)?;
                 self.compile_constructor("Ok", vec![ok_val])
             }
+            // Product tuple (e.g. Option<(i32,i32)>, Result<(i32,string),_>).
+            crate::ast::Type::Tuple(elems) if !elems.is_empty() => {
+                self.compile_from_json_turbofish_with_ptr(
+                    &[crate::ast::Type::Tuple(elems.clone())],
+                    raw_val,
+                )
+            }
             // Nested Map (e.g. Option<Map<string,i32>>).
             crate::ast::Type::Name(n, args) if n == "Map" => {
                 let val_is_string = args
@@ -2468,7 +2479,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Deserialize a JSON value into `Option<T>` (`{i1, i64}` canonical).
+    /// Deserialize a JSON value into `Option<T>`.
+    ///
+    /// Product-tuple inners use by-value layout `{i1, tuple}` (matches
+    /// `mimi_type_to_llvm` / `Some((…))`). Nested Option/Result/List still
+    /// heap-pack into the canonical `{i1, i64}` slot.
     fn compile_json_option_field(
         &mut self,
         parent_type: &str,
@@ -2480,13 +2495,22 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let bool_ty = self.context.bool_type();
         let i64_ty = self.context.i64_type();
-        let option_sty = self.context.struct_type(
-            &[
-                BasicTypeEnum::IntType(bool_ty),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
+        // Prefer full Option layout from the type map (by-value tuple payload).
+        let option_sty = self
+            .llvm_type_for(&crate::ast::Type::Option(Box::new(inner.clone())))
+            .and_then(|t| match t {
+                BasicTypeEnum::StructType(s) => Some(s),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                self.context.struct_type(
+                    &[
+                        BasicTypeEnum::IntType(bool_ty),
+                        BasicTypeEnum::IntType(i64_ty),
+                    ],
+                    false,
+                )
+            });
         let function = self
             .current_function()
             .ok_or_else(|| "codegen: no function for Option field".to_string())?;
@@ -2553,65 +2577,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             json_as_f64_fn,
             json_as_bool_fn,
         )?;
-        let pay_i64 = match inner_val {
-            BasicValueEnum::IntValue(iv) => {
-                let bw = iv.get_type().get_bit_width();
-                if bw < 64 {
-                    self.builder
-                        .build_int_s_extend(iv, i64_ty, "opt_sext")
-                        .map_err(|e| CompileError::LlvmError(format!("sext: {}", e)))?
-                } else if bw > 64 {
-                    self.builder
-                        .build_int_truncate(iv, i64_ty, "opt_trunc")
-                        .map_err(|e| CompileError::LlvmError(format!("trunc: {}", e)))?
-                } else {
-                    iv
-                }
-            }
-            BasicValueEnum::FloatValue(fv) => {
-                let f64_ty = self.context.f64_type();
-                let as_f64 = if fv.get_type().get_bit_width() == 64 {
-                    fv
-                } else {
-                    self.builder
-                        .build_float_ext(fv, f64_ty, "opt_fpext")
-                        .map_err(|e| CompileError::LlvmError(format!("fpext: {}", e)))?
-                };
-                self.builder
-                    .build_bit_cast(as_f64, i64_ty, "opt_fbits")
-                    .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?
-                    .into_int_value()
-            }
-            BasicValueEnum::PointerValue(pv) => self
-                .builder
-                .build_ptr_to_int(pv, i64_ty, "opt_ptr")
-                .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?,
-            BasicValueEnum::StructValue(sv) => {
-                // Nested Option/Result/List: heap-allocate so the outer Option
-                // payload pointer remains valid after this function returns.
-                let sty = sv.get_type();
-                let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
-                let heap = self.malloc_or_abort(i64_ty.const_int(size, false), "opt_nested_heap")?;
-                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                let typed = self
-                    .build_bit_cast(
-                        heap.into(),
-                        BasicTypeEnum::PointerType(i8_ptr),
-                        "opt_nested_ptr",
-                    )?
-                    .into_pointer_value();
-                self.build_store(typed, sv)?;
-                self.builder
-                    .build_ptr_to_int(typed, i64_ty, "opt_nested_i64")
-                    .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?
-            }
-            other => {
-                return Err(CompileError::Generic(format!(
-                    "from_json Option: unsupported inner value {:?}",
-                    other.get_type()
-                )));
-            }
-        };
         let some_slot = self.build_alloca(BasicTypeEnum::StructType(option_sty), "opt_some")?;
         self.build_store(
             self.gep()
@@ -2619,15 +2584,96 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
             bool_ty.const_int(1, false),
         )?;
-        // Nested Option/Result payload is a pointer (i64); store as i64.
-        // When outer Option layout is {i1,i64} this is correct. When nested
-        // Option is stored as {i1,ptr} at the type level, still i64 bit pattern.
-        self.build_store(
-            self.gep()
-                .build_struct_gep(BasicTypeEnum::StructType(option_sty), some_slot, 1, "p")
-                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
-            pay_i64,
-        )?;
+        let pay_slot = self
+            .gep()
+            .build_struct_gep(BasicTypeEnum::StructType(option_sty), some_slot, 1, "p")
+            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+        // Product tuples / by-value structs: store payload as-is when field 1
+        // is a matching StructType. Nested Option/Result/List still heap-pack
+        // into i64 slots.
+        let pay_fields = option_sty.get_field_types();
+        let payload_is_struct = pay_fields
+            .get(1)
+            .is_some_and(|t| matches!(t, BasicTypeEnum::StructType(_)));
+        match (&inner_val, payload_is_struct) {
+            (BasicValueEnum::StructValue(sv), true) => {
+                // Coerce to the Option payload LLVM type if needed.
+                let expected = pay_fields[1];
+                let coerced = if BasicTypeEnum::StructType(sv.get_type()) == expected {
+                    *sv
+                } else {
+                    // Store then reload through expected type if layouts differ
+                    // only by integer widths (i32 vs i64 fields).
+                    let tmp = self.build_alloca(BasicTypeEnum::StructType(sv.get_type()), "opt_tup_tmp")?;
+                    self.build_store(tmp, *sv)?;
+                    self.build_load(expected, tmp, "opt_tup_coerce")?
+                        .into_struct_value()
+                };
+                self.build_store(pay_slot, coerced)?;
+            }
+            _ => {
+                let pay_i64 = match inner_val {
+                    BasicValueEnum::IntValue(iv) => {
+                        let bw = iv.get_type().get_bit_width();
+                        if bw < 64 {
+                            self.builder
+                                .build_int_s_extend(iv, i64_ty, "opt_sext")
+                                .map_err(|e| CompileError::LlvmError(format!("sext: {}", e)))?
+                        } else if bw > 64 {
+                            self.builder
+                                .build_int_truncate(iv, i64_ty, "opt_trunc")
+                                .map_err(|e| CompileError::LlvmError(format!("trunc: {}", e)))?
+                        } else {
+                            iv
+                        }
+                    }
+                    BasicValueEnum::FloatValue(fv) => {
+                        let f64_ty = self.context.f64_type();
+                        let as_f64 = if fv.get_type().get_bit_width() == 64 {
+                            fv
+                        } else {
+                            self.builder
+                                .build_float_ext(fv, f64_ty, "opt_fpext")
+                                .map_err(|e| CompileError::LlvmError(format!("fpext: {}", e)))?
+                        };
+                        self.builder
+                            .build_bit_cast(as_f64, i64_ty, "opt_fbits")
+                            .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?
+                            .into_int_value()
+                    }
+                    BasicValueEnum::PointerValue(pv) => self
+                        .builder
+                        .build_ptr_to_int(pv, i64_ty, "opt_ptr")
+                        .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?,
+                    BasicValueEnum::StructValue(sv) => {
+                        // Nested Option/Result/List: heap-allocate so the outer
+                        // Option payload pointer remains valid after return.
+                        let sty = sv.get_type();
+                        let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                        let heap = self
+                            .malloc_or_abort(i64_ty.const_int(size, false), "opt_nested_heap")?;
+                        let typed = self
+                            .build_bit_cast(
+                                heap.into(),
+                                BasicTypeEnum::PointerType(i8_ptr),
+                                "opt_nested_ptr",
+                            )?
+                            .into_pointer_value();
+                        self.build_store(typed, sv)?;
+                        self.builder
+                            .build_ptr_to_int(typed, i64_ty, "opt_nested_i64")
+                            .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?
+                    }
+                    other => {
+                        return Err(CompileError::Generic(format!(
+                            "from_json Option: unsupported inner value {:?}",
+                            other.get_type()
+                        )));
+                    }
+                };
+                self.build_store(pay_slot, pay_i64)?;
+            }
+        }
         let some_val = self.build_load(BasicTypeEnum::StructType(option_sty), some_slot, "s")?;
         self.build_br(merge_bb)?;
         let some_end = self.builder.get_insert_block().unwrap_or(some_bb);
@@ -2640,12 +2686,41 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
             bool_ty.const_int(0, false),
         )?;
-        self.build_store(
-            self.gep()
-                .build_struct_gep(BasicTypeEnum::StructType(option_sty), none_slot, 1, "np")
-                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?,
-            i64_ty.const_int(0, false),
-        )?;
+        // Zero the payload slot (i64 or by-value struct).
+        let none_pay = self
+            .gep()
+            .build_struct_gep(BasicTypeEnum::StructType(option_sty), none_slot, 1, "np")
+            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+        match pay_fields.get(1) {
+            Some(BasicTypeEnum::StructType(st)) => {
+                let zero = st.get_undef(); // store undef then memset-ish via zero-init alloca
+                let zalloca = self.build_alloca(BasicTypeEnum::StructType(*st), "opt_none_z")?;
+                // memset to 0
+                let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(*st));
+                let memset_fn = self.get_runtime_fn("memset").ok();
+                if let Ok(mf) = self.get_runtime_fn("memset") {
+                    let _ = self.build_call(
+                        mf,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(zalloca),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i32_type().const_int(0, false),
+                            ),
+                            BasicMetadataValueEnum::IntValue(i64_ty.const_int(size, false)),
+                        ],
+                        "opt_none_memset",
+                    );
+                    let z = self.build_load(BasicTypeEnum::StructType(*st), zalloca, "opt_z")?;
+                    self.build_store(none_pay, z)?;
+                } else {
+                    let _ = (zero, memset_fn);
+                    self.build_store(none_pay, st.get_undef())?;
+                }
+            }
+            _ => {
+                self.build_store(none_pay, i64_ty.const_int(0, false))?;
+            }
+        }
         let none_val = self.build_load(BasicTypeEnum::StructType(option_sty), none_slot, "n")?;
         self.build_br(merge_bb)?;
         let none_end = self.builder.get_insert_block().unwrap_or(none_bb);
