@@ -3222,7 +3222,8 @@ fn dual_actor_bool_field() {
             0
         }
     "#,
-        "0\n1\n0"
+        // CG-H6: bool return is real i1, not packed i64 — print as false/true.
+        "false\ntrue\nfalse"
     );
 }
 
@@ -3404,6 +3405,48 @@ fn dual_actor_method_with_string_param() {
         }
     "#,
         "3"
+    );
+}
+
+#[test]
+fn dual_actor_string_param_content() {
+    if !can_link() {
+        return;
+    }
+    // R-C6: string param is 16-byte {ptr,len}; mailbox must not truncate to 8 bytes.
+    dual_assert!(
+        r#"
+        actor Echo {
+            func echo(msg: string) -> string { return msg; }
+        }
+        func main() -> i32 {
+            let e = Echo.spawn();
+            println(e.echo("hello"));
+            0
+        }
+    "#,
+        "hello"
+    );
+}
+
+#[test]
+fn dual_actor_string_return_content() {
+    if !can_link() {
+        return;
+    }
+    // CG-H6: compound string return must load full struct from result blob.
+    dual_assert!(
+        r#"
+        actor Greeter {
+            func hi() -> string { return "hi" + "!"; }
+        }
+        func main() -> i32 {
+            let g = Greeter.spawn();
+            println(g.hi());
+            0
+        }
+    "#,
+        "hi!"
     );
 }
 
