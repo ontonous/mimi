@@ -102,7 +102,7 @@ mod tests {
         ("read_file_partial", true, true, true),
         ("read_file_bytes", true, true, true),
         ("write_file_bytes", true, true, true),
-        ("read_lines_each", false, true, true),
+        ("read_lines_each", true, true, true),
         ("read_lines_json", true, true, true),
         ("exit", true, true, true),
         ("exec_pipe", true, true, true),

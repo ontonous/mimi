@@ -9198,18 +9198,18 @@ fn dual_read_lines_each() {
     if !can_link() {
         return;
     }
-    // SKIP_CODEGEN: read_lines_each (closure callback) has no codegen implementation
-    dual_assert_interp_only!(
+    dual_assert!(
         r#"
         func main() -> i32 {
-            write_file("/tmp/mimi_rle_test.txt", "a\nb\nc")
-            let count = read_lines_each("/tmp/mimi_rle_test.txt", fn(line: string) -> i32 {
+            write_file("/tmp/mimi_rle_test2.txt", "a\nb\nc")
+            let count = read_lines_each("/tmp/mimi_rle_test2.txt", fn(line: string) -> i32 {
                 0
             })
-            count
+            println(count)
+            0
         }
         "#,
-        interp::Value::Int(3)
+        "3"
     );
 }
 
