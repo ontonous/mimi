@@ -1078,6 +1078,55 @@ func main() -> i32 { 0 }
     );
 }
 
+
+
+#[test]
+fn verify_assign_updates_let_subst() {
+    require_z3!();
+    // V-C2: assignment must update flat let substitution.
+    let src = r#"
+func f() -> i32 {
+    ensures: result == 2
+    let mut y = 1
+    y = 2
+    y
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("assign subst");
+    let f = results.iter().find(|r| r.func_name == "f");
+    assert!(f.is_some(), "f present: {:?}", results);
+    assert_eq!(
+        f.unwrap().status,
+        VerifStatus::Verified,
+        "y=2 should make ensures result==2 hold: {:?}",
+        f.unwrap()
+    );
+}
+
+#[test]
+fn verify_early_return_not_dead_code() {
+    require_z3!();
+    // V-C3: first reachable return must win over a later dead return.
+    let src = r#"
+func f() -> i32 {
+    ensures: result == 0
+    return 0
+    return 1
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("early return");
+    let f = results.iter().find(|r| r.func_name == "f");
+    assert!(f.is_some(), "f present: {:?}", results);
+    assert_eq!(
+        f.unwrap().status,
+        VerifStatus::Verified,
+        "early return 0 should satisfy ensures, not dead return 1: {:?}",
+        f.unwrap()
+    );
+}
+
 #[test]
 fn verify_failed_callee_ensures_not_axioms() {
     require_z3!();

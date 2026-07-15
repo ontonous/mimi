@@ -144,6 +144,93 @@ pub type ValueHandle = usize;
 pub type MapHandle = usize;
 
 // ---------------------------------------------------------------------------
+// R-C11: live handle registries (Map / Set / Actor)
+// ---------------------------------------------------------------------------
+// Handles are still raw Box addresses for ABI compatibility, but every create
+// inserts into a process-wide set and every destroy removes under lock. Second
+// destroy is a no-op; use-after-destroy aborts instead of double-free / UAF.
+
+use std::collections::HashSet;
+
+static LIVE_MAPS: std::sync::OnceLock<Mutex<HashSet<MapHandle>>> = std::sync::OnceLock::new();
+static LIVE_SETS: std::sync::OnceLock<Mutex<HashSet<i64>>> = std::sync::OnceLock::new();
+static LIVE_ACTORS: std::sync::OnceLock<Mutex<HashSet<usize>>> = std::sync::OnceLock::new();
+
+fn live_maps() -> &'static Mutex<HashSet<MapHandle>> {
+    LIVE_MAPS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+fn live_sets() -> &'static Mutex<HashSet<i64>> {
+    LIVE_SETS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+fn live_actors() -> &'static Mutex<HashSet<usize>> {
+    LIVE_ACTORS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn map_register_live(handle: MapHandle) {
+    if handle != 0 {
+        let mut g = live_maps().lock().unwrap_or_else(|e| e.into_inner());
+        g.insert(handle);
+    }
+}
+/// Returns true if the handle was live and is now taken (caller must free).
+fn map_take_live(handle: MapHandle) -> bool {
+    if handle == 0 {
+        return false;
+    }
+    let mut g = live_maps().lock().unwrap_or_else(|e| e.into_inner());
+    g.remove(&handle)
+}
+fn map_is_live(handle: MapHandle) -> bool {
+    if handle == 0 {
+        return false;
+    }
+    let g = live_maps().lock().unwrap_or_else(|e| e.into_inner());
+    g.contains(&handle)
+}
+
+fn set_register_live(handle: i64) {
+    if handle != 0 {
+        let mut g = live_sets().lock().unwrap_or_else(|e| e.into_inner());
+        g.insert(handle);
+    }
+}
+fn set_take_live(handle: i64) -> bool {
+    if handle == 0 {
+        return false;
+    }
+    let mut g = live_sets().lock().unwrap_or_else(|e| e.into_inner());
+    g.remove(&handle)
+}
+fn set_is_live(handle: i64) -> bool {
+    if handle == 0 {
+        return false;
+    }
+    let g = live_sets().lock().unwrap_or_else(|e| e.into_inner());
+    g.contains(&handle)
+}
+
+fn actor_register_live(handle: usize) {
+    if handle != 0 {
+        let mut g = live_actors().lock().unwrap_or_else(|e| e.into_inner());
+        g.insert(handle);
+    }
+}
+fn actor_take_live(handle: usize) -> bool {
+    if handle == 0 {
+        return false;
+    }
+    let mut g = live_actors().lock().unwrap_or_else(|e| e.into_inner());
+    g.remove(&handle)
+}
+fn actor_is_live(handle: usize) -> bool {
+    if handle == 0 {
+        return false;
+    }
+    let g = live_actors().lock().unwrap_or_else(|e| e.into_inner());
+    g.contains(&handle)
+}
+
+// ---------------------------------------------------------------------------
 // Memory allocation helpers
 // ---------------------------------------------------------------------------
 
@@ -900,9 +987,10 @@ struct MimiMap {
 /// S4: Return raw pointer instead of &'static mut to avoid aliasing UB.
 /// Callers must dereference within a single scope (no two &mut to same handle).
 /// S18: abort() instead of panic! — panic across FFI boundary is UB (Rust ABI requirement).
-// SAFETY: aborts on invalid handle (0); caller must ensure `handle` is a unique `Box<MimiMap>` and avoid aliased mutable access.
+/// R-C11: also aborts on stale (destroyed / never-registered) handles.
+// SAFETY: aborts on invalid/stale handle; caller must ensure exclusive access while live.
 unsafe fn map_from_handle(handle: MapHandle) -> *mut MimiMap {
-    if handle == 0 {
+    if handle == 0 || !map_is_live(handle) {
         std::process::abort();
     }
     handle as *mut MimiMap
@@ -913,15 +1001,18 @@ pub extern "C" fn mimi_map_new() -> MapHandle {
     let map = Box::new(MimiMap {
         inner: HashMap::new(),
     });
-    Box::into_raw(map) as MapHandle
+    let h = Box::into_raw(map) as MapHandle;
+    map_register_live(h);
+    h
 }
 
 #[no_mangle]
 pub extern "C" fn mimi_map_destroy(handle: MapHandle) {
-    if handle == 0 {
+    // R-C11: double free is a no-op; only free if still live.
+    if !map_take_live(handle) {
         return;
     }
-    // SAFETY: handle is non-zero; reconstructing the Box and dropping it.
+    // SAFETY: handle was live and removed under lock; exclusive ownership restored.
     unsafe {
         drop(Box::from_raw(handle as *mut MimiMap));
     }
@@ -15398,9 +15489,10 @@ struct MimiSet {
 
 /// S4: Return raw pointer instead of &'static mut to avoid aliasing UB.
 /// S18: abort() instead of panic! — panic across FFI boundary is UB (Rust ABI requirement).
-// SAFETY: aborts on invalid handle (0); caller must ensure `handle` is a unique `Box<MimiSet>`.
+/// R-C11: also aborts on stale (destroyed / never-registered) handles.
+// SAFETY: aborts on invalid/stale handle; caller must ensure exclusive access while live.
 unsafe fn set_from_handle(handle: SetHandle) -> *mut MimiSet {
-    if handle == 0 {
+    if handle == 0 || !set_is_live(handle) {
         std::process::abort();
     }
     handle as *mut MimiSet
@@ -15411,7 +15503,9 @@ pub extern "C" fn mimi_set_new() -> SetHandle {
     let set = Box::new(MimiSet {
         inner: std::collections::HashSet::new(),
     });
-    Box::into_raw(set) as SetHandle
+    let h = Box::into_raw(set) as SetHandle;
+    set_register_live(h);
+    h
 }
 
 /// Serialize Option<i64> layout `{disc:i1/i64, payload:i64}` to match interp:
@@ -17086,10 +17180,11 @@ pub extern "C" fn mimi_set_from_json_i64(json: *const std::ffi::c_char) -> SetHa
 
 #[no_mangle]
 pub extern "C" fn mimi_set_destroy(handle: SetHandle) {
-    if handle == 0 {
+    // R-C11: double free is a no-op; only free if still live.
+    if !set_take_live(handle) {
         return;
     }
-    // SAFETY: handle is non-zero; reconstructing the Box and dropping it.
+    // SAFETY: handle was live and removed under lock; exclusive ownership restored.
     unsafe {
         drop(Box::from_raw(handle as *mut MimiSet));
     }
@@ -22548,17 +22643,25 @@ pub extern "C" fn mimi_actor_spawn(
     });
 
     ACTOR_SPAWN_COUNT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    Box::into_raw(repr) as *mut std::ffi::c_void
+    let raw = Box::into_raw(repr) as *mut std::ffi::c_void;
+    // R-C11: register live actor handle.
+    actor_register_live(raw as usize);
+    raw
+}
+
+/// R-C11: validate actor handle is non-null and still registered live.
+/// Returns false for null / double-dropped handles (callers treat as no-op or 0).
+fn actor_handle_live(handle: *mut std::ffi::c_void) -> bool {
+    !handle.is_null() && actor_is_live(handle as usize)
 }
 
 /// Get the actor ID from a handle. Used by codegen for self-call detection.
 #[no_mangle]
 pub extern "C" fn mimi_actor_id(handle: *mut std::ffi::c_void) -> u64 {
-    if handle.is_null() {
+    if !actor_handle_live(handle) {
         return 0;
     }
-    // SAFETY: `handle` was checked non-null; it was created by `mimi_actor_spawn`
-    // as a `Box<MimiActorRepr>`.
+    // SAFETY: handle is live and registered; created by mimi_actor_spawn.
     unsafe {
         let repr = &*(handle as *const MimiActorRepr);
         repr.id
@@ -22596,11 +22699,11 @@ pub extern "C" fn mimi_actor_call(
     args_size: i64,
     result_ptr: *mut std::ffi::c_void,
 ) -> i64 {
-    if handle.is_null() {
+    if !actor_handle_live(handle) {
         return 0;
     }
 
-    // SAFETY: `handle` is a valid `Box<MimiActorRepr>` from spawn.
+    // SAFETY: handle is live and registered from mimi_actor_spawn.
     let repr = unsafe { &*(handle as *const MimiActorRepr) };
 
     // v0.29.11: O(1) mailbox short-circuit after Fault absorption.
@@ -22689,7 +22792,8 @@ pub extern "C" fn mimi_actor_call(
 /// mailbox sender) and joins it.
 #[no_mangle]
 pub extern "C" fn mimi_actor_drop(handle: *mut std::ffi::c_void) {
-    if handle.is_null() {
+    // R-C11: double drop is a no-op; only free if still live.
+    if !actor_take_live(handle as usize) {
         return;
     }
     // v0.29.24: free a spawn slot.
@@ -22698,19 +22802,12 @@ pub extern "C" fn mimi_actor_drop(handle: *mut std::ffi::c_void) {
         std::sync::atomic::Ordering::Acquire,
         |v| Some(v.saturating_sub(1)),
     );
-    // SAFETY: `handle` was created by `mimi_actor_spawn` as a `Box<MimiActorRepr>`.
-    // We take ownership back and drop it, which closes the mailbox sender,
-    // causing the worker's `recv()` to return `Err` and exit.
+    // SAFETY: handle was live and removed under lock; exclusive ownership restored.
+    // Drop closes mailbox_tx so worker recv() returns Err and exits; then join.
     unsafe {
         let mut repr = Box::from_raw(handle as *mut MimiActorRepr);
-        // Drop the sender to close the channel — worker will exit on next recv.
-        // We do this by replacing with a dummy; but actually dropping the Box
-        // drops `mailbox_tx` automatically. However, we want to join the worker
-        // before the Box is fully dropped to avoid the worker accessing freed
-        // memory. Take the worker handle out, drop the Box (closes sender),
-        // then join.
         let worker = repr.worker.take();
-        drop(repr); // drops mailbox_tx → worker recv() returns Err → worker exits
+        drop(repr);
         if let Some(w) = worker {
             let _ = w.join();
         }
@@ -22722,10 +22819,10 @@ pub extern "C" fn mimi_actor_drop(handle: *mut std::ffi::c_void) {
 /// any already-queued messages without dispatch.
 #[no_mangle]
 pub extern "C" fn mimi_actor_fault(handle: *mut std::ffi::c_void) {
-    if handle.is_null() {
+    if !actor_handle_live(handle) {
         return;
     }
-    // SAFETY: `handle` is a valid `Box<MimiActorRepr>` from spawn (or null checked).
+    // SAFETY: handle is live and registered from mimi_actor_spawn.
     let repr = unsafe { &*(handle as *const MimiActorRepr) };
     repr.faulted
         .store(true, std::sync::atomic::Ordering::Release);
@@ -22735,10 +22832,10 @@ pub extern "C" fn mimi_actor_fault(handle: *mut std::ffi::c_void) {
 /// Returns 1 if faulted, 0 otherwise (or if handle is null).
 #[no_mangle]
 pub extern "C" fn mimi_actor_is_faulted(handle: *mut std::ffi::c_void) -> i32 {
-    if handle.is_null() {
+    if !actor_handle_live(handle) {
         return 0;
     }
-    // SAFETY: `handle` is a valid `Box<MimiActorRepr>` from spawn.
+    // SAFETY: handle is live and registered from mimi_actor_spawn.
     let repr = unsafe { &*(handle as *const MimiActorRepr) };
     if repr.faulted.load(std::sync::atomic::Ordering::Acquire) {
         1
@@ -22750,10 +22847,10 @@ pub extern "C" fn mimi_actor_is_faulted(handle: *mut std::ffi::c_void) -> i32 {
 /// v0.29.21: set mailbox high-water depth limit for backpressure.
 #[no_mangle]
 pub extern "C" fn mimi_actor_set_mailbox_depth(handle: *mut std::ffi::c_void, depth: i64) {
-    if handle.is_null() || depth <= 0 {
+    if !actor_handle_live(handle) || depth <= 0 {
         return;
     }
-    // SAFETY: handle from mimi_actor_spawn; exclusive via opaque pointer.
+    // SAFETY: handle is live and registered from mimi_actor_spawn.
     let repr = unsafe { &mut *(handle as *mut MimiActorRepr) };
     repr.mailbox_depth_limit = depth as usize;
 }
@@ -22761,7 +22858,7 @@ pub extern "C" fn mimi_actor_set_mailbox_depth(handle: *mut std::ffi::c_void, de
 /// v0.29.21: current approximate mailbox depth.
 #[no_mangle]
 pub extern "C" fn mimi_actor_mailbox_depth(handle: *mut std::ffi::c_void) -> i64 {
-    if handle.is_null() {
+    if !actor_handle_live(handle) {
         return 0;
     }
     let repr = unsafe { &*(handle as *const MimiActorRepr) };
@@ -22772,7 +22869,7 @@ pub extern "C" fn mimi_actor_mailbox_depth(handle: *mut std::ffi::c_void) -> i64
 /// v0.29.21: 1 if actor is muted under backpressure, else 0.
 #[no_mangle]
 pub extern "C" fn mimi_actor_is_muted(handle: *mut std::ffi::c_void) -> i32 {
-    if handle.is_null() {
+    if !actor_handle_live(handle) {
         return 0;
     }
     let repr = unsafe { &*(handle as *const MimiActorRepr) };
@@ -22810,7 +22907,7 @@ pub extern "C" fn mimi_actor_set_method_names(
     names: *const *const std::os::raw::c_char,
     count: i64,
 ) {
-    if handle.is_null() || names.is_null() || count <= 0 {
+    if !actor_handle_live(handle) || names.is_null() || count <= 0 {
         return;
     }
     let repr = unsafe { &*(handle as *const MimiActorRepr) };
@@ -22837,7 +22934,7 @@ pub extern "C" fn mimi_actor_method_id(
     handle: *mut std::ffi::c_void,
     name: *const std::os::raw::c_char,
 ) -> i32 {
-    if handle.is_null() || name.is_null() {
+    if !actor_handle_live(handle) || name.is_null() {
         return -1;
     }
     let repr = unsafe { &*(handle as *const MimiActorRepr) };
@@ -23705,5 +23802,52 @@ pub extern "C" fn mimi_quote_list_child(node: *mut MimiQuotedAst, i: i64) -> *mu
         // SAFETY: `arr_ptr` is a valid `Vec` created by `mimi_quote_new_list`.
         let vec = &*arr_ptr;
         (*vec)[idx]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R-C11 regression tests: live-handle registry
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod handle_registry_tests {
+    use super::*;
+
+    #[test]
+    fn map_double_destroy_is_noop() {
+        let h = mimi_map_new();
+        assert_ne!(h, 0);
+        assert_eq!(mimi_map_size(h), 0);
+        mimi_map_destroy(h);
+        // Second destroy must not free again (would be double-free).
+        mimi_map_destroy(h);
+        mimi_map_destroy(0);
+    }
+
+    #[test]
+    fn set_double_destroy_is_noop() {
+        let h = mimi_set_new();
+        assert_ne!(h, 0);
+        mimi_set_destroy(h);
+        mimi_set_destroy(h);
+        mimi_set_destroy(0);
+    }
+
+    #[test]
+    fn map_ops_on_live_handle_work() {
+        let h = mimi_map_new();
+        let key = b"k\0".as_ptr() as *const std::ffi::c_char;
+        mimi_map_set(h, key, 42);
+        assert_eq!(mimi_map_has_key(h, key), 1);
+        assert_eq!(mimi_map_get(h, key), 42);
+        assert_eq!(mimi_map_size(h), 1);
+        mimi_map_destroy(h);
+    }
+
+    #[test]
+    fn set_insert_on_live_handle_works() {
+        let h = mimi_set_new();
+        let h2 = mimi_set_insert(h, 7);
+        assert_eq!(h, h2);
+        mimi_set_destroy(h);
     }
 }
