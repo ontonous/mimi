@@ -267,6 +267,13 @@ impl<'a> Interpreter<'a> {
             }
             return Ok(Value::Variant(name.into(), args));
         }
+        // I-H9: zero-arg comptime funcs are pre-evaluated at startup into
+        // comptime_results; return the cache instead of re-executing.
+        if args.is_empty() {
+            if let Some(result) = self.comptime_results.get(name) {
+                return Ok(result.clone());
+            }
+        }
         // Check user-defined functions before builtins
         if let Some(func) = self.find_function(name) {
             return self.call_func(&func, args);
