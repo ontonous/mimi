@@ -859,6 +859,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                     String::new()
                 }
             }
+            Expr::Turbofish(name, type_args, _) => {
+                // from_json::<T>(...) → T; other turbofish fall back to name.
+                if name == "from_json" {
+                    if let Some(ta) = type_args.first() {
+                        if let Some(full) = self.get_full_type_name(ta) {
+                            return full;
+                        }
+                        return crate::core::fmt_type(ta);
+                    }
+                }
+                name.clone()
+            }
             Expr::List(elems) => {
                 if let Some(first) = elems.first() {
                     let elem = self.infer_object_type(first, vars);

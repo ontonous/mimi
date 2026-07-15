@@ -872,6 +872,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 return self.wrap_c_string(raw);
                             }
                         }
+                        if let Some(set_elem) = val_ty
+                            .strip_prefix("Set<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if set_elem.starts_with('(')
+                                || self.is_product_tuple_alias(set_elem)
+                            {
+                                let elem = if self.is_product_tuple_alias(set_elem) {
+                                    self.resolve_alias_type_name(set_elem)
+                                } else {
+                                    set_elem.to_string()
+                                };
+                                let raw =
+                                    self.emit_map_set_product_to_json(handle, &elem, 0)?;
+                                self.register_heap_alloc(raw);
+                                return self.wrap_c_string(raw);
+                            }
+                        }
                     }
                     let fn_name = if obj_type.contains("Map<string, string>") {
                         "mimi_map_to_json_string"

@@ -11628,3 +11628,42 @@ fn dual_option_set_product_tuple() {
         "Some(Set{(1, 2)})\n{\"Some\":[[[1,2]]]}"
     );
 }
+
+/// from_json Map of Set of product-tuple dual.
+#[test]
+fn dual_from_json_map_set_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, Set<(i32, i32)>>>("{\"a\":[[1,2],[3,4]]}")
+            println(m)
+            println(to_json(m))
+            0
+        }
+        "#,
+        "{\"a\":Set{(1, 2), (3, 4)}}\n{\"a\":[[1,2],[3,4]]}"
+    );
+}
+
+/// map_set Map of Set of product-tuple dual.
+#[test]
+fn dual_map_set_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = map_new()
+            let m2 = map_set(m, "a", from_json::<Set<(i32, i32)>>("[[1,2],[3,4]]"))
+            println(m2)
+            println(to_json(m2))
+            0
+        }
+        "#,
+        "{\"a\":Set{(1, 2), (3, 4)}}\n{\"a\":[[1,2],[3,4]]}"
+    );
+}
