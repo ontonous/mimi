@@ -421,7 +421,7 @@ impl<'a> LexerPos<'a> {
                             // LX-C3: separator only between digits.
                             let mut tmp = pos.chars.clone();
                             match tmp.next() {
-                                Some(n) if n.is_ascii_hexdigit() || n == '_' => {
+                                Some(n) if n.is_ascii_hexdigit() => {
                                     s.push(c);
                                     pos = next!(pos);
                                 }
@@ -448,7 +448,7 @@ impl<'a> LexerPos<'a> {
                         } else if c == '_' {
                             let mut tmp = pos.chars.clone();
                             match tmp.next() {
-                                Some(n) if n == '0' || n == '1' || n == '_' => {
+                                Some(n) if n == '0' || n == '1' => {
                                     s.push(c);
                                     pos = next!(pos);
                                 }
@@ -517,11 +517,13 @@ impl<'a> LexerPos<'a> {
                 // another separator that will itself be validated later).
                 let mut tmp = pos.chars.clone();
                 match tmp.next() {
-                    Some(n) if n.is_ascii_digit() || n == '_' => {
+                    // F-H9: separators only between digits; consecutive '__' is invalid
+                    // and is left for the next token (surface as error later).
+                    Some(n) if n.is_ascii_digit() => {
                         s.push(c);
                         pos = next!(pos);
                     }
-                    _ => break, // trailing '_' → leave for next token / error path
+                    _ => break, // trailing/double '_' → leave for next token / error path
                 }
             } else {
                 break;
