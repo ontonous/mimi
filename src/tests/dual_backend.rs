@@ -905,17 +905,20 @@ fn dual_nested_record_field_assign() {
 
 #[test]
 fn dual_nested_func_captures_outer() {
-    // I-H13: nested func capture is interpreter-complete; codegen still
-    // treats nested funcs as free of outer locals (undefined variable).
-    dual_assert_interp_only!(
+    if !can_link() {
+        return;
+    }
+    // I-H13: nested func captures outer locals on both backends.
+    dual_assert!(
         r#"
         func main() -> i32 {
             let n = 7
             func add_n(x: i32) -> i32 { x + n }
-            add_n(3)
+            println(add_n(3))
+            0
         }
     "#,
-        interp::Value::Int(10)
+        "10"
     );
 }
 

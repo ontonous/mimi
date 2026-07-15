@@ -1132,3 +1132,17 @@ func main() -> i32 {
 "#;
     assert_eq!(run_source(src), interp::Value::Int(42));
 }
+
+#[test]
+fn closure_captures_index_expr() {
+    // I-H10: free-var visitor must see variables used only as indices.
+    let src = r#"
+func main() -> i32 {
+    let xs = [10, 20, 30]
+    let i = 1
+    let f = fn() -> i32 { xs[i] }
+    f()
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(20));
+}

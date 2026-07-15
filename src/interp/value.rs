@@ -721,15 +721,21 @@ impl ActorHandle {
                             let _ = msg.response.send(Err(e));
                             continue;
                         }
-                        // Bind method parameters
-                        let mut args_iter = msg.args.iter();
+                        // I-H14: enforce arity — no silent Unit fill / drop extras.
+                        let expected: Vec<&Param> =
+                            func.params.iter().filter(|p| p.name != "self").collect();
+                        if msg.args.len() != expected.len() {
+                            let _ = msg.response.send(Err(InterpError::wrong_arg_count(format!(
+                                "actor method '{}' expects {} arguments, got {}",
+                                msg.method,
+                                expected.len(),
+                                msg.args.len()
+                            ))));
+                            continue;
+                        }
                         let mut bind_err = None;
-                        for param in &func.params {
-                            if param.name == "self" {
-                                continue;
-                            }
-                            let arg = args_iter.next().cloned().unwrap_or(Value::Unit);
-                            if let Err(e) = interp.bind(&param.name, arg) {
+                        for (param, arg) in expected.iter().zip(msg.args.iter()) {
+                            if let Err(e) = interp.bind(&param.name, arg.clone()) {
                                 bind_err = Some(e);
                                 break;
                             }
@@ -738,9 +744,15 @@ impl ActorHandle {
                             let _ = msg.response.send(Err(e));
                             continue;
                         }
+                        // I-H3 (partial): honor early_return from method body.
                         let result = interp
                             .eval_block(&func.body)
                             .map(|opt| opt.unwrap_or(Value::Unit));
+                        let result = if let Some(val) = interp.early_return.take() {
+                            Ok(val)
+                        } else {
+                            result
+                        };
                         interp.pop_scope();
                         result
                     };

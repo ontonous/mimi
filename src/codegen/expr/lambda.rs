@@ -48,6 +48,61 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_closure_struct(lambda_fn, &free_vars)
     }
 
+    /// I-H13: compile a nested `func` statement.
+    /// - No free vars: standalone LLVM function (existing dual_nested_func path).
+    /// - With free vars: lambda-style closure bound as a local of type `Func`.
+    pub(in crate::codegen) fn compile_nested_func_stmt(
+        &mut self,
+        f: &FuncDef,
+        vars: &mut HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<(), CompileError> {
+        let mut param_names: std::collections::HashSet<String> =
+            f.params.iter().map(|p| p.name.clone()).collect();
+        param_names.insert(f.name.clone());
+        let mut free_vars = BTreeMap::new();
+        self.collect_free_vars(&f.body, &param_names, vars, &mut free_vars);
+
+        if free_vars.is_empty() {
+            // Capture-free: keep prior dual-backend path (named LLVM function).
+            self.func_defs
+                .entry(f.name.clone())
+                .or_insert_with(|| f.clone());
+            let saved_block = self.builder.get_insert_block();
+            let saved_type_map = self.type_map.clone();
+            let saved_var_types = std::mem::take(&mut self.var_types);
+            let saved_var_type_names = std::mem::take(&mut self.var_type_names);
+            let saved_list_elem = std::mem::take(&mut self.list_elem_llvm_types);
+            self.compile_func(f)?;
+            self.var_types = saved_var_types;
+            self.var_type_names = saved_var_type_names;
+            self.list_elem_llvm_types = saved_list_elem;
+            self.type_map = saved_type_map;
+            if let Some(bb) = saved_block {
+                self.builder.position_at_end(bb);
+            }
+            return Ok(());
+        }
+
+        // Capturing nested func → closure value in local scope.
+        let closure_val =
+            self.compile_lambda_expr(&f.params, &f.ret, &f.body, vars)?;
+        let closure_ty = types::closure_struct_type(self.context);
+        let alloca = self.build_alloca(BasicTypeEnum::StructType(closure_ty), &f.name)?;
+        self.build_store(alloca, closure_val)?;
+        vars.insert(f.name.clone(), (alloca, BasicTypeEnum::StructType(closure_ty)));
+
+        let param_tys: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
+        let ret_ty = f
+            .ret
+            .clone()
+            .unwrap_or_else(|| Type::Name("i32".into(), vec![]));
+        self.var_types.insert(
+            f.name.clone(),
+            Type::Func(param_tys, Box::new(ret_ty)),
+        );
+        Ok(())
+    }
+
     /// Load captured variables from the env struct into the lambda's local scope.
     fn load_captured_vars(
         &self,
