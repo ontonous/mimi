@@ -1294,6 +1294,44 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     self.register_heap_alloc(raw);
                                     return self.wrap_c_string(raw);
                                 }
+                                // res_ok may be "List<(…), string" if strip_suffix only removed one >.
+                                let res_first = {
+                                    let mut depth = 0i32;
+                                    let mut end = res_ok.len();
+                                    for (i, ch) in res_ok.char_indices() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                end = i;
+                                                break;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    res_ok[..end].trim()
+                                };
+                                if let Some(list_elem) = res_first
+                                    .strip_prefix("List<")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if list_elem.starts_with('(')
+                                        || self.is_product_tuple_alias(list_elem)
+                                    {
+                                        let elem = if self.is_product_tuple_alias(list_elem)
+                                        {
+                                            self.resolve_alias_type_name(list_elem)
+                                        } else {
+                                            list_elem.to_string()
+                                        };
+                                        let raw = self
+                                            .emit_map_option_result_list_product_to_json(
+                                                handle, &elem, 0,
+                                            )?;
+                                        self.register_heap_alloc(raw);
+                                        return self.wrap_c_string(raw);
+                                    }
+                                }
                             }
                         }
                         if val_ty.starts_with("Result<") {
@@ -1428,6 +1466,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             )?;
                                         self.register_heap_alloc(raw);
                                         return self.wrap_c_string(raw);
+                                    }
+                                    if let Some(list_elem) = opt_elem
+                                        .strip_prefix("List<")
+                                        .and_then(|s| s.strip_suffix('>'))
+                                    {
+                                        if list_elem.starts_with('(')
+                                            || self.is_product_tuple_alias(list_elem)
+                                        {
+                                            let elem = if self
+                                                .is_product_tuple_alias(list_elem)
+                                            {
+                                                self.resolve_alias_type_name(list_elem)
+                                            } else {
+                                                list_elem.to_string()
+                                            };
+                                            let raw = self
+                                                .emit_map_result_option_list_product_to_json(
+                                                    handle, &elem, 0,
+                                                )?;
+                                            self.register_heap_alloc(raw);
+                                            return self.wrap_c_string(raw);
+                                        }
                                     }
                                 }
                             }

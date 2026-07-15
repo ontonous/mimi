@@ -805,6 +805,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         "%s".to_string(),
                                     ));
                                 }
+                                // res_ok may be "List<(…), string" if strip_suffix only removed one >.
+                                let res_first = {
+                                    let mut depth = 0i32;
+                                    let mut end = res_ok.len();
+                                    for (i, ch) in res_ok.char_indices() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                end = i;
+                                                break;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    res_ok[..end].trim()
+                                };
+                                if let Some(list_elem) = res_first
+                                    .strip_prefix("List<")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if list_elem.starts_with('(')
+                                        || self.is_product_tuple_alias(list_elem)
+                                    {
+                                        let elem = if self.is_product_tuple_alias(list_elem)
+                                        {
+                                            self.resolve_alias_type_name(list_elem)
+                                        } else {
+                                            list_elem.to_string()
+                                        };
+                                        let raw = self
+                                            .emit_map_option_result_list_product_to_json(
+                                                *iv, &elem, 1,
+                                            )?;
+                                        return Ok((
+                                            BasicMetadataValueEnum::PointerValue(raw),
+                                            "%s".to_string(),
+                                        ));
+                                    }
+                                }
                             }
                         }
                         if val_ty.starts_with("Result<") {
@@ -951,6 +991,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             BasicMetadataValueEnum::PointerValue(raw),
                                             "%s".to_string(),
                                         ));
+                                    }
+                                    if let Some(list_elem) = opt_elem
+                                        .strip_prefix("List<")
+                                        .and_then(|s| s.strip_suffix('>'))
+                                    {
+                                        if list_elem.starts_with('(')
+                                            || self.is_product_tuple_alias(list_elem)
+                                        {
+                                            let elem = if self
+                                                .is_product_tuple_alias(list_elem)
+                                            {
+                                                self.resolve_alias_type_name(list_elem)
+                                            } else {
+                                                list_elem.to_string()
+                                            };
+                                            let raw = self
+                                                .emit_map_result_option_list_product_to_json(
+                                                    *iv, &elem, 1,
+                                                )?;
+                                            return Ok((
+                                                BasicMetadataValueEnum::PointerValue(raw),
+                                                "%s".to_string(),
+                                            ));
+                                        }
                                     }
                                 }
                             }
@@ -7432,6 +7496,108 @@ impl<'ctx> CodeGenerator<'ctx> {
             )?
             .try_as_basic_value_opt()
             .ok_or("map option list product to_json void")?
+            .into_pointer_value())
+    }
+
+    /// Map of Result of Option of List of product-tuple values.
+    pub(in crate::codegen) fn emit_map_result_option_list_product_to_json(
+        &self,
+        handle: inkwell::values::IntValue<'ctx>,
+        product_type: &str,
+        display_style: i64,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let arity = {
+            let body = product_type
+                .strip_prefix('(')
+                .and_then(|s| s.strip_suffix(')'))
+                .unwrap_or(product_type);
+            let mut arity = 0i64;
+            let mut depth = 0i32;
+            let mut any = false;
+            for ch in body.chars() {
+                match ch {
+                    '<' | '(' => depth += 1,
+                    '>' | ')' => depth -= 1,
+                    ',' if depth == 0 => {
+                        arity += 1;
+                        any = true;
+                    }
+                    c if !c.is_whitespace() => any = true,
+                    _ => {}
+                }
+            }
+            if any {
+                arity += 1;
+            }
+            arity.max(1)
+        };
+        let func = self.get_runtime_fn("mimi_map_to_json_result_option_list_product_i64")?;
+        let i64_ty = self.context.i64_type();
+        Ok(self
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(handle),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
+                    BasicMetadataValueEnum::IntValue(
+                        i64_ty.const_int(display_style as u64, false),
+                    ),
+                ],
+                "map_result_option_list_product_json",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("map result option list product to_json void")?
+            .into_pointer_value())
+    }
+
+    /// Map of Option of Result of List of product-tuple values.
+    pub(in crate::codegen) fn emit_map_option_result_list_product_to_json(
+        &self,
+        handle: inkwell::values::IntValue<'ctx>,
+        product_type: &str,
+        display_style: i64,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let arity = {
+            let body = product_type
+                .strip_prefix('(')
+                .and_then(|s| s.strip_suffix(')'))
+                .unwrap_or(product_type);
+            let mut arity = 0i64;
+            let mut depth = 0i32;
+            let mut any = false;
+            for ch in body.chars() {
+                match ch {
+                    '<' | '(' => depth += 1,
+                    '>' | ')' => depth -= 1,
+                    ',' if depth == 0 => {
+                        arity += 1;
+                        any = true;
+                    }
+                    c if !c.is_whitespace() => any = true,
+                    _ => {}
+                }
+            }
+            if any {
+                arity += 1;
+            }
+            arity.max(1)
+        };
+        let func = self.get_runtime_fn("mimi_map_to_json_option_result_list_product_i64")?;
+        let i64_ty = self.context.i64_type();
+        Ok(self
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(handle),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
+                    BasicMetadataValueEnum::IntValue(
+                        i64_ty.const_int(display_style as u64, false),
+                    ),
+                ],
+                "map_option_result_list_product_json",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("map option result list product to_json void")?
             .into_pointer_value())
     }
 
