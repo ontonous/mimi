@@ -4034,6 +4034,198 @@ pub extern "C" fn mimi_map_from_json_product_i64(
 }
 
 
+
+/// Map of Option of Map of product from JSON.
+/// Pack: `{i64 disc, i64 map_handle}` (disc 0=None, 1=Some).
+#[no_mangle]
+pub extern "C" fn mimi_map_from_json_option_map_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> MapHandle {
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return mimi_map_new();
+    }
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_map_new();
+    if handle == 0 {
+        return 0;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'{' {
+        return handle;
+    }
+    i += 1;
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b'}' {
+            break;
+        }
+        if bytes[i] != b'"' {
+            break;
+        }
+        i += 1;
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'"' {
+            if bytes[i] == b'\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let key = String::from_utf8_lossy(&bytes[start..i]).into_owned();
+        i += 1;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let is_none = if bytes[i] == b'n'
+            && i + 4 <= bytes.len()
+            && &bytes[i..i + 4] == b"null"
+        {
+            i += 4;
+            true
+        } else if bytes[i] == b'"'
+            && i + 6 <= bytes.len()
+            && &bytes[i..i + 6] == b"\"None\""
+        {
+            i += 6;
+            true
+        } else {
+            false
+        };
+        let pack = unsafe { libc::malloc(16) as *mut i64 };
+        if pack.is_null() {
+            continue;
+        }
+        if is_none {
+            unsafe {
+                *pack = 0;
+                *pack.add(1) = 0;
+            }
+        } else {
+            // Extract object value as substring for nested map_from_json_product.
+            if bytes[i] != b'{' {
+                unsafe {
+                    libc::free(pack as *mut _);
+                }
+                break;
+            }
+            let obj_start = i;
+            let mut depth = 0i32;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    b'"' => {
+                        i += 1;
+                        while i < bytes.len() && bytes[i] != b'"' {
+                            if bytes[i] == b'\\' {
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            let obj = String::from_utf8_lossy(&bytes[obj_start..i]).into_owned();
+            let c_obj = alloc_c_string(&obj);
+            let inner_h = mimi_map_from_json_product_i64(c_obj, arity);
+            if !c_obj.is_null() {
+                unsafe {
+                    libc::free(c_obj as *mut _);
+                }
+            }
+            unsafe {
+                *pack = 1;
+                *pack.add(1) = inner_h as i64;
+            }
+        }
+        unsafe {
+            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+        }
+    }
+    handle
+}
+
+/// Map of Option of Map of product Display/JSON.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_option_map_product_i64(
+    handle: MapHandle,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if handle == 0 || arity <= 0 || arity > 16 {
+        return alloc_c_string("{}");
+    }
+    let map = unsafe { &*map_from_handle(handle) };
+    if map.inner.len() > 1_000_000 {
+        return alloc_c_string("{...}");
+    }
+    let mut entries: Vec<_> = map.inner.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 2 + 2);
+    parts.push(String::from("{"));
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        parts.push(json_escape_string(k));
+        parts.push(String::from(":"));
+        let vh = **v;
+        if vh == 0 {
+            if display_style != 0 {
+                parts.push(String::from("None()"));
+            } else {
+                parts.push(String::from("\"None\""));
+            }
+            continue;
+        }
+        let base = vh as *const i64;
+        let disc = unsafe { *base };
+        if disc == 0 {
+            if display_style != 0 {
+                parts.push(String::from("None()"));
+            } else {
+                parts.push(String::from("\"None\""));
+            }
+        } else {
+            let inner_h = unsafe { *base.add(1) } as MapHandle;
+            let inner_json = mimi_map_to_json_product_i64(inner_h, arity, display_style);
+            let s = unsafe { cstr_to_string(inner_json) };
+            if !inner_json.is_null() {
+                unsafe {
+                    libc::free(inner_json as *mut _);
+                }
+            }
+            if display_style != 0 {
+                parts.push(format!("Some({})", s));
+            } else {
+                parts.push(format!("{{\"Some\":[{}]}}", s));
+            }
+        }
+    }
+    parts.push(String::from("}"));
+    alloc_c_string(&parts.join(""))
+}
+
 /// Map of Option of product-tuple from JSON.
 /// Values: `null`/`"None"` → None; array `[1,2]` or `{"Some":[1,2]}` → Some product.
 /// Stores heap `{i8 disc, pad, i64[n] fields}` as ValueHandle (disc 0=None, 1=Some).
