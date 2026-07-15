@@ -6645,6 +6645,28 @@ pub struct MimiExecResult {
 /// untrusted input, use `mimi_exec_safe` which avoids the shell.
 #[no_mangle]
 pub extern "C" fn mimi_exec(cmd: *const std::ffi::c_char) -> *mut MimiExecResult {
+    // RT-H5: optional hard refuse under MIMI_EXEC_STRICT / MIMI_FFI_STRICT.
+    if std::env::var("MIMI_EXEC_STRICT")
+        .or_else(|_| std::env::var("MIMI_FFI_STRICT"))
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        let res = Box::new(MimiExecResult {
+            exit_code: -1,
+            stdout: alloc_c_string(""),
+            stderr: alloc_c_string(
+                "exec error: mimi_exec refused under MIMI_EXEC_STRICT/MIMI_FFI_STRICT; use mimi_exec_safe",
+            ),
+        });
+        return Box::into_raw(res);
+    }
+    static EXEC_WARNED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if !EXEC_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!(
+            "[mimi] RT-H5 WARNING: mimi_exec uses sh -c (shell injection risk).              Prefer mimi_exec_safe, or set MIMI_EXEC_STRICT=1 to refuse shell exec."
+        );
+    }
     if cmd.is_null() {
         let res = Box::new(MimiExecResult {
             exit_code: -1,
