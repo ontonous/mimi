@@ -2110,6 +2110,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[Type::Tuple(elems.clone())],
                 raw_ptr,
             ),
+            Type::Name(type_name, _) => {
+                // Named record Ok payload.
+                let fields_opt = self.type_defs.get(type_name).and_then(|td| {
+                    if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
+                        Some(fields.clone())
+                    } else {
+                        None
+                    }
+                });
+                if let Some(fields) = fields_opt {
+                    let rec = self.compile_from_json_record(type_name, &fields, raw_ptr)?;
+                    match rec {
+                        BasicValueEnum::PointerValue(pv) => {
+                            let llvm_ty = *self.type_llvm.get(type_name).ok_or_else(|| {
+                                CompileError::Generic(format!(
+                                    "type '{}' not registered",
+                                    type_name
+                                ))
+                            })?;
+                            self.build_load(llvm_ty, pv, type_name)
+                        }
+                        other => Ok(other),
+                    }
+                } else {
+                    Err(CompileError::Generic(format!(
+                        "from_json::<Result<{:?},_>>: unsupported Ok type",
+                        ok_ty
+                    )))
+                }
+            }
             _ => Err(CompileError::Generic(format!(
                 "from_json::<Result<{:?},_>>: unsupported Ok type",
                 ok_ty

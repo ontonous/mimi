@@ -6790,6 +6790,69 @@ fn dual_from_json_list_option_tuple() {
     );
 }
 
+/// Option of named record: from_json + literal Some + to_json.
+#[test]
+fn dual_from_json_option_record() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type P { x: i32, y: i32 }
+        func main() -> i32 {
+            let x = from_json::<Option<P>>("{\"x\":1,\"y\":2}")
+            println(x)
+            println(to_json(x))
+            let lit: Option<P> = Some(P { x: 1, y: 2 })
+            println(lit)
+            println(to_json(lit))
+            0
+        }
+        "#,
+        "Some(P { x: 1, y: 2 })\n{\"Some\":[{\"x\":1,\"y\":2}]}\nSome(P { x: 1, y: 2 })\n{\"Some\":[{\"x\":1,\"y\":2}]}"
+    );
+}
+
+/// Result of named record from_json + Display/to_json.
+#[test]
+fn dual_from_json_result_record() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type P { x: i32, y: i32 }
+        func main() -> i32 {
+            let x = from_json::<Result<P, string>>("{\"x\":1,\"y\":2}")
+            println(x)
+            println(to_json(x))
+            0
+        }
+        "#,
+        "Ok(P { x: 1, y: 2 })\n{\"Ok\":[{\"x\":1,\"y\":2}]}"
+    );
+}
+
+/// List of Option of named record.
+#[test]
+fn dual_from_json_list_option_record() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type P { x: i32, y: i32 }
+        func main() -> i32 {
+            let xs = from_json::<List<Option<P>>>("[{\"x\":1,\"y\":2},null]")
+            println(xs)
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[Some(P { x: 1, y: 2 }), None()]\n[{\"Some\":[{\"x\":1,\"y\":2}]},\"None\"]"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {

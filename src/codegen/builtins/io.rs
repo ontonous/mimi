@@ -777,9 +777,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(buf)
     }
 
-    /// Serialize `List<Option<(…)>>` (ptrtoint of full Option layout) to JSON.
+    /// Serialize `List<Option<(…)>>` / `List<Option<Record>>` (ptrtoint of full
+    /// Option layout) to JSON.
     pub(in crate::codegen) fn emit_list_option_product_tuple_to_json(
-        &self,
+        &mut self,
         list_alloca: inkwell::values::PointerValue<'ctx>,
         elem_opt_type: &str,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
@@ -944,8 +945,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         self.builder.position_at_end(some_bb);
         let pay = self.build_extract_value(loaded.into(), 1, "list_opt_tup_pay")?;
+        let inner_name = elem_opt_type
+            .strip_prefix("Option<")
+            .and_then(|s| s.strip_suffix('>'))
+            .unwrap_or("");
+        let is_named_record = self.type_defs.get(inner_name).is_some_and(|td| {
+            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+        });
         let piece = if let BasicValueEnum::StructValue(pay_sv) = pay {
-            let tup_json = self.emit_product_tuple_to_json(pay_sv)?;
+            let pay_json = if is_named_record {
+                let rec_ty = pay_sv.get_type();
+                let rec_alloca =
+                    self.build_alloca(BasicTypeEnum::StructType(rec_ty), "list_opt_rec_tmp")?;
+                self.build_store(rec_alloca, pay_sv)?;
+                self.compile_record_to_json_cstr(inner_name, rec_alloca)?
+            } else {
+                self.emit_product_tuple_to_json(pay_sv)?
+            };
             let wrap = self.malloc_or_abort(i64_ty.const_int(1024, false), "list_opt_tup_wrap")?;
             let fmt = self
                 .builder
@@ -958,7 +974,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(wrap),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(1024, false)),
                     BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                    BasicMetadataValueEnum::PointerValue(tup_json),
+                    BasicMetadataValueEnum::PointerValue(pay_json),
                 ],
                 "list_opt_tup_some_sn",
             )?;
@@ -2445,7 +2461,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         field_ty: BasicTypeEnum<'ctx>|
          -> MimiResult<()> {
             self.builder.position_at_end(bb);
-            // Ok arm with named record payload (pointer or ptrtoint).
+            // Ok arm with named record payload (by-value, pointer, or ptrtoint).
             if label == "ok" {
                 if let Some(rec_name) = ok_record {
                     let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -2455,6 +2471,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .builder
                             .build_int_to_ptr(iv, i8_ptr, "res_ok_rec")
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                        BasicValueEnum::StructValue(sv) => {
+                            // By-value record in Result Ok slot.
+                            let tmp = self.build_alloca(
+                                BasicTypeEnum::StructType(sv.get_type()),
+                                "res_ok_rec_tmp",
+                            )?;
+                            self.build_store(tmp, sv)?;
+                            tmp
+                        }
                         _ => {
                             return Err(CompileError::LlvmError(
                                 "Result Ok record payload unexpected kind".into(),
@@ -3178,6 +3203,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .build_extract_value(psv.into(), 0, "opt_str_ptr")?
                         .into_pointer_value();
                     OptPay::StrPtr(dp)
+                } else if let Some(rec_name) = arg_type
+                    .strip_prefix("Option<")
+                    .and_then(|s| s.strip_suffix('>'))
+                    .filter(|n| {
+                        self.type_defs.get(*n).is_some_and(|td| {
+                            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                        })
+                    })
+                {
+                    // Named record by-value in Option payload.
+                    let rec_ty = psv.get_type();
+                    let tmp = self
+                        .build_alloca(BasicTypeEnum::StructType(rec_ty), "opt_rec_disp_tmp")?;
+                    self.build_store(tmp, psv)?;
+                    let rec_str = self.emit_record_display(rec_name, tmp)?;
+                    OptPay::StrPtr(rec_str)
                 } else if pfields.len() >= 2 {
                     // Product tuple / multi-field struct by-value in Option payload.
                     let tup_str = self.emit_product_tuple_to_string(psv)?;
