@@ -101,6 +101,23 @@ impl LspServer {
                     }
                     // Check let bindings: find `let name =` or `let name:` via
                     // text scan (fast, avoids deep AST traversal)
+                    // L-H9: restrict text scan to the enclosing function region
+                    // (not whole-file first match).
+                    let func_start = f.pos.0.saturating_sub(1);
+                    let text_lines: Vec<&str> = text.lines().collect();
+                    let func_end = text_lines
+                        .iter()
+                        .enumerate()
+                        .skip(func_start + 1)
+                        .find(|(i, l)| {
+                            *i > func_start
+                                && (l.starts_with("func ")
+                                    || l.starts_with("type ")
+                                    || l.starts_with("flow ")
+                                    || l.starts_with("actor "))
+                        })
+                        .map(|(i, _)| i)
+                        .unwrap_or(text_lines.len());
                     for stmt in f.body.iter() {
                         if let Stmt::Let {
                             pat: Pattern::Variable(name),
@@ -108,17 +125,23 @@ impl LspServer {
                         } = stmt
                         {
                             if name == word {
-                                // Find the let statement line
-                                let text_lines: Vec<&str> = text.lines().collect();
                                 let text_line = text_lines
                                     .iter()
-                                    .position(|l| l.contains(&format!("let {}", name)))
-                                    .unwrap_or(0);
+                                    .enumerate()
+                                    .skip(func_start)
+                                    .take(func_end.saturating_sub(func_start))
+                                    .find(|(_, l)| l.contains(&format!("let {}", name)))
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(func_start);
+                                let line_text = text_lines.get(text_line).copied().unwrap_or("");
+                                let byte = line_text.find(&format!("let {}", name)).unwrap_or(0);
+                                let start_u = byte_col_to_utf16(line_text, byte + 4);
+                                let end_u = byte_col_to_utf16(line_text, byte + 4 + name.len());
                                 return Some(serde_json::json!({
                                     "uri": uri,
                                     "range": {
-                                        "start": { "line": text_line, "character": 0 },
-                                        "end": { "line": text_line, "character": 4 + name.len() } // "let " + name
+                                        "start": { "line": text_line, "character": start_u },
+                                        "end": { "line": text_line, "character": end_u }
                                     }
                                 }));
                             }
