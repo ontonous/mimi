@@ -8280,6 +8280,26 @@ fn dual_to_json_result_option_list() {
     );
 }
 
+/// f-string bool interpolation dual (true/false, not 1/0).
+#[test]
+fn dual_fstring_bool_interp() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let b = true
+            println(f"{b}")
+            println(f"{!b}")
+            println(f"{1 < 2}")
+            0
+        }
+        "#,
+        "true\nfalse\ntrue"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {

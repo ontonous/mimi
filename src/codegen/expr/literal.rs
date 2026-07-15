@@ -117,32 +117,104 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 crate::ast::FStringPart::Interp(expr) => {
                     let val = self.compile_expr(expr, vars)?;
+                    // Bool interps must render "true"/"false", not "%ld" 1/0.
+                    if let Some(bool_str) = self.maybe_bool_to_string(expr, val) {
+                        let ptr = match bool_str {
+                            BasicValueEnum::PointerValue(pv) => pv,
+                            _ => {
+                                return Err(CompileError::Generic(
+                                    "fstring bool: expected pointer".into(),
+                                ))
+                            }
+                        };
+                        let len = self
+                            .build_call(
+                                strlen_fn,
+                                &[BasicMetadataValueEnum::PointerValue(ptr)],
+                                &format!("fstr_bool_strlen_{}", i),
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("strlen returned void")?
+                            .into_int_value();
+                        total_size = self
+                            .builder
+                            .build_int_add(total_size, len, &format!("fstr_bool_sz_{}", i))
+                            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
+                        compiled_parts.push(CompiledPart::InterpStr(ptr.into()));
+                        continue;
+                    }
                     match val {
                         BasicValueEnum::IntValue(iv) => {
                             let bw = iv.get_type().get_bit_width();
+                            // i1 values are bools even when var_type_names misses
+                            // the binding (e.g. `let b = true` without explicit type).
+                            if bw == 1 {
+                                let true_g = self
+                                    .builder
+                                    .build_global_string_ptr("true", &format!("fstr_true_{}", i))
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("string error: {}", e))
+                                    })?
+                                    .as_pointer_value();
+                                let false_g = self
+                                    .builder
+                                    .build_global_string_ptr("false", &format!("fstr_false_{}", i))
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("string error: {}", e))
+                                    })?
+                                    .as_pointer_value();
+                                let zero = iv.get_type().const_int(0, false);
+                                let cond = self
+                                    .builder
+                                    .build_int_compare(
+                                        inkwell::IntPredicate::NE,
+                                        iv,
+                                        zero,
+                                        &format!("fstr_bool_nz_{}", i),
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("cmp error: {}", e))
+                                    })?;
+                                let ptr = self
+                                    .builder
+                                    .build_select(
+                                        cond,
+                                        BasicValueEnum::PointerValue(true_g),
+                                        BasicValueEnum::PointerValue(false_g),
+                                        &format!("fstr_bool_sel_{}", i),
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("select error: {}", e))
+                                    })?
+                                    .into_pointer_value();
+                                let len = self
+                                    .build_call(
+                                        strlen_fn,
+                                        &[BasicMetadataValueEnum::PointerValue(ptr)],
+                                        &format!("fstr_i1_strlen_{}", i),
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("strlen returned void")?
+                                    .into_int_value();
+                                total_size = self
+                                    .builder
+                                    .build_int_add(total_size, len, &format!("fstr_i1_sz_{}", i))
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("add error: {}", e))
+                                    })?;
+                                compiled_parts.push(CompiledPart::InterpStr(ptr.into()));
+                                continue;
+                            }
                             let ext_iv = if bw < 64 {
-                                // A1: s_extend for signed ints, z_extend for bool (i1).
-                                if bw == 1 {
-                                    self.builder
-                                        .build_int_z_extend(
-                                            iv,
-                                            self.context.i64_type(),
-                                            &format!("fstr_ext_{}", i),
-                                        )
-                                        .map_err(|e| {
-                                            CompileError::LlvmError(format!("zext error: {}", e))
-                                        })?
-                                } else {
-                                    self.builder
-                                        .build_int_s_extend(
-                                            iv,
-                                            self.context.i64_type(),
-                                            &format!("fstr_ext_{}", i),
-                                        )
-                                        .map_err(|e| {
-                                            CompileError::LlvmError(format!("sext error: {}", e))
-                                        })?
-                                }
+                                self.builder
+                                    .build_int_s_extend(
+                                        iv,
+                                        self.context.i64_type(),
+                                        &format!("fstr_ext_{}", i),
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("sext error: {}", e))
+                                    })?
                             } else {
                                 iv
                             };
