@@ -1990,6 +1990,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .expect_basic_value(&result, "mimi_set_from_json_product_i64")?
                         .into());
                 }
+                // Set of Option of product.
+                if let Some(Type::Name(ln, largs)) = resolved_elem.as_ref() {
+                    if ln == "Option" && largs.len() == 1 {
+                        let inner = match &largs[0] {
+                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                if let Some(td) = self.type_defs.get(an) {
+                                    if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
+                                        inner.clone()
+                                    } else {
+                                        largs[0].clone()
+                                    }
+                                } else {
+                                    largs[0].clone()
+                                }
+                            }
+                            other => other.clone(),
+                        };
+                        if let Type::Tuple(elems) = inner {
+                            let arity = elems.len() as u64;
+                            let func =
+                                self.get_runtime_fn("mimi_set_from_json_option_product_i64")?;
+                            let result = self.build_call(
+                                func,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(arity, false),
+                                    ),
+                                ],
+                                "set_from_json_option_product",
+                            )?;
+                            return Ok(self
+                                .expect_basic_value(
+                                    &result,
+                                    "mimi_set_from_json_option_product_i64",
+                                )?
+                                .into());
+                        }
+                    }
+                }
                 let elem_is_int = elem_ty
                     .map(|t| {
                         matches!(
@@ -2006,7 +2046,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .unwrap_or(false);
                 if !elem_is_int && !elem_is_float && !elem_is_string {
                     return Err(CompileError::Generic(
-                        "from_json::<Set>: only Set of scalar|product-tuple is supported in codegen"
+                        "from_json::<Set>: only Set of scalar|product-tuple|Option product is supported in codegen"
                             .into(),
                     ));
                 }
