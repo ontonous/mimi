@@ -32,6 +32,43 @@ func main() -> i32 {
 }
 
 #[test]
+fn round7_nested_generic_where_bound_rejects_unimplemented_element() {
+    let src = r#"
+trait Display {
+    func display() -> string;
+}
+func consume<T>(xs: List<T>) where T: Display { }
+func main() -> i32 {
+    consume([1, 2, 3])
+    0
+}
+"#;
+    assert!(
+        check_source(src).is_err(),
+        "where bounds must apply to type parameters nested in containers"
+    );
+}
+
+#[test]
+fn round7_nested_generic_where_bound_accepts_implemented_element() {
+    let src = r#"
+trait Display {
+    func display() -> string;
+}
+type Item { value: i32 }
+impl Display for Item {
+    func display() -> string { "item" }
+}
+func consume<T>(xs: List<T>) where T: Display { }
+func main() -> i32 {
+    consume([Item { value: 1 }])
+    0
+}
+"#;
+    assert!(check_source(src).is_ok());
+}
+
+#[test]
 fn round7_stdlib_invalid_inputs_terminate() {
     assert_eq!(
         run_with_stdlib(
