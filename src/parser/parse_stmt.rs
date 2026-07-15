@@ -653,7 +653,19 @@ impl Parser {
                 let tokens = crate::lexer::Lexer::new(&expr_str)
                     .tokenize()
                     .map_err(|e| ParseError::new(e.to_string(), base_line, base_col))?;
-                let expr = Parser::new(tokens).parse_expr(0)?;
+                // F-H2: interpolation sub-parser must consume the entire fragment.
+                let mut sub = Parser::new(tokens);
+                let expr = sub.parse_expr(0)?;
+                if !sub.at(&TokenKind::Eof) {
+                    return Err(ParseError::new(
+                        format!(
+                            "trailing tokens in f-string interpolation: `{}`",
+                            expr_str
+                        ),
+                        base_line,
+                        base_col,
+                    ));
+                }
                 parts.push(FStringPart::Interp(expr));
             } else if c == '\\' {
                 chars.next();
