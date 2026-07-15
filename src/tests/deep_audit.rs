@@ -425,15 +425,14 @@ fn ip_h2_sleep_negative_rejected() {
             0
         }
     "#;
-    // typecheck may pass; runtime must not hang for years.
+    // TC-H3: negative sleep must fail fast with an error (not hang, not succeed).
     let _ = check_source(src);
-    // Direct builtin path via a short run that should fail fast.
-    let result = std::panic::catch_unwind(|| {
-        let _ = run_source(src);
-    });
-    // Either interp error (Ok of panic catch with Err from run) or panic — both fine
-    // as long as we don't sleep for years. The important fix is the guard itself.
-    let _ = result;
+    let result = super::run_source_result(src);
+    assert!(
+        result.is_err(),
+        "sleep(-1) must Err; got {:?}",
+        result
+    );
 }
 
 #[test]

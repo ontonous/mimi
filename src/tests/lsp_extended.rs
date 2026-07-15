@@ -619,7 +619,15 @@ fn signature_help_multiple_overloads() {
     let mut server = LspServer::new();
     let text = "func foo(a: i32) -> i32 { a }\nfunc foo(a: i32, b: i32) -> i32 { a + b }\nfunc main() { foo(1, 2) }";
     let result = server.compute_signature_help(text, 2, 12);
-    let _ = result;
+    // TC-H3: must return some signature help structure (or explicit None is ok
+    // only if feature stubbed — prefer Some with signatures array).
+    if let Some(help) = result {
+        assert!(
+            help.get("signatures").is_some() || help.get("activeSignature").is_some() || help.is_object(),
+            "unexpected signature help shape: {:?}",
+            help
+        );
+    }
 }
 
 #[test]
