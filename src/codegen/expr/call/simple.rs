@@ -2967,11 +2967,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     };
                                     self.emit_list_map_product_to_json(list_ptr, &elem)?
                                 } else {
-                                    let list_fn_name = if list_inner.contains("string") {
-                                        "mimi_list_map_to_json_string"
-                                    } else {
-                                        "mimi_list_map_to_string"
-                                    };
+                                    // Value type is string only when Map<string, string>.
+                                    let list_fn_name =
+                                        if list_inner.contains("Map<string, string>") {
+                                            "mimi_list_map_to_json_string"
+                                        } else {
+                                            "mimi_list_map_to_string"
+                                        };
                                     let list_fn = self.get_runtime_fn(list_fn_name)?;
                                     self.build_call(
                                         list_fn,
@@ -4113,11 +4115,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     };
                                     self.emit_list_map_product_to_json(list_ptr, &elem)?
                                 } else {
-                                    let list_fn_name = if list_elem.contains("string") {
-                                        "mimi_list_map_to_json_string"
-                                    } else {
-                                        "mimi_list_map_to_string"
-                                    };
+                                    let list_fn_name =
+                                        if list_elem.contains("Map<string, string>") {
+                                            "mimi_list_map_to_json_string"
+                                        } else {
+                                            "mimi_list_map_to_string"
+                                        };
                                     let list_fn = self.get_runtime_fn(list_fn_name)?;
                                     self.build_call(
                                         list_fn,
