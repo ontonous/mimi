@@ -12,6 +12,25 @@ use super::CodeGenerator;
 use super::VarEntry;
 
 impl<'ctx> CodeGenerator<'ctx> {
+    /// ABI slot size for actor mailbox packing: natural type size, rounded up
+    /// to 8-byte alignment so mixed scalar/struct args stay aligned.
+    fn actor_abi_slot_size(&self, ty: BasicTypeEnum<'ctx>) -> u64 {
+        let size = self.llvm_type_size_bytes(ty).max(1);
+        size.div_ceil(8) * 8
+    }
+
+    fn is_actor_string_abi_type(ty: BasicTypeEnum<'ctx>) -> bool {
+        match ty {
+            BasicTypeEnum::StructType(st) => {
+                let fields = st.get_field_types();
+                fields.len() == 2
+                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64)
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn compile_actor(&mut self, actor: &crate::ast::ActorDef) -> MimiResult<()> {
         // Register this actor type name for method-call dispatch routing.
         self.actor_names.insert(actor.name.clone());
@@ -196,21 +215,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
             call_args.push(self_fields_ptr.into());
 
-            // Unpack params from args_blob. Each param is 8 bytes (i64-aligned).
-            // CG-C6: using i*8 offsets ensures all accesses are 8-byte aligned
-            // regardless of actual type size, preventing SIGBUS on ARM.
-            // For simplicity, all scalar params are stored as i64 in the blob.
-            // String/pointer params are stored as i8* (8 bytes).
-            let mut offset: u32 = 0;
+            // Unpack params from args_blob with natural type sizes (R-C6).
+            // Call site packs each param as its LLVM layout, 8-byte aligned.
+            // Previously every slot was 8 bytes while struct loads used natural
+            // sizes (e.g. string {ptr,len} = 16), reading past the slot.
+            let mut offset: u64 = 0;
             for param in &method.params {
                 let param_ty = types::mimi_type_to_llvm(self.context, &param.ty)
                     .unwrap_or(BasicTypeEnum::IntType(i64_ty));
+                let slot_size = self.actor_abi_slot_size(param_ty);
                 let gep = self
                     .gep()
                     .build_in_bounds_gep(
                         self.context.i8_type(),
                         args_blob,
-                        &[i64_ty.const_int(offset as u64, false)],
+                        &[i64_ty.const_int(offset, false)],
                         "arg_gep",
                     )
                     .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
@@ -261,7 +280,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.build_load(t, cast_ptr, "arg_sval")?
                     }
                     _ => {
-                        // Default: load as i64
                         let cast_ptr = self
                             .builder
                             .build_bit_cast(
@@ -275,7 +293,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 };
                 call_args.push(loaded.into());
-                offset += 8; // Each param occupies 8 bytes in the blob
+                offset += slot_size;
             }
 
             let call = self.build_call(method_fn, &call_args, "dispatch_method_call")?;
@@ -1315,14 +1333,33 @@ impl<'ctx> CodeGenerator<'ctx> {
         // ── Mailbox path: send to mailbox and await reply ──
         self.builder.position_at_end(mailbox_bb);
 
-        // Pack args into a blob.
+        // Pack args into a blob with natural type sizes (R-C6 / CG-H6).
+        // Must match compile_actor_dispatch unpack layout.
         let args_blob =
             self.build_alloca(self.context.i8_type().array_type(256), "actor_args_blob")?;
 
-        // Store each arg at offset i*8.
+        let method_params: Vec<crate::ast::Type> = self
+            .actor_defs
+            .get(&obj_type)
+            .and_then(|a| a.methods.iter().find(|m| m.name == method_name))
+            .map(|m| m.params.iter().map(|p| p.ty.clone()).collect())
+            .unwrap_or_default();
+
+        let mut blob_offset: u64 = 0;
         for (i, arg) in args.iter().enumerate() {
             let val = self.compile_expr(arg, vars)?;
-            let offset = i64_ty.const_int((i * 8) as u64, false);
+            let param_ty = method_params.get(i).and_then(|t| {
+                types::mimi_type_to_llvm(self.context, t)
+            });
+            let store_ty = param_ty.unwrap_or_else(|| match val {
+                BasicValueEnum::IntValue(iv) => BasicTypeEnum::IntType(iv.get_type()),
+                BasicValueEnum::FloatValue(fv) => BasicTypeEnum::FloatType(fv.get_type()),
+                BasicValueEnum::PointerValue(pv) => BasicTypeEnum::PointerType(pv.get_type()),
+                BasicValueEnum::StructValue(sv) => BasicTypeEnum::StructType(sv.get_type()),
+                _ => BasicTypeEnum::IntType(i64_ty),
+            });
+            let slot_size = self.actor_abi_slot_size(store_ty);
+            let offset = i64_ty.const_int(blob_offset, false);
             let gep = self
                 .gep()
                 .build_in_bounds_gep(
@@ -1333,40 +1370,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
                 .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
 
-            // Extend int values to i64 for uniform blob storage.
-            let stored_val = match val {
-                BasicValueEnum::IntValue(iv) => {
-                    let bw = iv.get_type().get_bit_width();
-                    if bw < 64 {
-                        // A1: use s_extend for signed integers (width > 1),
-                        // z_extend for bool (i1 — sign bit would make true = -1).
-                        if bw == 1 {
-                            self.builder
-                                .build_int_z_extend(iv, i64_ty, &format!("arg_zext_{}", i))
-                                .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
-                                .into()
-                        } else {
-                            self.builder
-                                .build_int_s_extend(iv, i64_ty, &format!("arg_sext_{}", i))
-                                .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?
-                                .into()
-                        }
-                    } else {
-                        iv.into()
-                    }
-                }
-                BasicValueEnum::PointerValue(pv) => self
-                    .builder
-                    .build_ptr_to_int(pv, i64_ty, &format!("arg_p2i_{}", i))
-                    .map_err(|e| CompileError::LlvmError(format!("ptr2int error: {}", e)))?
-                    .into(),
-                BasicValueEnum::FloatValue(fv) => self
-                    .builder
-                    .build_bit_cast(fv, i64_ty, &format!("arg_f2i_{}", i))
-                    .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?,
-                _ => i64_ty.const_int(0, false).into(),
-            };
-
             let cast_ptr = self
                 .builder
                 .build_bit_cast(
@@ -1376,10 +1379,78 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
                 .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
                 .into_pointer_value();
-            self.build_store(cast_ptr, stored_val)?;
+
+            // Store natural value layout; widen narrow ints to declared width.
+            match (val, store_ty) {
+                (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(t)) => {
+                    let stored = if iv.get_type().get_bit_width() < t.get_bit_width() {
+                        if iv.get_type().get_bit_width() == 1 {
+                            self.builder
+                                .build_int_z_extend(iv, t, &format!("arg_zext_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                        } else {
+                            self.builder
+                                .build_int_s_extend(iv, t, &format!("arg_sext_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?
+                        }
+                    } else if iv.get_type().get_bit_width() > t.get_bit_width() {
+                        self.builder
+                            .build_int_truncate(iv, t, &format!("arg_trunc_{}", i))
+                            .map_err(|e| CompileError::LlvmError(format!("trunc error: {}", e)))?
+                    } else {
+                        iv
+                    };
+                    self.build_store(cast_ptr, stored)?;
+                }
+                (BasicValueEnum::FloatValue(fv), BasicTypeEnum::FloatType(_)) => {
+                    self.build_store(cast_ptr, fv)?;
+                }
+                (BasicValueEnum::PointerValue(pv), BasicTypeEnum::PointerType(_)) => {
+                    self.build_store(cast_ptr, pv)?;
+                }
+                (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(_)) => {
+                    self.build_store(cast_ptr, sv)?;
+                }
+                (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(st))
+                    if Self::is_actor_string_abi_type(BasicTypeEnum::StructType(st)) =>
+                {
+                    // Raw C string pointer → wrap to {ptr,len} for string params.
+                    let wrapped = self.wrap_c_string(pv)?;
+                    self.build_store(cast_ptr, wrapped)?;
+                }
+                (BasicValueEnum::IntValue(iv), _) => {
+                    let stored = if iv.get_type().get_bit_width() < 64 {
+                        if iv.get_type().get_bit_width() == 1 {
+                            self.builder
+                                .build_int_z_extend(iv, i64_ty, &format!("arg_zext_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                        } else {
+                            self.builder
+                                .build_int_s_extend(iv, i64_ty, &format!("arg_sext_{}", i))
+                                .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?
+                        }
+                    } else {
+                        iv
+                    };
+                    self.build_store(cast_ptr, stored)?;
+                }
+                (BasicValueEnum::FloatValue(fv), _) => {
+                    self.build_store(cast_ptr, fv)?;
+                }
+                (BasicValueEnum::PointerValue(pv), _) => {
+                    self.build_store(cast_ptr, pv)?;
+                }
+                (BasicValueEnum::StructValue(sv), _) => {
+                    self.build_store(cast_ptr, sv)?;
+                }
+                _ => {
+                    self.build_store(cast_ptr, i64_ty.const_int(0, false))?;
+                }
+            }
+            blob_offset += slot_size;
         }
 
-        let args_size = i64_ty.const_int((args.len() * 8) as u64, false);
+        let args_size = i64_ty.const_int(blob_offset, false);
 
         // Allocate result blob.
         let result_blob =
@@ -1410,7 +1481,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "actor_call_result",
         )?;
 
-        // Load result from result_blob (first 8 bytes as i64).
+        // Load result from result_blob using declared return type layout (CG-H6).
         let result_cast = self
             .builder
             .build_bit_cast(
@@ -1420,53 +1491,41 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
             .into_pointer_value();
-        let raw_result = self.build_load(i64_ty, result_cast, "method_result")?;
 
-        // Re-shape the packed i64 to match the declared method return type.
-        // - f64 declared → bitcast i64 → f64
-        // - i32 declared → truncate i64 → i32
-        // - i64 (or unit/None) → return raw i64
-        let result_val: BasicValueEnum<'ctx> = match method_ret_ty {
-            Some(crate::ast::Type::Name(n, _)) if n == "f64" => self
-                .builder
-                .build_bit_cast(raw_result, self.context.f64_type(), "result_f64")
-                .map_err(|e| CompileError::LlvmError(format!("bitcast f64 error: {}", e)))?,
-            Some(crate::ast::Type::Name(n, _)) if n == "i32" => self
-                .builder
-                .build_int_truncate(
-                    raw_result.into_int_value(),
-                    self.context.i32_type(),
-                    "result_i32",
-                )
-                .map_err(|e| CompileError::LlvmError(format!("trunc i32 error: {}", e)))?
-                .into(),
-            Some(crate::ast::Type::Name(n, _)) if n == "string" => {
-                // v0.28.30: mailbox dispatch stores the full {i8*, i64} struct
-                // into the result blob (see compile_actor_dispatch). Load it
-                // as a struct rather than reconstructing from packed i64.
-                let str_ty = self.context.struct_type(
-                    &[
-                        BasicTypeEnum::PointerType(i8_ptr),
-                        BasicTypeEnum::IntType(i64_ty),
-                    ],
-                    false,
-                );
-                let result_scast = self
-                    .builder
-                    .build_bit_cast(
-                        result_blob,
-                        self.context.ptr_type(inkwell::AddressSpace::default()),
-                        "result_str_scast",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?
-                    .into_pointer_value();
-                self.build_load(
-                    BasicTypeEnum::StructType(str_ty),
-                    result_scast,
-                    "mailbox_str_ret",
-                )?
+        let result_val: BasicValueEnum<'ctx> = match &method_ret_ty {
+            Some(crate::ast::Type::Name(n, _)) if n == "f64" => {
+                self.build_load(self.context.f64_type(), result_cast, "result_f64")?
             }
-            _ => raw_result,
+            Some(crate::ast::Type::Name(n, _)) if n == "i32" => {
+                self.build_load(self.context.i32_type(), result_cast, "result_i32")?
+            }
+            Some(crate::ast::Type::Name(n, _)) if n == "bool" => {
+                self.build_load(self.context.bool_type(), result_cast, "result_bool")?
+            }
+            Some(ty) => {
+                if let Some(llvm_ty) = types::mimi_type_to_llvm(self.context, ty) {
+                    match llvm_ty {
+                        BasicTypeEnum::StructType(st) => self.build_load(
+                            BasicTypeEnum::StructType(st),
+                            result_cast,
+                            "mailbox_struct_ret",
+                        )?,
+                        BasicTypeEnum::IntType(t) => {
+                            self.build_load(t, result_cast, "mailbox_int_ret")?
+                        }
+                        BasicTypeEnum::FloatType(t) => {
+                            self.build_load(t, result_cast, "mailbox_float_ret")?
+                        }
+                        BasicTypeEnum::PointerType(t) => {
+                            self.build_load(t, result_cast, "mailbox_ptr_ret")?
+                        }
+                        _ => self.build_load(i64_ty, result_cast, "method_result")?,
+                    }
+                } else {
+                    self.build_load(i64_ty, result_cast, "method_result")?
+                }
+            }
+            None => self.build_load(i64_ty, result_cast, "method_result")?,
         };
 
         self.build_br(merge_bb)?;
