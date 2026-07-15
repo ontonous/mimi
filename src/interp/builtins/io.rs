@@ -4,13 +4,13 @@ impl<'a> Interpreter<'a> {
     // === I/O ===
     pub(crate) fn builtin_println(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
-        println!("{}", parts.join(" "));
+        self.emit_stdout_line(&parts.join(" "));
         Ok(Value::Unit)
     }
 
     pub(crate) fn builtin_print(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
-        print!("{}", parts.join(" "));
+        self.emit_stdout(&parts.join(" "));
         Ok(Value::Unit)
     }
 

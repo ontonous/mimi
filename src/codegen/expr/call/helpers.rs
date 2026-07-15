@@ -217,6 +217,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Unary(crate::ast::UnOp::Not, _) => {
                 self.select_bool_string(value, &build_global)
             }
+            // is_ok/is_err/is_some/is_none: parsed as Call(Field(obj, method), []).
+            // Return bool (i64 0/1); print as true/false to match interpreter.
+            Expr::Call(callee, _) => {
+                if let Expr::Field(_, method) = callee.as_ref() {
+                    if matches!(
+                        method.as_str(),
+                        "is_ok" | "is_err" | "is_some" | "is_none"
+                    ) {
+                        return self.select_bool_string(value, &build_global);
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }

@@ -148,6 +148,21 @@ pub struct Interpreter<'a> {
     /// Dropped when the Interpreter is dropped, freeing all CStrings.
     /// Uses ownership (not into_raw/from_raw) to guarantee no leaks.
     cstring_registry: std::cell::RefCell<Vec<std::ffi::CString>>,
+    /// TC-C1: optional stdout capture for dual-backend tests.
+    /// When `Some`, `print`/`println` append here instead of writing the process stdout.
+    /// Also installs a process-wide sink so actor worker threads (fresh Interpreters)
+    /// write into the same buffer.
+    stdout_capture: Option<std::sync::Arc<std::sync::Mutex<String>>>,
+}
+
+/// Process-wide stdout sink for dual-backend / actor-worker capture (TC-C1).
+static GLOBAL_STDOUT_CAPTURE: std::sync::OnceLock<
+    std::sync::Mutex<Option<std::sync::Arc<std::sync::Mutex<String>>>>,
+> = std::sync::OnceLock::new();
+
+fn global_stdout_slot(
+) -> &'static std::sync::Mutex<Option<std::sync::Arc<std::sync::Mutex<String>>>> {
+    GLOBAL_STDOUT_CAPTURE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 impl<'a> Interpreter<'a> {
@@ -255,7 +270,67 @@ impl<'a> Interpreter<'a> {
             globals: HashMap::new(),
             cli_args: Vec::new(),
             cstring_registry: std::cell::RefCell::new(Vec::new()),
+            stdout_capture: None,
         }
+    }
+
+    /// TC-C1: redirect `print`/`println` into an in-memory buffer (no process stdout).
+    /// Installs a process-wide sink so actor workers share the same buffer.
+    pub fn enable_stdout_capture(&mut self) {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        if let Ok(mut slot) = global_stdout_slot().lock() {
+            *slot = Some(std::sync::Arc::clone(&buf));
+        }
+        self.stdout_capture = Some(buf);
+    }
+
+    /// Take captured stdout and clear the process-wide sink.
+    pub fn take_stdout(&mut self) -> String {
+        if let Ok(mut slot) = global_stdout_slot().lock() {
+            *slot = None;
+        }
+        self.stdout_capture
+            .take()
+            .map(|b| b.lock().map(|g| g.clone()).unwrap_or_default())
+            .unwrap_or_default()
+    }
+
+    /// Borrow a snapshot of captured stdout without disabling capture.
+    pub fn captured_stdout(&self) -> Option<String> {
+        self.stdout_capture
+            .as_ref()
+            .and_then(|b| b.lock().ok().map(|g| g.clone()))
+    }
+
+    pub(in crate::interp) fn emit_stdout(&self, text: &str) {
+        if let Some(buf) = self.resolve_stdout_buf() {
+            if let Ok(mut g) = buf.lock() {
+                g.push_str(text);
+                return;
+            }
+        }
+        print!("{}", text);
+    }
+
+    pub(in crate::interp) fn emit_stdout_line(&self, text: &str) {
+        if let Some(buf) = self.resolve_stdout_buf() {
+            if let Ok(mut g) = buf.lock() {
+                g.push_str(text);
+                g.push('\n');
+                return;
+            }
+        }
+        println!("{}", text);
+    }
+
+    fn resolve_stdout_buf(&self) -> Option<std::sync::Arc<std::sync::Mutex<String>>> {
+        if let Some(buf) = &self.stdout_capture {
+            return Some(std::sync::Arc::clone(buf));
+        }
+        global_stdout_slot()
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(std::sync::Arc::clone))
     }
 
     // Default Rust thread stack is 2MB; each interpreter frame is ~2KB.
