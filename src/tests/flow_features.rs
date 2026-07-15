@@ -631,6 +631,75 @@ func main() -> i32 {
 }
 
 #[test]
+fn flow_check_transition_call_rejects_wrong_arity() {
+    let src = r#"
+flow Calc {
+    state Zero { v: i32 }
+    state Value { v: i32 }
+    transition add(Zero, amount: i32) -> Value {
+        do { return Value { v: self.v + amount } }
+    }
+}
+func main() -> i32 {
+    let s = Zero { v: 10 }
+    let r = Calc::add(s, 5, 99)
+    r.v
+}
+"#;
+    assert!(
+        check_source(src).is_err(),
+        "Flow transition calls must enforce their registered arity"
+    );
+}
+
+#[test]
+fn flow_check_transition_call_rejects_wrong_event_type() {
+    let src = r#"
+flow Calc {
+    state Zero { v: i32 }
+    state Value { v: i32 }
+    transition add(Zero, amount: i32) -> Value {
+        do { return Value { v: self.v + amount } }
+    }
+}
+func main() -> i32 {
+    let s = Zero { v: 10 }
+    let r = Calc::add(s, "wrong")
+    r.v
+}
+"#;
+    assert!(
+        check_source(src).is_err(),
+        "Flow transition calls must enforce event parameter types"
+    );
+}
+
+#[test]
+fn flow_check_transition_call_rejects_wrong_source_state() {
+    let src = r#"
+flow Calc {
+    state Zero { v: i32 }
+    state Other { v: i32 }
+    state Value { v: i32 }
+    transition add(Zero, amount: i32) -> Value {
+        do { return Value { v: self.v + amount } }
+    }
+    transition add(Other, amount: string) -> Value {
+        do { return Value { v: self.v } }
+    }
+}
+func main() -> i32 {
+    let r = Calc::add(99, 1)
+    0
+}
+"#;
+    assert!(
+        check_source(src).is_err(),
+        "Flow transition overload selection must reject an invalid source state"
+    );
+}
+
+#[test]
 fn flow_exec_multi_target() {
     let src = r#"
 flow Checker {

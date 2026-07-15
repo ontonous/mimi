@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::core::checker::Checker;
-use crate::core::helpers::{fmt_type, subst_type_params, suggest_name};
+use crate::core::helpers::{fmt_type, is_numeric_coercion, subst_type_params, suggest_name};
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use std::collections::HashMap;
@@ -34,24 +34,68 @@ impl<'a> Checker<'a> {
                     "call flow transition '{}::{}'",
                     module_name, method_name
                 ));
-                let from_ty = if let Some(first_arg) = args.first() {
-                    self.infer_expr(first_arg, scopes)
-                } else {
-                    Type::Name("unit".into(), vec![])
-                };
-                for arg in args.iter().skip(1) {
-                    self.infer_expr(arg, scopes);
-                }
+                let arg_types: Vec<Type> = args
+                    .iter()
+                    .map(|arg| self.infer_expr(arg, scopes))
+                    .collect();
+                let from_ty = arg_types
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
                 let overload_key = match &from_ty {
                     Type::Name(n, _) => format!("{}::{}", short_key, n),
                     _ => short_key.clone(),
                 };
-                if let Some((_, ret_type)) = self.funcs.get(&overload_key) {
-                    return ret_type.clone();
+                let signature = self
+                    .funcs
+                    .get(&overload_key)
+                    .or_else(|| self.funcs.get(&short_key))
+                    .cloned();
+                if let Some((params, ret_type)) = signature {
+                    if arg_types.len() != params.len() {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0257,
+                            format!(
+                                "flow transition '{}::{}' expects {} arguments, got {}",
+                                module_name,
+                                method_name,
+                                params.len(),
+                                arg_types.len()
+                            ),
+                        );
+                    } else {
+                        for (index, (actual, expected)) in
+                            arg_types.iter().zip(params.iter()).enumerate()
+                        {
+                            let coerced = is_numeric_coercion(expected, actual);
+                            if !coerced && self.unification.unify_strict(expected, actual).is_err()
+                            {
+                                self.errors.push(Diagnostic::error_code(
+                                    crate::diagnostic::codes::E0211,
+                                    format!(
+                                        "argument {} of flow transition '{}::{}' expected {}, found {}",
+                                        index + 1,
+                                        module_name,
+                                        method_name,
+                                        fmt_type(expected),
+                                        fmt_type(actual)
+                                    ),
+                                    Span::single(self.current_line, self.current_col),
+                                ));
+                            }
+                        }
+                    }
+                    return ret_type;
                 }
-                if let Some((_, ret_type)) = self.funcs.get(&short_key) {
-                    return ret_type.clone();
-                }
+                self.emit_code(
+                    crate::diagnostic::codes::E0211,
+                    format!(
+                        "no flow transition overload '{}::{}' accepts source state {}",
+                        module_name,
+                        method_name,
+                        fmt_type(&from_ty)
+                    ),
+                );
                 return Type::Name("unit".into(), vec![]);
             }
         }
