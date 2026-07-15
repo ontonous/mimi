@@ -1601,6 +1601,20 @@ impl<'a> Interpreter<'a> {
                             .collect::<Result<Vec<_>, _>>()?;
                         Ok(Value::Variant("Err".to_string(), converted))
                     }
+                    // JSON tagged object {"Ok": v} / {"Err": v}.
+                    Value::Record(_, fields) if fields.len() == 1 => {
+                        if let Some(v) = fields.get("Ok") {
+                            let ok_val = self.coerce_value_to_type(v.clone(), &type_args[0])?;
+                            Ok(Value::Variant("Ok".into(), vec![ok_val]))
+                        } else if let Some(v) = fields.get("Err") {
+                            let err_val = self.coerce_value_to_type(v.clone(), &type_args[1])?;
+                            Ok(Value::Variant("Err".into(), vec![err_val]))
+                        } else {
+                            let ok_val =
+                                self.coerce_value_to_type(Value::Record(None, fields), &type_args[0])?;
+                            Ok(Value::Variant("Ok".into(), vec![ok_val]))
+                        }
+                    }
                     // Bare JSON value → Ok(T) for from_json::<Result<T,E>>.
                     other => {
                         let ok_val = self.coerce_value_to_type(other, &type_args[0])?;

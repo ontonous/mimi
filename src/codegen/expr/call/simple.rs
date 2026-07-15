@@ -1000,6 +1000,54 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 return self.wrap_c_string(raw);
                             }
                         }
+                        if let Some(opt_elem) = val_ty
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if opt_elem.starts_with('(')
+                                || self.is_product_tuple_alias(opt_elem)
+                            {
+                                let elem = if self.is_product_tuple_alias(opt_elem) {
+                                    self.resolve_alias_type_name(opt_elem)
+                                } else {
+                                    opt_elem.to_string()
+                                };
+                                let raw =
+                                    self.emit_map_option_product_to_json(handle, &elem, 0)?;
+                                self.register_heap_alloc(raw);
+                                return self.wrap_c_string(raw);
+                            }
+                        }
+                        if val_ty.starts_with("Result<") {
+                            if let Some(ok_ty) = val_ty.strip_prefix("Result<").and_then(|s| {
+                                let mut depth = 0i32;
+                                for (i, ch) in s.char_indices() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            return Some(s[..i].trim());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                None
+                            }) {
+                                if ok_ty.starts_with('(')
+                                    || self.is_product_tuple_alias(ok_ty)
+                                {
+                                    let elem = if self.is_product_tuple_alias(ok_ty) {
+                                        self.resolve_alias_type_name(ok_ty)
+                                    } else {
+                                        ok_ty.to_string()
+                                    };
+                                    let raw =
+                                        self.emit_map_result_product_to_json(handle, &elem, 0)?;
+                                    self.register_heap_alloc(raw);
+                                    return self.wrap_c_string(raw);
+                                }
+                            }
+                        }
                         if val_ty.starts_with("Map<string, ") {
                             if let Some(inner_val) = val_ty
                                 .strip_prefix("Map<string, ")
