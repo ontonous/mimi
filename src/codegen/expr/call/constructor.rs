@@ -186,6 +186,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let disc = bool_ty.const_int(1, false);
         // Widen integer payloads to i64 so the struct layout matches
         // mimi_type_to_llvm's Option<T> which uses i64 for integer T.
+        // List payloads: always heap-pack the list struct and store as
+        // pointer (or ptrtoint) so packing Option into an outer List does
+        // not leave a dangling stack pointer.
         let payload: BasicValueEnum = match val {
             BasicValueEnum::IntValue(iv) => {
                 let bw = iv.get_type().get_bit_width();
@@ -215,7 +218,39 @@ impl<'ctx> CodeGenerator<'ctx> {
                     iv.into()
                 }
             }
-            _ => val,
+            BasicValueEnum::StructValue(sv) => {
+                let fields = sv.get_type().get_field_types();
+                let is_list = fields.len() == 2
+                    && matches!(
+                        fields[0],
+                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                    )
+                    && matches!(fields[1], BasicTypeEnum::PointerType(_));
+                if is_list {
+                    // Heap-pack list and store as i64 handle (matches Option
+                    // heap-pack ABI for List payloads).
+                    let size =
+                        self.llvm_type_size_bytes(BasicTypeEnum::StructType(sv.get_type()));
+                    let heap = self.malloc_or_abort(
+                        i64_ty.const_int(size, false),
+                        "some_list_heap",
+                    )?;
+                    let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let typed = self
+                        .build_bit_cast(
+                            heap.into(),
+                            BasicTypeEnum::PointerType(i8_ptr),
+                            "some_list_ptr",
+                        )?
+                        .into_pointer_value();
+                    self.build_store(typed, sv)?;
+                    self.build_ptr_to_int(typed, i64_ty, "some_list_i64")?
+                        .into()
+                } else {
+                    sv.into()
+                }
+            }
+            other => other,
         };
         let inner_ty = payload.get_type();
         let struct_ty = self
@@ -1455,8 +1490,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
         self.build_store(disc_gep, disc)?;
-        // Field 1 (ok/payload pad) — already zero-initialized from const_zero
-        // Field 2 (if Result/3-field): extract error value from narrow value
+        // Field 1 (ok/payload pad) + field 2 (Result err).
         if actual_len == 3 {
             let err_val = self.build_extract_value(agg_val, 2, "err_val")?;
             let err_gep = self
@@ -1470,22 +1504,58 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
             self.build_store(err_gep, err_val)?;
         } else if actual_len == 2 {
-            // Option: copy payload when types differ only by width (int widen).
-            // If expected payload is a wider struct, leave zero (None case).
-            if matches!(actual_fields[1], BasicTypeEnum::IntType(_))
-                && matches!(expected_fields[1], BasicTypeEnum::IntType(_))
-            {
-                let pay = self.build_extract_value(agg_val, 1, "opt_pay")?;
-                let pay_gep = self
-                    .gep()
-                    .build_struct_gep(
-                        BasicTypeEnum::StructType(expected_sty),
-                        wide_alloca,
-                        1,
-                        "opt_pay_gep",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
-                self.build_store(pay_gep, pay)?;
+            // Option: preserve payload when inflating layouts.
+            let pay = self.build_extract_value(agg_val, 1, "opt_pay")?;
+            let pay_gep = self
+                .gep()
+                .build_struct_gep(
+                    BasicTypeEnum::StructType(expected_sty),
+                    wide_alloca,
+                    1,
+                    "opt_pay_gep",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+            match (pay, expected_fields[1]) {
+                // Same-width int, or pointer→i64 heap handle (Option of List).
+                (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(et)) => {
+                    let i64_ty = self.context.i64_type();
+                    let as_i64 = if iv.get_type().get_bit_width() < 64 {
+                        self.builder
+                            .build_int_s_extend(iv, i64_ty, "opt_pay_sext")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else if iv.get_type().get_bit_width() > 64 {
+                        self.builder
+                            .build_int_truncate(iv, i64_ty, "opt_pay_trunc")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        iv
+                    };
+                    if et.get_bit_width() == 64 {
+                        self.build_store(pay_gep, as_i64)?;
+                    } else {
+                        self.build_store(pay_gep, pay)?;
+                    }
+                }
+                (BasicValueEnum::PointerValue(pv), BasicTypeEnum::IntType(et))
+                    if et.get_bit_width() == 64 =>
+                {
+                    // Option {i1, ptr} → {i1, i64}: ptrtoint list/record handle.
+                    let h = self.build_ptr_to_int(
+                        pv,
+                        self.context.i64_type(),
+                        "opt_pay_ptr_i64",
+                    )?;
+                    self.build_store(pay_gep, h)?;
+                }
+                (BasicValueEnum::PointerValue(pv), BasicTypeEnum::PointerType(_)) => {
+                    self.build_store(pay_gep, pv)?;
+                }
+                (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(_)) => {
+                    self.build_store(pay_gep, sv)?;
+                }
+                _ => {
+                    // Leave zero from const_zero (safe for None-like empties).
+                }
             }
         }
         // Load the inflated struct
