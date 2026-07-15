@@ -5233,7 +5233,6 @@ fn dual_recursive_type_list_enum_index() {
         return;
     }
     // List of recursive enum: store via ptrtoint, index reconstructs struct.
-    // (Call(string, List<Expr>) multi-arg packing still separate.)
     dual_assert!(
         r#"
         type Node {
@@ -5276,6 +5275,90 @@ fn dual_enum_list_payload() {
         }
         "#,
         "3\n1"
+    );
+}
+
+/// Single string payload: raw i8* literal must wrap to {ptr,len} for Packed ctor.
+#[test]
+fn dual_enum_string_payload_match() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Msg { Text(string) Empty }
+        func main() -> i32 {
+            let m = Text("hello")
+            match m {
+                Text(s) => { println(s); 0 }
+                Empty => { println("empty"); 0 }
+            }
+        }
+        "#,
+        "hello"
+    );
+}
+
+/// Multi-arg string + List packing (non-recursive).
+#[test]
+fn dual_enum_string_list_payload() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Expr {
+            Call(string, List<i32>)
+            Leaf(i32)
+        }
+        func main() -> i32 {
+            let e = Call("f", [1, 2, 3])
+            match e {
+                Call(name, args) => {
+                    println(name)
+                    println(args.len())
+                    0
+                }
+                Leaf(n) => { println(n); 0 }
+            }
+        }
+        "#,
+        "f\n3"
+    );
+}
+
+/// Recursive Call(string, List<Expr>) + string return from match (phi wrap).
+#[test]
+fn dual_enum_call_string_list_expr() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Expr {
+            Call(string, List<Expr>)
+            Leaf(i32)
+        }
+        func first_name(e: Expr) -> string {
+            match e {
+                Call(name, args) => name
+                Leaf(n) => "leaf"
+            }
+        }
+        func main() -> i32 {
+            let e = Call("f", [Leaf(1), Leaf(2)])
+            println(first_name(e))
+            match e {
+                Call(name, args) => {
+                    println(name)
+                    println(args.len())
+                    0
+                }
+                Leaf(n) => { println(n); 0 }
+            }
+        }
+        "#,
+        "f\nf\n2"
     );
 }
 

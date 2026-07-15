@@ -128,31 +128,115 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.emit_direct_call(function, &call_args, "enum_ctor")
     }
 
-    /// If an enum constructor expects a single packed struct (multi-field variant),
-    /// pack the individual arguments into that struct. Otherwise return the args unchanged.
+    /// Coerce a compiled arg to the LLVM type expected by an enum-ctor payload
+    /// field (or the sole packed param).
+    ///
+    /// - string field `{ptr,i64}` + raw `i8*` (string literal) → wrap via strlen
+    /// - other struct field + alloca pointer → load by value
+    /// - integer width mismatch → trunc/sext
+    pub(in crate::codegen) fn coerce_value_to_expected_type(
+        &self,
+        arg: BasicValueEnum<'ctx>,
+        expected: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match (arg, expected) {
+            (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(st)) => {
+                let fields = st.get_field_types();
+                // Mimi string is { i8*, i64 }; List is { i64, i8* } — order differs.
+                let is_string = fields.len() == 2
+                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(
+                        fields[1],
+                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                    );
+                if is_string {
+                    self.wrap_raw_string_ptr(pv)
+                } else {
+                    self.build_load(
+                        BasicTypeEnum::StructType(st),
+                        pv,
+                        "coerce_struct_load",
+                    )
+                }
+            }
+            (BasicValueEnum::IntValue(arg_iv), BasicTypeEnum::IntType(exp_it)) => {
+                let arg_bw = arg_iv.get_type().get_bit_width();
+                let exp_bw = exp_it.get_bit_width();
+                if arg_bw == exp_bw {
+                    Ok(arg)
+                } else if arg_bw > exp_bw {
+                    Ok(self
+                        .builder
+                        .build_int_truncate(arg_iv, exp_it, "coerce_trunc")
+                        .map_err(|e| CompileError::LlvmError(format!("arg trunc: {}", e)))?
+                        .into())
+                } else {
+                    Ok(self
+                        .builder
+                        .build_int_s_extend(arg_iv, exp_it, "coerce_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("arg s_ext: {}", e)))?
+                        .into())
+                }
+            }
+            _ => Ok(arg),
+        }
+    }
+
+    /// If an enum constructor expects a single packed struct (multi-field variant
+    /// or single struct payload like `string` / `List<T>`), coerce each arg to the
+    /// expected field type and pack. Single non-struct args pass through after coerce.
     pub(in crate::codegen) fn maybe_pack_enum_ctor_args(
         &mut self,
         compiled_args: &[BasicValueEnum<'ctx>],
         function: inkwell::values::FunctionValue<'ctx>,
     ) -> Result<Vec<BasicValueEnum<'ctx>>, CompileError> {
-        if compiled_args.len() > 1 && function.count_params() == 1 {
-            let param = function
-                .get_nth_param(0)
-                .ok_or_else(|| CompileError::LlvmError("expected at least one param".into()))?;
-            if let BasicValueEnum::StructValue(first_sv) = param {
-                let struct_ty = first_sv.get_type();
-                let mut struct_val = struct_ty.get_undef();
-                for (i, arg) in compiled_args.iter().enumerate() {
-                    let agg = self
-                        .builder
-                        .build_insert_value(struct_val, *arg, i as u32, "packed_field")
-                        .map_err(|e| {
-                            CompileError::LlvmError(format!("pack enum ctor arg {}: {}", i, e))
-                        })?;
-                    struct_val = agg.into_struct_value();
-                }
-                return Ok(vec![BasicValueEnum::StructValue(struct_val)]);
+        if function.count_params() != 1 {
+            return Ok(compiled_args.to_vec());
+        }
+        let param = function
+            .get_nth_param(0)
+            .ok_or_else(|| CompileError::LlvmError("expected at least one param".into()))?;
+        let BasicValueEnum::StructValue(param_sv) = param else {
+            // Primitive single payload (i32/f64/…): coerce width only.
+            if compiled_args.len() == 1 {
+                let expected = param.get_type();
+                return Ok(vec![self.coerce_value_to_expected_type(compiled_args[0], expected)?]);
             }
+            return Ok(compiled_args.to_vec());
+        };
+        let struct_ty = param_sv.get_type();
+        let field_tys = struct_ty.get_field_types();
+
+        if compiled_args.len() > 1 {
+            // Multi-arg variant → one packed struct param.
+            if field_tys.len() != compiled_args.len() {
+                return Err(CompileError::LlvmError(format!(
+                    "enum ctor pack: {} args for {}-field payload",
+                    compiled_args.len(),
+                    field_tys.len()
+                )));
+            }
+            let mut struct_val = struct_ty.get_undef();
+            for (i, arg) in compiled_args.iter().enumerate() {
+                let coerced = self.coerce_value_to_expected_type(*arg, field_tys[i])?;
+                let agg = self
+                    .builder
+                    .build_insert_value(struct_val, coerced, i as u32, "packed_field")
+                    .map_err(|e| {
+                        CompileError::LlvmError(format!("pack enum ctor arg {}: {}", i, e))
+                    })?;
+                struct_val = agg.into_struct_value();
+            }
+            return Ok(vec![BasicValueEnum::StructValue(struct_val)]);
+        }
+
+        // Single arg for struct payload (string, List, nested enum, …).
+        if compiled_args.len() == 1 {
+            let coerced = self.coerce_value_to_expected_type(
+                compiled_args[0],
+                BasicTypeEnum::StructType(struct_ty),
+            )?;
+            return Ok(vec![coerced]);
         }
         Ok(compiled_args.to_vec())
     }
@@ -2382,61 +2466,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         compiled_args: &[BasicValueEnum<'ctx>],
         name: &str,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        // Adjust integer arg widths to match the function's parameter types.
-        // After A1 restoration, i32 params expect i32 values; a literal 99
-        // is compiled as i64 and must be truncated to i32 before the call.
-        // Also: list/record exprs often yield alloca pointers while enum
-        // constructors take the struct by value — load before the call.
+        // Coerce each arg to the declared param type: int width, string wrap
+        // (raw i8* → {ptr,len}), list/record alloca load → by-value struct.
         let adjusted_args: Vec<BasicValueEnum<'ctx>> = compiled_args
             .iter()
             .enumerate()
             .map(|(i, v)| {
                 if let Some(param) = function.get_nth_param(i as u32) {
-                    if let (BasicValueEnum::IntValue(arg_iv), BasicValueEnum::IntValue(param_iv)) =
-                        (*v, param)
-                    {
-                        let arg_bw = arg_iv.get_type().get_bit_width();
-                        let param_bw = param_iv.get_type().get_bit_width();
-                        if arg_bw == param_bw {
-                            Ok(*v)
-                        } else if arg_bw > param_bw {
-                            // Truncate wider arg to param width (e.g. i64→i32)
-                            Ok(self
-                                .builder
-                                .build_int_truncate(
-                                    arg_iv,
-                                    param_iv.get_type(),
-                                    &format!("arg_trunc_{}", i),
-                                )
-                                .map_err(|e| CompileError::LlvmError(format!("arg trunc: {}", e)))?
-                                .into())
-                        } else {
-                            // Extend narrower arg to param width (e.g. i32→i64)
-                            Ok(self
-                                .builder
-                                .build_int_s_extend(
-                                    arg_iv,
-                                    param_iv.get_type(),
-                                    &format!("arg_sext_{}", i),
-                                )
-                                .map_err(|e| CompileError::LlvmError(format!("arg s_ext: {}", e)))?
-                                .into())
-                        }
-                    } else if let (
-                        BasicValueEnum::PointerValue(arg_pv),
-                        BasicValueEnum::StructValue(param_sv),
-                    ) = (*v, param)
-                    {
-                        // List/record alloca → by-value struct param (enum ctor payload).
-                        let sty = param_sv.get_type();
-                        Ok(self.build_load(
-                            BasicTypeEnum::StructType(sty),
-                            arg_pv,
-                            &format!("arg_load_struct_{}", i),
-                        )?)
-                    } else {
-                        Ok(*v)
-                    }
+                    self.coerce_value_to_expected_type(*v, param.get_type())
                 } else {
                     Ok(*v)
                 }

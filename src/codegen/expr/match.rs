@@ -1159,7 +1159,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // For width unification, s_ext must be emitted in the PREDECESSOR block
         // (where the value is defined), NOT in the merge block — otherwise the
         // sext doesn't dominate all uses when another predecessor doesn't define it.
-        let unified_vals: Vec<BasicValueEnum<'ctx>> = if needs_unify && max_bw > 0 {
+        let mut unified_vals: Vec<BasicValueEnum<'ctx>> = if needs_unify && max_bw > 0 {
             let target_ty = if max_bw <= 32 {
                 self.context.i32_type()
             } else {
@@ -1197,9 +1197,86 @@ impl<'ctx> CodeGenerator<'ctx> {
             incoming_vals.to_vec()
         };
 
+        // String-return arms: one arm may yield Mimi `{ptr,len}` while another
+        // yields a raw string-literal `i8*`. Phi of mixed types → LLVM
+        // "Cannot emit physreg copy instruction". Prefer the string struct;
+        // wrap raw pointers in the predecessor block.
+        let is_mimi_string_struct = |v: BasicValueEnum<'ctx>| -> bool {
+            if let BasicValueEnum::StructValue(sv) = v {
+                let fields = sv.get_type().get_field_types();
+                fields.len() == 2
+                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(
+                        fields[1],
+                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                    )
+            } else {
+                false
+            }
+        };
+        let has_string_struct = unified_vals.iter().copied().any(is_mimi_string_struct);
+        let has_raw_ptr = unified_vals
+            .iter()
+            .any(|v| matches!(v, BasicValueEnum::PointerValue(_)));
+        if has_string_struct && has_raw_ptr {
+            let wrap_idxs: Vec<(usize, PointerValue<'ctx>, BasicBlock<'ctx>)> = unified_vals
+                .iter()
+                .enumerate()
+                .filter_map(|(i, v)| match v {
+                    BasicValueEnum::PointerValue(pv) => Some((i, *pv, incoming_bbs[i])),
+                    _ => None,
+                })
+                .collect();
+            for (i, pv, pred_bb) in wrap_idxs {
+                self.builder.position_at_end(pred_bb);
+                if let Some(term) = pred_bb.get_terminator() {
+                    self.builder.position_before(&term);
+                }
+                unified_vals[i] = self.wrap_raw_string_ptr(pv)?;
+            }
+        }
+
+        // Prefer a StructValue arm as the phi type when present (e.g. after
+        // string wrap, or when int-width unify already left mixed kinds).
+        let ty = unified_vals
+            .iter()
+            .find_map(|v| match v {
+                BasicValueEnum::StructValue(sv) => Some(BasicTypeEnum::StructType(sv.get_type())),
+                _ => None,
+            })
+            .unwrap_or_else(|| unified_vals[0].get_type());
+
+        // Last-chance: coerce any still-mismatched predecessor to the phi type
+        // so we never emit a type-mismatched phi.
+        let mismatch_idxs: Vec<(usize, BasicValueEnum<'ctx>, BasicBlock<'ctx>)> = unified_vals
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.get_type() != ty)
+            .map(|(i, v)| (i, *v, incoming_bbs[i]))
+            .collect();
+        for (i, v, pred_bb) in mismatch_idxs {
+            self.builder.position_at_end(pred_bb);
+            if let Some(term) = pred_bb.get_terminator() {
+                self.builder.position_before(&term);
+            }
+            if let (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(st)) = (v, ty) {
+                let fields = st.get_field_types();
+                let is_string = fields.len() == 2
+                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(
+                        fields[1],
+                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                    );
+                if is_string {
+                    unified_vals[i] = self.wrap_raw_string_ptr(pv)?;
+                    continue;
+                }
+            }
+            unified_vals[i] = self.const_zero_for_type(ty);
+        }
+
         // Now build the phi in the merge block.
         self.builder.position_at_end(merge_bb);
-        let ty = unified_vals[0].get_type();
         let phi = self
             .builder
             .build_phi(ty, "match.result")
