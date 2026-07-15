@@ -178,7 +178,9 @@ pub(crate) fn build(
                 }
             }
             Err(e) => {
-                eprintln!("⚠  Skipping FFI verification: {}", e);
+                // P-H11: --verify-ffi must fail closed when the verifier itself
+                // errors (timeout, Z3 unavailable after typecheck, etc.).
+                return Err(format!("FFI verification error: {}", e));
             }
         }
     }
