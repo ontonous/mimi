@@ -247,14 +247,14 @@ func main() -> i32 {
 fn optional_chain_basic_field() {
     // x?.field — basic optional chain
     let src = "func main() -> i32 { let x: Option<i32> = Some(1); x?.to_string(); 0 }";
-    parse(src); // should not panic
+    let _file = parse(src); // TC-H3: must parse successfully
 }
 
 #[test]
 fn optional_chain_chained_three_levels() {
     // a?.b?.c — three-level chained optional
     let src = "func main() -> i32 { let x: Option<i32> = Some(1); x?.to_string()?.to_string(); 0 }";
-    parse(src); // should not panic
+    let _file = parse(src); // TC-H3: must parse successfully
 }
 
 #[test]
@@ -262,14 +262,15 @@ fn optional_chain_after_function_call() {
     // foo()?.field — optional chain after function call
     let src = "func foo() -> Option<i32> { Some(42) }
                func main() -> i32 { foo()?.to_string(); 0 }";
-    parse(src); // should not panic
+    let _file = parse(src); // TC-H3: must parse successfully
 }
 
 #[test]
 fn optional_chain_after_index() {
     // arr[0]?.field — optional chain after array index
     let src = "func main() -> i32 { let xs: List<Option<i32>> = [Some(1)]; xs[0]?.to_string(); 0 }";
-    // May fail to type-check, but should at least parse
+    // TC-H3: must at least parse; typecheck may still fail.
+    let _file = parse(src);
     let _ = check_source(src);
 }
 
@@ -278,14 +279,14 @@ fn optional_chain_mixed_with_try() {
     // x?.y? — mixed optional chain and try
     let src =
         "func main() -> i32 { let x: Option<Option<i32>> = Some(Some(1)); x?.to_string()?; 0 }";
-    parse(src); // should not panic
+    let _file = parse(src); // TC-H3: must parse successfully
 }
 
 #[test]
 fn optional_chain_followed_by_call() {
     // x?.to_string() — optional chain followed by method call
     let src = "func main() -> i32 { let x: Option<i32> = Some(1); x?.to_string(); 0 }";
-    parse(src); // should not panic
+    let _file = parse(src); // TC-H3: must parse successfully
 }
 
 #[test]

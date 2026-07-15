@@ -230,9 +230,11 @@ func main() -> i32 {
 
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());
     let result = loader.load_main(&main_path);
-    // May fail if import resolution requires specific setup
-    // Just ensure it doesn't panic
-    let _ = result;
+    // TC-H3: load must produce Ok or a structured Err — never panic.
+    match &result {
+        Ok(_) => {}
+        Err(e) => assert!(!e.is_empty(), "empty error string on load failure"),
+    }
     cleanup(&dir);
 }
 
@@ -251,8 +253,15 @@ func f() -> i32 { 2 }
 
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());
     let result = loader.load_main(&path);
-    // May error on duplicate, just ensure no panic
-    let _ = result;
+    // TC-H3: duplicate funcs should Err or load with later merge error, not panic.
+    match &result {
+        Ok(_) => {}
+        Err(e) => assert!(
+            e.contains("duplicate") || e.contains("f") || !e.is_empty(),
+            "unexpected err: {}",
+            e
+        ),
+    }
     cleanup(&dir);
 }
 
