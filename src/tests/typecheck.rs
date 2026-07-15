@@ -1782,3 +1782,43 @@ func main() -> f64 {
     )
     .is_ok());
 }
+
+
+#[test]
+fn view_param_field_write_rejected() {
+    // T-H1: field write through view must be E0415.
+    let src = r#"
+type Point { x: i32, y: i32 }
+func bump(p: view Point) {
+    p.x = 1
+}
+func main() -> i32 { 0 }
+"#;
+    let r = check_source(src);
+    assert!(r.is_err(), "expected view field write error");
+    let msgs: String = r.unwrap_err().iter().map(|d| d.message.clone()).collect::<Vec<_>>().join(";");
+    assert!(
+        msgs.contains("view") || msgs.contains("read-only") || msgs.contains("E0415"),
+        "unexpected: {}",
+        msgs
+    );
+}
+
+#[test]
+fn view_param_index_write_rejected() {
+    // T-H1: index write through view must be E0415.
+    let src = r#"
+func set0(xs: view List<i32>) {
+    xs[0] = 1
+}
+func main() -> i32 { 0 }
+"#;
+    let r = check_source(src);
+    assert!(r.is_err(), "expected view index write error");
+    let msgs: String = r.unwrap_err().iter().map(|d| d.message.clone()).collect::<Vec<_>>().join(";");
+    assert!(
+        msgs.contains("view") || msgs.contains("read-only") || msgs.contains("E0415"),
+        "unexpected: {}",
+        msgs
+    );
+}
