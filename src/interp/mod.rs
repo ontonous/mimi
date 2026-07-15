@@ -1054,6 +1054,106 @@ impl<'a> Interpreter<'a> {
         self.scope_env.assign(name, value)
     }
 
+    /// Write `value` into a place expression (I-H7 nested record assignment).
+    /// Supports `x`, `x.f`, `x.f.g`, and shared/local_shared record fields.
+    pub(crate) fn write_place_value(
+        &mut self,
+        place: &Expr,
+        value: Value,
+    ) -> Result<(), InterpError> {
+        match place {
+            Expr::Ident(name) => self.assign(name, value),
+            Expr::Field(obj, field) => {
+                if let Expr::Ident(name) = obj.as_ref() {
+                    if name == "self" {
+                        if let Some(Value::Actor(handle)) = self.lookup("self") {
+                            handle
+                                .inner
+                                .write()
+                                .map_err(|e| {
+                                    InterpError::lock_error(format!("actor lock failed: {}", e))
+                                })?
+                                .fields
+                                .insert(field.clone(), value);
+                            return Ok(());
+                        }
+                    }
+                }
+                let obj_val = self.eval_expr(obj)?;
+                match obj_val {
+                    Value::Record(type_name, mut fields) => {
+                        if !fields.contains_key(field.as_str()) {
+                            return Err(InterpError::field_not_found(format!(
+                                "field '{}' not found in record",
+                                field
+                            )));
+                        }
+                        fields.insert(field.clone(), value);
+                        self.write_place_value(obj, Value::Record(type_name, fields))
+                    }
+                    Value::Actor(handle) => {
+                        handle
+                            .inner
+                            .write()
+                            .map_err(|e| {
+                                InterpError::lock_error(format!("actor lock failed: {}", e))
+                            })?
+                            .fields
+                            .insert(field.clone(), value);
+                        Ok(())
+                    }
+                    Value::Shared(arc) => {
+                        let mut inner = arc.write().map_err(|e| {
+                            InterpError::lock_error(format!("shared write lock failed: {}", e))
+                        })?;
+                        match &mut *inner {
+                            Value::Record(_, fields) => {
+                                if !fields.contains_key(field.as_str()) {
+                                    return Err(InterpError::field_not_found(format!(
+                                        "field '{}' not found in shared record",
+                                        field
+                                    )));
+                                }
+                                fields.insert(field.clone(), value);
+                                Ok(())
+                            }
+                            _ => Err(InterpError::new(format!(
+                                "cannot assign to field of non-record shared value (type: {})",
+                                type_name(&inner)
+                            ))),
+                        }
+                    }
+                    Value::LocalShared(rc) => {
+                        let mut inner = rc.lock().unwrap_or_else(|e| e.into_inner());
+                        match &mut *inner {
+                            Value::Record(_, fields) => {
+                                if !fields.contains_key(field.as_str()) {
+                                    return Err(InterpError::field_not_found(format!(
+                                        "field '{}' not found in local_shared record",
+                                        field
+                                    )));
+                                }
+                                fields.insert(field.clone(), value);
+                                Ok(())
+                            }
+                            _ => Err(InterpError::new(format!(
+                                "cannot assign to field of non-record local_shared value (type: {})",
+                                type_name(&inner)
+                            ))),
+                        }
+                    }
+                    other => Err(InterpError::new(format!(
+                        "cannot assign to field of non-record/non-actor value (type: {})",
+                        type_name(&other)
+                    ))),
+                }
+            }
+            _ => Err(InterpError::new(
+                "assignment target is not a writable place",
+            )),
+        }
+    }
+
     /// Force-update a variable's value, bypassing the mutability check.
     /// Used by `push()` write-back — push mutates in place in codegen
     /// regardless of `mut`, so the interpreter must match.

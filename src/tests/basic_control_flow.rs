@@ -1106,3 +1106,29 @@ func main() -> f64 { test() }
     let v = run_source(src);
     assert_eq!(v, interp::Value::Float(1.5));
 }
+
+#[test]
+fn nested_func_captures_outer() {
+    let src = r#"
+func main() -> i32 {
+    let n = 7
+    func add_n(x: i32) -> i32 { x + n }
+    add_n(3)
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(10));
+}
+
+#[test]
+fn nested_record_field_assign_persists() {
+    let src = r#"
+type Inner { x: i32 }
+type Outer { inner: Inner }
+func main() -> i32 {
+    let mut o = Outer { inner: Inner { x: 1 } }
+    o.inner.x = 42
+    o.inner.x
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(42));
+}

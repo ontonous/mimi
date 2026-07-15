@@ -607,13 +607,11 @@ impl<'a> Interpreter<'a> {
                             {
                                 e.insert(v);
                             }
-                            // DAT-C4 (deep audit): write the modified record back to the variable.
-                            // Without this, `r.x = 10` silently fails — the record clone is
-                            // modified but never stored back.
-                            if let Expr::Ident(name) = obj.as_ref() {
-                                let updated = Value::Record(type_name, fields);
-                                self.assign(name, updated)?;
-                            }
+                            // DAT-C4 / I-H7: write the modified record back through
+                            // the place. Nested `o.inner.x = 42` must update the
+                            // outer record, not only a discarded clone.
+                            let updated = Value::Record(type_name, fields);
+                            self.write_place_value(obj, updated)?;
                         } else {
                             return Err(InterpError::field_not_found(format!(
                                 "field '{}' not found in record",
