@@ -109,8 +109,28 @@ pub(crate) fn collect_expr_free_vars(
                 collect_expr_free_vars(a, bound, free);
             }
         }
-        Expr::Field(obj, _) | Expr::Index(obj, _) => {
+        Expr::Field(obj, _) => {
             collect_expr_free_vars(obj, bound, free);
+        }
+        // I-H10: Index must visit both base and index expressions.
+        Expr::Index(obj, idx) => {
+            collect_expr_free_vars(obj, bound, free);
+            collect_expr_free_vars(idx, bound, free);
+        }
+        Expr::OptionalChain(obj, _) => {
+            collect_expr_free_vars(obj, bound, free);
+        }
+        Expr::MapLiteral { entries } => {
+            for (k, v) in entries {
+                collect_expr_free_vars(k, bound, free);
+                collect_expr_free_vars(v, bound, free);
+            }
+        }
+        Expr::NamedArg(_, e) => {
+            collect_expr_free_vars(e, bound, free);
+        }
+        Expr::Cast(e, _) => {
+            collect_expr_free_vars(e, bound, free);
         }
         Expr::Tuple(elems) | Expr::List(elems) => {
             for e in elems {
