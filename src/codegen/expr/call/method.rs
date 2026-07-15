@@ -1786,8 +1786,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
             }
             Type::Name(n, args) if n == "Map" => {
-                // Map<string, i32|i64|bool|f32|f64|string> from JSON object.
+                // Map<string, V> from JSON object — scalars or product-tuple V.
                 let val_ty = args.get(1);
+                let val_is_product = val_ty.map(|t| matches!(t, Type::Tuple(_))).unwrap_or(false);
+                if val_is_product {
+                    let arity = match val_ty {
+                        Some(Type::Tuple(elems)) => elems.len() as u64,
+                        _ => 2,
+                    };
+                    let func = self.get_runtime_fn("mimi_map_from_json_product_i64")?;
+                    let result = self.build_call(
+                        func,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(raw_ptr),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(arity, false),
+                            ),
+                        ],
+                        "map_from_json_product",
+                    )?;
+                    return Ok(self
+                        .expect_basic_value(&result, "mimi_map_from_json_product_i64")?
+                        .into());
+                }
                 let val_is_int = val_ty
                     .map(|t| {
                         matches!(
@@ -1804,7 +1825,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .unwrap_or(false);
                 if !val_is_int && !val_is_float && !val_is_string {
                     return Err(CompileError::Generic(
-                        "from_json::<Map>: only Map<string, i32|i64|bool|f32|f64|string> is supported in codegen"
+                        "from_json::<Map>: only Map<string, scalar|product-tuple> is supported in codegen"
                             .into(),
                     ));
                 }

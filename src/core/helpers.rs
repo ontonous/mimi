@@ -401,17 +401,10 @@ pub(crate) fn is_json_serializable(t: &Type) -> bool {
             if n == "List" && !args.is_empty() {
                 return is_json_serializable(&args[0]);
             }
-            // Map<string, i32|i64|bool|f32|f64|string> via typed map JSON helpers.
+            // Map<string, V> when V is serializable (scalars or product tuples).
             if n == "Map" && args.len() == 2 {
                 let key_ok = matches!(&args[0], Type::Name(k, _) if k == "string");
-                let val_ok = matches!(
-                    &args[1],
-                    Type::Name(v, _)
-                        if matches!(
-                            v.as_str(),
-                            "i32" | "i64" | "bool" | "f32" | "f64" | "string"
-                        )
-                );
+                let val_ok = is_json_serializable(&args[1]);
                 return key_ok && val_ok;
             }
             // Set<i32|i64|bool|f32|f64|string> via typed set JSON/display helpers.

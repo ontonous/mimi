@@ -7321,6 +7321,46 @@ fn dual_option_result_list_tuple() {
     );
 }
 
+/// Map of product-tuple: map_set + Display + to_json dual.
+#[test]
+fn dual_map_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = map_new()
+            let m2 = map_set(m, "a", (1, 2))
+            let m3 = map_set(m2, "b", (3, 4))
+            println(m3)
+            println(to_json(m3))
+            0
+        }
+        "#,
+        "{\"a\":(1, 2),\"b\":(3, 4)}\n{\"a\":[1,2],\"b\":[3,4]}"
+    );
+}
+
+/// from_json Map of product-tuple dual.
+#[test]
+fn dual_from_json_map_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, (i32, i32)>>("{\"a\":[1,2],\"b\":[3,4]}")
+            println(m)
+            println(to_json(m))
+            0
+        }
+        "#,
+        "{\"a\":(1, 2),\"b\":(3, 4)}\n{\"a\":[1,2],\"b\":[3,4]}"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {

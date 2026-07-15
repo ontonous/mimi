@@ -1915,6 +1915,49 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     ),
                                                 );
                                             }
+                                            "map_new" => {
+                                                self.var_type_names
+                                                    .insert(name.clone(), "Map".to_string());
+                                            }
+                                            "map_set" | "map_remove" => {
+                                                if let Some(val_arg) = call_args.get(2) {
+                                                    let vt =
+                                                        self.infer_object_type(val_arg, vars);
+                                                    if vt.starts_with('(')
+                                                        || self.is_product_tuple_alias(&vt)
+                                                    {
+                                                        let resolved = if self
+                                                            .is_product_tuple_alias(&vt)
+                                                        {
+                                                            self.resolve_alias_type_name(&vt)
+                                                        } else {
+                                                            vt
+                                                        };
+                                                        self.var_type_names.insert(
+                                                            name.clone(),
+                                                            format!("Map<string, {}>", resolved),
+                                                        );
+                                                    } else if !vt.is_empty()
+                                                        && vt != "i64"
+                                                        && vt != "int"
+                                                    {
+                                                        self.var_type_names.insert(
+                                                            name.clone(),
+                                                            format!("Map<string, {}>", vt),
+                                                        );
+                                                    } else {
+                                                        self.var_type_names
+                                                            .insert(name.clone(), "Map".to_string());
+                                                    }
+                                                } else {
+                                                    self.var_type_names
+                                                        .insert(name.clone(), "Map".to_string());
+                                                }
+                                            }
+                                            "set_new" | "set_insert" | "set_remove" => {
+                                                self.var_type_names
+                                                    .insert(name.clone(), "Set".to_string());
+                                            }
                                             _ => {}
                                         }
                                     }

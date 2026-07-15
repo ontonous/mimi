@@ -3249,6 +3249,158 @@ pub extern "C" fn mimi_map_to_json_string(handle: MapHandle) -> *mut std::ffi::c
     alloc_c_string(&parts.join(""))
 }
 
+/// Serialize Map values that are heap-packed product-tuple structs of i64 fields.
+/// `arity` is the number of i64 fields (e.g. 2 for `(i32,i32)` after widen).
+/// `display_style`: 0 = JSON arrays `[1,2]`, 1 = Display `(1, 2)`.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_product_i64(
+    handle: MapHandle,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if handle == 0 || arity <= 0 || arity > 16 {
+        return alloc_c_string("{}");
+    }
+    let map = unsafe { &*map_from_handle(handle) };
+    if map.inner.len() > 1_000_000 {
+        return alloc_c_string("{...}");
+    }
+    let mut entries: Vec<_> = map.inner.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 2 + 2);
+    parts.push(String::from("{"));
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        parts.push(json_escape_string(k));
+        parts.push(String::from(":"));
+        let vh = **v;
+        let n = arity as usize;
+        // SAFETY: map_set product path heap-packs an i64[n] struct and stores ptrtoint.
+        let fields: Vec<i64> = if vh == 0 {
+            vec![0; n]
+        } else {
+            let ptr = vh as *const i64;
+            if ptr.is_null() {
+                vec![0; n]
+            } else {
+                unsafe { std::slice::from_raw_parts(ptr, n).to_vec() }
+            }
+        };
+        if display_style != 0 {
+            // Display: (1, 2)
+            let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
+            parts.push(format!("({})", body.join(", ")));
+        } else {
+            // JSON: [1,2]
+            let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
+            parts.push(format!("[{}]", body.join(",")));
+        }
+    }
+    parts.push(String::from("}"));
+    alloc_c_string(&parts.join(""))
+}
+
+/// Build a MapHandle from a JSON object whose values are product-tuple arrays
+/// of integers (e.g. `"a":[1,2]`). Each value is heap-packed as i64[arity]
+/// matching `map_set` of product tuples / `mimi_map_to_json_product_i64`.
+#[no_mangle]
+pub extern "C" fn mimi_map_from_json_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> MapHandle {
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return mimi_map_new();
+    }
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_map_new();
+    if handle == 0 {
+        return 0;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'{' {
+        return handle;
+    }
+    i += 1;
+    let n = arity as usize;
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b'}' {
+            break;
+        }
+        if bytes[i] != b'"' {
+            break;
+        }
+        i += 1;
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'"' {
+            if bytes[i] == b'\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let key = String::from_utf8_lossy(&bytes[start..i]).into_owned();
+        i += 1;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'[' {
+            break;
+        }
+        i += 1;
+        let mut fields = vec![0i64; n];
+        for fi in 0..n {
+            while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+                i += 1;
+            }
+            let neg = i < bytes.len() && bytes[i] == b'-';
+            if neg {
+                i += 1;
+            }
+            let mut v: i64 = 0;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                v = v
+                    .saturating_mul(10)
+                    .saturating_add((bytes[i] - b'0') as i64);
+                i += 1;
+            }
+            if neg {
+                v = -v;
+            }
+            fields[fi] = v;
+        }
+        while i < bytes.len() && bytes[i] != b']' {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b']' {
+            i += 1;
+        }
+        let data_size = n * std::mem::size_of::<i64>();
+        let ptr = unsafe { libc::malloc(data_size) as *mut i64 };
+        if ptr.is_null() {
+            continue;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(fields.as_ptr(), ptr, n);
+        }
+        let vh = ptr as ValueHandle;
+        unsafe {
+            (*map_from_handle(handle)).inner.insert(key, vh);
+        }
+    }
+    handle
+}
+
 /// Build a MapHandle from a JSON object with string keys and integer values.
 /// Values are stored as raw i64 ValueHandles (same as map_set of integers).
 #[no_mangle]

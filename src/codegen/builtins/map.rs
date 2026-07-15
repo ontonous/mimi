@@ -292,22 +292,89 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .ok_or("mimi_str_clone returned void")?
                         .into_int_value()
                 } else {
-                    // Product tuple / multi-field struct: heap-pack and store
-                    // ptrtoint as ValueHandle (same as List element packing).
-                    let struct_ty = sv.get_type();
-                    let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(struct_ty));
-                    let size_val = self.context.i64_type().const_int(size, false);
-                    let ptr = self.malloc_or_abort(size_val, "map_set_struct")?;
-                    let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                    let typed_ptr = self
-                        .build_bit_cast(
-                            ptr.into(),
-                            BasicTypeEnum::PointerType(i8_ptr_ty),
-                            "map_set_struct_ptr",
-                        )?
-                        .into_pointer_value();
-                    self.build_store(typed_ptr, sv)?;
-                    self.build_ptr_to_int(typed_ptr, self.context.i64_type(), "map_set_struct_h")?
+                    // Product tuple / multi-field struct: widen int fields to
+                    // i64, heap-pack, store ptrtoint as ValueHandle so Map
+                    // Display/to_json can decode a uniform i64[n] layout.
+                    let i64_ty = self.context.i64_type();
+                    let fields = sv.get_type().get_field_types();
+                    let all_int = fields.iter().all(|f| matches!(f, BasicTypeEnum::IntType(_)));
+                    if all_int && !fields.is_empty() {
+                        let n = fields.len();
+                        let size_val = i64_ty.const_int((n as u64) * 8, false);
+                        let ptr = self.malloc_or_abort(size_val, "map_set_prod")?;
+                        let i8_ptr_ty =
+                            self.context.ptr_type(inkwell::AddressSpace::default());
+                        let base = self
+                            .build_bit_cast(
+                                ptr.into(),
+                                BasicTypeEnum::PointerType(i8_ptr_ty),
+                                "map_set_prod_ptr",
+                            )?
+                            .into_pointer_value();
+                        for (i, _) in fields.iter().enumerate() {
+                            let fv = self.build_extract_value(
+                                sv.into(),
+                                i as u32,
+                                &format!("map_set_prod_f{}", i),
+                            )?;
+                            let as_i64 = match fv {
+                                BasicValueEnum::IntValue(iv) => {
+                                    let bw = iv.get_type().get_bit_width();
+                                    if bw < 64 {
+                                        self.builder
+                                            .build_int_s_extend(
+                                                iv,
+                                                i64_ty,
+                                                &format!("map_set_prod_sext{}", i),
+                                            )
+                                            .map_err(|e| format!("map_set product sext: {}", e))?
+                                    } else if bw > 64 {
+                                        self.builder
+                                            .build_int_truncate(
+                                                iv,
+                                                i64_ty,
+                                                &format!("map_set_prod_trunc{}", i),
+                                            )
+                                            .map_err(|e| {
+                                                format!("map_set product trunc: {}", e)
+                                            })?
+                                    } else {
+                                        iv
+                                    }
+                                }
+                                _ => i64_ty.const_int(0, false),
+                            };
+                            let slot = unsafe {
+                                self.builder
+                                    .build_gep(
+                                        i64_ty,
+                                        base,
+                                        &[i64_ty.const_int(i as u64, false)],
+                                        &format!("map_set_prod_slot{}", i),
+                                    )
+                                    .map_err(|e| format!("map_set product gep: {}", e))?
+                            };
+                            self.build_store(slot, as_i64)?;
+                        }
+                        self.build_ptr_to_int(base, i64_ty, "map_set_prod_h")?
+                    } else {
+                        let struct_ty = sv.get_type();
+                        let size =
+                            self.llvm_type_size_bytes(BasicTypeEnum::StructType(struct_ty));
+                        let size_val = i64_ty.const_int(size, false);
+                        let ptr = self.malloc_or_abort(size_val, "map_set_struct")?;
+                        let i8_ptr_ty =
+                            self.context.ptr_type(inkwell::AddressSpace::default());
+                        let typed_ptr = self
+                            .build_bit_cast(
+                                ptr.into(),
+                                BasicTypeEnum::PointerType(i8_ptr_ty),
+                                "map_set_struct_ptr",
+                            )?
+                            .into_pointer_value();
+                        self.build_store(typed_ptr, sv)?;
+                        self.build_ptr_to_int(typed_ptr, i64_ty, "map_set_struct_h")?
+                    }
                 }
             }
             _ => return Err("map_set: third arg must be i64 value handle".into()),

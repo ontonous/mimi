@@ -730,6 +730,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )))
                         }
                     };
+                    if let Some(val_ty) = obj_type
+                        .strip_prefix("Map<string, ")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                            let elem = if self.is_product_tuple_alias(val_ty) {
+                                self.resolve_alias_type_name(val_ty)
+                            } else {
+                                val_ty.to_string()
+                            };
+                            let raw = self.emit_map_product_to_json(handle, &elem, 0)?;
+                            self.register_heap_alloc(raw);
+                            return self.wrap_c_string(raw);
+                        }
+                    }
                     let fn_name = if obj_type.contains("Map<string, string>") {
                         "mimi_map_to_json_string"
                     } else if obj_type.contains("Map<string, bool>") {
