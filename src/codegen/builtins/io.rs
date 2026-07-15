@@ -1964,7 +1964,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(BasicTypeEnum::StructType(res_sty), res_ptr, "list_res_ld")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_struct_value();
-        let res_str = self.emit_result_to_string_typed(loaded, None, elem_res_type)?;
+        let ok_rec = elem_res_type
+            .strip_prefix("Result<")
+            .and_then(|s| s.split(',').next())
+            .map(|s| s.trim())
+            .filter(|inner| {
+                !inner.is_empty()
+                    && self.type_defs.get(*inner).is_some_and(|td| {
+                        matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                    })
+            });
+        let res_str =
+            self.emit_result_to_string_typed(loaded, ok_rec, elem_res_type)?;
         self.build_call(
             strcat_fn,
             &[
