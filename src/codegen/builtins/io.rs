@@ -529,6 +529,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     "%s".to_string(),
                                 ));
                             }
+                            if list_elem.starts_with("Map<string, ") {
+                                if let Some(map_val) = list_elem
+                                    .strip_prefix("Map<string, ")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if map_val.starts_with('(')
+                                        || self.is_product_tuple_alias(map_val)
+                                    {
+                                        let elem = if self.is_product_tuple_alias(map_val)
+                                        {
+                                            self.resolve_alias_type_name(map_val)
+                                        } else {
+                                            map_val.to_string()
+                                        };
+                                        let raw = self.emit_map_list_map_product_to_json(
+                                            *iv, &elem, 1,
+                                        )?;
+                                        return Ok((
+                                            BasicMetadataValueEnum::PointerValue(raw),
+                                            "%s".to_string(),
+                                        ));
+                                    }
+                                }
+                            }
                             if let Some(set_elem) = list_elem
                                 .strip_prefix("Set<")
                                 .and_then(|s| s.strip_suffix('>'))
@@ -776,6 +800,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         BasicMetadataValueEnum::PointerValue(raw),
                                         "%s".to_string(),
                                     ));
+                                }
+                            }
+                            if set_elem.starts_with("Map<string, ") {
+                                if let Some(val_ty) = set_elem
+                                    .strip_prefix("Map<string, ")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if val_ty.starts_with('(')
+                                        || self.is_product_tuple_alias(val_ty)
+                                    {
+                                        let elem = if self.is_product_tuple_alias(val_ty)
+                                        {
+                                            self.resolve_alias_type_name(val_ty)
+                                        } else {
+                                            val_ty.to_string()
+                                        };
+                                        let raw = self.emit_map_set_map_product_to_json(
+                                            *iv, &elem, 1,
+                                        )?;
+                                        return Ok((
+                                            BasicMetadataValueEnum::PointerValue(raw),
+                                            "%s".to_string(),
+                                        ));
+                                    }
                                 }
                             }
                             if let Some(opt_inner) = set_elem
@@ -8153,6 +8201,108 @@ impl<'ctx> CodeGenerator<'ctx> {
             )?
             .try_as_basic_value_opt()
             .ok_or("map list option product to_json void")?
+            .into_pointer_value())
+    }
+
+    /// Map of Set of Map of product-tuple values.
+    pub(in crate::codegen) fn emit_map_set_map_product_to_json(
+        &self,
+        handle: inkwell::values::IntValue<'ctx>,
+        product_type: &str,
+        display_style: i64,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let arity = {
+            let body = product_type
+                .strip_prefix('(')
+                .and_then(|s| s.strip_suffix(')'))
+                .unwrap_or(product_type);
+            let mut arity = 0i64;
+            let mut depth = 0i32;
+            let mut any = false;
+            for ch in body.chars() {
+                match ch {
+                    '<' | '(' => depth += 1,
+                    '>' | ')' => depth -= 1,
+                    ',' if depth == 0 => {
+                        arity += 1;
+                        any = true;
+                    }
+                    c if !c.is_whitespace() => any = true,
+                    _ => {}
+                }
+            }
+            if any {
+                arity += 1;
+            }
+            arity.max(1)
+        };
+        let func = self.get_runtime_fn("mimi_map_to_json_set_map_product_i64")?;
+        let i64_ty = self.context.i64_type();
+        Ok(self
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(handle),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
+                    BasicMetadataValueEnum::IntValue(
+                        i64_ty.const_int(display_style as u64, false),
+                    ),
+                ],
+                "map_set_map_product_json",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("map set map product to_json void")?
+            .into_pointer_value())
+    }
+
+    /// Map of List of Map of product-tuple values.
+    pub(in crate::codegen) fn emit_map_list_map_product_to_json(
+        &self,
+        handle: inkwell::values::IntValue<'ctx>,
+        product_type: &str,
+        display_style: i64,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let arity = {
+            let body = product_type
+                .strip_prefix('(')
+                .and_then(|s| s.strip_suffix(')'))
+                .unwrap_or(product_type);
+            let mut arity = 0i64;
+            let mut depth = 0i32;
+            let mut any = false;
+            for ch in body.chars() {
+                match ch {
+                    '<' | '(' => depth += 1,
+                    '>' | ')' => depth -= 1,
+                    ',' if depth == 0 => {
+                        arity += 1;
+                        any = true;
+                    }
+                    c if !c.is_whitespace() => any = true,
+                    _ => {}
+                }
+            }
+            if any {
+                arity += 1;
+            }
+            arity.max(1)
+        };
+        let func = self.get_runtime_fn("mimi_map_to_json_list_map_product_i64")?;
+        let i64_ty = self.context.i64_type();
+        Ok(self
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(handle),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
+                    BasicMetadataValueEnum::IntValue(
+                        i64_ty.const_int(display_style as u64, false),
+                    ),
+                ],
+                "map_list_map_product_json",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("map list map product to_json void")?
             .into_pointer_value())
     }
 
