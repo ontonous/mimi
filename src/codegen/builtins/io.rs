@@ -3790,16 +3790,60 @@ impl<'ctx> CodeGenerator<'ctx> {
                         && (arg_type.contains("Map<") || arg_type.contains("Set<"))
                     {
                         let disp = if arg_type.contains("Map<") {
-                            let fn_name = Self::map_json_fn_for_type(arg_type);
-                            let func = self.get_runtime_fn(fn_name)?;
-                            self.build_call(
-                                func,
-                                &[BasicMetadataValueEnum::IntValue(as_i64)],
-                                "res_ok_map",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("map to_json void")?
-                            .into_pointer_value()
+                            let map_inner = arg_type
+                                .strip_prefix("Result<")
+                                .and_then(|s| {
+                                    // Result<Map<…>, E> — take first type arg.
+                                    let mut depth = 0i32;
+                                    for (i, ch) in s.char_indices() {
+                                        match ch {
+                                            '<' => depth += 1,
+                                            '>' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                return Some(s[..i].trim());
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    None
+                                })
+                                .unwrap_or(arg_type);
+                            if let Some(val_ty) = map_inner
+                                .strip_prefix("Map<string, ")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty)
+                                {
+                                    let elem = if self.is_product_tuple_alias(val_ty) {
+                                        self.resolve_alias_type_name(val_ty)
+                                    } else {
+                                        val_ty.to_string()
+                                    };
+                                    self.emit_map_product_to_json(as_i64, &elem, 1)?
+                                } else {
+                                    let fn_name = Self::map_json_fn_for_type(arg_type);
+                                    let func = self.get_runtime_fn(fn_name)?;
+                                    self.build_call(
+                                        func,
+                                        &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                        "res_ok_map",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("map to_json void")?
+                                    .into_pointer_value()
+                                }
+                            } else {
+                                let fn_name = Self::map_json_fn_for_type(arg_type);
+                                let func = self.get_runtime_fn(fn_name)?;
+                                self.build_call(
+                                    func,
+                                    &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                    "res_ok_map",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("map to_json void")?
+                                .into_pointer_value()
+                            }
                         } else {
                             let fn_name = Self::set_display_fn_for_type(arg_type);
                             let func = self.get_runtime_fn(fn_name)?;
@@ -4218,17 +4262,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                         OptPay::StrPtr(sel.into_pointer_value())
                     } else if arg_type.contains("Map<") || arg_type == "Option<Map>" {
-                        let fn_name = Self::map_json_fn_for_type(arg_type);
-                        let func = self.get_runtime_fn(fn_name)?;
-                        let raw = self
-                            .build_call(
+                        // Option of Map of product: decode heap product values.
+                        let map_inner = arg_type
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                            .unwrap_or(arg_type);
+                        let raw = if let Some(val_ty) = map_inner
+                            .strip_prefix("Map<string, ")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                let elem = if self.is_product_tuple_alias(val_ty) {
+                                    self.resolve_alias_type_name(val_ty)
+                                } else {
+                                    val_ty.to_string()
+                                };
+                                self.emit_map_product_to_json(as_i64, &elem, 1)?
+                            } else {
+                                let fn_name = Self::map_json_fn_for_type(arg_type);
+                                let func = self.get_runtime_fn(fn_name)?;
+                                self.build_call(
+                                    func,
+                                    &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                    "opt_map_json",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("map to_json void")?
+                                .into_pointer_value()
+                            }
+                        } else {
+                            let fn_name = Self::map_json_fn_for_type(arg_type);
+                            let func = self.get_runtime_fn(fn_name)?;
+                            self.build_call(
                                 func,
                                 &[BasicMetadataValueEnum::IntValue(as_i64)],
                                 "opt_map_json",
                             )?
                             .try_as_basic_value_opt()
                             .ok_or("map to_json void")?
-                            .into_pointer_value();
+                            .into_pointer_value()
+                        };
                         OptPay::StrPtr(raw)
                     } else if arg_type.contains("Set<") || arg_type == "Option<Set>" {
                         let fn_name = Self::set_display_fn_for_type(arg_type);

@@ -2461,6 +2461,45 @@ impl<'ctx> CodeGenerator<'ctx> {
                             || obj_type.contains("Map<string, f32>")
                         {
                             3
+                        } else if let Some(val_ty) = obj_type
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                            .and_then(|s| s.strip_prefix("Map<string, "))
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                let elem = if self.is_product_tuple_alias(val_ty) {
+                                    self.resolve_alias_type_name(val_ty)
+                                } else {
+                                    val_ty.to_string()
+                                };
+                                // mode = 10 + arity for product Map JSON.
+                                let mut arity: i64 = 0;
+                                let mut depth = 0i32;
+                                let mut any = false;
+                                let inner = elem
+                                    .strip_prefix('(')
+                                    .and_then(|s| s.strip_suffix(')'))
+                                    .unwrap_or(elem.as_str());
+                                for ch in inner.chars() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            arity += 1;
+                                            any = true;
+                                        }
+                                        c if !c.is_whitespace() => any = true,
+                                        _ => {}
+                                    }
+                                }
+                                if any {
+                                    arity += 1;
+                                }
+                                10 + arity.max(1)
+                            } else {
+                                0
+                            }
                         } else {
                             0
                         };
@@ -3575,6 +3614,57 @@ impl<'ctx> CodeGenerator<'ctx> {
                             || obj_type.contains("Map<string, f32>")
                         {
                             3
+                        } else if let Some(val_ty) = obj_type
+                            .strip_prefix("Result<")
+                            .and_then(|s| {
+                                let mut depth = 0i32;
+                                for (i, ch) in s.char_indices() {
+                                    match ch {
+                                        '<' => depth += 1,
+                                        '>' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            return Some(s[..i].trim());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                None
+                            })
+                            .and_then(|s| s.strip_prefix("Map<string, "))
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                let elem = if self.is_product_tuple_alias(val_ty) {
+                                    self.resolve_alias_type_name(val_ty)
+                                } else {
+                                    val_ty.to_string()
+                                };
+                                let mut arity: i64 = 0;
+                                let mut depth = 0i32;
+                                let mut any = false;
+                                let inner = elem
+                                    .strip_prefix('(')
+                                    .and_then(|s| s.strip_suffix(')'))
+                                    .unwrap_or(elem.as_str());
+                                for ch in inner.chars() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            arity += 1;
+                                            any = true;
+                                        }
+                                        c if !c.is_whitespace() => any = true,
+                                        _ => {}
+                                    }
+                                }
+                                if any {
+                                    arity += 1;
+                                }
+                                10 + arity.max(1)
+                            } else {
+                                0
+                            }
                         } else {
                             0
                         };
