@@ -117,8 +117,11 @@ impl LspServer {
     }
 
     /// Resolve imports if the file has any, using the workspace root.
+    /// L-C1: uses the in-memory AST for the main file so unsaved editor
+    /// buffers are not replaced by stale on-disk content.
     fn resolve_imports(file: &mut crate::ast::File, file_path: &std::path::Path) {
         if file.imports.is_empty() {
+            crate::loader::merge_prelude_into(file);
             return;
         }
         let base_dir = file_path
@@ -126,7 +129,10 @@ impl LspServer {
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
         let mut loader = crate::loader::ModuleLoader::new(base_dir);
-        if loader.load_main(file_path).is_ok() {
+        if loader
+            .load_main_with_file(file_path, file.clone())
+            .is_ok()
+        {
             if let Ok(merged) = loader.merge_all() {
                 *file = merged;
             }

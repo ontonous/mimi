@@ -87,6 +87,34 @@ pub fn flow_load_main(acc: Acc, path: &Path) -> Result<(Acc, LoadedModule), Stri
     flow_load_file(acc, canonical)
 }
 
+/// Like `flow_load_main`, but use the provided AST for the main file instead of
+/// reading it from disk (L-C1 unsaved buffer diagnostics).
+pub fn flow_load_main_with_file(
+    mut acc: Acc,
+    path: &Path,
+    file: File,
+) -> Result<(Acc, LoadedModule), String> {
+    let canonical = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf());
+    let module_name = acc.module_key(&canonical);
+    let loaded = LoadedModule {
+        path: canonical.clone(),
+        file: file.clone(),
+    };
+    acc.modules.insert(module_name, loaded.clone());
+    acc.loaded.insert(canonical.clone(), loaded.clone());
+    // Load transitive imports from the in-memory main file.
+    let imports = file.imports.clone();
+    for import in &imports {
+        let import_path = resolve_import_path(&canonical, &import.path, &acc)?;
+        let (new_acc, _) = flow_load_file(acc, import_path)?;
+        acc = new_acc;
+    }
+    Ok((acc, loaded))
+}
+
+
 /// Load a file (from cache or fresh) and all its transitive imports.
 pub fn flow_load_file(mut acc: Acc, path: PathBuf) -> Result<(Acc, LoadedModule), String> {
     // Check cache first
