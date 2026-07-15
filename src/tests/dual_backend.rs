@@ -7108,6 +7108,27 @@ fn dual_option_result_tuple_err_string() {
     );
 }
 
+/// map_set of product-tuple must not panic in codegen (stores heap-packed handle).
+/// Full Map Display dual for product values is still open (opaque MapHandle).
+#[test]
+fn dual_map_set_product_tuple_no_crash() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = map_new()
+            let m2 = map_set(m, "a", 1)
+            let m3 = map_set(m2, "b", 2)
+            println(map_size(m3))
+            0
+        }
+        "#,
+        "2"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {

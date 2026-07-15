@@ -244,45 +244,71 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_int_value()
             }
             BasicMetadataValueEnum::StructValue(sv) => {
-                let ptr = self
-                    .build_extract_value(sv.into(), 0, "map_set_str_ptr")?
-                    .into_pointer_value();
-                // Use strlen rather than extract field 1 (actor deserialization
-                // may leave the length field corrupt). This ensures correctness
-                // for both actor-deserialized and locally-constructed strings.
-                let strlen_fn = self
-                    .module
-                    .get_function("strlen")
-                    .ok_or("strlen not declared")?;
-                let len = self
-                    .builder
-                    .build_call(
-                        strlen_fn,
-                        &[BasicMetadataValueEnum::PointerValue(ptr)],
-                        "strlen_s",
-                    )
-                    .map_err(|e| format!("strlen call error: {}", e))?
-                    .try_as_basic_value_opt()
-                    .ok_or("strlen returned void")?
-                    .into_int_value();
-                let clone_fn = self
-                    .module
-                    .get_function("mimi_str_clone")
-                    .ok_or("mimi_str_clone not declared")?;
-                let result = self
-                    .builder
-                    .build_call(
-                        clone_fn,
-                        &[
-                            BasicMetadataValueEnum::PointerValue(ptr),
-                            BasicMetadataValueEnum::IntValue(len),
-                        ],
-                        "str_clone_var",
-                    )
-                    .map_err(|e| format!("mimi_str_clone call error: {}", e))?;
-                call_try_basic_value(&result)
-                    .ok_or("mimi_str_clone returned void")?
-                    .into_int_value()
+                let fields = sv.get_type().get_field_types();
+                let is_mimi_string = fields.len() == 2
+                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(
+                        fields[1],
+                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                    );
+                if is_mimi_string {
+                    let ptr = self
+                        .build_extract_value(sv.into(), 0, "map_set_str_ptr")?
+                        .into_pointer_value();
+                    // Use strlen rather than extract field 1 (actor deserialization
+                    // may leave the length field corrupt). This ensures correctness
+                    // for both actor-deserialized and locally-constructed strings.
+                    let strlen_fn = self
+                        .module
+                        .get_function("strlen")
+                        .ok_or("strlen not declared")?;
+                    let len = self
+                        .builder
+                        .build_call(
+                            strlen_fn,
+                            &[BasicMetadataValueEnum::PointerValue(ptr)],
+                            "strlen_s",
+                        )
+                        .map_err(|e| format!("strlen call error: {}", e))?
+                        .try_as_basic_value_opt()
+                        .ok_or("strlen returned void")?
+                        .into_int_value();
+                    let clone_fn = self
+                        .module
+                        .get_function("mimi_str_clone")
+                        .ok_or("mimi_str_clone not declared")?;
+                    let result = self
+                        .builder
+                        .build_call(
+                            clone_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(ptr),
+                                BasicMetadataValueEnum::IntValue(len),
+                            ],
+                            "str_clone_var",
+                        )
+                        .map_err(|e| format!("mimi_str_clone call error: {}", e))?;
+                    call_try_basic_value(&result)
+                        .ok_or("mimi_str_clone returned void")?
+                        .into_int_value()
+                } else {
+                    // Product tuple / multi-field struct: heap-pack and store
+                    // ptrtoint as ValueHandle (same as List element packing).
+                    let struct_ty = sv.get_type();
+                    let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(struct_ty));
+                    let size_val = self.context.i64_type().const_int(size, false);
+                    let ptr = self.malloc_or_abort(size_val, "map_set_struct")?;
+                    let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let typed_ptr = self
+                        .build_bit_cast(
+                            ptr.into(),
+                            BasicTypeEnum::PointerType(i8_ptr_ty),
+                            "map_set_struct_ptr",
+                        )?
+                        .into_pointer_value();
+                    self.build_store(typed_ptr, sv)?;
+                    self.build_ptr_to_int(typed_ptr, self.context.i64_type(), "map_set_struct_h")?
+                }
             }
             _ => return Err("map_set: third arg must be i64 value handle".into()),
         };
