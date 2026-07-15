@@ -513,6 +513,9 @@ impl<'a> Interpreter<'a> {
                 file: Box::new(self.file.clone()),
                 func: func.clone(),
                 args,
+                globals: self.globals.clone(),
+                cli_args: self.cli_args.clone(),
+                verify_contracts: self.verify_contracts,
             },
         ));
 

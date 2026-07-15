@@ -718,6 +718,12 @@ impl<'a> Checker<'a> {
                                 self.multi_target_vars.insert(name.clone(), targets);
                             }
                         }
+                        // T-H16: aliasing a multi-target var keeps the restriction.
+                        if let Expr::Ident(src) = init_expr {
+                            if let Some(targets) = self.multi_target_vars.get(src).cloned() {
+                                self.multi_target_vars.insert(name.clone(), targets);
+                            }
+                        }
                     }
                 }
                 // v0.29.19: seed session residual for SessionChan<S> bindings.

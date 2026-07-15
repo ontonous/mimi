@@ -22,6 +22,10 @@ pub enum PollFuture {
         file: Box<crate::ast::File>,
         func: FuncDef,
         args: Vec<Value>,
+        /// I-H4: snapshot of parent globals/const/cli_args for async body.
+        globals: std::collections::HashMap<String, Value>,
+        cli_args: Vec<String>,
+        verify_contracts: bool,
     },
     Pending(std::sync::mpsc::Receiver<Result<Value, InterpError>>),
     Ready(Result<Value, InterpError>),
@@ -44,8 +48,20 @@ impl std::fmt::Debug for PollFuture {
 
 /// Poll a deferred future: evaluate the function body and store the result.
 pub fn poll_deferred(state: &mut PollFuture) {
-    if let PollFuture::Deferred { file, func, args } = state {
+    if let PollFuture::Deferred {
+        file,
+        func,
+        args,
+        globals,
+        cli_args,
+        verify_contracts,
+    } = state
+    {
         let mut interp = super::Interpreter::new(&*file);
+        // I-H4: restore parent globals/cli_args and contract flag.
+        interp.globals = std::mem::take(globals);
+        interp.cli_args = std::mem::take(cli_args);
+        interp.verify_contracts = *verify_contracts;
         interp.push_scope();
         let mut result = Ok(Value::Unit);
         for (p, a) in func.params.iter().zip(std::mem::take(args)) {
