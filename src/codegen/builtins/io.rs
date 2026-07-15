@@ -1633,16 +1633,29 @@ impl<'ctx> CodeGenerator<'ctx> {
         let is_named_record = self.type_defs.get(inner_name).is_some_and(|td| {
             matches!(td.kind, crate::ast::TypeDefKind::Record(_))
         });
+        let snprintf_fn = self.get_runtime_fn("snprintf")?;
         let piece = if let BasicValueEnum::StructValue(pay_sv) = pay {
             let pfields = pay_sv.get_type().get_field_types();
-            // Nested Result {i1, ok, err} — never treat as product tuple.
             let is_result_layout = pfields.len() >= 3
                 && matches!(
                     pfields[0],
                     BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
                 );
+            let is_list_layout = pfields.len() == 2
+                && matches!(
+                    pfields[0],
+                    BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                )
+                && matches!(pfields[1], BasicTypeEnum::PointerType(_));
             let pay_json = if is_result_layout {
                 self.emit_result_struct_to_json_cstr(pay_sv, inner_name)?
+            } else if is_list_layout {
+                let tmp = self.build_alloca(
+                    BasicTypeEnum::StructType(pay_sv.get_type()),
+                    "list_opt_list_tmp",
+                )?;
+                self.build_store(tmp, pay_sv)?;
+                self.emit_list_payload_to_json_cstr(tmp, inner_name)?
             } else if is_named_record {
                 let rec_ty = pay_sv.get_type();
                 let rec_alloca =
@@ -1657,7 +1670,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .builder
                 .build_global_string_ptr("{\"Some\":[%s]}", "list_opt_tup_some_fmt")
                 .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-            let snprintf_fn = self.get_runtime_fn("snprintf")?;
             self.build_call(
                 snprintf_fn,
                 &[
@@ -1669,35 +1681,70 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "list_opt_tup_some_sn",
             )?;
             wrap
-        } else {
-            // Scalar fallback: treat payload as i64.
-            let pay_i64 = match pay {
-                BasicValueEnum::IntValue(iv) => {
-                    if iv.get_type().get_bit_width() < 64 {
-                        self.builder
-                            .build_int_s_extend(iv, i64_ty, "list_opt_tup_pay_i64")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                    } else {
-                        iv
-                    }
-                }
-                _ => i64_ty.const_int(0, false),
+        } else if let BasicValueEnum::IntValue(iv) = pay {
+            let pay_i64 = if iv.get_type().get_bit_width() < 64 {
+                self.builder
+                    .build_int_s_extend(iv, i64_ty, "list_opt_tup_pay_i64")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            } else {
+                iv
             };
-            let wrap = self.malloc_or_abort(i64_ty.const_int(64, false), "list_opt_i64_wrap")?;
-            let fmt = self
+            if inner_name.starts_with("List") {
+                let list_ptr = self
+                    .builder
+                    .build_int_to_ptr(pay_i64, i8_ptr, "list_opt_list_ptr")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let pay_json = self.emit_list_payload_to_json_cstr(list_ptr, inner_name)?;
+                let wrap =
+                    self.malloc_or_abort(i64_ty.const_int(1024, false), "list_opt_list_wrap")?;
+                let fmt = self
+                    .builder
+                    .build_global_string_ptr("{\"Some\":[%s]}", "list_opt_list_some_fmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(wrap),
+                        BasicMetadataValueEnum::IntValue(i64_ty.const_int(1024, false)),
+                        BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::PointerValue(pay_json),
+                    ],
+                    "list_opt_list_some_sn",
+                )?;
+                wrap
+            } else {
+                let wrap =
+                    self.malloc_or_abort(i64_ty.const_int(64, false), "list_opt_i64_wrap")?;
+                let fmt = self
+                    .builder
+                    .build_global_string_ptr("{\"Some\":[%ld]}", "list_opt_i64_some_fmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(wrap),
+                        BasicMetadataValueEnum::IntValue(i64_ty.const_int(64, false)),
+                        BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::IntValue(pay_i64),
+                    ],
+                    "list_opt_i64_some_sn",
+                )?;
+                wrap
+            }
+        } else {
+            let wrap = self.malloc_or_abort(i64_ty.const_int(16, false), "list_opt_null_wrap")?;
+            let lit = self
                 .builder
-                .build_global_string_ptr("{\"Some\":[%ld]}", "list_opt_i64_some_fmt")
+                .build_global_string_ptr("{\"Some\":[null]}", "list_opt_null_lit")
                 .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-            let snprintf_fn = self.get_runtime_fn("snprintf")?;
+            let strcpy_fn = self.get_runtime_fn("strcpy")?;
             self.build_call(
-                snprintf_fn,
+                strcpy_fn,
                 &[
                     BasicMetadataValueEnum::PointerValue(wrap),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(64, false)),
-                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                    BasicMetadataValueEnum::IntValue(pay_i64),
+                    BasicMetadataValueEnum::PointerValue(lit.as_pointer_value()),
                 ],
-                "list_opt_i64_some_sn",
+                "list_opt_null_cpy",
             )?;
             wrap
         };
@@ -4572,6 +4619,68 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         self.builder.position_at_end(merge_bb);
         Ok(buf)
+    }
+
+    /// JSON for a List payload given its type string `List<…>` (or bare inner).
+    /// `list_ptr` points at a list struct `{i64,ptr}`.
+    pub(in crate::codegen) fn emit_list_payload_to_json_cstr(
+        &self,
+        list_ptr: inkwell::values::PointerValue<'ctx>,
+        list_type: &str,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let inner = list_type
+            .strip_prefix("List<")
+            .and_then(|s| s.strip_suffix('>'))
+            .unwrap_or(list_type);
+        if inner.starts_with('(') || self.is_product_tuple_alias(inner) {
+            let elem = if self.is_product_tuple_alias(inner) {
+                self.resolve_alias_type_name(inner)
+            } else {
+                inner.to_string()
+            };
+            return self.emit_list_product_tuple_to_json(list_ptr, &elem);
+        }
+        if inner.starts_with("List<") {
+            let mid_elem = Self::strip_first_type_arg(&format!("List<{}>", inner), "List")
+                .and_then(|mid| Self::strip_first_type_arg(&mid, "List"))
+                .unwrap_or_else(|| inner.to_string());
+            if mid_elem.starts_with('(') || self.is_product_tuple_alias(&mid_elem) {
+                let elem = if self.is_product_tuple_alias(&mid_elem) {
+                    self.resolve_alias_type_name(&mid_elem)
+                } else {
+                    mid_elem
+                };
+                return self.emit_list_list_product_tuple_to_json(list_ptr, &elem);
+            }
+        }
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_name = if list_type.contains("List<string>") || inner == "string" {
+            "mimi_list_str_to_json"
+        } else if list_type.contains("List<bool>") || inner == "bool" {
+            "mimi_list_bool_to_json"
+        } else if list_type.contains("List<f64>")
+            || list_type.contains("List<f32>")
+            || inner == "f64"
+            || inner == "f32"
+        {
+            "mimi_list_f64_to_json"
+        } else {
+            "mimi_list_i64_to_json"
+        };
+        let fn_ty = i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false);
+        let list_fn = self.module.get_function(fn_name).unwrap_or_else(|| {
+            self.module
+                .add_function(fn_name, fn_ty, Some(inkwell::module::Linkage::External))
+        });
+        Ok(self
+            .build_call(
+                list_fn,
+                &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                "list_payload_json",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("list to_json void")?
+            .into_pointer_value())
     }
 
     /// Display helper for Result Ok of List — routes product-tuple lists correctly.

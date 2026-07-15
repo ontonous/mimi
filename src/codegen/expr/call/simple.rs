@@ -582,11 +582,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .and_then(|s| s.strip_suffix('>'))
                             .unwrap_or("");
                         let needs_full = opt_inner.starts_with("Result")
+                            || opt_inner.starts_with("List")
                             || opt_inner.starts_with('(')
                             || opt_inner.contains("Tuple")
                             || self.type_defs.get(opt_inner).is_some_and(|td| {
                                 matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                            });
+                            })
+                            || self.is_product_tuple_alias(opt_inner);
                         if needs_full {
                             let raw =
                                 self.emit_list_option_product_tuple_to_json(alloca, inner)?;

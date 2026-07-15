@@ -1224,6 +1224,27 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Option/Result of named records must use type_llvm for the payload
             // slot — mimi_type_to_llvm maps unknown names to i64.
             Type::Option(inner) => {
+                // List and nested Option stay classic {i1,i64} heap-pack
+                // (Option ABI split). Never embed List by-value — packing
+                // Option<List> into an outer List would zero/dangle the payload.
+                let force_heap = match inner.as_ref() {
+                    Type::Option(_) => true,
+                    Type::Name(n, _)
+                        if n == "List" || n == "Option" || n == "Map" || n == "Set" =>
+                    {
+                        true
+                    }
+                    _ => false,
+                };
+                if force_heap {
+                    return Some(BasicTypeEnum::StructType(self.context.struct_type(
+                        &[
+                            BasicTypeEnum::IntType(self.context.bool_type()),
+                            BasicTypeEnum::IntType(self.context.i64_type()),
+                        ],
+                        false,
+                    )));
+                }
                 let inner_llvm = self.llvm_type_for(inner)?;
                 // Only widen scalar ints and product-tuple int fields — never
                 // named records (all-i32 records must keep i32 field layout).
