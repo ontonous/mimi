@@ -155,6 +155,41 @@ func main() -> i32 { 0 }
 }
 
 #[test]
+fn flow_check_cross_flow_same_state_name_rejected_on_pollution() {
+    let src = r#"
+flow A {
+    state Ready { x: i32 }
+    transition go(Ready) -> Ready { do { return Ready { x: 0 } } }
+}
+flow B {
+    state Ready { y: string }
+    transition go(Ready) -> Ready { do { return Ready { y: "bad" } } }
+}
+func main() -> i32 { 0 }
+"#;
+    assert!(
+        check_source(src).is_err(),
+        "cross-flow unqualified state name collision with incompatible payloads must be rejected"
+    );
+}
+
+#[test]
+fn flow_check_cross_flow_same_state_name_same_payload_accepted() {
+    let src = r#"
+flow A {
+    state Ready { v: i32 }
+    transition go(Ready) -> Ready { do { return Ready { v: 0 } } }
+}
+flow B {
+    state Ready { v: i32 }
+    transition go(Ready) -> Ready { do { return Ready { v: 1 } } }
+}
+func main() -> i32 { 0 }
+"#;
+    assert!(check_source(src).is_ok());
+}
+
+#[test]
 fn flow_parse_multiple_transition_targets() {
     let src = r#"
 flow Processor {

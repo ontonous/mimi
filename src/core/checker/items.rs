@@ -749,12 +749,37 @@ impl<'a> Checker<'a> {
                     });
                     // Also register with unqualified name for use in transition bodies.
                     // CK-C2: never overwrite a user-declared type of the same name.
+                    // T-H8: when two flows share an unqualified state name, verify
+                    // payload compatibility to prevent silent type pollution.
                     if Self::is_builtin_type(&state.name) {
                         // skip
                     } else if let Some(existing) = self.types.get(&state.name) {
-                        // Only warn when the existing entry is not already this flow state record.
                         let is_flow_state = matches!(&existing.kind, TypeDefKind::Record(_));
-                        if !is_flow_state {
+                        if is_flow_state {
+                            // T-H8: cross-flow unqualified name collision — payloads must match.
+                            let current_fields = state.payload.as_deref().unwrap_or_default();
+                            if let TypeDefKind::Record(existing_fields) = &existing.kind {
+                                let compatible = current_fields.len() == existing_fields.len()
+                                    && current_fields.iter().zip(existing_fields.iter()).all(
+                                        |(a, b)| {
+                                            a.name == b.name
+                                                && same_type(
+                                                    &self.resolve_type(&a.ty),
+                                                    &self.resolve_type(&b.ty),
+                                                )
+                                        },
+                                    );
+                                if !compatible {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0402,
+                                        format!(
+                                            "flow state '{}' conflicts with another flow state of the same name; use the qualified name 'flow::<flow_name>::{}'",
+                                            state.name, state.name
+                                        ),
+                                    );
+                                }
+                            }
+                        } else {
                             self.emit_code(
                                 crate::diagnostic::codes::E0402,
                                 format!(
