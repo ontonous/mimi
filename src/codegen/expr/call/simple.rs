@@ -343,12 +343,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             // to the appropriate mimi_list_*_to_json runtime helper.
             if name == "to_json" && !args.is_empty() && !metadata_args.is_empty() {
                 // Product tuples: JSON array via recursive field serialization.
+                // Only when the *source* type is a product tuple — never Option
+                // `{i1,T}`, Result, enum `{i32,i64}`, string, or list layouts.
                 if let BasicMetadataValueEnum::StructValue(sv) = metadata_args[0] {
                     let fields = sv.get_type().get_field_types();
-                    // Exclude known string {ptr,i64} and list {i64,ptr} and
-                    // Option/Result {i1,...} / enum {i32,i64} single-payload layouts
-                    // when they are not multi-field products. Heuristic: ≥2 fields
-                    // and not (string layout or list layout).
+                    let looks_like_option = !fields.is_empty()
+                        && matches!(
+                            fields[0],
+                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
+                        );
                     let is_string = fields.len() == 2
                         && matches!(fields[0], BasicTypeEnum::PointerType(_))
                         && matches!(
@@ -370,7 +373,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                             fields[1],
                             BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
                         );
-                    if fields.len() >= 2 && !is_string && !is_list && !is_enum_tag {
+                    let src_ty = self.infer_object_type(&args[0], vars);
+                    let named_as_tuple = src_ty.starts_with('(') || src_ty.contains("Tuple");
+                    // Prefer AST-ish type name when available; else multi-field
+                    // product that is not option/string/list/enum.
+                    if named_as_tuple
+                        || (fields.len() >= 2
+                            && !looks_like_option
+                            && !is_string
+                            && !is_list
+                            && !is_enum_tag
+                            && !src_ty.starts_with("Option")
+                            && !src_ty.starts_with("Result")
+                            && !src_ty.starts_with("List")
+                            && !src_ty.starts_with("Map")
+                            && !src_ty.starts_with("Set")
+                            && self.type_defs.get(&src_ty).is_none())
+                    {
                         let raw = self.emit_product_tuple_to_json(sv)?;
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
@@ -925,6 +944,104 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .into_pointer_value();
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
+                    }
+                    // Option of product tuple: payload is a multi-field struct.
+                    if let BasicValueEnum::StructValue(pay_sv) = payload_bv {
+                        let pay_fields = pay_sv.get_type().get_field_types();
+                        let pay_is_string = pay_fields.len() == 2
+                            && matches!(pay_fields[0], BasicTypeEnum::PointerType(_))
+                            && matches!(
+                                pay_fields[1],
+                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                            );
+                        if pay_fields.len() >= 2 && !pay_is_string {
+                            let pay_json = self.emit_product_tuple_to_json(pay_sv)?;
+                            let disc_is_some = self
+                                .builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::NE,
+                                    disc_i64,
+                                    self.context.i64_type().const_int(0, false),
+                                    "opt_tup_is_some",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let function = self.current_function().ok_or("no function")?;
+                            let some_bb =
+                                self.context.append_basic_block(function, "toj_opt_tup_some");
+                            let none_bb =
+                                self.context.append_basic_block(function, "toj_opt_tup_none");
+                            let merge_bb =
+                                self.context.append_basic_block(function, "toj_opt_tup_merge");
+                            let i8_ptr_ty =
+                                self.context.ptr_type(inkwell::AddressSpace::default());
+                            let out_alloca = self.build_alloca(
+                                BasicTypeEnum::PointerType(i8_ptr_ty),
+                                "toj_opt_tup_out",
+                            )?;
+                            self.builder
+                                .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(some_bb);
+                            let buf = self.malloc_or_abort(
+                                self.context.i64_type().const_int(1024, false),
+                                "opt_tup_buf",
+                            )?;
+                            let fmt = self
+                                .builder
+                                .build_global_string_ptr("{\"Some\":[%s]}", "opt_tup_fmt")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                            self.build_call(
+                                snprintf_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(buf),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(1024, false),
+                                    ),
+                                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                    BasicMetadataValueEnum::PointerValue(pay_json),
+                                ],
+                                "opt_tup_sn",
+                            )?;
+                            self.build_store(out_alloca, buf)?;
+                            self.builder
+                                .build_unconditional_branch(merge_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(none_bb);
+                            let none_heap = self.malloc_or_abort(
+                                self.context.i64_type().const_int(8, false),
+                                "opt_tup_none_heap",
+                            )?;
+                            let none_lit = self
+                                .builder
+                                .build_global_string_ptr("\"None\"", "opt_tup_none")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                            self.build_call(
+                                strcpy_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(none_heap),
+                                    BasicMetadataValueEnum::PointerValue(
+                                        none_lit.as_pointer_value(),
+                                    ),
+                                ],
+                                "opt_tup_none_cpy",
+                            )?;
+                            self.build_store(out_alloca, none_heap)?;
+                            self.builder
+                                .build_unconditional_branch(merge_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(merge_bb);
+                            let raw = self
+                                .build_load(
+                                    BasicTypeEnum::PointerType(i8_ptr_ty),
+                                    out_alloca,
+                                    "opt_tup_result",
+                                )?
+                                .into_pointer_value();
+                            self.register_heap_alloc(raw);
+                            return self.wrap_c_string(raw);
+                        }
                     }
                     let payload_i64 = match payload_bv {
                         BasicValueEnum::IntValue(iv) => {
