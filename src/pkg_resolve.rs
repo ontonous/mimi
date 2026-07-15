@@ -15,6 +15,18 @@ pub fn resolve_single_dep(
     dst: &Path,
     reg: &Path,
 ) -> Result<ResolvedDep, String> {
+    resolve_single_dep_in(dep, dst, reg, None)
+}
+
+/// Resolve a dependency with an optional base directory for relative path deps.
+/// When `base_dir` is set (manifest directory), path deps resolve relative to it
+/// rather than the process cwd (P-H10).
+pub fn resolve_single_dep_in(
+    dep: &manifest::Dependency,
+    dst: &Path,
+    reg: &Path,
+    base_dir: Option<&Path>,
+) -> Result<ResolvedDep, String> {
     if let Some(git_url) = &dep.git {
         resolve_git_dep(dep, git_url, dst)
     } else {
@@ -22,7 +34,7 @@ pub fn resolve_single_dep(
         if source == "registry" {
             resolve_registry_dep(dep, dst, reg)
         } else {
-            resolve_path_dep(dep, dst, source)
+            resolve_path_dep(dep, dst, source, base_dir)
         }
     }
 }
@@ -135,14 +147,26 @@ fn resolve_path_dep(
     dep: &manifest::Dependency,
     dst: &Path,
     source: &str,
+    base_dir: Option<&Path>,
 ) -> Result<ResolvedDep, String> {
     // B1: use unified path safety validation.
     crate::path_safety::validate_path_dep(source)?;
-    let src = PathBuf::from(source);
+    // P-H10: relative path deps resolve against the manifest directory.
+    let src = {
+        let p = PathBuf::from(source);
+        if p.is_absolute() {
+            p
+        } else if let Some(base) = base_dir {
+            base.join(p)
+        } else {
+            p
+        }
+    };
     if !src.exists() {
         return Err(format!(
             "path dependency '{}' not found at {}",
-            dep.name, source
+            dep.name,
+            src.display()
         ));
     }
     if dst.exists() {
