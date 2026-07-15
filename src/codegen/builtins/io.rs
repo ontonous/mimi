@@ -1782,6 +1782,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                     elem.to_string()
                 };
                 self.emit_set_product_to_json(handle, &resolved, 1)?
+            } else if let Some(opt_inner) = elem
+                .strip_prefix("Option<")
+                .and_then(|s| s.strip_suffix('>'))
+            {
+                if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner) {
+                    let resolved = if self.is_product_tuple_alias(opt_inner) {
+                        self.resolve_alias_type_name(opt_inner)
+                    } else {
+                        opt_inner.to_string()
+                    };
+                    self.emit_set_option_product_to_json(handle, &resolved, 1)?
+                } else {
+                    let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
+                    self.build_call(
+                        set_fn,
+                        &[BasicMetadataValueEnum::IntValue(handle)],
+                        "list_set_disp",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("set display void")?
+                    .into_pointer_value()
+                }
             } else if elem.starts_with("Result<") {
                 if let Some(ok_ty) = elem.strip_prefix("Result<").and_then(|s| {
                     let mut depth = 0i32;
@@ -1890,6 +1912,57 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Serialize `List<Result<Option<(…)>,E>>` with full Result layout.
+    /// List of Set of Option of product-tuple values.
+    pub(in crate::codegen) fn emit_list_set_option_product_to_json(
+        &self,
+        list_ptr: inkwell::values::PointerValue<'ctx>,
+        product_type: &str,
+        display_style: i64,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let arity = {
+            let body = product_type
+                .strip_prefix('(')
+                .and_then(|s| s.strip_suffix(')'))
+                .unwrap_or(product_type);
+            let mut arity = 0i64;
+            let mut depth = 0i32;
+            let mut any = false;
+            for ch in body.chars() {
+                match ch {
+                    '<' | '(' => depth += 1,
+                    '>' | ')' => depth -= 1,
+                    ',' if depth == 0 => {
+                        arity += 1;
+                        any = true;
+                    }
+                    c if !c.is_whitespace() => any = true,
+                    _ => {}
+                }
+            }
+            if any {
+                arity += 1;
+            }
+            arity.max(1)
+        };
+        let func = self.get_runtime_fn("mimi_list_set_option_product_to_json")?;
+        let i64_ty = self.context.i64_type();
+        Ok(self
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::PointerValue(list_ptr),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
+                    BasicMetadataValueEnum::IntValue(
+                        i64_ty.const_int(display_style as u64, false),
+                    ),
+                ],
+                "list_set_option_product_json",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("list set option product to_json void")?
+            .into_pointer_value())
+    }
+
     /// List of Set of Result of product-tuple values.
     pub(in crate::codegen) fn emit_list_set_result_product_to_json(
         &self,
