@@ -811,6 +811,13 @@ impl<'a> Checker<'a> {
                 // Signature: (from_state_payload, ...event_params) -> to_state
                 // Multi-target transitions use the first target as the nominal
                 // return type (call sites access common payload fields).
+                // CK-H7: short keys only when a transition name is unique across
+                // from_states — otherwise name-only lookup is ambiguous (HashMap
+                // iteration order must not pick a "last" overload).
+                let mut transition_name_counts: HashMap<&str, usize> = HashMap::new();
+                for t in &f.transitions {
+                    *transition_name_counts.entry(t.name.as_str()).or_insert(0) += 1;
+                }
                 for t in &f.transitions {
                     let t_key = format!("{}::{}::{}", qualified, t.name, t.from_state);
                     let mut params: Vec<Type> = Vec::new();
@@ -825,10 +832,10 @@ impl<'a> Checker<'a> {
                         Type::Name("unit".into(), vec![])
                     };
                     self.funcs.insert(t_key, (params.clone(), ret.clone()));
-                    // Also keep a short key (last write wins) for name-only lookup
-                    // when from_state cannot be inferred at the call site.
-                    let short_key = format!("{}::{}", qualified, t.name);
-                    self.funcs.insert(short_key, (params, ret));
+                    if transition_name_counts.get(t.name.as_str()).copied() == Some(1) {
+                        let short_key = format!("{}::{}", qualified, t.name);
+                        self.funcs.insert(short_key, (params, ret));
+                    }
                 }
             }
             Item::Protocol(p) => {
@@ -1385,14 +1392,16 @@ impl<'a> Checker<'a> {
                                 );
                                 continue;
                             };
+                            // CK-H8: do not call unify inside any() — failed unifies can
+                            // leave partial substitutions. same_type is side-effect free.
+                            let expected_ty = self.resolve_type(proto_payload_ty);
                             let has_field = flow_state
                                 .payload
                                 .as_ref()
                                 .map(|fields| {
                                     fields.iter().any(|field| {
                                         let field_ty = self.resolve_type(&field.ty);
-                                        let expected_ty = self.resolve_type(proto_payload_ty);
-                                        self.unification.unify(&field_ty, &expected_ty).is_ok()
+                                        same_type(&field_ty, &expected_ty)
                                     })
                                 })
                                 .unwrap_or(false);
