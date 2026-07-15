@@ -12763,3 +12763,22 @@ fn dual_from_json_list_set_option_product_tuple() {
         "[Set{None(), Some((1, 2))}, Set{None()}]\n[[\"None\",{\"Some\":[[1,2]]}],[\"None\"]]"
     );
 }
+
+/// from_json Result of Set of Option of product dual.
+#[test]
+fn dual_from_json_result_set_option_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let r = from_json::<Result<Set<Option<(i32, i32)>>, string>>("{\"Ok\":[[1,2],null]}")
+            println(r)
+            println(to_json(r))
+            0
+        }
+        "#,
+        "Ok(Set{None(), Some((1, 2))})\n{\"Ok\":[[\"None\",{\"Some\":[[1,2]]}]]}"
+    );
+}

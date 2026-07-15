@@ -5168,6 +5168,45 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     arity += 1;
                                 }
                                 10 + arity.max(1)
+                            } else if let Some(opt_inner) = elem
+                                .strip_prefix("Option<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if opt_inner.starts_with('(')
+                                    || self.is_product_tuple_alias(opt_inner)
+                                {
+                                    let resolved = if self.is_product_tuple_alias(opt_inner)
+                                    {
+                                        self.resolve_alias_type_name(opt_inner)
+                                    } else {
+                                        opt_inner.to_string()
+                                    };
+                                    let mut arity: i64 = 0;
+                                    let mut depth = 0i32;
+                                    let mut any = false;
+                                    let body = resolved
+                                        .strip_prefix('(')
+                                        .and_then(|s| s.strip_suffix(')'))
+                                        .unwrap_or(resolved.as_str());
+                                    for ch in body.chars() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                arity += 1;
+                                                any = true;
+                                            }
+                                            c if !c.is_whitespace() => any = true,
+                                            _ => {}
+                                        }
+                                    }
+                                    if any {
+                                        arity += 1;
+                                    }
+                                    50 + arity.max(1)
+                                } else {
+                                    0
+                                }
                             } else {
                                 0
                             }

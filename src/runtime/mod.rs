@@ -1827,8 +1827,10 @@ pub extern "C" fn mimi_result_set_to_json(
     mode: i64,
 ) -> *mut std::ffi::c_char {
     if disc != 0 {
-        // mode >= 10 encodes product arity as (10 + arity).
-        let json_ptr = if mode >= 10 {
+        // mode: 0-3 scalar; 10+ product; 50+ Option product.
+        let json_ptr = if mode >= 50 {
+            mimi_set_to_json_option_product_i64(ok_handle, mode - 50, 0)
+        } else if mode >= 10 {
             mimi_set_to_json_product_i64(ok_handle, mode - 10, 0)
         } else {
             match mode {
