@@ -2452,8 +2452,49 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     pay_fields[1],
                                     BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
                                 );
-                            if !pay_is_string && pay_fields.len() >= 2 {
-                                let pay_json = self.emit_product_tuple_to_json(pay_sv)?;
+                            if !pay_is_string && pay_fields.len() >= 1 {
+                                let mut pay_inner = obj_type
+                                    .strip_prefix("Result<")
+                                    .and_then(|s| s.split(',').next())
+                                    .and_then(|s| s.strip_prefix("Option<"))
+                                    .and_then(|s| s.strip_suffix('>'))
+                                    .map(|s| s.trim().to_string())
+                                    .unwrap_or_default();
+                                if pay_inner.is_empty() {
+                                    let pay_sty = pay_sv.get_type();
+                                    for (n, ty) in &self.type_llvm {
+                                        if matches!(
+                                            ty,
+                                            BasicTypeEnum::StructType(s) if *s == pay_sty
+                                        ) && self.type_defs.get(n.as_str()).is_some_and(|td| {
+                                            matches!(
+                                                td.kind,
+                                                crate::ast::TypeDefKind::Record(_)
+                                            )
+                                        }) {
+                                            pay_inner = n.clone();
+                                            break;
+                                        }
+                                    }
+                                }
+                                let is_named_record =
+                                    self.type_defs.get(&pay_inner).is_some_and(|td| {
+                                        matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                    });
+                                if !is_named_record && pay_fields.len() < 2 {
+                                    // fall through to i64 path
+                                } else {
+                                let pay_json = if is_named_record {
+                                    let rec_ty = pay_sv.get_type();
+                                    let rec_alloca = self.build_alloca(
+                                        BasicTypeEnum::StructType(rec_ty),
+                                        "res_opt_rec_tmp",
+                                    )?;
+                                    self.build_store(rec_alloca, pay_sv)?;
+                                    self.compile_record_to_json_cstr(&pay_inner, rec_alloca)?
+                                } else {
+                                    self.emit_product_tuple_to_json(pay_sv)?
+                                };
                                 let disc_is_ok = self
                                     .builder
                                     .build_int_compare(
@@ -2621,6 +2662,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     .into_pointer_value();
                                 self.register_heap_alloc(raw);
                                 return self.wrap_c_string(raw);
+                                } // else !is_named_record && pay_fields.len() < 2
                             }
                         }
                         let o_pay = match o_pay_bv {

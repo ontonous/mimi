@@ -3488,7 +3488,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 {
                     let res_ty = Self::strip_first_type_arg(arg_type, "Option")
                         .unwrap_or_else(|| "Result".to_string());
-                    let nested = self.emit_result_to_string_typed(psv, None, &res_ty)?;
+                    let ok_rec = res_ty
+                        .strip_prefix("Result<")
+                        .and_then(|s| s.split(',').next())
+                        .map(|s| s.trim())
+                        .filter(|inner| {
+                            !inner.is_empty()
+                                && self.type_defs.get(*inner).is_some_and(|td| {
+                                    matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                })
+                        });
+                    let nested =
+                        self.emit_result_to_string_typed(psv, ok_rec, &res_ty)?;
                     OptPay::StrPtr(nested)
                 } else if pfields.len() == 2
                     && matches!(
