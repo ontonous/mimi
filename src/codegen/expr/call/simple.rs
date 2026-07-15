@@ -654,6 +654,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "mimi_list_option_i64_to_json"
                     } else if inner.starts_with("Result") && inner.contains("Map<") {
                         // List of Result of Map — typed map Ok payload.
+                        // mode 0-3 scalars; mode 20+arity for product Map
+                        // (runtime list_result adds +10 for scalar map path).
                         let mode = if inner.contains("Map<string, string>") {
                             1i64
                         } else if inner.contains("Map<string, bool>") {
@@ -662,6 +664,58 @@ impl<'ctx> CodeGenerator<'ctx> {
                             || inner.contains("Map<string, f32>")
                         {
                             3
+                        } else if let Some(val_ty) = inner
+                            .strip_prefix("Result<")
+                            .and_then(|s| {
+                                let mut depth = 0i32;
+                                for (i, ch) in s.char_indices() {
+                                    match ch {
+                                        '<' => depth += 1,
+                                        '>' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            return Some(s[..i].trim());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                None
+                            })
+                            .and_then(|s| s.strip_prefix("Map<string, "))
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                let elem = if self.is_product_tuple_alias(val_ty) {
+                                    self.resolve_alias_type_name(val_ty)
+                                } else {
+                                    val_ty.to_string()
+                                };
+                                let mut arity: i64 = 0;
+                                let mut depth = 0i32;
+                                let mut any = false;
+                                let body = elem
+                                    .strip_prefix('(')
+                                    .and_then(|s| s.strip_suffix(')'))
+                                    .unwrap_or(elem.as_str());
+                                for ch in body.chars() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            arity += 1;
+                                            any = true;
+                                        }
+                                        c if !c.is_whitespace() => any = true,
+                                        _ => {}
+                                    }
+                                }
+                                if any {
+                                    arity += 1;
+                                }
+                                // Pass through as 10+arity so after +10 becomes 20+arity.
+                                10 + arity.max(1)
+                            } else {
+                                0
+                            }
                         } else {
                             0
                         };
