@@ -54,6 +54,8 @@ impl<'a> Checker<'a> {
                 if matches!(rty, Type::Infer) {
                     body_type
                 } else {
+                    let body_type = self.unification.resolve(&body_type);
+                    self.unify_types(&rty, &body_type);
                     rty
                 }
             }

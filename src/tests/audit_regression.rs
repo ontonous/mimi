@@ -7,6 +7,31 @@
 use super::*;
 
 #[test]
+fn round7_lambda_explicit_return_type_rejects_wrong_body() {
+    let src = r#"
+func main() -> i32 {
+    let f = fn(x: i32) -> string { x }
+    0
+}
+"#;
+    assert!(
+        check_source(src).is_err(),
+        "lambda body must match its explicit return type"
+    );
+}
+
+#[test]
+fn round7_lambda_explicit_return_type_accepts_matching_body() {
+    let src = r#"
+func main() -> i32 {
+    let f = fn(x: i32) -> i32 { x + 1 }
+    f(1)
+}
+"#;
+    assert!(check_source(src).is_ok());
+}
+
+#[test]
 fn round7_stdlib_invalid_inputs_terminate() {
     assert_eq!(
         run_with_stdlib(
