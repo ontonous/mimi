@@ -645,8 +645,9 @@ impl<'a> Interpreter<'a> {
                                             self.pop_scope();
                                             return Err(e);
                                         }
-                                        let _ = self.eval_block(body);
+                                        let callback_result = self.eval_block(body);
                                         self.pop_scope();
+                                        callback_result?;
                                     }
                                 }
                                 _ => {
@@ -660,7 +661,12 @@ impl<'a> Interpreter<'a> {
                             }
                             count += 1;
                         }
-                        Err(_) => break,
+                        Err(e) => {
+                            return Err(InterpError::new(format!(
+                                "read_lines_each: failed to read line: {}",
+                                e
+                            )))
+                        }
                     }
                 }
                 Ok(Value::Int(count))
