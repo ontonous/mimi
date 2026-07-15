@@ -988,6 +988,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 return self.wrap_c_string(raw);
                             }
                         }
+                        if val_ty.starts_with("Map<string, ") {
+                            if let Some(inner_val) = val_ty
+                                .strip_prefix("Map<string, ")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if inner_val.starts_with('(')
+                                    || self.is_product_tuple_alias(inner_val)
+                                {
+                                    let elem = if self.is_product_tuple_alias(inner_val) {
+                                        self.resolve_alias_type_name(inner_val)
+                                    } else {
+                                        inner_val.to_string()
+                                    };
+                                    let raw =
+                                        self.emit_map_map_product_to_json(handle, &elem, 0)?;
+                                    self.register_heap_alloc(raw);
+                                    return self.wrap_c_string(raw);
+                                }
+                            }
+                        }
                     }
                     let fn_name = if obj_type.contains("Map<string, string>") {
                         "mimi_map_to_json_string"

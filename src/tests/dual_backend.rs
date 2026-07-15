@@ -11749,3 +11749,22 @@ fn dual_result_option_map_product_tuple() {
         "Ok(Some({\"a\":(1, 2)}))\n{\"Ok\":[{\"Some\":[{\"a\":[1,2]}]}]}"
     );
 }
+
+/// from_json Map of Map of product-tuple dual.
+#[test]
+fn dual_from_json_map_map_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, Map<string, (i32, i32)>>>("{\"outer\":{\"a\":[1,2]}}")
+            println(m)
+            println(to_json(m))
+            0
+        }
+        "#,
+        "{\"outer\":{\"a\":(1, 2)}}\n{\"outer\":{\"a\":[1,2]}}"
+    );
+}
