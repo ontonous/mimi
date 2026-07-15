@@ -257,6 +257,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         } else {
                                             self.emit_list_result_to_string(*sv, inner)?
                                         }
+                                    } else if let Some(set_elem) = ok_ty
+                                        .strip_prefix("Set<")
+                                        .and_then(|s| s.strip_suffix('>'))
+                                    {
+                                        if set_elem.starts_with('(')
+                                            || self.is_product_tuple_alias(set_elem)
+                                        {
+                                            let elem = if self.is_product_tuple_alias(set_elem)
+                                            {
+                                                self.resolve_alias_type_name(set_elem)
+                                            } else {
+                                                set_elem.to_string()
+                                            };
+                                            let list_alloca = self.build_alloca(
+                                                BasicTypeEnum::StructType(self.list_struct_type()),
+                                                "list_res_set_prod_disp",
+                                            )?;
+                                            self.build_store(list_alloca, *sv)?;
+                                            self.emit_list_result_set_product_runtime(
+                                                list_alloca,
+                                                &elem,
+                                                1,
+                                            )?
+                                        } else {
+                                            self.emit_list_result_to_string(*sv, inner)?
+                                        }
                                     } else {
                                         self.emit_list_result_to_string(*sv, inner)?
                                     }
@@ -6058,6 +6084,57 @@ impl<'ctx> CodeGenerator<'ctx> {
             )?
             .try_as_basic_value_opt()
             .ok_or("set product to_json void")?
+            .into_pointer_value())
+    }
+
+    /// List of Result of Set of product via runtime.
+    pub(in crate::codegen) fn emit_list_result_set_product_runtime(
+        &self,
+        list_alloca: inkwell::values::PointerValue<'ctx>,
+        product_type: &str,
+        display_style: i64,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let arity = {
+            let body = product_type
+                .strip_prefix('(')
+                .and_then(|s| s.strip_suffix(')'))
+                .unwrap_or(product_type);
+            let mut arity = 0i64;
+            let mut depth = 0i32;
+            let mut any = false;
+            for ch in body.chars() {
+                match ch {
+                    '<' | '(' => depth += 1,
+                    '>' | ')' => depth -= 1,
+                    ',' if depth == 0 => {
+                        arity += 1;
+                        any = true;
+                    }
+                    c if !c.is_whitespace() => any = true,
+                    _ => {}
+                }
+            }
+            if any {
+                arity += 1;
+            }
+            arity.max(1)
+        };
+        let func = self.get_runtime_fn("mimi_list_result_set_product_to_json")?;
+        let i64_ty = self.context.i64_type();
+        Ok(self
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::PointerValue(list_alloca),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
+                    BasicMetadataValueEnum::IntValue(
+                        i64_ty.const_int(display_style as u64, false),
+                    ),
+                ],
+                "list_res_set_prod_rt",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("list result set product runtime void")?
             .into_pointer_value())
     }
 
