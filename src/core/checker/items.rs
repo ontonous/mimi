@@ -964,7 +964,13 @@ impl<'a> Checker<'a> {
                         .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
                     self.var_scopes.push(HashMap::new());
                     self.cap_vars.push(HashMap::new());
-                    self.check_block(&method.body, &ret, &mut scopes);
+                    let implicit_return =
+                        self.check_block_with_implicit_return(&method.body, &ret, &mut scopes);
+                    self.check_method_implicit_return(
+                        &format!("actor '{}::{}'", actor.name, method.name),
+                        &ret,
+                        implicit_return,
+                    );
                     self.check_unconsumed_caps();
                     self.cap_vars.pop();
                     self.var_scopes.pop();
@@ -1133,7 +1139,16 @@ impl<'a> Checker<'a> {
                     }
                     self.var_scopes.push(HashMap::new());
                     self.cap_vars.push(HashMap::new());
-                    self.check_block(&method.body, &ret, &mut scopes);
+                    let implicit_return =
+                        self.check_block_with_implicit_return(&method.body, &ret, &mut scopes);
+                    self.check_method_implicit_return(
+                        &format!(
+                            "method '{}' in impl of '{}' for '{}'",
+                            method.name, impl_def.trait_name, impl_def.type_name
+                        ),
+                        &ret,
+                        implicit_return,
+                    );
                     self.check_unconsumed_caps();
                     self.var_scopes.pop();
                     self.cap_vars.pop();
@@ -1669,6 +1684,34 @@ impl<'a> Checker<'a> {
                 // Resolve body; unknown names are errors.
                 self.check_session_type_wf(&s.body, &s.name);
             }
+        }
+    }
+
+    fn check_method_implicit_return(
+        &mut self,
+        context: &str,
+        declared: &Type,
+        implicit: Option<Type>,
+    ) {
+        let Some(actual) = implicit else { return };
+        let actual = self.unification.resolve(&actual);
+        let actual = match actual {
+            Type::Shared(inner) | Type::LocalShared(inner) | Type::CShared(inner) => *inner,
+            other => other,
+        };
+        if !is_numeric_coercion(declared, &actual)
+            && self.unification.unify(declared, &actual).is_err()
+            && !matches!(declared, Type::Name(name, _) if name == "unit")
+        {
+            self.emit_code(
+                crate::diagnostic::codes::E0207,
+                format!(
+                    "implicit return in {}: expected {}, found {}",
+                    context,
+                    fmt_type(declared),
+                    fmt_type(&actual)
+                ),
+            );
         }
     }
 
