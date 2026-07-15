@@ -3976,6 +3976,150 @@ pub extern "C" fn mimi_set_to_json_i64(handle: SetHandle) -> *mut std::ffi::c_ch
     alloc_c_string(&parts.join(""))
 }
 
+/// Serialize Set of heap-packed product-tuple i64[n] handles.
+/// `display_style`: 0 = JSON `[[1,2]]`, 1 = Display `Set{(1, 2), (3, 4)}`.
+#[no_mangle]
+pub extern "C" fn mimi_set_to_json_product_i64(
+    handle: SetHandle,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if handle == 0 || arity <= 0 || arity > 16 {
+        return if display_style != 0 {
+            alloc_c_string("Set{}")
+        } else {
+            alloc_c_string("[]")
+        };
+    }
+    let set = unsafe { &*set_from_handle(handle) };
+    if set.inner.len() > 1_000_000 {
+        return if display_style != 0 {
+            alloc_c_string("Set{...}")
+        } else {
+            alloc_c_string("[...]")
+        };
+    }
+    let n = arity as usize;
+    // Sort by decoded product fields for stable dual order.
+    let mut items: Vec<Vec<i64>> = set
+        .inner
+        .iter()
+        .map(|vh| {
+            if *vh == 0 {
+                vec![0; n]
+            } else {
+                let ptr = *vh as *const i64;
+                if ptr.is_null() {
+                    vec![0; n]
+                } else {
+                    unsafe { std::slice::from_raw_parts(ptr, n).to_vec() }
+                }
+            }
+        })
+        .collect();
+    items.sort();
+    if display_style != 0 {
+        let mut parts: Vec<String> = Vec::with_capacity(items.len() * 2 + 2);
+        parts.push(String::from("Set{"));
+        for (i, fields) in items.iter().enumerate() {
+            if i > 0 {
+                parts.push(String::from(", "));
+            }
+            let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
+            parts.push(format!("({})", body.join(", ")));
+        }
+        parts.push(String::from("}"));
+        alloc_c_string(&parts.join(""))
+    } else {
+        let mut parts: Vec<String> = Vec::with_capacity(items.len() * 2 + 2);
+        parts.push(String::from("["));
+        for (i, fields) in items.iter().enumerate() {
+            if i > 0 {
+                parts.push(String::from(","));
+            }
+            let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
+            parts.push(format!("[{}]", body.join(",")));
+        }
+        parts.push(String::from("]"));
+        alloc_c_string(&parts.join(""))
+    }
+}
+
+/// Build Set from JSON array of product arrays: `[[1,2],[3,4]]`.
+#[no_mangle]
+pub extern "C" fn mimi_set_from_json_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> SetHandle {
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return mimi_set_new();
+    }
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_set_new();
+    if handle == 0 {
+        return 0;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'[' {
+        return handle;
+    }
+    i += 1;
+    let n = arity as usize;
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b']' {
+            break;
+        }
+        if bytes[i] != b'[' {
+            break;
+        }
+        i += 1;
+        let mut fields = vec![0i64; n];
+        for fi in 0..n {
+            while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+                i += 1;
+            }
+            let neg = i < bytes.len() && bytes[i] == b'-';
+            if neg {
+                i += 1;
+            }
+            let mut v: i64 = 0;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                v = v
+                    .saturating_mul(10)
+                    .saturating_add((bytes[i] - b'0') as i64);
+                i += 1;
+            }
+            if neg {
+                v = -v;
+            }
+            fields[fi] = v;
+        }
+        while i < bytes.len() && bytes[i] != b']' {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b']' {
+            i += 1;
+        }
+        let data_size = n * std::mem::size_of::<i64>();
+        let ptr = unsafe { libc::malloc(data_size) as *mut i64 };
+        if ptr.is_null() {
+            continue;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(fields.as_ptr(), ptr, n);
+        }
+        mimi_set_insert(handle, ptr as SetValueHandle);
+    }
+    handle
+}
+
 /// Serialize a SetHandle of 0/1 bool values to a JSON array of true/false.
 #[no_mangle]
 pub extern "C" fn mimi_set_to_json_bool(handle: SetHandle) -> *mut std::ffi::c_char {

@@ -11590,3 +11590,22 @@ fn dual_result_list_map_product_tuple() {
         "Ok([{\"a\":(1, 2)}])\n{\"Ok\":[[{\"a\":[1,2]}]]}"
     );
 }
+
+/// from_json Set of product-tuple dual.
+#[test]
+fn dual_from_json_set_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<(i32, i32)>>("[[1,2],[3,4]]")
+            println(s)
+            println(to_json(s))
+            0
+        }
+        "#,
+        "Set{(1, 2), (3, 4)}\n[[1,2],[3,4]]"
+    );
+}
