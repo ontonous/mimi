@@ -10,12 +10,25 @@ impl LspServer {
             let mut prev_line = 0u32;
             let mut prev_start = 0u32;
 
+            let lines: Vec<&str> = text.lines().collect();
             for tok in &lexer_tokens {
                 let line = (tok.line as u32).saturating_sub(1);
-                let start = (tok.col as u32).saturating_sub(1);
+                // Lexer col is 1-based; convert to UTF-16 for LSP (L-H10).
+                let line_text = lines.get(tok.line.saturating_sub(1)).copied().unwrap_or("");
+                let map = crate::lsp::position_map::PositionMap::new(line_text);
+                // Approximate byte offset: col-1 as char index → walk chars.
+                let byte_start = {
+                    let target = tok.col.saturating_sub(1);
+                    line_text
+                        .char_indices()
+                        .nth(target)
+                        .map(|(i, _)| i)
+                        .unwrap_or(line_text.len())
+                };
+                let start = map.byte_to_lsp(byte_start).1 as u32;
 
-                // Calculate token length from kind
-                let len = match &tok.kind {
+                // Calculate token length from kind (then convert to UTF-16 units)
+                let len_bytes = match &tok.kind {
                     lexer::TokenKind::Ident(s) => s.len() as u32,
                     lexer::TokenKind::Int(s) => s.len() as u32,
                     lexer::TokenKind::Float(s) => s.len() as u32,
@@ -108,6 +121,11 @@ impl LspServer {
                     | lexer::TokenKind::Not => (7, vec![]), // operator
                     _ => continue,
                 };
+
+                // L-H10: length in UTF-16 code units.
+                let end_byte = (byte_start + len_bytes as usize).min(line_text.len());
+                let end_utf16 = map.byte_to_lsp(end_byte).1 as u32;
+                let len = end_utf16.saturating_sub(start);
 
                 let delta_line = line.saturating_sub(prev_line);
                 let delta_start = if delta_line == 0 {
