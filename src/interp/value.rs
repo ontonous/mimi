@@ -1048,12 +1048,15 @@ impl std::fmt::Display for Value {
                         write!(f, "{}", fv)?;
                     }
                 }
-                for v in other {
+                // Sort non-scalar elements by Display for dual-stable Set order.
+                let mut other_s: Vec<String> = other.iter().map(|v| format!("{}", v)).collect();
+                other_s.sort();
+                for s in other_s {
                     if !first {
                         write!(f, ", ")?;
                     }
                     first = false;
-                    write!(f, "{}", v)?;
+                    write!(f, "{}", s)?;
                 }
                 write!(f, "}}")
             }

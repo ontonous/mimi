@@ -549,6 +549,8 @@ impl<'a> Interpreter<'a> {
                         arr.push(serde_json::Value::Number(n));
                     }
                 }
+                // Stable dual order for non-scalar Set elements (Option/Result/tuples).
+                other.sort_by_key(|jv| jv.to_string());
                 arr.extend(other);
                 Ok(serde_json::Value::Array(arr))
             }
