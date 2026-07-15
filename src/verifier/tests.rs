@@ -1080,6 +1080,39 @@ func main() -> i32 { 0 }
 
 
 
+
+#[test]
+fn verify_branch_callee_ensures_not_unconditional() {
+    require_z3!();
+    // V-C5: callee ensures inside a never-taken branch must not prove caller.
+    let src = r#"
+func always_ten(x: i32) -> i32 {
+    ensures: result == 10
+    10
+}
+func caller(y: i32) -> i32 {
+    ensures: result == 10
+    if false {
+        always_ten(y)
+    } else {
+        y
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("branch callee");
+    let always = results.iter().find(|r| r.func_name == "always_ten");
+    let caller = results.iter().find(|r| r.func_name == "caller");
+    assert!(always.is_some() && always.unwrap().status == VerifStatus::Verified);
+    assert!(caller.is_some(), "caller present");
+    assert_ne!(
+        caller.unwrap().status,
+        VerifStatus::Verified,
+        "dead-branch callee ensures must not prove caller: {:?}",
+        caller.unwrap()
+    );
+}
+
 #[test]
 fn verify_assign_updates_let_subst() {
     require_z3!();

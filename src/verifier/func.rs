@@ -1439,25 +1439,13 @@ impl VerifierCtx {
             Expr::Field(obj, _) => self.assert_callee_ensures_in_expr(session, obj, vars),
             Expr::TupleIndex(obj, _) => self.assert_callee_ensures_in_expr(session, obj, vars),
             Expr::Old(inner) => self.assert_callee_ensures_in_expr(session, inner, vars),
-            Expr::If { cond, then_, else_ } => {
+            Expr::If { cond, then_: _, else_: _ } => {
+                // V-C5: path-conditional arms — only condition is unconditional.
                 self.assert_callee_ensures_in_expr(session, cond, vars);
-                for stmt in then_ {
-                    if let Stmt::Expr(e) = stmt {
-                        self.assert_callee_ensures_in_expr(session, e, vars);
-                    }
-                }
-                if let Some(else_block) = else_ {
-                    for stmt in else_block {
-                        if let Stmt::Expr(e) = stmt {
-                            self.assert_callee_ensures_in_expr(session, e, vars);
-                        }
-                    }
-                }
             }
-            Expr::Match(_, arms) => {
-                for arm in arms {
-                    self.assert_callee_ensures_in_expr(session, &arm.body, vars);
-                }
+            Expr::Match(scrutinee, _arms) => {
+                // V-C5: match arms are path-conditional; only scrutinee is always run.
+                self.assert_callee_ensures_in_expr(session, scrutinee, vars);
             }
             Expr::Block(stmts) => {
                 for stmt in stmts {
@@ -1614,24 +1602,26 @@ impl VerifierCtx {
             Stmt::SharedLet { init, .. } => {
                 self.assert_callee_ensures_in_expr(session, init, vars);
             }
-            Stmt::If { cond, then_, else_ } => {
+            Stmt::If { cond, then_: _, else_: _ } => {
+                // V-C5: only the condition is always evaluated. Callee ensures
+                // inside then/else are path-conditional; admitting them as
+                // unconditional axioms is unsound. Skip branch bodies until
+                // path-condition implication is implemented.
                 self.assert_callee_ensures_in_expr(session, cond, vars);
-                self.assert_callee_ensures_in_block(session, then_, vars);
-                if let Some(else_block) = else_ {
-                    self.assert_callee_ensures_in_block(session, else_block, vars);
-                }
             }
-            Stmt::While { cond, body, .. }
+            Stmt::While { cond, body: _, .. }
             | Stmt::For {
                 iterable: cond,
-                body,
+                body: _,
                 ..
             } => {
+                // V-C5: loop bodies may execute zero times — do not assert
+                // callee ensures from body as axioms.
                 self.assert_callee_ensures_in_expr(session, cond, vars);
-                self.assert_callee_ensures_in_block(session, body, vars);
             }
-            Stmt::Loop(body) => {
-                self.assert_callee_ensures_in_block(session, body, vars);
+            Stmt::Loop(_body) => {
+                // V-C5: skip unconditional body ensures (zero-iteration possible
+                // only via break, but still path-sensitive).
             }
             Stmt::Block(body) | Stmt::Arena(body) | Stmt::Unsafe(body) | Stmt::Parasteps(body) => {
                 self.assert_callee_ensures_in_block(session, body, vars);
