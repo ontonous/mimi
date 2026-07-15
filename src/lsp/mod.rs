@@ -43,6 +43,21 @@ struct PersistentCache {
     entries: HashMap<String, CacheEntry>,
 }
 
+/// L-H6: JSON-RPC / LSP session lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifecycleState {
+    /// Before successful `initialize`.
+    Uninitialized,
+    /// After `initialize`, before `initialized` notification (requests limited).
+    Initializing,
+    /// Fully running — all methods allowed.
+    Running,
+    /// After `shutdown` request; only `exit` is valid.
+    Shutdown,
+    /// After `exit` notification.
+    Exited,
+}
+
 /// LSP server for Mimi language
 pub struct LspServer {
     pub(crate) documents: HashMap<String, String>,
@@ -66,6 +81,8 @@ pub struct LspServer {
     /// calling `process::exit`, which would kill the test runner when
     /// `handle_message` is exercised directly in unit tests.
     should_exit: bool,
+    /// L-H6: session lifecycle gate for method dispatch.
+    pub(crate) lifecycle: LifecycleState,
     /// Simple parse cache: stores the last parsed text and its AST.
     /// Avoids re-parsing the same text multiple times per keystroke.
     /// Cleared on textDocument/didChange.
@@ -94,6 +111,7 @@ impl LspServer {
             stdlib_completions_raw: Vec::new(),
             stdlib_loaded: false,
             should_exit: false,
+            lifecycle: LifecycleState::Uninitialized,
             parse_cache_text: std::cell::RefCell::new((String::new(), None)),
         }
     }
