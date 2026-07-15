@@ -34,13 +34,20 @@ impl<'a> Interpreter<'a> {
             return Err(InterpError::new("pow expects 2 arguments (base, exp)"));
         }
         match (&args[0], &args[1]) {
-            (Value::Int(b), Value::Int(e)) => match b.checked_pow(*e as u32) {
-                Some(v) => Ok(Value::Int(v)),
-                None => Err(InterpError::new(format!(
-                    "integer overflow in pow({}, {})",
-                    b, e
-                ))),
-            },
+            (Value::Int(_), Value::Int(e)) if *e < 0 => Err(InterpError::new(
+                "negative exponent not supported for integer pow",
+            )),
+            (Value::Int(b), Value::Int(e)) => {
+                let exp = u32::try_from(*e)
+                    .map_err(|_| InterpError::new("integer exponent is too large"))?;
+                match b.checked_pow(exp) {
+                    Some(v) => Ok(Value::Int(v)),
+                    None => Err(InterpError::new(format!(
+                        "integer overflow in pow({}, {})",
+                        b, e
+                    ))),
+                }
+            }
             (Value::Float(b), Value::Int(e)) => Ok(Value::Float(b.powf(*e as f64))),
             (Value::Float(b), Value::Float(e)) => Ok(Value::Float(b.powf(*e))),
             _ => Err(InterpError::new("pow expects numbers")),

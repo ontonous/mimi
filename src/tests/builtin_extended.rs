@@ -53,6 +53,17 @@ func main() -> i64 {
 }
 
 #[test]
+fn builtin_pow_negative_integer_exp_errors() {
+    let src = r#"
+func main() -> i32 {
+    pow(2, -1)
+}
+"#;
+    let err = run_source_result(src).expect_err("negative integer exponent must fail");
+    assert!(err.contains("negative exponent"), "unexpected error: {}", err);
+}
+
+#[test]
 fn builtin_floor() {
     let src = r#"
 func main() -> f64 {
