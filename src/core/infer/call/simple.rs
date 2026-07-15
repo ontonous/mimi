@@ -1917,20 +1917,18 @@ impl<'a> Checker<'a> {
                 // Check where constraints (before substitution). CK-H6: all entries.
                 if let Some(clauses) = self.where_clauses.get(name).cloned() {
                     for (type_param, bounds) in clauses {
-                        for (at, param) in arg_tys.iter().zip(params.iter()) {
-                            if self.type_uses_type_param(param, &type_param) {
-                                for bound in &bounds {
-                                    if !self.type_implements_trait(at, bound) {
-                                        self.emit_code(
-                                            crate::diagnostic::codes::E0253,
-                                            format!(
-                                                "where constraint violated: type '{}' does not implement trait '{}' (required by function '{}')",
-                                                fmt_type(at),
-                                                bound,
-                                                name
-                                            ),
-                                        );
-                                    }
+                        if let Some(concrete_type) = type_map.get(&type_param) {
+                            for bound in &bounds {
+                                if !self.type_implements_trait(concrete_type, bound) {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0253,
+                                        format!(
+                                            "where constraint violated: type '{}' does not implement trait '{}' (required by function '{}')",
+                                            fmt_type(concrete_type),
+                                            bound,
+                                            name
+                                        ),
+                                    );
                                 }
                             }
                         }
