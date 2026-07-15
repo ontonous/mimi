@@ -12232,3 +12232,41 @@ fn dual_from_json_list_option_map_product_tuple() {
         "[Some({\"a\":(1, 2)}), None()]\n[{\"Some\":[{\"a\":[1,2]}]},\"None\"]"
     );
 }
+
+/// from_json List of Result of Set of product-tuple dual.
+#[test]
+fn dual_from_json_list_result_set_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = from_json::<List<Result<Set<(i32, i32)>, string>>>("[{\"Ok\":[[1,2]]},{\"Err\":\"e\"}]")
+            println(xs)
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[Ok(Set{(1, 2)}), Err(e)]\n[{\"Ok\":[[[1,2]]]},{\"Err\":[\"e\"]}]"
+    );
+}
+
+/// from_json Option of Map of Set of product-tuple dual.
+#[test]
+fn dual_from_json_option_map_set_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let o = from_json::<Option<Map<string, Set<(i32, i32)>>>>("{\"a\":[[1,2]]}")
+            println(o)
+            println(to_json(o))
+            0
+        }
+        "#,
+        "Some({\"a\":Set{(1, 2)}})\n{\"Some\":[{\"a\":[[1,2]]}]}"
+    );
+}

@@ -705,15 +705,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                         "mimi_list_option_i64_to_json"
                     } else if inner.starts_with("Result") && inner.contains("Set<") {
-                        // List of Result of Set product.
-                        if let Some(elem) = inner
+                        // List of Result of Set of product — dedicated runtime path.
+                        if let Some(set_elem) = inner
                             .strip_prefix("Result<")
                             .and_then(|s| {
                                 let mut depth = 0i32;
                                 for (i, ch) in s.char_indices() {
                                     match ch {
-                                        '<' => depth += 1,
-                                        '>' => depth -= 1,
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
                                         ',' if depth == 0 => {
                                             return Some(s[..i].trim());
                                         }
@@ -725,37 +725,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .and_then(|s| s.strip_prefix("Set<"))
                             .and_then(|s| s.strip_suffix('>'))
                         {
-                            if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
-                                let resolved = if self.is_product_tuple_alias(elem) {
-                                    self.resolve_alias_type_name(elem)
+                            if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem)
+                            {
+                                let elem = if self.is_product_tuple_alias(set_elem) {
+                                    self.resolve_alias_type_name(set_elem)
                                 } else {
-                                    elem.to_string()
+                                    set_elem.to_string()
                                 };
-                                let mut arity: i64 = 0;
-                                let mut depth = 0i32;
-                                let mut any = false;
-                                let body = resolved
-                                    .strip_prefix('(')
-                                    .and_then(|s| s.strip_suffix(')'))
-                                    .unwrap_or(resolved.as_str());
-                                for ch in body.chars() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            arity += 1;
-                                            any = true;
-                                        }
-                                        c if !c.is_whitespace() => any = true,
-                                        _ => {}
-                                    }
-                                }
-                                if any {
-                                    arity += 1;
-                                }
-                                let raw = self.emit_list_result_set_product_to_json(
-                                    alloca,
-                                    arity.max(1),
+                                let raw = self.emit_list_result_set_product_runtime(
+                                    alloca, &elem, 0,
                                 )?;
                                 self.register_heap_alloc(raw);
                                 return self.wrap_c_string(raw);
