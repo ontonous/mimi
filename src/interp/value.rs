@@ -864,7 +864,10 @@ impl ActorHandle {
             bp,
         };
         // v0.29.20: register weak entry for PeerFault peer resolution (R-C9).
+        // Also prune dead weak entries so the registry does not grow unboundedly
+        // after actors drop without short_circuit_mailbox.
         if let Ok(mut map) = actor_handles().lock() {
+            map.retain(|_, e| e.upgrade().is_some());
             map.insert(id, WeakActorEntry::from_handle(&handle));
         }
         handle
