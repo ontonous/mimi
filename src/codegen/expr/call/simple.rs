@@ -374,21 +374,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
                         );
                     let src_ty = self.infer_object_type(&args[0], vars);
-                    let named_as_tuple = src_ty.starts_with('(') || src_ty.contains("Tuple");
+                    // Type aliases like `type Pair = (i32, i32)` keep the alias
+                    // name in var_type_names; resolve so product dispatch fires.
+                    let src_resolved = self.resolve_alias_type_name(&src_ty);
+                    let named_as_tuple = src_resolved.starts_with('(')
+                        || src_ty.starts_with('(')
+                        || src_ty.contains("Tuple")
+                        || self.is_product_tuple_alias(&src_ty);
                     // Prefer AST-ish type name when available; else multi-field
                     // product that is not option/string/list/enum.
+                    // Named records stay on the record path (type_defs Record);
+                    // product-tuple aliases are not "blocking" names.
+                    let blocks_product = self.type_defs.get(&src_ty).is_some_and(|td| {
+                        !matches!(td.kind, crate::ast::TypeDefKind::Alias(_))
+                    });
                     if named_as_tuple
                         || (fields.len() >= 2
                             && !looks_like_option
                             && !is_string
                             && !is_list
                             && !is_enum_tag
-                            && !src_ty.starts_with("Option")
-                            && !src_ty.starts_with("Result")
-                            && !src_ty.starts_with("List")
-                            && !src_ty.starts_with("Map")
-                            && !src_ty.starts_with("Set")
-                            && self.type_defs.get(&src_ty).is_none())
+                            && !src_resolved.starts_with("Option")
+                            && !src_resolved.starts_with("Result")
+                            && !src_resolved.starts_with("List")
+                            && !src_resolved.starts_with("Map")
+                            && !src_resolved.starts_with("Set")
+                            && !blocks_product)
                     {
                         let raw = self.emit_product_tuple_to_json(sv)?;
                         self.register_heap_alloc(raw);

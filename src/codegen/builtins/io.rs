@@ -303,14 +303,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     // Heterogeneous product / user tuple: format all fields.
                     // Skip named enums (i32 tag + payload) already handled above.
-                    let is_named = !arg_type.is_empty() && self.type_defs.contains_key(arg_type);
+                    // Type aliases of product tuples (e.g. `type Pair = (i32,i32)`)
+                    // must use the product path — they appear in type_defs but are
+                    // not named records/enums.
+                    let is_product_alias = self.is_product_tuple_alias(arg_type);
+                    let is_named = !arg_type.is_empty()
+                        && self.type_defs.contains_key(arg_type)
+                        && !is_product_alias;
                     let is_enum_layout = num_fields == 2
                         && matches!(
                             fields[0],
                             BasicTypeEnum::IntType(t) if t.get_bit_width() == 32
                         )
                         && matches!(fields[1], BasicTypeEnum::IntType(t) if t.get_bit_width() == 64);
-                    if !is_named && !is_enum_layout {
+                    if (!is_named || is_product_alias) && !is_enum_layout {
                         let str_ptr = self.emit_product_tuple_to_string(*sv)?;
                         return Ok((
                             BasicMetadataValueEnum::PointerValue(str_ptr),

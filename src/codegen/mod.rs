@@ -1277,6 +1277,52 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// If `name` is a type alias, return its underlying type name string for
+    /// Display/to_json dispatch (e.g. `Pair` → `(i32, i32)`). Non-aliases and
+    /// unknown names are returned unchanged.
+    pub(super) fn resolve_alias_type_name(&self, name: &str) -> String {
+        if name.is_empty() {
+            return String::new();
+        }
+        // Already a product-tuple or container form — leave as-is.
+        if name.starts_with('(')
+            || name.starts_with("List")
+            || name.starts_with("Option")
+            || name.starts_with("Result")
+            || name.starts_with("Map")
+            || name.starts_with("Set")
+        {
+            return name.to_string();
+        }
+        let mut cur = name.to_string();
+        // Bound depth so cyclic aliases cannot loop forever.
+        for _ in 0..8 {
+            let Some(td) = self.type_defs.get(&cur) else {
+                return cur;
+            };
+            match &td.kind {
+                crate::ast::TypeDefKind::Alias(inner) => {
+                    if let Some(full) = self.get_full_type_name(inner) {
+                        cur = full;
+                    } else {
+                        return cur;
+                    }
+                }
+                _ => return cur,
+            }
+        }
+        cur
+    }
+
+    /// True when `name` is a type alias whose underlying type is a product tuple.
+    pub(super) fn is_product_tuple_alias(&self, name: &str) -> bool {
+        if name.is_empty() || !self.type_defs.contains_key(name) {
+            return false;
+        }
+        let resolved = self.resolve_alias_type_name(name);
+        resolved.starts_with('(')
+    }
+
     /// Get the full type name including generics for a variable (for list element reconstruction).
     pub(super) fn get_full_type_name(&self, ty: &Type) -> Option<String> {
         match ty {
