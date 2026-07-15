@@ -60,6 +60,47 @@ pub(in crate::interp) struct FfiCallbackCtx {
 
 use std::sync::Mutex;
 
+/// R-C3: libffi machine-code trampoline + userdata that must outlive any
+/// delayed C callback. Stored globally until `mimi_callback_deregister`.
+///
+/// SAFETY: libffi Closure is not Send, but we only access it under the
+/// global store mutex and never move the trampoline across threads — only
+/// the function pointer is shared with C. Marking Send is required for
+/// the static Mutex map.
+struct CallbackTrampolineKeepalive {
+    _closure: Box<libffi::middle::Closure<'static>>,
+    _userdata: Box<i64>,
+}
+// SAFETY: trampoline memory is process-global and only dropped under the
+// store mutex after active callbacks drain; no concurrent free of Closure.
+unsafe impl Send for CallbackTrampolineKeepalive {}
+
+/// Global entry for a registered callback (Mimi closure + trampoline keepalive).
+struct GlobalCallbackEntry {
+    closure: Value,
+    ret_is_float: bool,
+    arg_free_mask: Vec<bool>,
+    arg_kinds: Vec<CallbackArgKind>,
+    active_count: Arc<AtomicUsize>,
+    /// R-C3: keeps the executable trampoline alive after the sync FFI call.
+    keepalive: Option<CallbackTrampolineKeepalive>,
+}
+
+impl Clone for GlobalCallbackEntry {
+    fn clone(&self) -> Self {
+        // Keepalive is not cloneable (owns the trampoline); clone only the
+        // callable payload used by the trampoline lookup path.
+        Self {
+            closure: self.closure.clone(),
+            ret_is_float: self.ret_is_float,
+            arg_free_mask: self.arg_free_mask.clone(),
+            arg_kinds: self.arg_kinds.clone(),
+            active_count: Arc::clone(&self.active_count),
+            keepalive: None,
+        }
+    }
+}
+
 /// F3: Global fallback store for callbacks — accessible from any thread.
 /// When C stores a callback function pointer and invokes it after the
 /// synchronous FFI call returns, the thread-local context has been cleared.
@@ -70,15 +111,10 @@ use std::sync::Mutex;
 /// FFI-10: Entry includes Arc<AtomicUsize> "active call" counter.
 /// trampoline increments before invoking closure, decrements after.
 /// deregister waits for count == 0 before removing the entry.
-#[allow(clippy::type_complexity)]
-static CALLBACK_GLOBAL_STORE: std::sync::OnceLock<
-    Mutex<HashMap<i64, (Value, bool, Vec<bool>, Vec<CallbackArgKind>, Arc<AtomicUsize>)>>,
-> = std::sync::OnceLock::new();
+static CALLBACK_GLOBAL_STORE: std::sync::OnceLock<Mutex<HashMap<i64, GlobalCallbackEntry>>> =
+    std::sync::OnceLock::new();
 
-#[allow(clippy::type_complexity)]
-fn global_callback_store(
-) -> &'static Mutex<HashMap<i64, (Value, bool, Vec<bool>, Vec<CallbackArgKind>, Arc<AtomicUsize>)>>
-{
+fn global_callback_store() -> &'static Mutex<HashMap<i64, GlobalCallbackEntry>> {
     CALLBACK_GLOBAL_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -166,27 +202,26 @@ pub extern "C" fn mimi_callback_deregister(callback_id: i64) {
     // FFI-10: Extract the active-count Arc and remove the entry BEFORE waiting.
     // FFI-BUG-3 fix: Removing the entry first prevents new calls from finding
     // it and incrementing the count during the spin-drain loop (TOCTOU window).
-    let active_count = {
+    // Remove from store but keep the entry (and trampoline) until drain completes.
+    let removed = {
         let mut store = global_callback_store()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some((_, _, _, _, count)) = store.get(&callback_id) {
-            let cnt = Arc::clone(count);
-            // Remove entry first so new calls won't find it and increment count
-            store.remove(&callback_id);
-            cnt
-        } else {
-            return;
-        }
+        store.remove(&callback_id)
     };
-    // Spin until no in-flight calls remain.
+    let Some(entry) = removed else {
+        return;
+    };
+    // Spin until no in-flight calls remain (trampoline still valid via entry).
     loop {
-        let n = active_count.load(Ordering::Acquire);
+        let n = entry.active_count.load(Ordering::Acquire);
         if n == 0 {
             break;
         }
         std::hint::spin_loop();
     }
+    // Drop entry (and R-C3 keepalive) after drain.
+    drop(entry);
     FFI_CALLBACK_CTX.with(|c| {
         c.borrow_mut().entries.remove(&callback_id);
     });
@@ -305,23 +340,24 @@ unsafe fn callback_trampoline_inner(
         }
         None => {
             // Global store entry — increment and track the count
-            let (closure, ret_is_float, arg_free_mask, arg_kinds, cnt) = {
+            let entry = {
                 let store = global_callback_store()
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 match store.get(&callback_id).cloned() {
-                    Some((c, r, a, k, cnt)) => (c, r, a, k, cnt),
+                    Some(e) => e,
                     None => {
                         *result = 0;
                         return;
                     }
                 }
             };
+            let cnt = Arc::clone(&entry.active_count);
             (
-                closure,
-                ret_is_float,
-                arg_free_mask,
-                arg_kinds,
+                entry.closure,
+                entry.ret_is_float,
+                entry.arg_free_mask,
+                entry.arg_kinds,
                 ActiveCountGuard::new(&cnt),
             )
         }
@@ -566,33 +602,13 @@ impl<'a> Interpreter<'a> {
                         ),
                     );
                 });
-                if let Ok(mut store) = global_callback_store().lock() {
-                    store.insert(
-                        cb_id,
-                        (
-                            closure,
-                            ret_is_float,
-                            arg_free_mask,
-                            arg_kinds,
-                            Arc::clone(&active_count),
-                        ),
-                    );
-                }
 
                 // Create a libffi Closure that generates a C-compatible function pointer.
-                // The userdata (callback_id) must outlive the closure.
-                // Box::leak gives us a 'static reference that is valid as long as
-                // the Box is not re-created (we reclaim it via Box::from_raw below).
+                // R-C3: userdata + Closure must outlive any delayed C callback —
+                // store them in CALLBACK_GLOBAL_STORE, not only FfiGuard.
                 let userdata = Box::new(cb_id);
-                // SAFETY: Box::leak intentionally leaks the Box allocation. The
-                // memory remains valid until reclaimed by Box::from_raw in the
-                // FfiGuard constructor below. The libffi Closure captures this
-                // reference and is boxed alongside it in FfiGuard::CallbackClosure;
-                // when the FfiGuard is dropped, Box::from_raw re-owns the allocation
-                // and Box::new(ffi_closure) drops the closure, so the reference
-                // never dangles.
                 let userdata_ptr = Box::into_raw(userdata);
-                // SAFETY: userdata_ptr came from Box::into_raw and is leaked intentionally for the libffi closure.
+                // SAFETY: userdata_ptr from Box::into_raw; reclaimed into keepalive below.
                 let cb_ref_static: &'static i64 = unsafe { &*userdata_ptr };
 
                 let ffi_closure = libffi::middle::Closure::new(
@@ -602,22 +618,33 @@ impl<'a> Interpreter<'a> {
                 );
 
                 let code_ptr_ref = ffi_closure.code_ptr();
-                // code_ptr_ref is &unsafe extern "C" fn() — a reference to the generated
-                // trampoline function pointer. We convert it to a raw i64 address.
-                // SAFETY: code_ptr_ref points to the libffi-generated trampoline; dereferencing yields the function pointer.
+                // SAFETY: code_ptr_ref points to the libffi-generated trampoline.
                 let fn_ptr_val: unsafe extern "C" fn() = *code_ptr_ref;
                 let fn_ptr = fn_ptr_val as usize as i64;
 
-                // Keep the closure and its userdata alive for the duration of the C call
-                ffi_guards.push(FfiGuard::CallbackClosure {
-                    closure: Box::new(ffi_closure),
-                    // SAFETY: userdata_ptr was obtained from Box::into_raw above.
-                    // Box::from_raw reclaims ownership so the Box is dropped when
-                    // FfiGuard drops (after the closure, ensuring the reference
-                    // inside the closure is valid during Closure::drop).
-                    // SAFETY: reclaims the Box leaked above; valid as long as the closure owns it.
-                    userdata: unsafe { Box::from_raw(userdata_ptr) },
-                });
+                // SAFETY: reclaim userdata Box into keepalive alongside Closure.
+                let keepalive = CallbackTrampolineKeepalive {
+                    _closure: Box::new(ffi_closure),
+                    _userdata: unsafe { Box::from_raw(userdata_ptr) },
+                };
+
+                if let Ok(mut store) = global_callback_store().lock() {
+                    store.insert(
+                        cb_id,
+                        GlobalCallbackEntry {
+                            closure,
+                            ret_is_float,
+                            arg_free_mask,
+                            arg_kinds,
+                            active_count: Arc::clone(&active_count),
+                            keepalive: Some(keepalive),
+                        },
+                    );
+                }
+
+                // FfiGuard no longer owns the trampoline (global store does).
+                // Keep a no-op guard slot unused — callers still pass ffi_guards.
+                let _ = ffi_guards;
 
                 Ok(fn_ptr)
             }
