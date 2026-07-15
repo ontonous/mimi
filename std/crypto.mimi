@@ -37,19 +37,52 @@ pub func is_valid_hex(s: string) -> bool {
 }
 
 // hex_encode: Converts a string to its hex representation.
-// Each character becomes two hex digits.
+// Each Unicode scalar is emitted as UTF-8 bytes (two hex digits each).
+// Nibbles are always clamped to 0..15 so high code points never OOB.
 pub func hex_encode(s: string) -> string {
     let mut result = ""
     for i in range(0, len(s)) {
         let code = char_code(s, i)
-        let hi = code / 16
-        let lo = code % 16
-        result = result + hex_digit(hi) + hex_digit(lo)
+        result = result + hex_code_utf8(code)
     }
     result
 }
 
-func hex_digit(n: i64) -> string {
-    let digits = "0123456789abcdef"
-    str_substring(digits, n, n + 1)
+func hex_code_utf8(code: i64) -> string {
+    let mut out = ""
+    let mut c: i64 = code
+    if c < 0 { c = 0 as i64 }
+    if c < 128 {
+        out = hex_byte(c)
+    } else {
+        if c < 2048 {
+            out = hex_byte(192 as i64 + c / 64) + hex_byte(128 as i64 + c % 64)
+        } else {
+            if c < 65536 {
+                out = hex_byte(224 as i64 + c / 4096) + hex_byte(128 as i64 + (c / 64) % 64) + hex_byte(128 as i64 + c % 64)
+            } else {
+                if c > 1114111 { c = 1114111 as i64 }
+                out = hex_byte(240 as i64 + c / 262144) + hex_byte(128 as i64 + (c / 4096) % 64) + hex_byte(128 as i64 + (c / 64) % 64) + hex_byte(128 as i64 + c % 64)
+            }
+        }
+    }
+    out
 }
+
+func hex_byte(b: i64) -> string {
+    let mut v: i64 = b
+    if v < 0 { v = 0 as i64 }
+    if v > 255 { v = 255 as i64 }
+    hex_digit(v / 16) + hex_digit(v % 16)
+}
+
+func hex_digit(n: i64) -> string {
+    let mut d: i64 = n
+    if d < 0 { d = 0 as i64 }
+    if d > 15 { d = 15 as i64 }
+    let digits = "0123456789abcdef"
+    str_substring(digits, d, d + 1)
+}
+
+
+
