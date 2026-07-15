@@ -517,6 +517,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
                     }
+                    // List of Map of product-tuple: emit via per-element product JSON.
+                    if let Some(val_ty) = inner
+                        .strip_prefix("Map<string, ")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                            let elem = if self.is_product_tuple_alias(val_ty) {
+                                self.resolve_alias_type_name(val_ty)
+                            } else {
+                                val_ty.to_string()
+                            };
+                            let raw =
+                                self.emit_list_map_product_to_json(alloca, &elem)?;
+                            self.register_heap_alloc(raw);
+                            return self.wrap_c_string(raw);
+                        }
+                    }
                     let rt_fn_name = if inner.starts_with("Map") {
                         if inner.contains("Map<string, string>") {
                             "mimi_list_map_to_json_string"

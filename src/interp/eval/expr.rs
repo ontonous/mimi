@@ -1564,6 +1564,20 @@ impl<'a> Interpreter<'a> {
                     }
                     _ => Err(InterpError::new(format!("expected list, got {}", val))),
                 },
+                "Map" if type_args.len() == 2 => match val {
+                    // Untyped JSON object → Record(None, fields); coerce values to V.
+                    Value::Record(_, fields) => {
+                        let mut out = HashMap::new();
+                        for (k, v) in fields {
+                            out.insert(k, self.coerce_value_to_type(v, &type_args[1])?);
+                        }
+                        Ok(Value::Record(None, out))
+                    }
+                    other => Err(InterpError::new(format!(
+                        "expected object for Map, got {}",
+                        other
+                    ))),
+                },
                 "Option" if type_args.len() == 1 => match val {
                     // JSON null and missing values become Unit in json_to_value.
                     Value::Unit => Ok(Value::Variant("None".into(), vec![])),
