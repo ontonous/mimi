@@ -1208,12 +1208,57 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub(super) fn llvm_type_for(&self, ty: &crate::ast::Type) -> Option<BasicTypeEnum<'ctx>> {
-        if let crate::ast::Type::Name(name, _) = ty {
-            if let Some(llvm) = self.type_llvm.get(name) {
-                return Some(*llvm);
+        use crate::ast::Type;
+        match ty {
+            Type::Name(name, args) if args.is_empty() => {
+                if let Some(llvm) = self.type_llvm.get(name) {
+                    return Some(*llvm);
+                }
+                crate::codegen::types::mimi_type_to_llvm(self.context, ty)
             }
+            // Option/Result of named records must use type_llvm for the payload
+            // slot — mimi_type_to_llvm maps unknown names to i64.
+            Type::Option(inner) => {
+                let inner_llvm = self.llvm_type_for(inner)?;
+                let widened = match inner_llvm {
+                    BasicTypeEnum::IntType(it) if it.get_bit_width() < 64 => {
+                        BasicTypeEnum::IntType(self.context.i64_type())
+                    }
+                    other => other,
+                };
+                Some(BasicTypeEnum::StructType(self.context.struct_type(
+                    &[
+                        BasicTypeEnum::IntType(self.context.bool_type()),
+                        widened,
+                    ],
+                    false,
+                )))
+            }
+            Type::Result(ok, _) => {
+                let ok_llvm = self.llvm_type_for(ok)?;
+                let widened = match ok_llvm {
+                    BasicTypeEnum::IntType(it) if it.get_bit_width() < 64 => {
+                        BasicTypeEnum::IntType(self.context.i64_type())
+                    }
+                    other => other,
+                };
+                Some(BasicTypeEnum::StructType(self.context.struct_type(
+                    &[
+                        BasicTypeEnum::IntType(self.context.bool_type()),
+                        widened,
+                        BasicTypeEnum::IntType(self.context.i64_type()),
+                    ],
+                    false,
+                )))
+            }
+            Type::Name(n, args) if n == "Option" && args.len() == 1 => {
+                self.llvm_type_for(&Type::Option(Box::new(args[0].clone())))
+            }
+            Type::Name(n, args) if n == "Result" && args.len() == 2 => self.llvm_type_for(
+                &Type::Result(Box::new(args[0].clone()), Box::new(args[1].clone())),
+            ),
+            _ => crate::codegen::types::mimi_type_to_llvm(self.context, ty),
         }
-        crate::codegen::types::mimi_type_to_llvm(self.context, ty)
     }
 
     /// Register the element LLVM type for a `List<T>` variable so that

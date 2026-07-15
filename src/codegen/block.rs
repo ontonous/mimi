@@ -231,12 +231,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // For simple Variable patterns, track type info
                     if let Pattern::Variable(name) = pat {
                         if let Some(decl_ty) = ty.as_ref() {
-                            if let Type::Name(tn, args) = decl_ty {
-                                if !args.is_empty() {
-                                    if let Some(full) = self.get_full_type_name(decl_ty) {
-                                        self.var_type_names.insert(name.clone(), full);
-                                    }
-                                } else {
+                            if let Some(full) = self.get_full_type_name(decl_ty) {
+                                self.var_type_names.insert(name.clone(), full);
+                            } else if let Type::Name(tn, args) = decl_ty {
+                                if args.is_empty() {
                                     self.var_type_names.insert(name.clone(), tn.clone());
                                 }
                             }
@@ -413,12 +411,34 @@ impl<'ctx> CodeGenerator<'ctx> {
                             } else if let Expr::Ident(func_name) = callee.as_ref() {
                                 match func_name.as_str() {
                                     "Ok" | "Err" => {
-                                        self.var_type_names
-                                            .insert(name.clone(), "Result".to_string());
+                                        // Do not overwrite a full annotated type
+                                        // like `Result<P,string>` with bare `Result`.
+                                        if !self
+                                            .var_type_names
+                                            .get(name)
+                                            .is_some_and(|t| t.starts_with("Result"))
+                                        {
+                                            self.var_type_names
+                                                .insert(name.clone(), "Result".to_string());
+                                        }
                                     }
                                     "Some" | "None" => {
-                                        self.var_type_names
-                                            .insert(name.clone(), "Option".to_string());
+                                        // Prefer annotated `Option<P>` / inferred full type.
+                                        if !self
+                                            .var_type_names
+                                            .get(name)
+                                            .is_some_and(|t| t.starts_with("Option"))
+                                        {
+                                            let inferred =
+                                                self.infer_object_type(init, vars);
+                                            if inferred.starts_with("Option<") {
+                                                self.var_type_names
+                                                    .insert(name.clone(), inferred);
+                                            } else {
+                                                self.var_type_names
+                                                    .insert(name.clone(), "Option".to_string());
+                                            }
+                                        }
                                     }
                                     _ => {
                                         // Known builtins that return Result<string,string>
