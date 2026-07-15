@@ -763,7 +763,40 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                         "mimi_list_result_i64_to_json"
                     } else if inner.starts_with("Result") && inner.contains("Map<") {
-                        // List of Result of Map — typed map Ok payload.
+                        // List of Result of Map of product — dedicated runtime path.
+                        if let Some(val_ty) = inner
+                            .strip_prefix("Result<")
+                            .and_then(|s| {
+                                let mut depth = 0i32;
+                                for (i, ch) in s.char_indices() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            return Some(s[..i].trim());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                None
+                            })
+                            .and_then(|s| s.strip_prefix("Map<string, "))
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                let elem = if self.is_product_tuple_alias(val_ty) {
+                                    self.resolve_alias_type_name(val_ty)
+                                } else {
+                                    val_ty.to_string()
+                                };
+                                let raw = self.emit_list_result_map_product_runtime(
+                                    alloca, &elem, 0,
+                                )?;
+                                self.register_heap_alloc(raw);
+                                return self.wrap_c_string(raw);
+                            }
+                        }
+                        // List of Result of Map — typed map Ok payload (scalars).
                         // mode 0-3 scalars; mode 20+arity for product Map
                         // (runtime list_result adds +10 for scalar map path).
                         let mode = if inner.contains("Map<string, string>") {
@@ -904,6 +937,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.emit_list_result_product_runtime(alloca, &elem, 0)?;
                             self.register_heap_alloc(raw);
                             return self.wrap_c_string(raw);
+                        }
+                        if ok_inner.starts_with("Map<string, ") {
+                            if let Some(inner_val) = ok_inner
+                                .strip_prefix("Map<string, ")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if inner_val.starts_with('(')
+                                    || self.is_product_tuple_alias(inner_val)
+                                {
+                                    let elem = if self.is_product_tuple_alias(inner_val) {
+                                        self.resolve_alias_type_name(inner_val)
+                                    } else {
+                                        inner_val.to_string()
+                                    };
+                                    let raw = self.emit_list_result_map_product_runtime(
+                                        alloca, &elem, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return self.wrap_c_string(raw);
+                                }
+                            }
                         }
                         if ok_is_option_product {
                             let raw =
@@ -1056,6 +1110,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         self.register_heap_alloc(raw);
                                         return self.wrap_c_string(raw);
                                     }
+                                }
+                            }
+                            if let Some(set_elem) = opt_elem
+                                .strip_prefix("Set<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if set_elem.starts_with('(')
+                                    || self.is_product_tuple_alias(set_elem)
+                                {
+                                    let elem = if self.is_product_tuple_alias(set_elem) {
+                                        self.resolve_alias_type_name(set_elem)
+                                    } else {
+                                        set_elem.to_string()
+                                    };
+                                    let raw = self.emit_map_option_set_product_to_json(
+                                        handle, &elem, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return self.wrap_c_string(raw);
                                 }
                             }
                         }
