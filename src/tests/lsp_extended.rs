@@ -283,11 +283,13 @@ fn diagnostic_has_position() {
     assert!(result.is_err(), "should have error for undefined variable");
     let errors = result.unwrap_err();
     assert!(!errors.is_empty(), "should have at least one error");
-    // All diagnostics should have span fields
+    // TC-H3: assert spans are populated (1-based lines for user diagnostics).
     for err in &errors {
-        // span.start_line and span.start_col are usize, always >= 0
-        let _ = err.span.start_line;
-        let _ = err.span.start_col;
+        assert!(
+            err.span.start_line >= 1,
+            "diagnostic missing start_line: {:?}",
+            err
+        );
     }
 }
 
