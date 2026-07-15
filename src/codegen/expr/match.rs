@@ -232,9 +232,40 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                 } else {
+                    // Single-arg constructor: bind payload and register List
+                    // element types when payload is List<Enum>/List<Record>
+                    // so xs[i] can reconstruct ptrtoint-encoded structs.
+                    let payload_ast = variant_owner.as_ref().and_then(|(owner, _)| {
+                        self.type_defs.get(owner).and_then(|td| {
+                            if let TypeDefKind::Enum(variants) = &td.kind {
+                                variants.iter().find(|v| v.name == *name).and_then(|v| {
+                                    match &v.payload {
+                                        Some(VariantPayload::Tuple(ts)) if ts.len() == 1 => {
+                                            Some(ts[0].clone())
+                                        }
+                                        _ => None,
+                                    }
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                    });
                     for (_, inner_pat) in inner_patterns {
-                        if let Pattern::Variable(name) = inner_pat {
-                            self.bind_pattern_var(&mut local_vars, name, payload, payload_ty)?;
+                        if let Pattern::Variable(bind_name) = inner_pat {
+                            self.bind_pattern_var(
+                                &mut local_vars,
+                                bind_name,
+                                payload,
+                                payload_ty,
+                            )?;
+                            if let Some(ref ast_ty) = payload_ast {
+                                self.var_types.insert(bind_name.clone(), ast_ty.clone());
+                                if let Some(full) = self.get_full_type_name(ast_ty) {
+                                    self.var_type_names.insert(bind_name.clone(), full);
+                                }
+                                self.register_list_elem_type(bind_name, ast_ty);
+                            }
                         }
                     }
                 }

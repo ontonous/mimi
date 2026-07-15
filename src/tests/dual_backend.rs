@@ -1498,7 +1498,7 @@ fn dual_contract_ensures_old_dual() {
         return;
     }
     // old() in ensures with contracts enabled — both backends must succeed
-    // (doesn't use `result` which is still codegen-gapped)
+    // (result binding also dual-backend; see dual_contract_ensures).
     dual_assert_contract_ok(
         r#"
         func add_one(x: i32) -> i32 {
@@ -5228,31 +5228,54 @@ fn dual_recursive_type_simple() {
 }
 
 #[test]
-fn dual_recursive_type_interp_build() {
+fn dual_recursive_type_list_enum_index() {
     if !can_link() {
         return;
     }
-    // SKIP_CODEGEN: codegen can't index List<Expr> (recursive non-scalar element type)
-    dual_assert_interp_only!(
+    // List of recursive enum: store via ptrtoint, index reconstructs struct.
+    // (Call(string, List<Expr>) multi-arg packing still separate.)
+    dual_assert!(
         r#"
-        type Expr {
-            Call(string, List<Expr>)
-            Lit(i32)
+        type Node {
+            Leaf(i32)
+            Branch(List<Node>)
         }
-        func eval(e: Expr) -> i32 {
-            match e {
-                Lit(v) => v
-                Call(_, args) => eval(args[0])
+        func first(n: Node) -> i32 {
+            match n {
+                Leaf(v) => v
+                Branch(xs) => first(xs[0])
             }
         }
         func main() -> i32 {
-            let inner = Lit(42);
-            let outer = Call("foo", [inner]);
-            println(eval(outer));
+            let n = Branch([Leaf(7)])
+            println(first(n))
             0
         }
-    "#,
-        interp::Value::Int(0)
+        "#,
+        "7"
+    );
+}
+
+#[test]
+fn dual_enum_list_payload() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Wrap {
+            Empty
+            Items(List<i32>)
+        }
+        func main() -> i32 {
+            let w = Items([1, 2, 3])
+            match w {
+                Empty => { println(0); 0 }
+                Items(xs) => { println(xs.len()); println(xs[0]); 0 }
+            }
+        }
+        "#,
+        "3\n1"
     );
 }
 

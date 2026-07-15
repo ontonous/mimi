@@ -1941,68 +1941,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             let ctor_name = format!("{}_{}", type_name, name);
             if let Some(function) = self.module.get_function(&ctor_name) {
                 let call_args = self.maybe_pack_enum_ctor_args(&compiled_args, function)?;
-                // Adjust integer arg widths to match the constructor's param types.
-                // After A1 restoration, i32 params need i32 values (not i64).
-                let adjusted_args: Vec<BasicValueEnum<'ctx>> = call_args
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        if let Some(param) = function.get_nth_param(i as u32) {
-                            if let (
-                                BasicValueEnum::IntValue(arg_iv),
-                                BasicValueEnum::IntValue(param_iv),
-                            ) = (*v, param)
-                            {
-                                let arg_bw = arg_iv.get_type().get_bit_width();
-                                let param_bw = param_iv.get_type().get_bit_width();
-                                if arg_bw == param_bw {
-                                    Ok(*v)
-                                } else if arg_bw > param_bw {
-                                    Ok(self
-                                        .builder
-                                        .build_int_truncate(
-                                            arg_iv,
-                                            param_iv.get_type(),
-                                            &format!("enum_arg_trunc_{}", i),
-                                        )
-                                        .map_err(|e| {
-                                            CompileError::LlvmError(format!(
-                                                "enum arg trunc: {}",
-                                                e
-                                            ))
-                                        })?
-                                        .into())
-                                } else {
-                                    Ok(self
-                                        .builder
-                                        .build_int_s_extend(
-                                            arg_iv,
-                                            param_iv.get_type(),
-                                            &format!("enum_arg_sext_{}", i),
-                                        )
-                                        .map_err(|e| {
-                                            CompileError::LlvmError(format!(
-                                                "enum arg s_ext: {}",
-                                                e
-                                            ))
-                                        })?
-                                        .into())
-                                }
-                            } else {
-                                Ok(*v)
-                            }
-                        } else {
-                            Ok(*v)
-                        }
-                    })
-                    .collect::<Result<_, CompileError>>()?;
-                let packed_meta: Vec<_> = adjusted_args
-                    .iter()
-                    .map(|v| types::basic_value_to_metadata_value(v, self.context.i64_type()))
-                    .collect();
-                let call = self.build_call(function, &packed_meta, "call")?;
-                return Ok(call_try_basic_value(&call)
-                    .unwrap_or(self.context.i64_type().const_int(0, false).into()));
+                // emit_direct_call: int width adjust + load list/record allocas
+                // when the ctor takes a by-value struct payload.
+                return self.emit_direct_call(function, &call_args, "enum_ctor");
             }
             return Err(format!("enum constructor '{}' not registered", ctor_name).into());
         }
@@ -2435,7 +2376,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Build a call to a declared function and extract its basic value.
-    fn emit_direct_call(
+    pub(in crate::codegen) fn emit_direct_call(
         &self,
         function: inkwell::values::FunctionValue<'ctx>,
         compiled_args: &[BasicValueEnum<'ctx>],
@@ -2444,6 +2385,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Adjust integer arg widths to match the function's parameter types.
         // After A1 restoration, i32 params expect i32 values; a literal 99
         // is compiled as i64 and must be truncated to i32 before the call.
+        // Also: list/record exprs often yield alloca pointers while enum
+        // constructors take the struct by value — load before the call.
         let adjusted_args: Vec<BasicValueEnum<'ctx>> = compiled_args
             .iter()
             .enumerate()
@@ -2479,6 +2422,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| CompileError::LlvmError(format!("arg s_ext: {}", e)))?
                                 .into())
                         }
+                    } else if let (
+                        BasicValueEnum::PointerValue(arg_pv),
+                        BasicValueEnum::StructValue(param_sv),
+                    ) = (*v, param)
+                    {
+                        // List/record alloca → by-value struct param (enum ctor payload).
+                        let sty = param_sv.get_type();
+                        Ok(self.build_load(
+                            BasicTypeEnum::StructType(sty),
+                            arg_pv,
+                            &format!("arg_load_struct_{}", i),
+                        )?)
                     } else {
                         Ok(*v)
                     }
