@@ -2429,7 +2429,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                 }
                             }
-                            // List of Option of product.
+                            // List of Option of product / Option of Set of product.
                             if ln == "List" {
                                 if let Type::Name(mn, margs) = &le {
                                     if mn == "Option" && margs.len() == 1 {
@@ -2449,6 +2449,53 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
+                                        if let Type::Name(sn, sargs) = &opt_inner {
+                                            if sn == "Set" && sargs.len() == 1 {
+                                                let set_elem = match &sargs[0] {
+                                                    Type::Name(an, aargs) if aargs.is_empty() => {
+                                                        if let Some(td) = self.type_defs.get(an) {
+                                                            if let crate::ast::TypeDefKind::Alias(
+                                                                inner,
+                                                            ) = &td.kind
+                                                            {
+                                                                inner.clone()
+                                                            } else {
+                                                                sargs[0].clone()
+                                                            }
+                                                        } else {
+                                                            sargs[0].clone()
+                                                        }
+                                                    }
+                                                    other => other.clone(),
+                                                };
+                                                if let Type::Tuple(elems) = set_elem {
+                                                    let arity = elems.len() as u64;
+                                                    let func = self.get_runtime_fn(
+                                                        "mimi_map_from_json_list_option_set_product_i64",
+                                                    )?;
+                                                    let result = self.build_call(
+                                                        func,
+                                                        &[
+                                                            BasicMetadataValueEnum::PointerValue(
+                                                                raw_ptr,
+                                                            ),
+                                                            BasicMetadataValueEnum::IntValue(
+                                                                self.context
+                                                                    .i64_type()
+                                                                    .const_int(arity, false),
+                                                            ),
+                                                        ],
+                                                        "map_from_json_list_option_set_product",
+                                                    )?;
+                                                    return Ok(self
+                                                        .expect_basic_value(
+                                                            &result,
+                                                            "mimi_map_from_json_list_option_set_product_i64",
+                                                        )?
+                                                        .into());
+                                                }
+                                            }
+                                        }
                                         if let Type::Tuple(elems) = opt_inner {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
