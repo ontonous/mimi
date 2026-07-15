@@ -647,14 +647,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .and_then(|s| s.split(',').next())
                             .map(|s| s.trim())
                             .unwrap_or("");
-                        // Product-tuple / named-record Ok only — not Option/Result/List Ok.
+                        // Product-tuple / named-record / nested Result Ok — not bare scalar.
                         let ok_is_product = ok_inner.starts_with('(')
                             || ok_inner.contains("Tuple")
+                            || ok_inner.starts_with("Result")
                             || self.type_defs.get(ok_inner).is_some_and(|td| {
                                 matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                            });
+                            })
+                            || self.is_product_tuple_alias(ok_inner);
                         let ok_is_option_product = ok_inner.starts_with("Option")
-                            && (ok_inner.contains('(') || ok_inner.contains("Tuple"));
+                            && (ok_inner.contains('(')
+                                || ok_inner.contains("Tuple")
+                                || ok_inner.contains("Result"));
                         if ok_is_product {
                             let raw = self.emit_list_result_product_to_json(alloca, inner)?;
                             self.register_heap_alloc(raw);
