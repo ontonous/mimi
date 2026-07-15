@@ -342,6 +342,40 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Special case: `to_json(obj)` where obj is a List<T> — dispatch
             // to the appropriate mimi_list_*_to_json runtime helper.
             if name == "to_json" && !args.is_empty() && !metadata_args.is_empty() {
+                // Product tuples: JSON array via recursive field serialization.
+                if let BasicMetadataValueEnum::StructValue(sv) = metadata_args[0] {
+                    let fields = sv.get_type().get_field_types();
+                    // Exclude known string {ptr,i64} and list {i64,ptr} and
+                    // Option/Result {i1,...} / enum {i32,i64} single-payload layouts
+                    // when they are not multi-field products. Heuristic: ≥2 fields
+                    // and not (string layout or list layout).
+                    let is_string = fields.len() == 2
+                        && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                        && matches!(
+                            fields[1],
+                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                        );
+                    let is_list = fields.len() == 2
+                        && matches!(
+                            fields[0],
+                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                        )
+                        && matches!(fields[1], BasicTypeEnum::PointerType(_));
+                    let is_enum_tag = fields.len() == 2
+                        && matches!(
+                            fields[0],
+                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 32
+                        )
+                        && matches!(
+                            fields[1],
+                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                        );
+                    if fields.len() >= 2 && !is_string && !is_list && !is_enum_tag {
+                        let raw = self.emit_product_tuple_to_json(sv)?;
+                        self.register_heap_alloc(raw);
+                        return self.wrap_c_string(raw);
+                    }
+                }
                 let obj_type = self.infer_object_type(&args[0], vars);
                 if let Some(inner) = obj_type
                     .strip_prefix("List<")

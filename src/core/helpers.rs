@@ -382,11 +382,13 @@ pub(crate) fn is_numeric(t: &Type) -> bool {
 /// - Any (escape hatch — interpreter handles all value types)
 /// - Infer/_ (defer to runtime)
 ///
-/// Genuinely unsupported: Option, Result, Map, Set, Tuple (no codegen path).
+/// Genuinely unsupported: Channel/Future/Atomic (no codegen path).
 pub(crate) fn is_json_serializable(t: &Type) -> bool {
     match t {
         Type::Infer => true,                                    // _ placeholder — defer
         Type::Newtype(_, inner) => is_json_serializable(inner), // transparent
+        // Product tuples: JSON arrays when every element is serializable.
+        Type::Tuple(elems) => elems.iter().all(is_json_serializable),
         Type::Name(n, args) => {
             // Primitive scalars
             if matches!(

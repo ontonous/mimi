@@ -2990,6 +2990,206 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(buf)
     }
 
+    /// Serialize a product-tuple struct to a JSON array C string (compact,
+    /// matching serde_json / interp `to_json` for `Value::Tuple`).
+    pub(in crate::codegen) fn emit_product_tuple_to_json(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let fields = sv.get_type().get_field_types();
+        let i64_ty = self.context.i64_type();
+        let buf = self.malloc_or_abort(i64_ty.const_int(4096, false), "json_tup_buf")?;
+        let open = self
+            .builder
+            .build_global_string_ptr("[", "json_tup_open")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+        let strcat_fn = self.get_runtime_fn("strcat")?;
+        let snprintf_fn = self.get_runtime_fn("snprintf")?;
+        self.build_call(
+            strcpy_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(open.as_pointer_value()),
+            ],
+            "json_tup_open_cpy",
+        )?;
+        let buf_size = i64_ty.const_int(512, false);
+        for (i, ft) in fields.iter().enumerate() {
+            if i > 0 {
+                let comma = self
+                    .builder
+                    .build_global_string_ptr(",", "json_tup_comma")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_call(
+                    strcat_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::PointerValue(comma.as_pointer_value()),
+                    ],
+                    "json_tup_comma_cat",
+                )?;
+            }
+            let field_val =
+                self.build_extract_value(sv.into(), i as u32, &format!("json_tup_{}", i))?;
+            let piece = self.malloc_or_abort(i64_ty.const_int(512, false), "json_tup_piece")?;
+            match (ft, field_val) {
+                (BasicTypeEnum::IntType(it), BasicValueEnum::IntValue(iv)) => {
+                    if it.get_bit_width() == 1 {
+                        let true_g = self
+                            .builder
+                            .build_global_string_ptr("true", "json_tup_true")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let false_g = self
+                            .builder
+                            .build_global_string_ptr("false", "json_tup_false")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let zero = iv.get_type().const_int(0, false);
+                        let is_t = self
+                            .builder
+                            .build_int_compare(IntPredicate::NE, iv, zero, "json_tup_bool")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let sel = self
+                            .builder
+                            .build_select(
+                                is_t,
+                                true_g.as_pointer_value(),
+                                false_g.as_pointer_value(),
+                                "json_tup_bool_s",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.build_call(
+                            strcpy_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(piece),
+                                BasicMetadataValueEnum::PointerValue(sel.into_pointer_value()),
+                            ],
+                            "json_tup_bool_cpy",
+                        )?;
+                    } else {
+                        let as_i64 = if iv.get_type().get_bit_width() < 64 {
+                            self.builder
+                                .build_int_s_extend(iv, i64_ty, "json_tup_sext")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        } else {
+                            iv
+                        };
+                        let fmt = self
+                            .builder
+                            .build_global_string_ptr("%ld", "json_tup_ld")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(piece),
+                                BasicMetadataValueEnum::IntValue(buf_size),
+                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                BasicMetadataValueEnum::IntValue(as_i64),
+                            ],
+                            "json_tup_ld_sn",
+                        )?;
+                    }
+                }
+                (BasicTypeEnum::StructType(sty), BasicValueEnum::StructValue(fsv)) => {
+                    let ffields = sty.get_field_types();
+                    if ffields.len() == 2
+                        && matches!(ffields[0], BasicTypeEnum::PointerType(_))
+                        && matches!(
+                            ffields[1],
+                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                        )
+                    {
+                        // string {ptr,len} → JSON-escaped quoted string
+                        // (mimi_json_escape_string already wraps with ").
+                        let ptr = self
+                            .build_extract_value(fsv.into(), 0, "json_tup_str_ptr")?
+                            .into_pointer_value();
+                        let esc_fn = self.get_runtime_fn("mimi_json_escape_string")?;
+                        let escaped = self
+                            .build_call(
+                                esc_fn,
+                                &[BasicMetadataValueEnum::PointerValue(ptr)],
+                                "json_tup_esc",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("mimi_json_escape_string void")?
+                            .into_pointer_value();
+                        self.build_call(
+                            strcpy_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(piece),
+                                BasicMetadataValueEnum::PointerValue(escaped),
+                            ],
+                            "json_tup_esc_cpy",
+                        )?;
+                    } else {
+                        // Nested product tuple.
+                        let nested = self.emit_product_tuple_to_json(fsv)?;
+                        self.build_call(
+                            strcpy_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(piece),
+                                BasicMetadataValueEnum::PointerValue(nested),
+                            ],
+                            "json_tup_nested_cpy",
+                        )?;
+                    }
+                }
+                (BasicTypeEnum::FloatType(_), BasicValueEnum::FloatValue(fv)) => {
+                    let fmt = self
+                        .builder
+                        .build_global_string_ptr("%g", "json_tup_f")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.build_call(
+                        snprintf_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(piece),
+                            BasicMetadataValueEnum::IntValue(buf_size),
+                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                            BasicMetadataValueEnum::FloatValue(fv),
+                        ],
+                        "json_tup_f_sn",
+                    )?;
+                }
+                _ => {
+                    let n = self
+                        .builder
+                        .build_global_string_ptr("null", "json_tup_null")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.build_call(
+                        strcpy_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(piece),
+                            BasicMetadataValueEnum::PointerValue(n.as_pointer_value()),
+                        ],
+                        "json_tup_null_cpy",
+                    )?;
+                }
+            }
+            self.build_call(
+                strcat_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(buf),
+                    BasicMetadataValueEnum::PointerValue(piece),
+                ],
+                "json_tup_piece_cat",
+            )?;
+        }
+        let close = self
+            .builder
+            .build_global_string_ptr("]", "json_tup_close")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_call(
+            strcat_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(buf),
+                BasicMetadataValueEnum::PointerValue(close.as_pointer_value()),
+            ],
+            "json_tup_close_cat",
+        )?;
+        Ok(buf)
+    }
+
     /// Format an all-integer struct (tuple / map_get) as `(v0, v1, ...)`.
     fn emit_int_tuple_to_string(
         &self,
