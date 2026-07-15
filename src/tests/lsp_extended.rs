@@ -314,9 +314,8 @@ fn diagnostic_type_mismatch() {
         func main() { add(1, "hello") }
     "#,
     );
-    // This might or might not fail depending on type inference
-    // Just ensure it doesn't panic
-    let _ = result;
+    // TC-H3: type mismatch must be rejected.
+    assert!(result.is_err(), "expected type error for add(1, \"hello\")");
 }
 
 #[test]
@@ -337,9 +336,9 @@ fn diagnostic_multiple_errors() {
 
 #[test]
 fn diagnostic_strict_mode() {
-    let result = check_source_strict("func main() { 42 }");
-    // Strict mode should still work
-    let _ = result;
+    let result = check_source_strict("func main() -> i32 { 42 }");
+    // TC-H3: strict mode must accept a well-typed program.
+    assert!(result.is_ok(), "strict well-typed main failed: {:?}", result);
 }
 
 // ===================== Phase D: References Tests =====================
@@ -518,8 +517,12 @@ fn debug_references() {
 fn hover_variable() {
     let server = LspServer::new();
     let text = "func main() {\n    let x = 42;\n    println(x);\n}";
-    let result = server.compute_hover(text, 1, 10);
-    let _ = result;
+    let result = server.compute_hover(text, 1, 8);
+    // TC-H3: hover may be None for unannotated lets, but must not panic.
+    // Prefer Some when available.
+    if let Some(h) = result {
+        assert!(h.get("contents").is_some(), "hover missing contents: {:?}", h);
+    }
 }
 
 #[test]
@@ -527,7 +530,8 @@ fn definition_variable() {
     let server = LspServer::new();
     let text = "func main() -> i32 {\n    let x = 42;\n    x\n}";
     let result = server.compute_definition(text, 2, 4, "file:///test.mimi");
-    let _ = result;
+    // TC-H3: local `x` should resolve to a definition range.
+    assert!(result.is_some(), "expected definition for local x");
 }
 
 #[test]
