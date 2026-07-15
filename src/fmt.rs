@@ -4,6 +4,47 @@
 /// blank line normalization. Does NOT reorder imports or restructure code.
 ///
 /// A7: Uses `source_scan::SourceScanner` for correct string/comment tracking.
+
+/// F-H1: whether a block comment remains open after scanning `line`.
+fn block_comment_carries(line: &str, already_open: bool) -> bool {
+    let mut open = already_open;
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if !open {
+            if chars[i] == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+                open = true;
+                i += 2;
+                continue;
+            }
+            // Skip line comments
+            if chars[i] == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+                break;
+            }
+            // Skip strings roughly
+            if chars[i] == '"' {
+                i += 1;
+                while i < chars.len() {
+                    if chars[i] == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if chars[i] == '"' {
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+        } else if chars[i] == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            open = false;
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    open
+}
+
 pub struct Formatter {
     indent_size: usize,
 }
@@ -196,10 +237,20 @@ impl Formatter {
         let mut output = String::new();
         let mut indent_level: usize = 0;
         let mut prev_blank = false;
+        // F-H1: track open block comments across lines so `*/` is not
+        // re-spaced as multiply/divide on continuation lines.
+        let mut in_block_comment = false;
 
         for line in source.lines() {
-            let trimmed = Self::normalize_spacing(line.trim());
+            let raw_trim = line.trim();
+            let trimmed = if in_block_comment {
+                raw_trim.to_string()
+            } else {
+                Self::normalize_spacing(raw_trim)
+            };
             let trimmed: &str = &trimmed;
+
+            in_block_comment = block_comment_carries(trimmed, in_block_comment);
 
             // Skip empty lines but track them
             if trimmed.is_empty() {
@@ -335,6 +386,24 @@ println(2)
 ";
         let result = fmt.format(input);
         assert!(result.contains("/* block comment */"));
+    }
+
+    #[test]
+    fn format_preserves_multiline_block_comments() {
+        // F-H1: cross-line /* ... */ must not be corrupted.
+        let fmt = Formatter::new();
+        let input = "func main() -> i32 {
+    /* line1
+       line2 */
+    42
+}
+";
+        let result = fmt.format(input);
+        assert!(
+            result.contains("/*") && result.contains("line1") && result.contains("line2") && result.contains("*/"),
+            "multiline block comment corrupted: {}",
+            result
+        );
     }
 
     #[test]
