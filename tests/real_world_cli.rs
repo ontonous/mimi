@@ -136,11 +136,12 @@ fn real_world_cli_suite() {
         if let Some(Err(e)) = &codegen {
             details.push_str(&format!("[codegen] {e}\n"));
         }
-        // L1 dual-backend: for flow_* programs, require matching stdout.
+        // TC-C5 / L1: require matching stdout for all dual successes, not only
+        // flow_* programs. Known gaps still route to known_gap_failures.
         if let (Ok(i), Some(Ok(c))) = (&interp_out, &codegen) {
             let i_trim = i.trim_end();
             let c_trim = c.trim_end();
-            if name.starts_with("flow_") && i_trim != c_trim {
+            if i_trim != c_trim {
                 details.push_str(&format!(
                     "[L1 dual-backend mismatch]\ninterp:\n{i_trim}\ncodegen:\n{c_trim}\n"
                 ));
