@@ -1587,6 +1587,44 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         ));
                                     }
                                 }
+                                if inner_val.starts_with("Result<") {
+                                    if let Some(ok_ty) = inner_val
+                                        .strip_prefix("Result<")
+                                        .and_then(|s| {
+                                            let mut depth = 0i32;
+                                            for (i, ch) in s.char_indices() {
+                                                match ch {
+                                                    '<' | '(' => depth += 1,
+                                                    '>' | ')' => depth -= 1,
+                                                    ',' if depth == 0 => {
+                                                        return Some(s[..i].trim());
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                            None
+                                        })
+                                    {
+                                        if ok_ty.starts_with('(')
+                                            || self.is_product_tuple_alias(ok_ty)
+                                        {
+                                            let elem = if self.is_product_tuple_alias(ok_ty)
+                                            {
+                                                self.resolve_alias_type_name(ok_ty)
+                                            } else {
+                                                ok_ty.to_string()
+                                            };
+                                            let raw = self
+                                                .emit_map_map_result_product_to_json(
+                                                    *iv, &elem, 1,
+                                                )?;
+                                            return Ok((
+                                                BasicMetadataValueEnum::PointerValue(raw),
+                                                "%s".to_string(),
+                                            ));
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1696,6 +1734,72 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         BasicMetadataValueEnum::PointerValue(raw),
                                         "%s".to_string(),
                                     ));
+                                }
+                                if let Some(list_elem) = val_ty
+                                    .strip_prefix("List<")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if list_elem.starts_with('(')
+                                        || self.is_product_tuple_alias(list_elem)
+                                    {
+                                        let resolved = if self
+                                            .is_product_tuple_alias(list_elem)
+                                        {
+                                            self.resolve_alias_type_name(list_elem)
+                                        } else {
+                                            list_elem.to_string()
+                                        };
+                                        let arity = {
+                                            let body = resolved
+                                                .strip_prefix('(')
+                                                .and_then(|s| s.strip_suffix(')'))
+                                                .unwrap_or(&resolved);
+                                            let mut arity = 0i64;
+                                            let mut depth = 0i32;
+                                            let mut any = false;
+                                            for ch in body.chars() {
+                                                match ch {
+                                                    '<' | '(' => depth += 1,
+                                                    '>' | ')' => depth -= 1,
+                                                    ',' if depth == 0 => {
+                                                        arity += 1;
+                                                        any = true;
+                                                    }
+                                                    c if !c.is_whitespace() => any = true,
+                                                    _ => {}
+                                                }
+                                            }
+                                            if any {
+                                                arity += 1;
+                                            }
+                                            arity.max(1)
+                                        };
+                                        let func = self.get_runtime_fn(
+                                            "mimi_set_to_json_map_list_product_i64",
+                                        )?;
+                                        let i64_ty = self.context.i64_type();
+                                        let raw = self
+                                            .build_call(
+                                                func,
+                                                &[
+                                                    BasicMetadataValueEnum::IntValue(*iv),
+                                                    BasicMetadataValueEnum::IntValue(
+                                                        i64_ty.const_int(arity as u64, false),
+                                                    ),
+                                                    BasicMetadataValueEnum::IntValue(
+                                                        i64_ty.const_int(1, false),
+                                                    ),
+                                                ],
+                                                "set_map_list_product_disp",
+                                            )?
+                                            .try_as_basic_value_opt()
+                                            .ok_or("set map list product display void")?
+                                            .into_pointer_value();
+                                        return Ok((
+                                            BasicMetadataValueEnum::PointerValue(raw),
+                                            "%s".to_string(),
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -8954,6 +9058,56 @@ impl<'ctx> CodeGenerator<'ctx> {
             )?
             .try_as_basic_value_opt()
             .ok_or("map list set map product to_json void")?
+            .into_pointer_value())
+    }
+
+    pub(in crate::codegen) fn emit_map_map_result_product_to_json(
+        &self,
+        handle: inkwell::values::IntValue<'ctx>,
+        product_type: &str,
+        display_style: i64,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let arity = {
+            let body = product_type
+                .strip_prefix('(')
+                .and_then(|s| s.strip_suffix(')'))
+                .unwrap_or(product_type);
+            let mut arity = 0i64;
+            let mut depth = 0i32;
+            let mut any = false;
+            for ch in body.chars() {
+                match ch {
+                    '<' | '(' => depth += 1,
+                    '>' | ')' => depth -= 1,
+                    ',' if depth == 0 => {
+                        arity += 1;
+                        any = true;
+                    }
+                    c if !c.is_whitespace() => any = true,
+                    _ => {}
+                }
+            }
+            if any {
+                arity += 1;
+            }
+            arity.max(1)
+        };
+        let func = self.get_runtime_fn("mimi_map_to_json_map_result_product_i64")?;
+        let i64_ty = self.context.i64_type();
+        Ok(self
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(handle),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
+                    BasicMetadataValueEnum::IntValue(
+                        i64_ty.const_int(display_style as u64, false),
+                    ),
+                ],
+                "map_map_result_product_json",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("map map result product to_json void")?
             .into_pointer_value())
     }
 
