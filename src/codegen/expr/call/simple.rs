@@ -1020,7 +1020,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.register_heap_alloc(raw);
                             return self.wrap_c_string(raw);
                         }
-                        // Scalar / other Option / nested Result Ok — runtime i64 helper.
+                        // Nested Result Ok: Result<Result<…>, E> — full LLVM load + recurse.
+                        if ok_inner.starts_with("Result") {
+                            let raw =
+                                self.emit_list_result_product_to_json(alloca, inner)?;
+                            self.register_heap_alloc(raw);
+                            return self.wrap_c_string(raw);
+                        }
+                        // Scalar Result Ok — runtime i64 helper.
                         "mimi_list_result_i64_to_json"
                     } else if inner.starts_with('(') || self.is_product_tuple_alias(inner) {
                         // List of product tuples (or type-alias of them).
