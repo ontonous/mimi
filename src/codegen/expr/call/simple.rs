@@ -893,13 +893,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             })
                             .unwrap_or("");
                         // Product-tuple / named-record / nested Result Ok — not bare scalar.
+                        // Product-tuple only (not named records — those use struct to_json).
                         let ok_is_product = ok_inner.starts_with('(')
                             || ok_inner.contains("Tuple")
-                            || ok_inner.starts_with("Result")
-                            || self.type_defs.get(ok_inner).is_some_and(|td| {
-                                matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                            })
                             || self.is_product_tuple_alias(ok_inner);
+                        let ok_is_named_record = self.type_defs.get(ok_inner).is_some_and(|td| {
+                            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                        });
                         let ok_is_option_product = ok_inner.starts_with("Option")
                             && (ok_inner.contains('(')
                                 || ok_inner.contains("Tuple")
@@ -913,6 +913,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                             };
                             let raw =
                                 self.emit_list_result_product_runtime(alloca, &elem, 0)?;
+                            self.register_heap_alloc(raw);
+                            return self.wrap_c_string(raw);
+                        }
+                        if ok_is_named_record {
+                            let raw =
+                                self.emit_list_result_product_to_json(alloca, inner)?;
                             self.register_heap_alloc(raw);
                             return self.wrap_c_string(raw);
                         }
