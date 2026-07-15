@@ -1213,3 +1213,21 @@ func main() -> i32 {
 "#;
     assert_eq!(run_source(src), crate::interp::Value::Int(7));
 }
+
+
+#[test]
+fn parasteps_captures_outer_local() {
+    // I-H6: parasteps worker must see outer locals used in spawn body.
+    let src = r#"
+func main() -> i32 {
+    let n = 40
+    let mut out = 0
+    parasteps {
+        let f = spawn (n + 2)
+        out = await f
+    }
+    out
+}
+"#;
+    assert_eq!(run_source(src), crate::interp::Value::Int(42));
+}
