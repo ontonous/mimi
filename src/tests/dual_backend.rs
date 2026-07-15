@@ -8070,6 +8070,42 @@ fn dual_from_json_list_map_string_vals() {
     );
 }
 
+/// from_json List of Option of Map dual.
+#[test]
+fn dual_from_json_list_option_map() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = from_json::<List<Option<Map<string, i32>>>>("[{\"a\":1}, null]")
+            println(xs)
+            0
+        }
+        "#,
+        "[Some({\"a\":1}), None()]"
+    );
+}
+
+/// to_json Option of List None dual.
+#[test]
+fn dual_to_json_option_list_none() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a: Option<List<i32>> = None
+            println(to_json(a))
+            0
+        }
+        "#,
+        "\"None\""
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
