@@ -39,20 +39,33 @@ pub(crate) fn extract_string_empty_cmp(lhs: &Expr, rhs: &Expr, op: &BinOp) -> (S
 
 /// Extract the return/tail expression from a function body, handling if-else branching.
 /// Uses `Expr::If` to represent conditional paths so the Z3 layer can encode them via `ite`.
+///
+/// V-C3: scan **forward** for the first reachable explicit `return` / top-level
+/// `if`. Reverse search previously picked dead code after an early return
+/// (e.g. `return 0; return 1` → wrongly chose `1`).
 pub(crate) fn extract_body_return(block: &[Stmt]) -> Option<Expr> {
-    // First pass: look for explicit returns and if-else expressions
-    for stmt in block.iter().rev() {
+    // First pass (forward): first explicit return or branching if wins.
+    for stmt in block.iter() {
         match stmt {
             Stmt::Return(Some(expr)) => return Some(expr.clone()),
             Stmt::Return(None) => return Some(Expr::Literal(Lit::Unit)),
             Stmt::If { cond, then_, else_ } => {
                 return extract_if_return(cond, then_, else_);
             }
-            _ => {}
+            Stmt::Requires(_, _)
+            | Stmt::Ensures(_, _)
+            | Stmt::Invariant(_, _)
+            | Stmt::Math(_)
+            | Stmt::Desc(..)
+            | Stmt::Rule(..)
+            | Stmt::MmsBlock { .. }
+            | Stmt::Let { .. }
+            | Stmt::Assign { .. }
+            | Stmt::Expr(_) => continue,
+            _ => continue,
         }
     }
-    // Second pass: look for implicit return (tail expression).
-    // Also skip let/assign statements so `let x = ...; expr` patterns are found.
+    // Second pass (reverse): implicit return = last expression, skipping lets.
     for stmt in block.iter().rev() {
         match stmt {
             Stmt::Expr(expr) => return Some(expr.clone()),

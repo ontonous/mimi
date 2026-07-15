@@ -1810,6 +1810,13 @@ impl VerifierCtx {
                     Self::build_let_subst_in_expr(e, subst);
                 }
                 Stmt::Assign { target, value } => {
+                    // V-C2: simple `name = expr` updates the substitution so
+                    // later uses of `name` see the assigned value, not the
+                    // original let-init (flat store model, no SSA).
+                    if let Expr::Ident(name) = target {
+                        let value_expr: &Expr = value;
+                        subst.insert(name.clone(), value_expr.clone());
+                    }
                     Self::build_let_subst_in_expr(target, subst);
                     Self::build_let_subst_in_expr(value, subst);
                 }
