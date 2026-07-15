@@ -5783,6 +5783,718 @@ pub extern "C" fn mimi_set_to_json_list_map_product_i64(
 
 
 /// Set of Result of Map of product from JSON.
+
+/// Set of Result of List of product from JSON.
+#[no_mangle]
+pub extern "C" fn mimi_set_from_json_result_list_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> SetHandle {
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return mimi_set_new();
+    }
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_set_new();
+    if handle == 0 {
+        return 0;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'[' {
+        return handle;
+    }
+    i += 1;
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b']' {
+            break;
+        }
+        if bytes[i] != b'{' {
+            break;
+        }
+        let obj_start = i;
+        let mut depth = 0i32;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        if bytes[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let obj = String::from_utf8_lossy(&bytes[obj_start..i]).into_owned();
+        let pack = unsafe { libc::malloc(16) as *mut i64 };
+        if pack.is_null() {
+            continue;
+        }
+        if obj.contains("\"Err\"") {
+            let mut err_s = String::new();
+            if let Some(pos) = obj.find("\"Err\"") {
+                let rest = &obj[pos + 5..];
+                if let Some(q1) = rest.find('"') {
+                    let r2 = &rest[q1 + 1..];
+                    if let Some(q2) = r2.find('"') {
+                        err_s = r2[..q2].to_string();
+                    }
+                }
+            }
+            let c = alloc_c_string(&err_s);
+            unsafe {
+                *pack = 0;
+                *pack.add(1) = c as i64;
+            }
+        } else {
+            let mut arr = String::from("[]");
+            if let Some(pos) = obj.find("\"Ok\"") {
+                let rest = &obj[pos + 4..];
+                if let Some(br) = rest.find('[') {
+                    let start = br;
+                    let rb = rest.as_bytes();
+                    let mut depth = 0i32;
+                    let mut k = start;
+                    while k < rb.len() {
+                        match rb[k] {
+                            b'[' => depth += 1,
+                            b']' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    k += 1;
+                                    break;
+                                }
+                            }
+                            b'"' => {
+                                k += 1;
+                                while k < rb.len() && rb[k] != b'"' {
+                                    if rb[k] == b'\\' {
+                                        k += 1;
+                                    }
+                                    k += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                        k += 1;
+                    }
+                    arr = rest[start..k].to_string();
+                }
+            }
+            // Wrap as single-entry map of list product, extract list handle.
+            let wrap = format!("{{\"_\":{}}}", arr);
+            let c_wrap = alloc_c_string(&wrap);
+            let tmp = mimi_map_from_json_list_product_i64(c_wrap, arity);
+            if !c_wrap.is_null() {
+                unsafe {
+                    libc::free(c_wrap as *mut _);
+                }
+            }
+            let mut list_h: i64 = 0;
+            if tmp != 0 {
+                let m = unsafe { &*map_from_handle(tmp) };
+                if let Some(v) = m.inner.values().next() {
+                    list_h = *v as i64;
+                }
+            }
+            unsafe {
+                *pack = 1;
+                *pack.add(1) = list_h;
+            }
+        }
+        mimi_set_insert(handle, pack as SetValueHandle);
+    }
+    handle
+}
+
+/// Set of Result of List of product Display/JSON.
+#[no_mangle]
+pub extern "C" fn mimi_set_to_json_result_list_product_i64(
+    handle: SetHandle,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if handle == 0 || arity <= 0 || arity > 16 {
+        return if display_style != 0 {
+            alloc_c_string("Set{}")
+        } else {
+            alloc_c_string("[]")
+        };
+    }
+    let set = unsafe { &*set_from_handle(handle) };
+    if set.inner.len() > 1_000_000 {
+        return if display_style != 0 {
+            alloc_c_string("Set{...}")
+        } else {
+            alloc_c_string("[...]")
+        };
+    }
+    let mut decorated: Vec<(i32, String)> = set
+        .inner
+        .iter()
+        .map(|vh| {
+            let pack = *vh as *const i64;
+            if pack.is_null() {
+                return (
+                    0,
+                    if display_style != 0 {
+                        String::from("Err()")
+                    } else {
+                        String::from("{\"Err\":[\"\"]}")
+                    },
+                );
+            }
+            let disc = unsafe { *pack };
+            if disc == 0 {
+                let err_ptr = unsafe { *pack.add(1) } as *const std::ffi::c_char;
+                let err_s = if err_ptr.is_null() {
+                    String::new()
+                } else {
+                    unsafe { cstr_to_string(err_ptr) }
+                };
+                let s = if display_style != 0 {
+                    format!("Err({})", err_s)
+                } else {
+                    format!("{{\"Err\":[{}]}}", json_escape_string(&err_s))
+                };
+                (0, s)
+            } else {
+                let list_ptr = unsafe { *pack.add(1) } as *const MimiList;
+                // Display list-of-product via one-entry map helper.
+                let tmp = mimi_map_new();
+                if tmp != 0 {
+                    unsafe {
+                        (*map_from_handle(tmp))
+                            .inner
+                            .insert(String::from("_"), list_ptr as ValueHandle);
+                    }
+                }
+                let jp = mimi_map_to_json_list_product_i64(tmp, arity, display_style);
+                let map_s = unsafe { cstr_to_string(jp) };
+                if !jp.is_null() {
+                    unsafe {
+                        libc::free(jp as *mut _);
+                    }
+                }
+                // Extract value after first ':'
+                let list_s = if let Some(pos) = map_s.find(':') {
+                    let rest = map_s[pos + 1..].trim();
+                    if rest.ends_with('}') {
+                        rest[..rest.len() - 1].to_string()
+                    } else {
+                        rest.to_string()
+                    }
+                } else {
+                    String::from("[]")
+                };
+                let s = if display_style != 0 {
+                    format!("Ok({})", list_s)
+                } else {
+                    format!("{{\"Ok\":[{}]}}", list_s)
+                };
+                (1, s)
+            }
+        })
+        .collect();
+    decorated.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    if display_style != 0 {
+        let mut parts: Vec<String> = Vec::with_capacity(decorated.len() * 2 + 2);
+        parts.push(String::from("Set{"));
+        for (i, (_, val)) in decorated.iter().enumerate() {
+            if i > 0 {
+                parts.push(String::from(", "));
+            }
+            parts.push(val.clone());
+        }
+        parts.push(String::from("}"));
+        alloc_c_string(&parts.join(""))
+    } else {
+        let mut parts: Vec<String> = Vec::with_capacity(decorated.len() * 2 + 2);
+        parts.push(String::from("["));
+        for (i, (_, val)) in decorated.iter().enumerate() {
+            if i > 0 {
+                parts.push(String::from(","));
+            }
+            parts.push(val.clone());
+        }
+        parts.push(String::from("]"));
+        alloc_c_string(&parts.join(""))
+    }
+}
+
+/// Map of List of Map of List of product from JSON.
+#[no_mangle]
+pub extern "C" fn mimi_map_from_json_list_map_list_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> MapHandle {
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return mimi_map_new();
+    }
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_map_new();
+    if handle == 0 {
+        return 0;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'{' {
+        return handle;
+    }
+    i += 1;
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b'}' {
+            break;
+        }
+        if bytes[i] != b'"' {
+            break;
+        }
+        i += 1;
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'"' {
+            if bytes[i] == b'\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let key = String::from_utf8_lossy(&bytes[start..i]).into_owned();
+        i += 1;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'[' {
+            break;
+        }
+        let arr_start = i;
+        let mut depth = 0i32;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        if bytes[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let arr = String::from_utf8_lossy(&bytes[arr_start..i]).into_owned();
+        let c_arr = alloc_c_string(&arr);
+        // List of Map of List of product: reuse list_from_json_map with list values
+        // via parsing each element as map of list product
+        let list_ptr = mimi_list_from_json_map_list_product_i64(c_arr, arity);
+        if !c_arr.is_null() {
+            unsafe {
+                libc::free(c_arr as *mut _);
+            }
+        }
+        unsafe {
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, list_ptr as ValueHandle);
+        }
+    }
+    handle
+}
+
+/// List of Map of List of product from JSON.
+#[no_mangle]
+pub extern "C" fn mimi_list_from_json_map_list_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> *mut MimiList {
+    let empty = || {
+        let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
+        if !list.is_null() {
+            unsafe {
+                (*list).len = 0;
+                (*list).data = std::ptr::null_mut();
+                (*list).owns_data = true;
+            }
+        }
+        list
+    };
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return empty();
+    }
+    let s = unsafe { cstr_to_string(json) };
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'[' {
+        return empty();
+    }
+    i += 1;
+    let mut handles: Vec<i64> = Vec::new();
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b']' {
+            break;
+        }
+        if bytes[i] != b'{' {
+            break;
+        }
+        let obj_start = i;
+        let mut depth = 0i32;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        if bytes[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let obj = String::from_utf8_lossy(&bytes[obj_start..i]).into_owned();
+        let c_obj = alloc_c_string(&obj);
+        let mh = mimi_map_from_json_list_product_i64(c_obj, arity);
+        if !c_obj.is_null() {
+            unsafe {
+                libc::free(c_obj as *mut _);
+            }
+        }
+        handles.push(mh as i64);
+    }
+    let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
+    if list.is_null() {
+        return empty();
+    }
+    let data_size = handles.len() * 8;
+    let data = if data_size == 0 {
+        std::ptr::null_mut()
+    } else {
+        unsafe { libc::malloc(data_size) as *mut i64 }
+    };
+    if data_size > 0 && data.is_null() {
+        unsafe {
+            libc::free(list as *mut _);
+        }
+        return empty();
+    }
+    if !data.is_null() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(handles.as_ptr(), data, handles.len());
+        }
+    }
+    unsafe {
+        (*list).len = handles.len() as i64;
+        (*list).data = data as *mut *mut std::ffi::c_char;
+        (*list).owns_data = true;
+    }
+    list
+}
+
+/// List of Map of List of product Display/JSON.
+#[no_mangle]
+pub extern "C" fn mimi_list_map_list_product_to_json(
+    list: *const MimiList,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if list.is_null() || arity <= 0 || arity > 16 {
+        return alloc_c_string("[]");
+    }
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len <= 0 {
+        return alloc_c_string("[]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize * 2 + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(if display_style != 0 {
+                String::from(", ")
+            } else {
+                String::from(",")
+            });
+        }
+        let h = unsafe { *(lst.data as *const i64).offset(i) };
+        let map_json = mimi_map_to_json_list_product_i64(h as MapHandle, arity, display_style);
+        let s = unsafe { cstr_to_string(map_json) };
+        if !map_json.is_null() {
+            unsafe {
+                libc::free(map_json as *mut _);
+            }
+        }
+        parts.push(s);
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
+/// Map of List of Map of List of product Display/JSON.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_list_map_list_product_i64(
+    handle: MapHandle,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if handle == 0 || arity <= 0 || arity > 16 {
+        return alloc_c_string("{}");
+    }
+    let map = unsafe { &*map_from_handle(handle) };
+    if map.inner.len() > 1_000_000 {
+        return alloc_c_string("{...}");
+    }
+    let mut entries: Vec<_> = map.inner.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 2 + 2);
+    parts.push(String::from("{"));
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        parts.push(json_escape_string(k));
+        parts.push(String::from(":"));
+        let vh = **v;
+        if vh == 0 {
+            parts.push(String::from("[]"));
+            continue;
+        }
+        let list_ptr = vh as *const MimiList;
+        let json_ptr = mimi_list_map_list_product_to_json(list_ptr, arity, display_style);
+        let s = unsafe { cstr_to_string(json_ptr) };
+        if !json_ptr.is_null() {
+            unsafe {
+                libc::free(json_ptr as *mut _);
+            }
+        }
+        parts.push(s);
+    }
+    parts.push(String::from("}"));
+    alloc_c_string(&parts.join(""))
+}
+
+/// Map of Option of Map of List of product from JSON.
+#[no_mangle]
+pub extern "C" fn mimi_map_from_json_option_map_list_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> MapHandle {
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return mimi_map_new();
+    }
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_map_new();
+    if handle == 0 {
+        return 0;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'{' {
+        return handle;
+    }
+    i += 1;
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b'}' {
+            break;
+        }
+        if bytes[i] != b'"' {
+            break;
+        }
+        i += 1;
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'"' {
+            if bytes[i] == b'\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let key = String::from_utf8_lossy(&bytes[start..i]).into_owned();
+        i += 1;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let pack = unsafe { libc::malloc(16) as *mut i64 };
+        if pack.is_null() {
+            continue;
+        }
+        if bytes[i] == b'n' && i + 4 <= bytes.len() && &bytes[i..i + 4] == b"null" {
+            i += 4;
+            unsafe {
+                *pack = 0;
+                *pack.add(1) = 0;
+            }
+        } else if bytes[i] == b'{' {
+            let obj_start = i;
+            let mut depth = 0i32;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    b'"' => {
+                        i += 1;
+                        while i < bytes.len() && bytes[i] != b'"' {
+                            if bytes[i] == b'\\' {
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            let obj = String::from_utf8_lossy(&bytes[obj_start..i]).into_owned();
+            let c_obj = alloc_c_string(&obj);
+            let mh = mimi_map_from_json_list_product_i64(c_obj, arity);
+            if !c_obj.is_null() {
+                unsafe {
+                    libc::free(c_obj as *mut _);
+                }
+            }
+            unsafe {
+                *pack = 1;
+                *pack.add(1) = mh as i64;
+            }
+        } else {
+            unsafe {
+                libc::free(pack as *mut _);
+            }
+            break;
+        }
+        unsafe {
+            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+        }
+    }
+    handle
+}
+
+/// Map of Option of Map of List of product Display/JSON.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_option_map_list_product_i64(
+    handle: MapHandle,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if handle == 0 || arity <= 0 || arity > 16 {
+        return alloc_c_string("{}");
+    }
+    let map = unsafe { &*map_from_handle(handle) };
+    if map.inner.len() > 1_000_000 {
+        return alloc_c_string("{...}");
+    }
+    let mut entries: Vec<_> = map.inner.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 2 + 2);
+    parts.push(String::from("{"));
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        parts.push(json_escape_string(k));
+        parts.push(String::from(":"));
+        let vh = **v;
+        if vh == 0 {
+            if display_style != 0 {
+                parts.push(String::from("None()"));
+            } else {
+                parts.push(String::from("\"None\""));
+            }
+            continue;
+        }
+        let base = vh as *const i64;
+        let disc = unsafe { *base };
+        if disc == 0 {
+            if display_style != 0 {
+                parts.push(String::from("None()"));
+            } else {
+                parts.push(String::from("\"None\""));
+            }
+        } else {
+            let mh = unsafe { *base.add(1) } as MapHandle;
+            let map_json = mimi_map_to_json_list_product_i64(mh, arity, display_style);
+            let s = unsafe { cstr_to_string(map_json) };
+            if !map_json.is_null() {
+                unsafe {
+                    libc::free(map_json as *mut _);
+                }
+            }
+            if display_style != 0 {
+                parts.push(format!("Some({})", s));
+            } else {
+                parts.push(format!("{{\"Some\":[{}]}}", s));
+            }
+        }
+    }
+    parts.push(String::from("}"));
+    alloc_c_string(&parts.join(""))
+}
+
 #[no_mangle]
 pub extern "C" fn mimi_set_from_json_result_map_product_i64(
     json: *const std::ffi::c_char,
