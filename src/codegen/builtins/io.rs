@@ -4001,6 +4001,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             NestedOpt(inkwell::values::IntValue<'a>),
             /// Nested Result payload is ptrtoint of heap Result; load only in Some arm.
             NestedRes(inkwell::values::IntValue<'a>),
+            /// List payload is ptrtoint (or pointer) of list struct; load only in Some arm
+            /// so None's null/garbage handle does not SIGSEGV.
+            NestedList(inkwell::values::IntValue<'a>),
         }
         let pay_kind = match payload_bv {
             BasicValueEnum::IntValue(iv) => {
@@ -4100,74 +4103,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .into_pointer_value();
                         OptPay::StrPtr(raw)
                     } else if arg_type.contains("List<") || arg_type.starts_with("Option<List") {
-                        // Option of List stored as ptrtoint of list struct.
-                        // Product-tuple elements need codegen helpers; scalars use
-                        // runtime list_to_string. Load list only in Some arm via
-                        // pointer (null-safe when disc is checked later).
-                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                        let list_ptr = self
-                            .builder
-                            .build_int_to_ptr(as_i64, i8_ptr, "opt_list_from_i64")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let list_ty = self.list_struct_type();
-                        let loaded = self
-                            .builder
-                            .build_load(
-                                BasicTypeEnum::StructType(list_ty),
-                                list_ptr,
-                                "opt_list_ld",
-                            )
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                            .into_struct_value();
-                        let list_str = if arg_type.contains("List<string>") {
-                            self.emit_list_string_to_string(loaded)?
-                        } else if let Some(inner) = arg_type
-                            .strip_prefix("Option<")
-                            .and_then(|s| s.strip_suffix('>'))
-                            .and_then(|s| s.strip_prefix("List<"))
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if inner.starts_with("List<") {
-                                let mid = Self::strip_first_type_arg(
-                                    &format!("List<{}>", inner),
-                                    "List",
-                                )
-                                .unwrap_or_else(|| inner.to_string());
-                                let mid_elem = Self::strip_first_type_arg(&mid, "List")
-                                    .unwrap_or_else(|| mid.clone());
-                                if mid_elem.starts_with('(')
-                                    || self.is_product_tuple_alias(&mid_elem)
-                                {
-                                    let elem = if self.is_product_tuple_alias(&mid_elem) {
-                                        self.resolve_alias_type_name(&mid_elem)
-                                    } else {
-                                        mid_elem
-                                    };
-                                    self.emit_list_list_product_tuple_to_string(loaded, &elem)?
-                                } else {
-                                    self.emit_list_i32_to_string(loaded)?
-                                }
-                            } else if inner.starts_with('(') || self.is_product_tuple_alias(inner)
-                            {
-                                let elem = if self.is_product_tuple_alias(inner) {
-                                    self.resolve_alias_type_name(inner)
-                                } else {
-                                    inner.to_string()
-                                };
-                                self.emit_list_product_tuple_to_string(loaded, &elem)?
-                            } else if inner.starts_with("Option") {
-                                self.emit_list_option_to_string(loaded, inner)?
-                            } else if inner.starts_with("Result") {
-                                self.emit_list_result_to_string(loaded, inner)?
-                            } else if arg_type.contains("Map") {
-                                self.emit_list_map_to_string(loaded, "List")?
-                            } else {
-                                self.emit_list_i32_to_string(loaded)?
-                            }
-                        } else {
-                            self.emit_list_i32_to_string(loaded)?
-                        };
-                        OptPay::StrPtr(list_str)
+                        // Defer list load until Some arm (None payload may be null).
+                        OptPay::NestedList(as_i64)
                     } else if arg_type
                         .strip_prefix("Option<")
                         .and_then(|s| s.strip_suffix('>'))
@@ -4193,59 +4130,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } else if arg_type.starts_with("Option<List")
                     || arg_type.contains("List<")
                 {
-                    // Option of list: payload is pointer to {i64,ptr} list.
-                    let list_ty = self.list_struct_type();
-                    let loaded = self
-                        .builder
-                        .build_load(
-                            BasicTypeEnum::StructType(list_ty),
-                            pv,
-                            "opt_list_ld",
-                        )
-                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                        .into_struct_value();
-                    let list_str = if arg_type.contains("List<string>") {
-                        self.emit_list_string_to_string(loaded)?
-                    } else if let Some(inner) = arg_type
-                        .strip_prefix("Option<")
-                        .and_then(|s| s.strip_suffix('>'))
-                        .and_then(|s| s.strip_prefix("List<"))
-                        .and_then(|s| s.strip_suffix('>'))
-                    {
-                        if inner.starts_with("List<") {
-                            let mid_elem = Self::strip_first_type_arg(
-                                &format!("List<{}>", inner),
-                                "List",
-                            )
-                            .and_then(|mid| Self::strip_first_type_arg(&mid, "List"))
-                            .unwrap_or_else(|| inner.to_string());
-                            if mid_elem.starts_with('(')
-                                || self.is_product_tuple_alias(&mid_elem)
-                            {
-                                let elem = if self.is_product_tuple_alias(&mid_elem) {
-                                    self.resolve_alias_type_name(&mid_elem)
-                                } else {
-                                    mid_elem
-                                };
-                                self.emit_list_list_product_tuple_to_string(loaded, &elem)?
-                            } else {
-                                self.emit_list_i32_to_string(loaded)?
-                            }
-                        } else if inner.starts_with('(') || self.is_product_tuple_alias(inner)
-                        {
-                            let elem = if self.is_product_tuple_alias(inner) {
-                                self.resolve_alias_type_name(inner)
-                            } else {
-                                inner.to_string()
-                            };
-                            self.emit_list_product_tuple_to_string(loaded, &elem)?
-                        } else {
-                            self.emit_list_i32_to_string(loaded)?
-                        }
-                    } else {
-                        self.emit_list_i32_to_string(loaded)?
-                    };
-                    OptPay::StrPtr(list_str)
+                    // Defer list load until Some arm.
+                    let as_i64 = self
+                        .build_ptr_to_int(pv, i64_ty, "opt_list_ptr_i64")?;
+                    OptPay::NestedList(as_i64)
                 } else {
                     OptPay::StrPtr(pv)
                 }
@@ -4568,6 +4456,85 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicMetadataValueEnum::PointerValue(nested),
                     ],
                     "opt_res_snprintf",
+                )?;
+            }
+            OptPay::NestedList(as_i64) => {
+                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                let list_ptr = self
+                    .builder
+                    .build_int_to_ptr(as_i64, i8_ptr, "opt_list_from_i64")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let list_ty = self.list_struct_type();
+                let loaded = self
+                    .builder
+                    .build_load(
+                        BasicTypeEnum::StructType(list_ty),
+                        list_ptr,
+                        "opt_list_ld",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_struct_value();
+                let list_str = if arg_type.contains("List<string>") {
+                    self.emit_list_string_to_string(loaded)?
+                } else if let Some(inner) = arg_type
+                    .strip_prefix("Option<")
+                    .and_then(|s| s.strip_suffix('>'))
+                    .and_then(|s| s.strip_prefix("List<"))
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    if inner.starts_with("List<") {
+                        let mid = Self::strip_first_type_arg(
+                            &format!("List<{}>", inner),
+                            "List",
+                        )
+                        .unwrap_or_else(|| inner.to_string());
+                        let mid_elem = Self::strip_first_type_arg(&mid, "List")
+                            .unwrap_or_else(|| mid.clone());
+                        if mid_elem.starts_with('(')
+                            || self.is_product_tuple_alias(&mid_elem)
+                        {
+                            let elem = if self.is_product_tuple_alias(&mid_elem) {
+                                self.resolve_alias_type_name(&mid_elem)
+                            } else {
+                                mid_elem
+                            };
+                            self.emit_list_list_product_tuple_to_string(loaded, &elem)?
+                        } else {
+                            self.emit_list_i32_to_string(loaded)?
+                        }
+                    } else if inner.starts_with('(') || self.is_product_tuple_alias(inner)
+                    {
+                        let elem = if self.is_product_tuple_alias(inner) {
+                            self.resolve_alias_type_name(inner)
+                        } else {
+                            inner.to_string()
+                        };
+                        self.emit_list_product_tuple_to_string(loaded, &elem)?
+                    } else if inner.starts_with("Option") {
+                        self.emit_list_option_to_string(loaded, inner)?
+                    } else if inner.starts_with("Result") {
+                        self.emit_list_result_to_string(loaded, inner)?
+                    } else if arg_type.contains("Map") {
+                        self.emit_list_map_to_string(loaded, "List")?
+                    } else {
+                        self.emit_list_i32_to_string(loaded)?
+                    }
+                } else {
+                    self.emit_list_i32_to_string(loaded)?
+                };
+                let some_fmt = self
+                    .builder
+                    .build_global_string_ptr("Some(%s)", "opt_list_sfmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::IntValue(buf_size),
+                        BasicMetadataValueEnum::PointerValue(some_fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::PointerValue(list_str),
+                    ],
+                    "opt_list_snprintf",
                 )?;
             }
             OptPay::Float(fv) => {

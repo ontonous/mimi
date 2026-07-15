@@ -7264,6 +7264,25 @@ fn dual_option_list_list_tuple() {
     );
 }
 
+/// Result of Option of List of product-tuple dual.
+#[test]
+fn dual_result_option_list_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let x: Result<Option<List<(i32, i32)>>, string> = Ok(Some([(1, 2)]))
+            println(x)
+            println(to_json(x))
+            0
+        }
+        "#,
+        "Ok(Some([(1, 2)]))\n{\"Ok\":[{\"Some\":[[[1,2]]]}]}"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {
