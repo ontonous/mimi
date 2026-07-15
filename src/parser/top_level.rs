@@ -1124,19 +1124,23 @@ impl Parser {
                 TokenKind::State => {
                     self.advance();
                     let name = self.expect_ident()?;
-                    let payload_type = if self.at(&TokenKind::LBrace) {
+                    let (payload_name, payload_type) = if self.at(&TokenKind::LBrace) {
                         self.advance();
                         // Parse single payload type: { data: f32 }
-                        let _fname = self.expect_ident()?;
+                        let field_name = self.expect_ident()?;
                         self.expect(TokenKind::Colon, "`:`")?;
                         let fty = self.parse_type()?;
                         self.expect(TokenKind::RBrace, "`}`")?;
-                        Some(fty)
+                        (Some(field_name), Some(fty))
                     } else {
-                        None
+                        (None, None)
                     };
                     self.match_semi();
-                    states.push(ProtocolStateDef { name, payload_type });
+                    states.push(ProtocolStateDef {
+                        name,
+                        payload_name,
+                        payload_type,
+                    });
                 }
                 TokenKind::Transition => {
                     self.advance();

@@ -706,6 +706,7 @@ pub enum SessionType {
 #[derive(Debug, Clone)]
 pub struct ProtocolStateDef {
     pub name: String,
+    pub payload_name: Option<String>,
     pub payload_type: Option<Type>,
 }
 

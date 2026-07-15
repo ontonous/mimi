@@ -2728,6 +2728,24 @@ func main() -> i32 {
 }
 
 #[test]
+fn flow_check_protocol_payload_field_name_must_match() {
+    let src = r#"
+protocol Sensor {
+    state Active { data: i32 }
+}
+flow Bad {
+    impl Sensor
+    state Active { wrong: i32 }
+}
+func main() -> i32 { 0 }
+"#;
+    assert!(
+        check_source(src).is_err(),
+        "a same-typed field with the wrong name must not satisfy a protocol payload"
+    );
+}
+
+#[test]
 fn flow_check_protocol_multi_target_covers_edge() {
     // Multi-target transition covers protocol edge if required to_state is listed.
     let src = r#"
