@@ -1179,3 +1179,17 @@ func main() -> i32 {
     let call = interp.call_named("main", vec![]);
     assert!(call.is_err(), "expected requires failure, got {:?}", call);
 }
+
+
+#[test]
+fn spawn_named_func_is_deferred() {
+    // I-H5: named-func spawn should complete via await (Deferred path).
+    let src = r#"
+func work(n: i32) -> i32 { n + 1 }
+func main() -> i32 {
+    let f = spawn work(41)
+    await f
+}
+"#;
+    assert_eq!(run_source(src), crate::interp::Value::Int(42));
+}

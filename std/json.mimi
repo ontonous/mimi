@@ -63,13 +63,7 @@ impl JsonExt for string {
     func get_object(key: string) -> string { json_get_string(self, key) }
     func get_array(key: string) -> string { json_get_string(self, key) }
     func array_length() -> i32 {
-        let mut al_i = 0
-        let mut al_found = true
-        while al_found {
-            let elem = json_get_element(self, al_i)
-            if elem == "" { al_found = false } else { al_i += 1 }
-        }
-        al_i
+        json_array_length(self)
     }
 }
 
@@ -141,11 +135,5 @@ pub func get_array(json: string, key: string) -> string {
 
 // array_length: Returns the number of elements in a JSON array.
 pub func array_length(json: string) -> i32 {
-    let mut al_i = 0
-    let mut al_found = true
-    while al_found {
-        let elem = json_get_element(json, al_i)
-        if elem == "" { al_found = false } else { al_i += 1 }
-    }
-    al_i
+    json_array_length(json)
 }

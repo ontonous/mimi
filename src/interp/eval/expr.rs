@@ -1371,8 +1371,30 @@ impl<'a> Interpreter<'a> {
                 }
             }
         }
-        // Non-actor `spawn expr` — evaluate inline (same env), return Future<T>
-        // Note: true concurrent thread pool evaluation requires env capture, deferred
+        // I-H5: non-actor `spawn expr` must not evaluate the body on the
+        // caller thread before returning a Future. Prefer Deferred for
+        // named function calls so await runs them via executor_run.
+        if let Expr::Call(callee, args) = expr {
+            if let Expr::Ident(name) = callee.as_ref() {
+                if let Some(func) = self.find_function(name) {
+                    let args_vals: Vec<Value> = args
+                        .iter()
+                        .map(|a| self.eval_expr(a))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let fut = std::sync::Arc::new(std::sync::Mutex::new(
+                        crate::interp::value::PollFuture::Deferred {
+                            file: Box::new(self.file.clone()),
+                            func,
+                            args: args_vals,
+                        },
+                    ));
+                    crate::interp::value::executor_submit(fut.clone());
+                    return Ok(Value::Future(fut));
+                }
+            }
+        }
+        // Fallback: evaluate now and wrap as already-ready Pending channel.
+        // (Arbitrary expressions still lack full env capture for true async.)
         let result = self.eval_expr(expr);
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = tx.send(result);
