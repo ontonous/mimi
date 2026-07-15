@@ -2414,6 +2414,72 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 .into());
                                         }
                                     }
+                                    // Result of List of Option of product.
+                                    if ln == "Result" && mn == "List" && margs.len() == 1 {
+                                        let list_elem0 = match &margs[0] {
+                                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                                if let Some(td) = self.type_defs.get(an) {
+                                                    if let crate::ast::TypeDefKind::Alias(inner) =
+                                                        &td.kind
+                                                    {
+                                                        inner.clone()
+                                                    } else {
+                                                        margs[0].clone()
+                                                    }
+                                                } else {
+                                                    margs[0].clone()
+                                                }
+                                            }
+                                            other => other.clone(),
+                                        };
+                                        if let Type::Name(on, oargs) = &list_elem0 {
+                                            if on == "Option" && oargs.len() == 1 {
+                                                let opt_inner = match &oargs[0] {
+                                                    Type::Name(an, aargs) if aargs.is_empty() => {
+                                                        if let Some(td) = self.type_defs.get(an) {
+                                                            if let crate::ast::TypeDefKind::Alias(
+                                                                inner,
+                                                            ) = &td.kind
+                                                            {
+                                                                inner.clone()
+                                                            } else {
+                                                                oargs[0].clone()
+                                                            }
+                                                        } else {
+                                                            oargs[0].clone()
+                                                        }
+                                                    }
+                                                    other => other.clone(),
+                                                };
+                                                if let Type::Tuple(elems) = opt_inner {
+                                                    let arity = elems.len() as u64;
+                                                    let func = self.get_runtime_fn(
+                                                        "mimi_map_from_json_result_list_option_product_i64",
+                                                    )?;
+                                                    let result = self.build_call(
+                                                        func,
+                                                        &[
+                                                            BasicMetadataValueEnum::PointerValue(
+                                                                raw_ptr,
+                                                            ),
+                                                            BasicMetadataValueEnum::IntValue(
+                                                                self.context
+                                                                    .i64_type()
+                                                                    .const_int(arity, false),
+                                                            ),
+                                                        ],
+                                                        "map_from_json_result_list_option_product",
+                                                    )?;
+                                                    return Ok(self
+                                                        .expect_basic_value(
+                                                            &result,
+                                                            "mimi_map_from_json_result_list_option_product_i64",
+                                                        )?
+                                                        .into());
+                                                }
+                                            }
+                                        }
+                                    }
                                     // Result of List of product.
                                     if ln == "Result" && mn == "List" && margs.len() == 1 {
                                         let list_elem = match &margs[0] {
