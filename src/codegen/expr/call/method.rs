@@ -2680,6 +2680,55 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                 }
                             }
+                            // Map of Map of Set of product (outer Map values are Map of Set of product).
+                            if ln == "Map" {
+                                if let Type::Name(sn, sargs) = &le {
+                                    if sn == "Set" && sargs.len() == 1 {
+                                        let set_elem = match &sargs[0] {
+                                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                                if let Some(td) = self.type_defs.get(an) {
+                                                    if let crate::ast::TypeDefKind::Alias(inner) =
+                                                        &td.kind
+                                                    {
+                                                        inner.clone()
+                                                    } else {
+                                                        sargs[0].clone()
+                                                    }
+                                                } else {
+                                                    sargs[0].clone()
+                                                }
+                                            }
+                                            other => other.clone(),
+                                        };
+                                        if let Type::Tuple(elems) = set_elem {
+                                            let arity = elems.len() as u64;
+                                            let func = self.get_runtime_fn(
+                                                "mimi_map_from_json_map_set_product_i64",
+                                            )?;
+                                            let result = self.build_call(
+                                                func,
+                                                &[
+                                                    BasicMetadataValueEnum::PointerValue(
+                                                        raw_ptr,
+                                                    ),
+                                                    BasicMetadataValueEnum::IntValue(
+                                                        self.context
+                                                            .i64_type()
+                                                            .const_int(arity, false),
+                                                    ),
+                                                ],
+                                                "map_from_json_map_set_product",
+                                            )?;
+                                            return Ok(self
+                                                .expect_basic_value(
+                                                    &result,
+                                                    "mimi_map_from_json_map_set_product_i64",
+                                                )?
+                                                .into());
+                                        }
+                                    }
+                                }
+                            }
                             // Set of List of Map of product.
                             if ln == "Set" {
                                 if let Type::Name(mn, margs) = &le {
@@ -4256,6 +4305,53 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         .expect_basic_value(
                                             &result,
                                             "mimi_set_from_json_list_map_product_i64",
+                                        )?
+                                        .into());
+                                }
+                            }
+                        }
+                    }
+                }
+                // Set of Option of Map of product.
+                if let Some(Type::Name(on, oargs)) = elem_ty {
+                    if on == "Option" && oargs.len() == 1 {
+                        if let Type::Name(mn, margs) = &oargs[0] {
+                            if mn == "Map" && margs.len() == 2 {
+                                let map_val = match &margs[1] {
+                                    Type::Name(an, aargs) if aargs.is_empty() => {
+                                        if let Some(td) = self.type_defs.get(an) {
+                                            if let crate::ast::TypeDefKind::Alias(inner) =
+                                                &td.kind
+                                            {
+                                                inner.clone()
+                                            } else {
+                                                margs[1].clone()
+                                            }
+                                        } else {
+                                            margs[1].clone()
+                                        }
+                                    }
+                                    other => other.clone(),
+                                };
+                                if let Type::Tuple(elems) = map_val {
+                                    let arity = elems.len() as u64;
+                                    let func = self.get_runtime_fn(
+                                        "mimi_set_from_json_option_map_product_i64",
+                                    )?;
+                                    let result = self.build_call(
+                                        func,
+                                        &[
+                                            BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                            BasicMetadataValueEnum::IntValue(
+                                                self.context.i64_type().const_int(arity, false),
+                                            ),
+                                        ],
+                                        "set_from_json_option_map_product",
+                                    )?;
+                                    return Ok(self
+                                        .expect_basic_value(
+                                            &result,
+                                            "mimi_set_from_json_option_map_product_i64",
                                         )?
                                         .into());
                                 }
