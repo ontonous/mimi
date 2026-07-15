@@ -3,6 +3,23 @@
 
 use super::*;
 
+#[test]
+fn read_lines_each_propagates_callback_errors() {
+    let src = r#"
+func fail_line(line: string) -> i32 {
+    assert(false)
+    0
+}
+
+func main() -> i32 {
+    write_file("/tmp/mimi_read_lines_each_error.txt", "line\n")
+    read_lines_each("/tmp/mimi_read_lines_each_error.txt", fail_line)
+}
+"#;
+    let err = run_source_result(src).expect_err("callback failure must propagate");
+    assert!(err.contains("assert"), "unexpected error: {}", err);
+}
+
 // ====== Deep Nesting Stress ======
 
 #[test]
