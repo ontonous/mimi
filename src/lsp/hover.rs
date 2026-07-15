@@ -637,8 +637,23 @@ impl LspServer {
         character: usize,
         word: &str,
     ) -> Option<Value> {
-        for item in &file.items {
-            if let Item::Func(f) = item {
+        // L-H8: walk functions whose signature starts at/before the cursor
+        // line (prefer later funcs so nested/local scope wins).
+        let mut funcs: Vec<&crate::ast::FuncDef> = file
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Func(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        funcs.sort_by_key(|f| f.pos.0);
+        for f in funcs.into_iter().rev() {
+            let start0 = f.pos.0.saturating_sub(1);
+            if line < start0 {
+                continue;
+            }
+            {
                 // 1. Function parameters: hover over `x` in `f.params`
                 if let Some(param) = f.params.iter().find(|p| p.name == word) {
                     // The cursor must be inside the function signature line

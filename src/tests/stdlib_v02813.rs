@@ -15,6 +15,23 @@ fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
     (a - b).abs() < eps
 }
 
+
+/// TC-H4: run a pure float main() on both backends (interp Value + println codegen).
+fn dual_float_main(body: &str, expected: f64, eps: f64, label: &str) {
+    let src = format!("func main() -> f64 {{ {} }}", body);
+    assert_float_approx(run_source(&src), expected, eps, label);
+    let cg = format!("func main() -> i32 {{ println({}); 0 }}", body);
+    let out = compile_and_run(&cg).unwrap_or_else(|e| panic!("{} codegen: {}", label, e));
+    let v: f64 = out.trim().parse().unwrap_or_else(|_| panic!("{} parse: {}", label, out));
+    assert!(
+        (v - expected).abs() < eps,
+        "{} codegen: expected ~{}, got {}",
+        label,
+        expected,
+        v
+    );
+}
+
 fn assert_float_approx(result: interp::Value, expected: f64, eps: f64, label: &str) {
     if let interp::Value::Float(f) = result {
         assert!(
@@ -31,34 +48,22 @@ fn assert_float_approx(result: interp::Value, expected: f64, eps: f64, label: &s
 
 #[test]
 fn stdlib_v02813_sin_zero() {
-    let src = "func main() -> f64 { sin(0.0) }";
-    assert_float_approx(run_source(src), 0.0, 1e-10, "sin(0)");
-    let out = compile_and_run("func main() -> i32 { println(sin(0.0)); 0 }")
-        .expect("compile_and_run sin(0)");
-    let v: f64 = out.trim().parse().unwrap();
-    assert!(v.abs() < 1e-9, "got {}", v);
+    dual_float_main("sin(0.0)", 0.0, 1e-10, "sin(0)");
 }
 
 #[test]
 fn stdlib_v02813_sin_pi_over_2() {
-    let src = "func main() -> f64 { sin(pi() / 2.0) }";
-    assert_float_approx(run_source(src), 1.0, 1e-10, "sin(pi/2)");
-    let out = compile_and_run("func main() -> i32 { println(sin(pi() / 2.0)); 0 }")
-        .expect("compile_and_run sin(pi/2)");
-    let v: f64 = out.trim().parse().unwrap();
-    assert!((v - 1.0).abs() < 1e-9);
+    dual_float_main("sin(pi() / 2.0)", 1.0, 1e-10, "sin(pi/2)");
 }
 
 #[test]
 fn stdlib_v02813_cos_zero() {
-    let src = "func main() -> f64 { cos(0.0) }";
-    assert_float_approx(run_source(src), 1.0, 1e-10, "cos(0)");
+    dual_float_main("cos(0.0)", 1.0, 1e-10, "cos(0)");
 }
 
 #[test]
 fn stdlib_v02813_tan_zero() {
-    let src = "func main() -> f64 { tan(0.0) }";
-    assert_float_approx(run_source(src), 0.0, 1e-10, "tan(0)");
+    dual_float_main("tan(0.0)", 0.0, 1e-10, "tan(0)");
 }
 
 #[test]
