@@ -1231,3 +1231,30 @@ func main() -> i32 {
 "#;
     assert_eq!(run_source(src), crate::interp::Value::Int(42));
 }
+
+
+#[test]
+fn digit_separator_ok() {
+    // F-H9: valid separators still work.
+    let src = r#"
+func main() -> i32 {
+    1_000 + 2
+}
+"#;
+    assert_eq!(run_source(src), crate::interp::Value::Int(1002));
+}
+
+#[test]
+fn digit_separator_double_is_not_silent() {
+    // F-H9: consecutive '__' must not silently become a valid number.
+    let src = r#"
+func main() -> i32 {
+    1__0
+}
+"#;
+    let r = std::panic::catch_unwind(|| run_source(src));
+    // Either parse/lex error or runtime error — must not silently equal 10.
+    if let Ok(v) = r {
+        assert_ne!(v, crate::interp::Value::Int(10), "1__0 must not equal 10");
+    }
+}
