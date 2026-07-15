@@ -3794,6 +3794,125 @@ pub extern "C" fn mimi_map_from_json_set_product_i64(
     handle
 }
 
+/// Serialize Map values that are MapHandles of product-tuples.
+/// `display_style`: 0 = JSON, 1 = Display with `(a, b)` products.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_map_product_i64(
+    handle: MapHandle,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if handle == 0 || arity <= 0 || arity > 16 {
+        return alloc_c_string("{}");
+    }
+    let map = unsafe { &*map_from_handle(handle) };
+    if map.inner.len() > 1_000_000 {
+        return alloc_c_string("{...}");
+    }
+    let mut entries: Vec<_> = map.inner.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 2 + 2);
+    parts.push(String::from("{"));
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        parts.push(json_escape_string(k));
+        parts.push(String::from(":"));
+        let inner_h = **v as MapHandle;
+        let inner_json = mimi_map_to_json_product_i64(inner_h, arity, display_style);
+        let s = unsafe { cstr_to_string(inner_json) };
+        if !inner_json.is_null() {
+            unsafe { libc::free(inner_json as *mut std::ffi::c_void) };
+        }
+        parts.push(s);
+    }
+    parts.push(String::from("}"));
+    alloc_c_string(&parts.join(""))
+}
+
+/// Build Map from JSON object whose values are nested Map product objects:
+/// `"outer":{"a":[1,2]}`.
+#[no_mangle]
+pub extern "C" fn mimi_map_from_json_map_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> MapHandle {
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return mimi_map_new();
+    }
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_map_new();
+    if handle == 0 {
+        return 0;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'{' {
+        return handle;
+    }
+    i += 1;
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b'}' {
+            break;
+        }
+        if bytes[i] != b'"' {
+            break;
+        }
+        i += 1;
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'"' {
+            if bytes[i] == b'\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let key = String::from_utf8_lossy(&bytes[start..i]).into_owned();
+        i += 1;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'{' {
+            break;
+        }
+        // Parse nested object substring.
+        let val_start = i;
+        let mut depth = 0i32;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let val_json = &s[val_start..i];
+        let c_val = std::ffi::CString::new(val_json).unwrap_or_default();
+        let inner_h = mimi_map_from_json_product_i64(c_val.as_ptr(), arity);
+        unsafe {
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, inner_h as ValueHandle);
+        }
+    }
+    handle
+}
+
 /// Build a MapHandle from a JSON object whose values are product-tuple arrays
 /// of integers (e.g. `"a":[1,2]`). Each value is heap-packed as i64[arity]
 /// matching `map_set` of product tuples / `mimi_map_to_json_product_i64`.
