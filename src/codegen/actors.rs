@@ -733,33 +733,34 @@ impl<'ctx> CodeGenerator<'ctx> {
                 *last_val = self.adjust_int_val(*last_val, ret_type)?;
             }
             Stmt::Return(Some(expr)) => {
-                self.pop_shared_scope()?;
-                self.free_heap_allocs()?;
-                self.pop_comp_scope();
-                self.pop_cap_scope();
                 let mut val = self.compile_expr(expr, vars)?;
                 val = self.adjust_int_val(
                     val,
                     self.current_fn_ret_type()
                         .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type())),
                 )?;
-                val = self.load_return_value_if_needed(val)?;
+                val = self.claim_string_return_value(val, ret_type, Some(expr), vars)?;
                 let ensures = self.ensures_stmts.clone();
                 for ensures_expr in &ensures {
                     self.compile_contract_assert(ensures_expr, vars, "ensures violation")?;
                 }
-                self.build_return(Some(&val))?;
-                return Ok(true);
-            }
-            Stmt::Return(None) => {
                 self.pop_shared_scope()?;
                 self.free_heap_allocs()?;
                 self.pop_comp_scope();
                 self.pop_cap_scope();
+                val = self.load_return_value_if_needed(val)?;
+                self.build_return(Some(&val))?;
+                return Ok(true);
+            }
+            Stmt::Return(None) => {
                 let ensures = self.ensures_stmts.clone();
                 for ensures_expr in &ensures {
                     self.compile_contract_assert(ensures_expr, vars, "ensures violation")?;
                 }
+                self.pop_shared_scope()?;
+                self.free_heap_allocs()?;
+                self.pop_comp_scope();
+                self.pop_cap_scope();
                 self.build_return(None)?;
                 return Ok(true);
             }
@@ -1115,6 +1116,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         ret_type: BasicTypeEnum<'ctx>,
         last_val: BasicValueEnum<'ctx>,
     ) -> MimiResult<()> {
+        if self.block_has_terminator() {
+            return Ok(());
+        }
         self.check_unconsumed_caps()?;
         self.release_all_shared()?;
         self.free_heap_allocs()?;

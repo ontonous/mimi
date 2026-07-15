@@ -2898,6 +2898,28 @@ fn dual_actor_await_get() {
 }
 
 #[test]
+fn dual_actor_explicit_string_temp_return() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        actor Greeter {
+            func greet() -> string {
+                return "hello" + " " + "actor";
+            }
+        }
+        func main() -> i32 {
+            let g = Greeter.spawn();
+            println(g.greet());
+            0
+        }
+    "#,
+        "hello actor"
+    );
+}
+
+#[test]
 fn dual_actor_with_param() {
     if !can_link() {
         return;
