@@ -647,9 +647,65 @@ impl<'ctx> CodeGenerator<'ctx> {
                         } else {
                             r_err
                         };
-                        let res_fn = self.get_runtime_fn("mimi_result_i64_to_json")?;
-                        let res_json = self
-                            .build_call(
+                        // Option of Result of Map/Set: Ok is a handle, not a plain i64.
+                        let res_json = if obj_type.contains("Map<") {
+                            let mode = if obj_type.contains("Map<string, string>") {
+                                1i64
+                            } else if obj_type.contains("Map<string, bool>") {
+                                2
+                            } else if obj_type.contains("Map<string, f64>")
+                                || obj_type.contains("Map<string, f32>")
+                            {
+                                3
+                            } else {
+                                0
+                            };
+                            let res_fn = self.get_runtime_fn("mimi_result_map_to_json")?;
+                            self.build_call(
+                                res_fn,
+                                &[
+                                    BasicMetadataValueEnum::IntValue(r_disc_i64),
+                                    BasicMetadataValueEnum::IntValue(r_ok_i64),
+                                    BasicMetadataValueEnum::IntValue(r_err_i64),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(mode as u64, false),
+                                    ),
+                                ],
+                                "opt_res_map_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("result map to_json void")?
+                            .into_pointer_value()
+                        } else if obj_type.contains("Set<") {
+                            let mode = if obj_type.contains("Set<string>") {
+                                1i64
+                            } else if obj_type.contains("Set<bool>") {
+                                2
+                            } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>")
+                            {
+                                3
+                            } else {
+                                0
+                            };
+                            let res_fn = self.get_runtime_fn("mimi_result_set_to_json")?;
+                            self.build_call(
+                                res_fn,
+                                &[
+                                    BasicMetadataValueEnum::IntValue(r_disc_i64),
+                                    BasicMetadataValueEnum::IntValue(r_ok_i64),
+                                    BasicMetadataValueEnum::IntValue(r_err_i64),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(mode as u64, false),
+                                    ),
+                                ],
+                                "opt_res_set_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("result set to_json void")?
+                            .into_pointer_value()
+                        } else {
+                            let res_fn = self.get_runtime_fn("mimi_result_i64_to_json")?;
+                            self.build_call(
                                 res_fn,
                                 &[
                                     BasicMetadataValueEnum::IntValue(r_disc_i64),
@@ -660,7 +716,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )?
                             .try_as_basic_value_opt()
                             .ok_or("result to_json void")?
-                            .into_pointer_value();
+                            .into_pointer_value()
+                        };
                         let disc_is_some = self
                             .builder
                             .build_int_compare(
@@ -1205,9 +1262,192 @@ impl<'ctx> CodeGenerator<'ctx> {
                         } else {
                             o_pay
                         };
-                        let opt_fn = self.get_runtime_fn("mimi_option_i64_to_json")?;
-                        let opt_json = self
-                            .build_call(
+                        // Nested Option of Map/Set/List needs typed helpers.
+                        let opt_json = if obj_type.contains("Map<") {
+                            let mode = if obj_type.contains("Map<string, string>") {
+                                1i64
+                            } else if obj_type.contains("Map<string, bool>") {
+                                2
+                            } else if obj_type.contains("Map<string, f64>")
+                                || obj_type.contains("Map<string, f32>")
+                            {
+                                3
+                            } else {
+                                0
+                            };
+                            let opt_fn = self.get_runtime_fn("mimi_option_map_to_json")?;
+                            self.build_call(
+                                opt_fn,
+                                &[
+                                    BasicMetadataValueEnum::IntValue(o_disc_i64),
+                                    BasicMetadataValueEnum::IntValue(o_pay_i64),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(mode as u64, false),
+                                    ),
+                                ],
+                                "res_opt_map_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("option map to_json void")?
+                            .into_pointer_value()
+                        } else if obj_type.contains("Set<") {
+                            let mode = if obj_type.contains("Set<string>") {
+                                1i64
+                            } else if obj_type.contains("Set<bool>") {
+                                2
+                            } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>")
+                            {
+                                3
+                            } else {
+                                0
+                            };
+                            let opt_fn = self.get_runtime_fn("mimi_option_set_to_json")?;
+                            self.build_call(
+                                opt_fn,
+                                &[
+                                    BasicMetadataValueEnum::IntValue(o_disc_i64),
+                                    BasicMetadataValueEnum::IntValue(o_pay_i64),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(mode as u64, false),
+                                    ),
+                                ],
+                                "res_opt_set_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("option set to_json void")?
+                            .into_pointer_value()
+                        } else if obj_type.contains("List<") {
+                            // Option of List: rebuild {"Some":[list_json]} / "None".
+                            let disc_is_some = self
+                                .builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::NE,
+                                    o_disc_i64,
+                                    self.context.i64_type().const_int(0, false),
+                                    "res_opt_list_some",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let function = self.current_function().ok_or("no function")?;
+                            let some_bb = self
+                                .context
+                                .append_basic_block(function, "toj_res_opt_list_some");
+                            let none_bb = self
+                                .context
+                                .append_basic_block(function, "toj_res_opt_list_none");
+                            let merge_bb = self
+                                .context
+                                .append_basic_block(function, "toj_res_opt_list_merge");
+                            let i8_ptr_ty =
+                                self.context.ptr_type(inkwell::AddressSpace::default());
+                            let out_alloca = self.build_alloca(
+                                BasicTypeEnum::PointerType(i8_ptr_ty),
+                                "toj_res_opt_list_out",
+                            )?;
+                            self.builder
+                                .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(some_bb);
+                            let list_ptr = self
+                                .builder
+                                .build_int_to_ptr(o_pay_i64, i8_ptr_ty, "res_opt_list_ptr")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let list_fn_name = if obj_type.contains("List<Map") {
+                                if obj_type.contains("Map<string, string>") {
+                                    "mimi_list_map_to_json_string"
+                                } else {
+                                    "mimi_list_map_to_string"
+                                }
+                            } else if obj_type.contains("List<string>") {
+                                "mimi_list_str_to_json"
+                            } else if obj_type.contains("List<f64>") || obj_type.contains("List<f32>")
+                            {
+                                "mimi_list_f64_to_json"
+                            } else if obj_type.contains("List<bool>") {
+                                "mimi_list_bool_to_json"
+                            } else {
+                                "mimi_list_i64_to_json"
+                            };
+                            let list_fn_ty = i8_ptr_ty
+                                .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
+                            let list_fn =
+                                self.module.get_function(list_fn_name).unwrap_or_else(|| {
+                                    self.module.add_function(
+                                        list_fn_name,
+                                        list_fn_ty,
+                                        Some(inkwell::module::Linkage::External),
+                                    )
+                                });
+                            let list_json = self
+                                .build_call(
+                                    list_fn,
+                                    &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                                    "res_opt_list_json",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("list to_json void")?
+                                .into_pointer_value();
+                            let buf = self.malloc_or_abort(
+                                self.context.i64_type().const_int(4096, false),
+                                "res_opt_list_buf",
+                            )?;
+                            let fmt = self
+                                .builder
+                                .build_global_string_ptr(
+                                    "{\"Some\":[%s]}",
+                                    "res_opt_list_fmt",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                            self.build_call(
+                                snprintf_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(buf),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(4096, false),
+                                    ),
+                                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                    BasicMetadataValueEnum::PointerValue(list_json),
+                                ],
+                                "res_opt_list_sn",
+                            )?;
+                            self.build_store(out_alloca, buf)?;
+                            self.builder
+                                .build_unconditional_branch(merge_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(none_bb);
+                            let none_heap = self.malloc_or_abort(
+                                self.context.i64_type().const_int(8, false),
+                                "res_opt_list_none",
+                            )?;
+                            let none_lit = self
+                                .builder
+                                .build_global_string_ptr("\"None\"", "res_opt_list_none_lit")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                            self.build_call(
+                                strcpy_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(none_heap),
+                                    BasicMetadataValueEnum::PointerValue(
+                                        none_lit.as_pointer_value(),
+                                    ),
+                                ],
+                                "res_opt_list_none_cpy",
+                            )?;
+                            self.build_store(out_alloca, none_heap)?;
+                            self.builder
+                                .build_unconditional_branch(merge_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(merge_bb);
+                            self.build_load(
+                                BasicTypeEnum::PointerType(i8_ptr_ty),
+                                out_alloca,
+                                "res_opt_list_result",
+                            )?
+                            .into_pointer_value()
+                        } else {
+                            let opt_fn = self.get_runtime_fn("mimi_option_i64_to_json")?;
+                            self.build_call(
                                 opt_fn,
                                 &[
                                     BasicMetadataValueEnum::IntValue(o_disc_i64),
@@ -1217,7 +1457,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )?
                             .try_as_basic_value_opt()
                             .ok_or("option to_json void")?
-                            .into_pointer_value();
+                            .into_pointer_value()
+                        };
                         let disc_is_ok = self
                             .builder
                             .build_int_compare(

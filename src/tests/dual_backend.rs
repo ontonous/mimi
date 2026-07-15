@@ -8243,6 +8243,43 @@ fn dual_to_json_list_result_map() {
     );
 }
 
+/// to_json Option of Result of Map dual.
+#[test]
+fn dual_to_json_option_result_map() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, i32>>("{\"a\":1}")
+            let a: Option<Result<Map<string, i32>, i32>> = Some(Ok(m))
+            println(to_json(a))
+            0
+        }
+        "#,
+        "{\"Some\":[{\"Ok\":[{\"a\":1}]}]}"
+    );
+}
+
+/// to_json Result of Option of List dual.
+#[test]
+fn dual_to_json_result_option_list() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Result<Option<List<i32>>, i32>>("[1,2]")
+            println(to_json(a))
+            0
+        }
+        "#,
+        "{\"Ok\":[{\"Some\":[[1,2]]}]}"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {
