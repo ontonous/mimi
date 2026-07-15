@@ -84,9 +84,21 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             Some(ptr)
         }
         Type::Tuple(elems) => {
+            // i32 tuple fields use i64 to match compile_tuple_expr /
+            // Int-literal ABI (and Ok((1,2)) Result payloads). Keep i1 bool
+            // as i1 so (i32, bool, string) Display stays correct.
             let mut llvm_elems = Vec::new();
             for e in elems {
-                llvm_elems.push(mimi_type_to_llvm(ctx, e)?);
+                let el = mimi_type_to_llvm(ctx, e)?;
+                let el = match el {
+                    BasicTypeEnum::IntType(it)
+                        if it.get_bit_width() > 1 && it.get_bit_width() < 64 =>
+                    {
+                        BasicTypeEnum::IntType(ctx.i64_type())
+                    }
+                    other => other,
+                };
+                llvm_elems.push(el);
             }
             Some(BasicTypeEnum::StructType(
                 ctx.struct_type(&llvm_elems, false),

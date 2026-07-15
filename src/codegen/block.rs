@@ -208,7 +208,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     // Non-dyn Trait: compile init and bind via recursive pattern matching
+                    // Typed list literals: seed element type so Result/Option
+                    // list elems pack with a uniform layout.
+                    let saved_list_elem = self.pending_list_elem_type.take();
+                    if matches!(init, Expr::List(_)) {
+                        if let Some(decl_ty) = ty.as_ref() {
+                            if let Type::Name(n, args) = decl_ty {
+                                if n == "List" && args.len() == 1 {
+                                    self.pending_list_elem_type = Some(args[0].clone());
+                                }
+                            }
+                        }
+                    }
                     let mut val = self.compile_expr(init, vars)?;
+                    self.pending_list_elem_type = saved_list_elem;
                     if let Some(decl_ty) = ty {
                         let target = types::mimi_type_to_llvm(self.context, decl_ty)
                             .unwrap_or_else(|| val.get_type());
@@ -1363,7 +1376,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ref_: _,
                     pos: _,
                 } => {
+                    // Typed list literals: seed pending_list_elem_type so
+                    // Result/Option list elements pack with a uniform layout.
+                    let saved_list_elem = self.pending_list_elem_type.take();
+                    if matches!(init, Expr::List(_)) {
+                        if let Some(decl_ty) = ty.as_ref() {
+                            if let Type::Name(n, args) = decl_ty {
+                                if n == "List" && args.len() == 1 {
+                                    self.pending_list_elem_type = Some(args[0].clone());
+                                }
+                            }
+                        }
+                    }
                     let val = self.compile_expr(init, vars)?;
+                    self.pending_list_elem_type = saved_list_elem;
                     let val = self.normalize_string_value(val, init)?;
                     let val = if let Some(decl_ty) = &ty {
                         // Populate var_type_names from the type annotation so that

@@ -1577,7 +1577,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     // Non-dyn Trait: compile init and bind via recursive pattern matching
+                    let saved_list_elem = self.pending_list_elem_type.take();
+                    if matches!(init, Expr::List(_)) {
+                        if let Some(decl_ty) = ty.as_ref() {
+                            if let Type::Name(n, args) = decl_ty {
+                                if n == "List" && args.len() == 1 {
+                                    self.pending_list_elem_type = Some(args[0].clone());
+                                }
+                            }
+                        }
+                    }
                     let mut val = self.compile_expr(init, vars)?;
+                    self.pending_list_elem_type = saved_list_elem;
                     if let Some(decl_ty) = ty {
                         let target = types::mimi_type_to_llvm(self.context, decl_ty)
                             .unwrap_or_else(|| val.get_type());

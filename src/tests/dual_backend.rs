@@ -7051,6 +7051,63 @@ fn dual_to_json_tuple_alias() {
     );
 }
 
+/// List of Result of product-tuple with string Err (literal + to_json dual).
+#[test]
+fn dual_list_result_tuple_err_string() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs: List<Result<(i32, i32), string>> = [Ok((1, 2)), Err("e")]
+            println(xs)
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[Ok((1, 2)), Err(e)]\n[{\"Ok\":[[1,2]]},{\"Err\":[\"e\"]}]"
+    );
+}
+
+/// List of Option of Result of product-tuple (literal dual).
+#[test]
+fn dual_list_option_result_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs: List<Option<Result<(i32, i32), string>>> = [Some(Ok((1, 2))), None, Some(Err("e"))]
+            println(xs)
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[Some(Ok((1, 2))), None(), Some(Err(e))]\n[{\"Some\":[{\"Ok\":[[1,2]]}]},\"None\",{\"Some\":[{\"Err\":[\"e\"]}]}]"
+    );
+}
+
+/// Option of Result of product-tuple with string Err to_json dual.
+#[test]
+fn dual_option_result_tuple_err_string() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let y: Option<Result<(i32, i32), string>> = Some(Err("e"))
+            println(y)
+            println(to_json(y))
+            0
+        }
+        "#,
+        "Some(Err(e))\n{\"Some\":[{\"Err\":[\"e\"]}]}"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {

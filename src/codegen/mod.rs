@@ -249,6 +249,10 @@ pub struct CodeGenerator<'ctx> {
     /// Used so that nested lists and other struct elements are heap-copied before
     /// their pointer is stored, preventing stack-use-after-return.
     pending_push_elem_type: Option<String>,
+    /// When compiling a typed list literal (`let xs: List<T> = [...]`), the
+    /// element type `T` so Result/Option constructors can be inflated to a
+    /// uniform layout before heap packing.
+    pending_list_elem_type: Option<Type>,
     pending_to_string_is_any: bool,
     /// Cached result of MIMI_OPT env var check at codegen construction time.
     /// Avoids repeated env var queries within a single compile_to_object call.
@@ -378,6 +382,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             pending_len_is_string: false,
             pending_print_arg_types: Vec::new(),
             pending_push_elem_type: None,
+            pending_list_elem_type: None,
             pending_to_string_is_any: false,
             optimize: std::env::var("MIMI_OPT")
                 .map(|v| v == "1" || v == "true")
@@ -1220,11 +1225,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             // slot — mimi_type_to_llvm maps unknown names to i64.
             Type::Option(inner) => {
                 let inner_llvm = self.llvm_type_for(inner)?;
-                let widened = match inner_llvm {
-                    BasicTypeEnum::IntType(it) if it.get_bit_width() < 64 => {
+                // Only widen scalar ints and product-tuple int fields — never
+                // named records (all-i32 records must keep i32 field layout).
+                let widened = match (inner.as_ref(), inner_llvm) {
+                    (_, BasicTypeEnum::IntType(it)) if it.get_bit_width() < 64 => {
                         BasicTypeEnum::IntType(self.context.i64_type())
                     }
-                    other => other,
+                    (Type::Tuple(_), BasicTypeEnum::StructType(sty)) => {
+                        // Widen i32..i63 fields only — keep i1 bool as i1.
+                        let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
+                        let widened_fields: Vec<_> = sty
+                            .get_field_types()
+                            .iter()
+                            .map(|f| match f {
+                                BasicTypeEnum::IntType(it)
+                                    if it.get_bit_width() > 1 && it.get_bit_width() < 64 =>
+                                {
+                                    i64_ty
+                                }
+                                other => *other,
+                            })
+                            .collect();
+                        BasicTypeEnum::StructType(self.context.struct_type(&widened_fields, false))
+                    }
+                    (_, other) => other,
                 };
                 Some(BasicTypeEnum::StructType(self.context.struct_type(
                     &[
@@ -1236,11 +1260,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Type::Result(ok, _) => {
                 let ok_llvm = self.llvm_type_for(ok)?;
-                let widened = match ok_llvm {
-                    BasicTypeEnum::IntType(it) if it.get_bit_width() < 64 => {
+                // Widen integer Ok slots and product-tuple i32 fields to i64
+                // so they match Ok((1,2)) literal ABI. Do not widen named records
+                // or i1 bool fields.
+                let widened = match (ok.as_ref(), ok_llvm) {
+                    (_, BasicTypeEnum::IntType(it)) if it.get_bit_width() < 64 => {
                         BasicTypeEnum::IntType(self.context.i64_type())
                     }
-                    other => other,
+                    (Type::Tuple(_), BasicTypeEnum::StructType(sty)) => {
+                        let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
+                        let widened_fields: Vec<_> = sty
+                            .get_field_types()
+                            .iter()
+                            .map(|f| match f {
+                                BasicTypeEnum::IntType(it)
+                                    if it.get_bit_width() > 1 && it.get_bit_width() < 64 =>
+                                {
+                                    i64_ty
+                                }
+                                other => *other,
+                            })
+                            .collect();
+                        BasicTypeEnum::StructType(self.context.struct_type(&widened_fields, false))
+                    }
+                    (_, other) => other,
                 };
                 Some(BasicTypeEnum::StructType(self.context.struct_type(
                     &[
