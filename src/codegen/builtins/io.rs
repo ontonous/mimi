@@ -6397,18 +6397,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 BasicTypeEnum::StructType(sty)
                     if label == "ok"
-                        && sty.get_field_types().len() >= 2
-                        && !matches!(
-                            sty.get_field_types()[0],
-                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                        && sty.get_field_types().len() == 2
+                        && matches!(sty.get_field_types()[0], BasicTypeEnum::PointerType(_))
+                        && matches!(
+                            sty.get_field_types()[1],
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
                         ) =>
                 {
-                    // Product tuple by-value in Result Ok: e.g. (i32,i32).
-                    let tup_str =
-                        self.emit_product_tuple_to_string(val.into_struct_value())?;
+                    // Mimi string {ptr, len} by-value in Result Ok — print data as %s.
+                    let sv = val.into_struct_value();
+                    let data_ptr = self
+                        .build_extract_value(sv.into(), 0, "res_ok_str_ptr")?
+                        .into_pointer_value();
                     let fmt = self
                         .builder
-                        .build_global_string_ptr("Ok(%s)", "res_ok_tup_fmt")
+                        .build_global_string_ptr("Ok(%s)", "res_ok_str_fmt")
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                     self.build_call(
                         snprintf_fn,
@@ -6416,10 +6419,102 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::PointerValue(buf),
                             BasicMetadataValueEnum::IntValue(buf_size),
                             BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                            BasicMetadataValueEnum::PointerValue(tup_str),
+                            BasicMetadataValueEnum::PointerValue(data_ptr),
                         ],
-                        "res_ok_tup_snprintf",
+                        "res_ok_str_snprintf",
                     )?;
+                }
+                BasicTypeEnum::StructType(sty)
+                    if label == "ok"
+                        && sty.get_field_types().len() >= 2
+                        && !matches!(
+                            sty.get_field_types()[0],
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                        )
+                        && !(matches!(sty.get_field_types()[0], BasicTypeEnum::PointerType(_))
+                            && sty.get_field_types().len() == 2
+                            && matches!(
+                                sty.get_field_types()[1],
+                                BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                            )) =>
+                {
+                    // Product tuple by-value in Result Ok: e.g. (i32,i32).
+                    // Skip Mimi string {ptr,len} (handled above).
+                    // Custom enums {i32 tag, i64 payload} handled below if needed.
+                    let is_enum_layout = sty.get_field_types().len() == 2
+                        && matches!(
+                            sty.get_field_types()[0],
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 32
+                        )
+                        && matches!(
+                            sty.get_field_types()[1],
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                        );
+                    if is_enum_layout {
+                        // Result Ok of custom enum — use enum display when type known.
+                        let ok_ty = Self::strip_first_type_arg(arg_type, "Result")
+                            .unwrap_or_default();
+                        if !ok_ty.is_empty()
+                            && self.type_defs.get(&ok_ty).is_some_and(|td| {
+                                matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
+                            })
+                        {
+                            let enum_str =
+                                self.emit_enum_display(&ok_ty, val.into_struct_value())?;
+                            let fmt = self
+                                .builder
+                                .build_global_string_ptr("Ok(%s)", "res_ok_enum_fmt")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.build_call(
+                                snprintf_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(buf),
+                                    BasicMetadataValueEnum::IntValue(buf_size),
+                                    BasicMetadataValueEnum::PointerValue(
+                                        fmt.as_pointer_value(),
+                                    ),
+                                    BasicMetadataValueEnum::PointerValue(enum_str),
+                                ],
+                                "res_ok_enum_snprintf",
+                            )?;
+                        } else {
+                            let tup_str =
+                                self.emit_product_tuple_to_string(val.into_struct_value())?;
+                            let fmt = self
+                                .builder
+                                .build_global_string_ptr("Ok(%s)", "res_ok_tup_fmt")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.build_call(
+                                snprintf_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(buf),
+                                    BasicMetadataValueEnum::IntValue(buf_size),
+                                    BasicMetadataValueEnum::PointerValue(
+                                        fmt.as_pointer_value(),
+                                    ),
+                                    BasicMetadataValueEnum::PointerValue(tup_str),
+                                ],
+                                "res_ok_tup_snprintf",
+                            )?;
+                        }
+                    } else {
+                        let tup_str =
+                            self.emit_product_tuple_to_string(val.into_struct_value())?;
+                        let fmt = self
+                            .builder
+                            .build_global_string_ptr("Ok(%s)", "res_ok_tup_fmt")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(buf),
+                                BasicMetadataValueEnum::IntValue(buf_size),
+                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                BasicMetadataValueEnum::PointerValue(tup_str),
+                            ],
+                            "res_ok_tup_snprintf",
+                        )?;
+                    }
                 }
                 BasicTypeEnum::IntType(_) => {
                     let iv = val.into_int_value();
