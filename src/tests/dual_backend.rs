@@ -7008,6 +7008,26 @@ fn dual_from_json_list_result_option_tuple() {
     );
 }
 
+/// Option of type-alias product tuple (`type Pair = (i32, i32)`).
+#[test]
+fn dual_from_json_option_tuple_alias() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Pair = (i32, i32)
+        func main() -> i32 {
+            let x = from_json::<Option<Pair>>("[1,2]")
+            println(x)
+            println(to_json(x))
+            0
+        }
+        "#,
+        "Some((1, 2))\n{\"Some\":[[1,2]]}"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {

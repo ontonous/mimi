@@ -1870,7 +1870,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.compile_constructor("Ok", vec![ok_val])
             }
             Type::Name(type_name, _) => {
-                // Record type: deserialize JSON object into struct fields
+                // Type alias → underlying type; Record → field deserialize.
+                if let Some(td) = self.type_defs.get(type_name) {
+                    if let crate::ast::TypeDefKind::Alias(aliased) = &td.kind {
+                        let aliased = aliased.clone();
+                        return self
+                            .compile_from_json_turbofish_with_ptr(&[aliased], raw_ptr);
+                    }
+                }
                 let fields_opt = self.type_defs.get(type_name).and_then(|td| {
                     if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
                         Some(fields.clone())
@@ -2111,7 +2118,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 raw_ptr,
             ),
             Type::Name(type_name, _) => {
-                // Named record Ok payload.
+                // Type alias or named record Ok payload.
+                if let Some(td) = self.type_defs.get(type_name) {
+                    if let crate::ast::TypeDefKind::Alias(aliased) = &td.kind {
+                        let aliased = aliased.clone();
+                        return self.compile_from_json_scalar_ok(&aliased, raw_ptr);
+                    }
+                }
                 let fields_opt = self.type_defs.get(type_name).and_then(|td| {
                     if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
                         Some(fields.clone())
@@ -2463,9 +2476,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )?;
                 Ok(self.expect_basic_value(&result, fn_name)?.into())
             }
-            // Nested Record: json_get_string returns the nested object as a
-            // JSON substring; recurse into compile_from_json_record.
+            // Nested Record / type alias: resolve Alias to underlying type,
+            // otherwise deserialize JSON object into a Record.
             crate::ast::Type::Name(nested_name, _) => {
+                if let Some(td) = self.type_defs.get(nested_name.as_str()) {
+                    if let crate::ast::TypeDefKind::Alias(aliased) = &td.kind {
+                        let aliased = aliased.clone();
+                        return self.compile_json_scalar_field(
+                            type_name,
+                            &crate::ast::Field {
+                                name: field.name.clone(),
+                                ty: aliased,
+                            },
+                            raw_val,
+                            json_as_i64_fn,
+                            json_as_f64_fn,
+                            json_as_bool_fn,
+                        );
+                    }
+                }
                 let fields_opt =
                     self.type_defs
                         .get(nested_name.as_str())
