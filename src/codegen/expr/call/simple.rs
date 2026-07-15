@@ -1097,6 +1097,43 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     self.register_heap_alloc(raw);
                                     return self.wrap_c_string(raw);
                                 }
+                                let res_first = {
+                                    let mut depth = 0i32;
+                                    let mut end = res_ok.len();
+                                    for (i, ch) in res_ok.char_indices() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                end = i;
+                                                break;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    res_ok[..end].trim().to_string()
+                                };
+                                if let Some(opt_inner) = res_first
+                                    .strip_prefix("Option<")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if opt_inner.starts_with('(')
+                                        || self.is_product_tuple_alias(opt_inner)
+                                    {
+                                        let elem = if self.is_product_tuple_alias(opt_inner)
+                                        {
+                                            self.resolve_alias_type_name(opt_inner)
+                                        } else {
+                                            opt_inner.to_string()
+                                        };
+                                        let raw = self
+                                            .emit_map_list_result_option_product_to_json(
+                                                handle, &elem, 0,
+                                            )?;
+                                        self.register_heap_alloc(raw);
+                                        return self.wrap_c_string(raw);
+                                    }
+                                }
                             }
                         }
                         if let Some(set_elem) = val_ty
