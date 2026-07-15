@@ -1877,3 +1877,23 @@ func main() -> i32 { 0 }
     let r = crate::core::check(&file);
     assert!(r.is_err(), "expected typecheck failure for ill-typed body");
 }
+
+
+#[test]
+fn verify_actor_method_contract() {
+    require_z3!();
+    // V-H6: actor methods enter the verify queue.
+    let src = r#"
+actor Counter {
+    count: i32
+    func get() -> i32 {
+        ensures: result >= 0
+        self.count
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("verify");
+    let m = results.iter().find(|r| r.func_name.contains("get"));
+    assert!(m.is_some(), "actor method should be verified: {:?}", results);
+}

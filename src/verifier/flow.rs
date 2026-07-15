@@ -185,6 +185,43 @@ fn flatten_items_inner(items: &[Item], queue: &mut Vec<StepKind>) {
                     queue.push(StepKind::Extern(func.clone()));
                 }
             }
+            // V-H6: actor methods, impl methods, flow transitions enter the queue.
+            Item::Actor(a) => {
+                for m in &a.methods {
+                    let mut f = m.clone();
+                    f.name = format!("{}::{}", a.name, m.name);
+                    queue.push(StepKind::Func(f));
+                }
+            }
+            Item::Impl(i) => {
+                for m in &i.methods {
+                    let mut f = m.clone();
+                    f.name = format!("{}::{}::{}", i.type_name, i.trait_name, m.name);
+                    queue.push(StepKind::Func(f));
+                }
+            }
+            Item::Flow(flow) => {
+                for t in &flow.transitions {
+                    if let Some(body) = &t.body {
+                        // Synthesize a FuncDef for the transition body.
+                        let f = FuncDef {
+                            name: format!("{}::{}", flow.name, t.name),
+                            pub_: false,
+                            params: t.params.clone(),
+                            ret: None,
+                            body: body.clone(),
+                            where_clause: vec![],
+                            generics: vec![],
+                            effects: vec![],
+                            is_comptime: false,
+                            is_async: false,
+                            extern_abi: None,
+                            pos: t.pos,
+                        };
+                        queue.push(StepKind::Func(f));
+                    }
+                }
+            }
             _ => {}
         }
     }
