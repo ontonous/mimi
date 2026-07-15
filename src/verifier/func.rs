@@ -6,7 +6,8 @@ use crate::verifier::ctx::{
 };
 use crate::verifier::expr;
 use crate::verifier::helpers::{
-    block_tail_expr, collect_idents_in_stmt, extract_body_return, format_expr,
+    block_tail_expr, collect_idents_in_expr, collect_idents_in_stmt, extract_body_return,
+    format_expr,
 };
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -533,7 +534,31 @@ impl VerifierCtx {
         }
 
         // V-H1 (establish): prove each invariant from requires before assuming it.
-        // Full loop-preserve (body ⇒ inv') is still residual.
+        // V-H1 (preserve, conservative): if any loop body assigns a free variable of
+        // an invariant, we cannot claim Verified without a body⇒inv' proof — record
+        // a parse_error so the final status degrades to Unknown rather than a false
+        // Verified. Bodies that do not touch inv free vars auto-preserve.
+        if !invariant_exprs.is_empty() {
+            let mut inv_free: Vec<String> = Vec::new();
+            for inv in &invariant_exprs {
+                collect_idents_in_expr(inv, &mut inv_free);
+            }
+            let mut assigned: Vec<String> = Vec::new();
+            Self::collect_loop_assigned_idents(&func.body, &mut assigned);
+            let mut touched = false;
+            for a in &assigned {
+                if inv_free.iter().any(|f| f == a) {
+                    touched = true;
+                    break;
+                }
+            }
+            if touched {
+                parse_errors.push(
+                    "loop invariant preserve not proven (loop body assigns invariant free vars; full body⇒inv' residual)"
+                        .into(),
+                );
+            }
+        }
         for inv in &invariant_exprs {
             let Some(z3_bool) = expr::expr_to_z3_bool(inv, &mut vars) else {
                 parse_errors.push(format!("could not encode invariant: {}", format_expr(inv)));
@@ -2082,6 +2107,75 @@ impl VerifierCtx {
             )),
             Expr::Literal(l) => Expr::Literal(l.clone()),
             _ => ensures.clone(),
+        }
+    }
+
+    /// Collect simple assign targets (`name = …`) that appear inside any loop body.
+    /// Used by V-H1 conservative preserve: if an invariant free var is assigned
+    /// in a loop, we cannot claim Verified without a body⇒inv' proof.
+    fn collect_loop_assigned_idents(stmts: &[Stmt], out: &mut Vec<String>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::While { body, .. }
+                | Stmt::WhileLet { body, .. }
+                | Stmt::For { body, .. }
+                | Stmt::Loop(body) => {
+                    Self::collect_assigned_idents_in_block(body, out);
+                }
+                Stmt::If { then_, else_, .. } => {
+                    Self::collect_loop_assigned_idents(then_, out);
+                    if let Some(e) = else_ {
+                        Self::collect_loop_assigned_idents(e, out);
+                    }
+                }
+                Stmt::Block(body)
+                | Stmt::Arena(body)
+                | Stmt::Unsafe(body)
+                | Stmt::Parasteps(body)
+                | Stmt::OnFailure(body) => {
+                    Self::collect_loop_assigned_idents(body, out);
+                }
+                Stmt::Alloc { body, .. } => {
+                    Self::collect_loop_assigned_idents(body, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_assigned_idents_in_block(stmts: &[Stmt], out: &mut Vec<String>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Assign {
+                    target: Expr::Ident(name),
+                    ..
+                } => {
+                    if !out.contains(name) {
+                        out.push(name.clone());
+                    }
+                }
+                Stmt::If { then_, else_, .. } => {
+                    Self::collect_assigned_idents_in_block(then_, out);
+                    if let Some(e) = else_ {
+                        Self::collect_assigned_idents_in_block(e, out);
+                    }
+                }
+                Stmt::While { body, .. }
+                | Stmt::WhileLet { body, .. }
+                | Stmt::For { body, .. }
+                | Stmt::Loop(body)
+                | Stmt::Block(body)
+                | Stmt::Arena(body)
+                | Stmt::Unsafe(body)
+                | Stmt::Parasteps(body)
+                | Stmt::OnFailure(body) => {
+                    Self::collect_assigned_idents_in_block(body, out);
+                }
+                Stmt::Alloc { body, .. } => {
+                    Self::collect_assigned_idents_in_block(body, out);
+                }
+                _ => {}
+            }
         }
     }
 }
