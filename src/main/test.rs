@@ -106,13 +106,27 @@ pub(crate) fn test(
             _ => interp::AllocatorKind::System,
         };
         match interp.call_named(func_name, vec![]) {
-            Ok(_) => {
-                if use_color {
-                    println!("  \x1b[32m✓\x1b[0m {}", func_name);
+            // TC-H1: bool-returning tests fail when the value is false;
+            // non-bool Ok is still a pass (side-effect / unit tests).
+            Ok(val) => {
+                let fail_bool = matches!(&val, mimi::interp::Value::Bool(false));
+                if fail_bool {
+                    let msg = format!("{} returned false", func_name);
+                    if use_color {
+                        println!("  \x1b[31m✗\x1b[0m {}: {}", func_name, msg);
+                    } else {
+                        println!("  ✗ {}: {}", func_name, msg);
+                    }
+                    failed += 1;
+                    errors.push((func_name.clone(), msg));
                 } else {
-                    println!("  ✓ {}", func_name);
+                    if use_color {
+                        println!("  \x1b[32m✓\x1b[0m {}", func_name);
+                    } else {
+                        println!("  ✓ {}", func_name);
+                    }
+                    passed += 1;
                 }
-                passed += 1;
             }
             Err(e) => {
                 if verbose {
@@ -127,7 +141,7 @@ pub(crate) fn test(
                     println!("  ✗ {}: {}", func_name, e);
                 }
                 failed += 1;
-                errors.push((func_name.clone(), e));
+                errors.push((func_name.clone(), e.to_string()));
             }
         }
     }
