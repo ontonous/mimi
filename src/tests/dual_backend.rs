@@ -6615,6 +6615,24 @@ fn dual_from_json_tuple() {
     );
 }
 
+/// to_json product tuples (JSON arrays).
+#[test]
+fn dual_to_json_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(to_json((1, true, "hi")))
+            println(to_json(((1, 2), "x")))
+            0
+        }
+        "#,
+        "[1,true,\"hi\"]\n[[1,2],\"x\"]"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {
