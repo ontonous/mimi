@@ -3879,6 +3879,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                 }
+                // Set of Map of product.
+                if let Some(Type::Name(mn, margs)) = elem_ty {
+                    if mn == "Map" && margs.len() == 2 {
+                        let map_val = match &margs[1] {
+                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                if let Some(td) = self.type_defs.get(an) {
+                                    if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
+                                        inner.clone()
+                                    } else {
+                                        margs[1].clone()
+                                    }
+                                } else {
+                                    margs[1].clone()
+                                }
+                            }
+                            other => other.clone(),
+                        };
+                        if let Type::Tuple(elems) = map_val {
+                            let arity = elems.len() as u64;
+                            let func =
+                                self.get_runtime_fn("mimi_set_from_json_map_product_i64")?;
+                            let result = self.build_call(
+                                func,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(arity, false),
+                                    ),
+                                ],
+                                "set_from_json_map_product",
+                            )?;
+                            return Ok(self
+                                .expect_basic_value(
+                                    &result,
+                                    "mimi_set_from_json_map_product_i64",
+                                )?
+                                .into());
+                        }
+                    }
+                }
                 let elem_is_int = elem_ty
                     .map(|t| {
                         matches!(
@@ -3895,7 +3935,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .unwrap_or(false);
                 if !elem_is_int && !elem_is_float && !elem_is_string {
                     return Err(CompileError::Generic(
-                        "from_json::<Set>: only Set of scalar|product-tuple|Option product is supported in codegen"
+                        "from_json::<Set>: only Set of scalar|product-tuple|Option product|Map product is supported in codegen"
                             .into(),
                     ));
                 }

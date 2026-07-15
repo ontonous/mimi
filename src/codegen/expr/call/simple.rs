@@ -1935,6 +1935,70 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.register_heap_alloc(raw);
                             return self.wrap_c_string(raw);
                         }
+                        if elem.starts_with("Map<string, ") {
+                            if let Some(val_ty) = elem
+                                .strip_prefix("Map<string, ")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if val_ty.starts_with('(')
+                                    || self.is_product_tuple_alias(val_ty)
+                                {
+                                    let resolved = if self.is_product_tuple_alias(val_ty)
+                                    {
+                                        self.resolve_alias_type_name(val_ty)
+                                    } else {
+                                        val_ty.to_string()
+                                    };
+                                    let arity = {
+                                        let body = resolved
+                                            .strip_prefix('(')
+                                            .and_then(|s| s.strip_suffix(')'))
+                                            .unwrap_or(&resolved);
+                                        let mut arity = 0i64;
+                                        let mut depth = 0i32;
+                                        let mut any = false;
+                                        for ch in body.chars() {
+                                            match ch {
+                                                '<' | '(' => depth += 1,
+                                                '>' | ')' => depth -= 1,
+                                                ',' if depth == 0 => {
+                                                    arity += 1;
+                                                    any = true;
+                                                }
+                                                c if !c.is_whitespace() => any = true,
+                                                _ => {}
+                                            }
+                                        }
+                                        if any {
+                                            arity += 1;
+                                        }
+                                        arity.max(1)
+                                    };
+                                    let func = self
+                                        .get_runtime_fn("mimi_set_to_json_map_product_i64")?;
+                                    let i64_ty = self.context.i64_type();
+                                    let raw = self
+                                        .build_call(
+                                            func,
+                                            &[
+                                                BasicMetadataValueEnum::IntValue(handle),
+                                                BasicMetadataValueEnum::IntValue(
+                                                    i64_ty.const_int(arity as u64, false),
+                                                ),
+                                                BasicMetadataValueEnum::IntValue(
+                                                    i64_ty.const_int(0, false),
+                                                ),
+                                            ],
+                                            "set_map_product_json",
+                                        )?
+                                        .try_as_basic_value_opt()
+                                        .ok_or("set map product to_json void")?
+                                        .into_pointer_value();
+                                    self.register_heap_alloc(raw);
+                                    return self.wrap_c_string(raw);
+                                }
+                            }
+                        }
                         if let Some(opt_elem) = elem
                             .strip_prefix("Option<")
                             .and_then(|s| s.strip_suffix('>'))
@@ -3899,7 +3963,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
                     }
-                    if obj_type.contains("Map<") {
+                    let opt_inner = obj_type
+                        .strip_prefix("Option<")
+                        .and_then(|s| s.strip_suffix('>'))
+                        .unwrap_or(obj_type.as_str());
+                    if opt_inner.starts_with("Map<") {
                         let mode = if obj_type.contains("Map<string, string>") {
                             1i64
                         } else if obj_type.contains("Map<string, bool>") {
@@ -3930,7 +3998,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
                     }
-                    if obj_type.contains("Set<") {
+if opt_inner.starts_with("Set<") {
                         let mode = if obj_type.contains("Set<string>") {
                             1i64
                         } else if obj_type.contains("Set<bool>") {
@@ -3972,6 +4040,50 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     arity += 1;
                                 }
                                 10 + arity.max(1)
+                            } else if elem.starts_with("Map<string, ") {
+                                if let Some(val_ty) = elem
+                                    .strip_prefix("Map<string, ")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if val_ty.starts_with('(')
+                                        || self.is_product_tuple_alias(val_ty)
+                                    {
+                                        let resolved = if self
+                                            .is_product_tuple_alias(val_ty)
+                                        {
+                                            self.resolve_alias_type_name(val_ty)
+                                        } else {
+                                            val_ty.to_string()
+                                        };
+                                        let mut arity: i64 = 0;
+                                        let mut depth = 0i32;
+                                        let mut any = false;
+                                        let body = resolved
+                                            .strip_prefix('(')
+                                            .and_then(|s| s.strip_suffix(')'))
+                                            .unwrap_or(resolved.as_str());
+                                        for ch in body.chars() {
+                                            match ch {
+                                                '<' | '(' => depth += 1,
+                                                '>' | ')' => depth -= 1,
+                                                ',' if depth == 0 => {
+                                                    arity += 1;
+                                                    any = true;
+                                                }
+                                                c if !c.is_whitespace() => any = true,
+                                                _ => {}
+                                            }
+                                        }
+                                        if any {
+                                            arity += 1;
+                                        }
+                                        70 + arity.max(1)
+                                    } else {
+                                        0
+                                    }
+                                } else {
+                                    0
+                                }
                             } else {
                                 0
                             }
@@ -5325,39 +5437,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )));
                         }
                     };
-                    if obj_type.contains("Map<") {
-                        let mode = if obj_type.contains("Map<string, string>") {
-                            1i64
-                        } else if obj_type.contains("Map<string, bool>") {
-                            2
-                        } else if obj_type.contains("Map<string, f64>")
-                            || obj_type.contains("Map<string, f32>")
-                        {
-                            3
-                        } else {
-                            self.map_nested_product_mode(&obj_type)
-                        };
-                        let func = self.get_runtime_fn("mimi_result_map_to_json")?;
-                        let raw = self
-                            .build_call(
-                                func,
-                                &[
-                                    BasicMetadataValueEnum::IntValue(disc_i64),
-                                    BasicMetadataValueEnum::IntValue(ok_i64),
-                                    BasicMetadataValueEnum::IntValue(err_i64),
-                                    BasicMetadataValueEnum::IntValue(
-                                        self.context.i64_type().const_int(mode as u64, false),
-                                    ),
-                                ],
-                                "to_json_res_map",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("mimi_result_map_to_json void")?
-                            .into_pointer_value();
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    }
-                    if obj_type.contains("Set<") {
+                    let ok_root = obj_type
+                        .strip_prefix("Result<")
+                        .and_then(|s| {
+                            let mut depth = 0i32;
+                            for (i, ch) in s.char_indices() {
+                                match ch {
+                                    '<' => depth += 1,
+                                    '>' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        return Some(s[..i].trim());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            None
+                        })
+                        .unwrap_or(obj_type.as_str());
+                    if ok_root.starts_with("Set<") {
                         let mode = if obj_type.contains("Set<string>") {
                             1i64
                         } else if obj_type.contains("Set<bool>") {
@@ -5451,6 +5548,50 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 } else {
                                     0
                                 }
+                            } else if elem.starts_with("Map<string, ") {
+                                if let Some(val_ty) = elem
+                                    .strip_prefix("Map<string, ")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if val_ty.starts_with('(')
+                                        || self.is_product_tuple_alias(val_ty)
+                                    {
+                                        let resolved = if self
+                                            .is_product_tuple_alias(val_ty)
+                                        {
+                                            self.resolve_alias_type_name(val_ty)
+                                        } else {
+                                            val_ty.to_string()
+                                        };
+                                        let mut arity: i64 = 0;
+                                        let mut depth = 0i32;
+                                        let mut any = false;
+                                        let body = resolved
+                                            .strip_prefix('(')
+                                            .and_then(|s| s.strip_suffix(')'))
+                                            .unwrap_or(resolved.as_str());
+                                        for ch in body.chars() {
+                                            match ch {
+                                                '<' | '(' => depth += 1,
+                                                '>' | ')' => depth -= 1,
+                                                ',' if depth == 0 => {
+                                                    arity += 1;
+                                                    any = true;
+                                                }
+                                                c if !c.is_whitespace() => any = true,
+                                                _ => {}
+                                            }
+                                        }
+                                        if any {
+                                            arity += 1;
+                                        }
+                                        70 + arity.max(1)
+                                    } else {
+                                        0
+                                    }
+                                } else {
+                                    0
+                                }
                             } else {
                                 0
                             }
@@ -5473,6 +5614,38 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )?
                             .try_as_basic_value_opt()
                             .ok_or("mimi_result_set_to_json void")?
+                            .into_pointer_value();
+                        self.register_heap_alloc(raw);
+                        return self.wrap_c_string(raw);
+                    }
+if ok_root.starts_with("Map<") {
+                        let mode = if obj_type.contains("Map<string, string>") {
+                            1i64
+                        } else if obj_type.contains("Map<string, bool>") {
+                            2
+                        } else if obj_type.contains("Map<string, f64>")
+                            || obj_type.contains("Map<string, f32>")
+                        {
+                            3
+                        } else {
+                            self.map_nested_product_mode(&obj_type)
+                        };
+                        let func = self.get_runtime_fn("mimi_result_map_to_json")?;
+                        let raw = self
+                            .build_call(
+                                func,
+                                &[
+                                    BasicMetadataValueEnum::IntValue(disc_i64),
+                                    BasicMetadataValueEnum::IntValue(ok_i64),
+                                    BasicMetadataValueEnum::IntValue(err_i64),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(mode as u64, false),
+                                    ),
+                                ],
+                                "to_json_res_map",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("mimi_result_map_to_json void")?
                             .into_pointer_value();
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
