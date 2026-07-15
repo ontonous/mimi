@@ -216,15 +216,37 @@ pub(crate) fn build(
     });
     let output_path = output.unwrap_or(&output_path_buf);
 
+    // P-H8: stage object files in a temp directory so intermediate
+    // artifacts never collide with user-named outputs in the project tree.
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "mimi-build-{}-{}",
+        std::process::id(),
+        output_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("out")
+    ));
+    std::fs::create_dir_all(&tmp_dir)
+        .map_err(|e| format!("failed to create temp build dir: {}", e))?;
+    let obj_path = tmp_dir.join(
+        output_path
+            .file_name()
+            .map(|n| {
+                let mut p = std::path::PathBuf::from(n);
+                p.set_extension("o");
+                p
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from("out.o")),
+    );
+
     codegen
-        .compile_to_object(&output_path.with_extension("o"))
+        .compile_to_object(&obj_path)
         .map_err(|e| e.to_diagnostic().to_string())?;
 
     // Determine the C compiler/linker to use (cross-compiler or native)
     let cc_cmd = target_linker(target).unwrap_or_else(|| "cc".to_string());
 
     // Compile and link Rust runtime
-    let obj_path = output_path.with_extension("o");
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let runtime_rs = manifest_dir.join("src/runtime/standalone.rs");
     let runtime_lib = output_path
@@ -317,5 +339,6 @@ pub(crate) fn build(
     } else {
         return Err(format!("linker failed with exit code {:?}", status.code()));
     }
+    let _ = std::fs::remove_dir_all(&tmp_dir);
     Ok(())
 }
