@@ -459,3 +459,15 @@ func main() -> i32 {
 "#;
     assert_eq!(run_source(src), interp::Value::Int(42));
 }
+
+#[test]
+fn comptime_zero_arg_not_double_executed() {
+    // I-H9: zero-arg comptime must run once (cache), not again on call.
+    let src = r#"
+comptime func seed() -> i32 { 42 }
+func main() -> i32 {
+    seed() + seed()
+}
+"#;
+    assert_eq!(run_source(src), crate::interp::Value::Int(84));
+}
