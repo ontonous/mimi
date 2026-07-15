@@ -1822,3 +1822,19 @@ func main() -> i32 { 0 }
         msgs
     );
 }
+
+
+#[test]
+fn fstring_interp_trailing_tokens_rejected() {
+    // F-H2: leftover tokens after the primary expr must be a parse error.
+    let src = r#"
+func main() -> i32 {
+    let s = f"{1 2}"
+    0
+}
+"#;
+    let tokens = crate::lexer::Lexer::new(src).tokenize();
+    assert!(tokens.is_ok());
+    let r = crate::parser::Parser::new(tokens.unwrap()).parse_file();
+    assert!(r.is_err(), "expected trailing-token error, got {:?}", r);
+}
