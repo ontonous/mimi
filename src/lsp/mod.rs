@@ -321,11 +321,20 @@ impl LspServer {
 
             // Parse and handle (with panic catch to prevent server crash)
             if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&body) {
-                // SEC-C5 (deep audit): preserve document state across panic recovery.
-                // Instead of replacing self with LspServer::new() (which loses all
-                // documents), we save/restore documents and workspace_root.
+                // SEC-C5 / AU-H2: preserve document + caches across panic recovery.
+                // mem::take moves the server into catch_unwind; on panic the moved
+                // value is dropped and *self is Default — restore everything that
+                // does not hold live Z3 state (verifier is intentionally cleared).
                 let backup_docs = self.documents.clone();
+                let backup_access = self.access_order.clone();
                 let backup_workspace = self.workspace_root.clone();
+                let backup_cursor = self.last_cursor_line;
+                let backup_verif_cache = self.verification_cache.clone();
+                let backup_cache_order = self.cache_access_order.clone();
+                let backup_cache_path = self.cache_path.clone();
+                let backup_stdlib_funcs = self.stdlib_funcs.clone();
+                let backup_stdlib_raw = self.stdlib_completions_raw.clone();
+                let backup_stdlib_loaded = self.stdlib_loaded;
                 let backup_should_exit = self.should_exit;
                 let saved = std::mem::take(self);
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -345,15 +354,22 @@ impl LspServer {
                         *self = new_self;
                     }
                     Err(_) => {
-                        // Restore critical state lost by the panic.
-                        // The new_self from catch_unwind is lost (panic happened),
-                        // so self is currently LspServer::new(). Restore documents
-                        // and workspace_root so the server remains functional.
+                        // AU-H2: restore caches + stdlib; drop verifier so AU-H3
+                        // can recreate a fresh Z3 session on next verify.
                         self.documents = backup_docs;
+                        self.access_order = backup_access;
                         self.workspace_root = backup_workspace;
+                        self.last_cursor_line = backup_cursor;
+                        self.verification_cache = backup_verif_cache;
+                        self.cache_access_order = backup_cache_order;
+                        self.cache_path = backup_cache_path;
+                        self.stdlib_funcs = backup_stdlib_funcs;
+                        self.stdlib_completions_raw = backup_stdlib_raw;
+                        self.stdlib_loaded = backup_stdlib_loaded;
                         self.should_exit = backup_should_exit;
+                        self.verifier = None;
                         eprintln!(
-                            "[lsp] handler panicked for method {:?}, state preserved",
+                            "[lsp] handler panicked for method {:?}, state preserved (verifier reset)",
                             msg.get("method").and_then(|v| v.as_str())
                         );
                     }

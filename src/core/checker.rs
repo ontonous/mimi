@@ -294,7 +294,12 @@ impl<'a> Checker<'a> {
     /// ForAll body so that `instantiate` (which substitutes TypeVar(i)→fresh) works correctly.
     /// Called from `Stmt::Let` for immutable non-ref bindings (CO-C1 / H16).
     pub(crate) fn generalize(&mut self, ty: &Type, env: &HashMap<String, Type>) -> Type {
+        // CK-H2: never nest ForAll. If already quantified, leave it alone
+        // (re-generalizing a ForAll body would re-bind TypeVar(0..n) and nest).
         let (resolved, free_vars) = self.resolve_and_collect_free_vars(ty);
+        if matches!(resolved, Type::ForAll(..)) {
+            return resolved;
+        }
         let env_vars = self.collect_env_type_vars(env);
         let generalized: Vec<u32> = free_vars
             .into_iter()
