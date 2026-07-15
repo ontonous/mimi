@@ -357,6 +357,22 @@ impl<'a> Interpreter<'a> {
     /// (b) the fork lock which prevents concurrent FFI operations, and
     /// (c) the `MIMI_FFI_SKIP_FORK` env var which disables fork isolation.
     #[allow(clippy::too_many_arguments)]
+    /// Whether the return contract is a process-local pointer that cannot
+    /// be passed from a forked child to the parent as a raw address (R-C4).
+    fn ret_contract_is_process_local_ptr(ret_contract: &FfiRetContract) -> bool {
+        matches!(
+            ret_contract,
+            FfiRetContract::String
+                | FfiRetContract::StringOwned
+                | FfiRetContract::Json
+                | FfiRetContract::RawPtr(_)
+                | FfiRetContract::RawPtrMut(_)
+                | FfiRetContract::CShared(_)
+                | FfiRetContract::CBorrow(_)
+                | FfiRetContract::CBorrowMut(_)
+        )
+    }
+
     pub(in crate::interp) fn call_ffi_with_fork_isolation(
         &self,
         cif: &Cif,
@@ -364,6 +380,13 @@ impl<'a> Interpreter<'a> {
         ffi_args: &[libffi::middle::Arg],
         ret_contract: &FfiRetContract,
     ) -> Result<i64, String> {
+        // R-C4: process-local pointer returns cannot be marshalled as a
+        // child-heap address over a pipe. Fall back to in-process call
+        // (still protected by no_panic handlers when enabled).
+        if Self::ret_contract_is_process_local_ptr(ret_contract) {
+            return self.call_ffi_direct(cif, code_ptr, ffi_args, ret_contract);
+        }
+
         // Acquire fork lock to serialize fork() with other FFI operations.
         // The lock is held across fork and released in parent/child handlers.
         let _guard = ensure_fork_lock().lock().unwrap_or_else(|e| e.into_inner());
