@@ -778,8 +778,16 @@ impl<'a> Interpreter<'a> {
     ) -> Result<(), InterpError> {
         let v = self.eval_expr(init)?;
         let shared_val = match kind {
-            SharedKind::Shared => Value::Shared(Arc::new(RwLock::new(v))),
-            SharedKind::LocalShared => Value::LocalShared(LocalSharedInner::new(v)),
+            // TC-C1 dual: do not double-wrap. `shared y = x` / `shared y = if { x }`
+            // where x is already Shared must alias the same cell (codegen loads once).
+            SharedKind::Shared => match v {
+                Value::Shared(arc) => Value::Shared(Arc::clone(&arc)),
+                other => Value::Shared(Arc::new(RwLock::new(other))),
+            },
+            SharedKind::LocalShared => match v {
+                Value::LocalShared(rc) => Value::LocalShared(LocalSharedInner::clone_rc(&rc)),
+                other => Value::LocalShared(LocalSharedInner::new(other)),
+            },
             SharedKind::Weak => {
                 // Auto-detect: if init is Shared → WeakShared, if LocalShared → WeakLocal
                 match v {

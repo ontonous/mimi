@@ -2509,9 +2509,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ));
                 }
                 // A1: Ensure integer is i64 for printf("%ld").
-                // i1 bool: print "true"/"false" to match interpreter.
+                // i1 bool OR typed `bool` (is_ok/is_err return i64 0/1): print
+                // "true"/"false" to match interpreter Display.
                 let bw = iv.get_type().get_bit_width();
-                if bw == 1 {
+                let as_bool = bw == 1 || arg_type == "bool" || arg_type == "Bool";
+                if as_bool {
                     let true_g = self
                         .builder
                         .build_global_string_ptr("true", "print_bool_true")
@@ -6582,8 +6584,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         .into_pointer_value()
                                     }
                                 } else {
-                                    let set_fn =
-                                        self.get_runtime_fn("mimi_set_to_display")?;
+                                    // Scalar Set element (string/bool/f64/i64)
+                                    let set_fn_name = if elem == "string" || elem == "str" {
+                                        "mimi_set_to_display_string"
+                                    } else if elem == "bool" {
+                                        "mimi_set_to_display_bool"
+                                    } else if elem == "f64" || elem == "f32" {
+                                        "mimi_set_to_display_f64"
+                                    } else {
+                                        "mimi_set_to_display"
+                                    };
+                                    let set_fn = self.get_runtime_fn(set_fn_name)?;
                                     self.build_call(
                                         set_fn,
                                         &[BasicMetadataValueEnum::IntValue(as_i64)],

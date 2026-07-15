@@ -738,8 +738,16 @@ impl<'a> Interpreter<'a> {
             QuotedAst::SharedLet { kind, name, init } => {
                 let v = self.eval_quoted_ast(init)?;
                 let shared_val = match kind {
-                    SharedKind::Shared => Value::Shared(Arc::new(RwLock::new(v))),
-                    SharedKind::LocalShared => Value::LocalShared(LocalSharedInner::new(v)),
+                    SharedKind::Shared => match v {
+                        Value::Shared(arc) => Value::Shared(Arc::clone(&arc)),
+                        other => Value::Shared(Arc::new(RwLock::new(other))),
+                    },
+                    SharedKind::LocalShared => match v {
+                        Value::LocalShared(rc) => {
+                            Value::LocalShared(LocalSharedInner::clone_rc(&rc))
+                        }
+                        other => Value::LocalShared(LocalSharedInner::new(other)),
+                    },
                     SharedKind::Weak => match v {
                         Value::Shared(arc) => Value::WeakShared(Arc::downgrade(&arc)),
                         Value::LocalShared(rc) => Value::WeakLocal(rc.downgrade()),

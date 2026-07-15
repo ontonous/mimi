@@ -284,6 +284,19 @@ pub(crate) fn run_source(src: &str) -> interp::Value {
     interp.run().expect("src/tests/mod.rs:151 unwrap failed")
 }
 
+/// TC-C1: run interpreter with stdout capture enabled.
+/// Returns `(main return value, captured stdout)`.
+pub(crate) fn run_source_with_stdout(src: &str) -> (interp::Value, String) {
+    let file = parse(src);
+    let mut interp = interp::Interpreter::new(&file);
+    interp.enable_stdout_capture();
+    let val = interp
+        .run()
+        .expect("src/tests/mod.rs: run_source_with_stdout failed");
+    let stdout = interp.take_stdout();
+    (val, stdout)
+}
+
 /// Concatenate a stdlib file (by name) with the test source and run.
 /// Used to test stdlib modules in isolation. The stdlib file's items
 /// (functions, traits) become available to the test source without

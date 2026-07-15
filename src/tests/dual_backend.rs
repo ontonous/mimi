@@ -24,15 +24,16 @@ fn can_cc() -> bool {
 
 macro_rules! dual_assert {
     ($src:expr, $expected:expr) => {{
-        // TC-C1 (partial): non-panicking interpreter + codegen stdout match.
+        // TC-C1: compare interpreter captured stdout with codegen stdout.
         // Typecheck is soft (not a hard gate) — many dual fixtures predate
         // strict i32/i64 field-init rules and still exercise codegen correctly.
         let _ = check_source($src);
-        let _interp_val = std::panic::catch_unwind(|| run_source($src));
+        let __interp_run = std::panic::catch_unwind(|| run_source_with_stdout($src));
         assert!(
-            _interp_val.is_ok(),
+            __interp_run.is_ok(),
             "interpreter panicked for dual_assert source"
         );
+        let (_interp_val, __interp_stdout) = __interp_run.unwrap();
         let __codegen = compile_and_run($src).expect("codegen failed");
         assert_eq!(
             __codegen.trim(),
@@ -41,6 +42,25 @@ macro_rules! dual_assert {
             __codegen.trim(),
             $expected
         );
+        // When the program produced stdout, require interp == codegen == expected.
+        // Programs that only return a value (no print) leave interp stdout empty —
+        // those still gate on non-panic + codegen match (historical fixtures).
+        if !__interp_stdout.trim().is_empty() || !$expected.trim().is_empty() {
+            assert_eq!(
+                __interp_stdout.trim(),
+                $expected,
+                "interpreter stdout mismatch\ninterp: {}\nexpected: {}",
+                __interp_stdout.trim(),
+                $expected
+            );
+            assert_eq!(
+                __interp_stdout.trim(),
+                __codegen.trim(),
+                "dual-backend stdout diverge\ninterp: {}\ncodegen: {}",
+                __interp_stdout.trim(),
+                __codegen.trim()
+            );
+        }
     }};
 }
 
@@ -4781,7 +4801,7 @@ fn dual_option_ok_or() {
             0
         }
     "#,
-        "1\n0\n0\n1"
+        "true\nfalse\nfalse\ntrue"
     );
 }
 
