@@ -52,9 +52,12 @@ impl VerifierState {
     /// Create initial Ready state from a parsed File AST.
     /// Collects func_defs and flattens all items into the verification queue.
     pub fn new(file: &File) -> Result<Self, String> {
-        let session = SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS)?;
+        let mut session = SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS)?;
         let mut ctx = VerifierCtx::default();
         ctx.collect_func_defs(&file.items);
+        // V-C4 source-order independence: pre-seed func_status so callers can
+        // trust callees defined later in the file.
+        ctx.preseed_func_status(&mut session, &file.items);
         let queue = flatten_items(&file.items);
         Ok(VerifierState::Ready {
             session,
@@ -66,9 +69,10 @@ impl VerifierState {
 
     /// Create Ready state with a specific Z3 timeout (milliseconds).
     pub fn with_timeout(file: &File, timeout_ms: u64) -> Result<Self, String> {
-        let session = SolverSession::new(timeout_ms)?;
+        let mut session = SolverSession::new(timeout_ms)?;
         let mut ctx = VerifierCtx::default();
         ctx.collect_func_defs(&file.items);
+        ctx.preseed_func_status(&mut session, &file.items);
         let queue = flatten_items(&file.items);
         Ok(VerifierState::Ready {
             session,
@@ -206,6 +210,10 @@ pub fn flow_verify_ffi_call_sites_or_mock(file: &File) -> Result<Vec<Verificatio
 }
 
 /// Top-level entry: parse source, run Flow verifier, return results.
+///
+/// Typecheck is intentionally **not** applied here so unit tests can verify
+/// incomplete/contract-focused fragments. Production CLI (`mimi verify`)
+/// typechecks first — see `src/main/verify.rs` (V-H8).
 pub fn flow_verify_source(source: &str) -> Result<Vec<VerificationResult>, String> {
     let tokens = crate::lexer::Lexer::new(source).tokenize()?;
     let file = crate::parser::Parser::new(tokens)
