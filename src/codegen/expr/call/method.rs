@@ -2135,6 +2135,49 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 .into());
                                         }
                                     }
+                                    // Option of Result of product.
+                                    if ln == "Option" && mn == "Result" && !margs.is_empty() {
+                                        let res_ok = match &margs[0] {
+                                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                                if let Some(td) = self.type_defs.get(an) {
+                                                    if let crate::ast::TypeDefKind::Alias(inner) =
+                                                        &td.kind
+                                                    {
+                                                        inner.clone()
+                                                    } else {
+                                                        margs[0].clone()
+                                                    }
+                                                } else {
+                                                    margs[0].clone()
+                                                }
+                                            }
+                                            other => other.clone(),
+                                        };
+                                        if let Type::Tuple(elems) = res_ok {
+                                            let arity = elems.len() as u64;
+                                            let func = self.get_runtime_fn(
+                                                "mimi_map_from_json_option_result_product_i64",
+                                            )?;
+                                            let result = self.build_call(
+                                                func,
+                                                &[
+                                                    BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                                    BasicMetadataValueEnum::IntValue(
+                                                        self.context
+                                                            .i64_type()
+                                                            .const_int(arity, false),
+                                                    ),
+                                                ],
+                                                "map_from_json_option_result_product",
+                                            )?;
+                                            return Ok(self
+                                                .expect_basic_value(
+                                                    &result,
+                                                    "mimi_map_from_json_option_result_product_i64",
+                                                )?
+                                                .into());
+                                        }
+                                    }
                                     // Result of Option of product.
                                     if ln == "Result" && mn == "Option" && margs.len() == 1 {
                                         let opt_inner = match &margs[0] {
