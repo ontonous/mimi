@@ -2558,6 +2558,31 @@ fn dual_math_block() {
     );
 }
 
+#[test]
+fn dual_for_loop_propagates_return() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func first_positive(xs: List<i32>) -> i32 {
+            for x in xs {
+                if x > 0 {
+                    return x;
+                }
+            }
+            -1
+        }
+
+        func main() -> i32 {
+            println(first_positive([-2, -1, 7, 9]));
+            0
+        }
+    "#,
+        "7"
+    );
+}
+
 // ─── 29.  字符串 Strings (5 tests) ─────────────────────────────
 
 #[test]
