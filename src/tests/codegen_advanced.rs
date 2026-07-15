@@ -610,6 +610,60 @@ fn adv_comptime_runtime_dep_errors() {
     );
 }
 
+fn assert_codegen_unsupported(src: &str, feature: &str) {
+    let file = parse(src);
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "unsupported");
+    let err = codegen
+        .compile_file(&file)
+        .expect_err("LLVM codegen must reject unsupported feature")
+        .to_string();
+    assert!(
+        err.contains("unsupported in LLVM codegen") && err.contains(feature),
+        "unexpected error for {}: {}",
+        feature,
+        err
+    );
+}
+
+#[test]
+fn adv_codegen_rejects_fake_builtin_results() {
+    for (feature, call) in [
+        ("protocol_methods", "protocol_methods(\"P\")"),
+        ("test_sandbox", "test_sandbox([])"),
+        ("session_open", "session_open()"),
+    ] {
+        let src = format!("func main() -> i32 {{ let _ = {}; 0 }}", call);
+        assert_codegen_unsupported(&src, feature);
+    }
+}
+
+#[test]
+fn adv_codegen_rejects_fake_flow_test_builtins() {
+    assert_codegen_unsupported(
+        r#"
+        type S { value: i32 }
+        func main() -> i32 {
+            let s = S { value: 1 }
+            assert_state(s, "S")
+            0
+        }
+        "#,
+        "assert_state",
+    );
+    assert_codegen_unsupported(
+        r#"
+        type S { value: i32 }
+        func main() -> i32 {
+            let s = S { value: 1 }
+            let _ = inject_fault(s)
+            0
+        }
+        "#,
+        "inject_fault",
+    );
+}
+
 #[test]
 fn adv_comptime_func_call_works() {
     // comptime functions are folded at codegen time and inlined as constants.

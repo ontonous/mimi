@@ -15,7 +15,7 @@ ENV["LLVM_SYS_180_PREFIX"] = "/tmp/llvm-wrapper"
 
 # Paths are relative to tests/real_world. Add entries only for complete
 # programs intentionally unsupported by codegen, not individual weak features.
-INTERPRETER_ONLY = frozenset()
+INTERPRETER_ONLY = frozenset({"flow_test_macros.mimi"})
 
 
 def run_one(path: Path):

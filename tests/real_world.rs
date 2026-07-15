@@ -359,15 +359,17 @@ fn real_world_flow_dual_backend_suite() {
         return;
     }
     let root = project_root().join("tests").join("real_world");
+    let interpreter_only = ["flow_test_macros.mimi"];
     let mut sources: Vec<PathBuf> = fs::read_dir(&root)
         .expect("read tests/real_world")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
+            let name = p.file_name().and_then(|s| s.to_str());
             p.extension().is_some_and(|ext| ext == "mimi")
-                && p.file_name()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|n| n.starts_with("flow_"))
+                && name.is_some_and(|n| {
+                    n.starts_with("flow_") && !interpreter_only.contains(&n)
+                })
         })
         .collect();
     sources.sort();
