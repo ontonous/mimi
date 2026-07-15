@@ -2480,6 +2480,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let nested_ty = Type::Name("List".into(), args.clone());
                 self.compile_from_json_turbofish_with_ptr(&[nested_ty], raw_ptr)
             }
+            Type::Name(n, args) if n == "Set" => {
+                let nested_ty = Type::Name("Set".into(), args.clone());
+                self.compile_from_json_turbofish_with_ptr(&[nested_ty], raw_ptr)
+            }
+            Type::Name(n, args) if n == "Map" => {
+                let nested_ty = Type::Name("Map".into(), args.clone());
+                self.compile_from_json_turbofish_with_ptr(&[nested_ty], raw_ptr)
+            }
             Type::Name(n, args) if n == "Option" && args.len() == 1 => {
                 let json_as_i64_fn = self.module.get_function("mimi_json_as_i64");
                 let json_as_f64_fn = self.module.get_function("mimi_json_as_f64");
@@ -2951,29 +2959,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )?;
                 Ok(self.expect_basic_value(&result, fn_name)?.into())
             }
-            // Nested Set.
+            // Nested Set (including product / Option product / Result product).
             crate::ast::Type::Name(n, args) if n == "Set" => {
-                let elem_is_string = args
-                    .first()
-                    .map(|t| matches!(t, crate::ast::Type::Name(tn, _) if tn == "string"))
-                    .unwrap_or(false);
-                let elem_is_float = args.first().map(|t| {
-                    matches!(t, crate::ast::Type::Name(tn, _) if tn == "f32" || tn == "f64")
-                }).unwrap_or(false);
-                let fn_name = if elem_is_string {
-                    "mimi_set_from_json_string"
-                } else if elem_is_float {
-                    "mimi_set_from_json_f64"
-                } else {
-                    "mimi_set_from_json_i64"
-                };
-                let func = self.get_runtime_fn(fn_name)?;
-                let result = self.build_call(
-                    func,
-                    &[BasicMetadataValueEnum::PointerValue(raw_val)],
-                    "set_from_json_field",
-                )?;
-                Ok(self.expect_basic_value(&result, fn_name)?.into())
+                let nested_ty = crate::ast::Type::Name("Set".into(), args.clone());
+                self.compile_from_json_turbofish_with_ptr(&[nested_ty], raw_val)
             }
             // Nested Record / type alias: resolve Alias to underlying type,
             // otherwise deserialize JSON object into a Record.
@@ -3058,7 +3047,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // named records, and Result of those may use by-value payload slots.
         let force_heap = matches!(
             inner,
-            crate::ast::Type::Name(n, _) if n == "List" || n == "Option"
+            crate::ast::Type::Name(n, _)
+                if n == "List" || n == "Option" || n == "Set" || n == "Map"
         ) || matches!(inner, crate::ast::Type::Option(_));
         let option_sty = if force_heap {
             self.context.struct_type(
