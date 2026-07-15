@@ -4033,6 +4033,469 @@ pub extern "C" fn mimi_map_from_json_product_i64(
     handle
 }
 
+
+/// Map of Option of product-tuple from JSON.
+/// Values: `null`/`"None"` → None; array `[1,2]` or `{"Some":[1,2]}` → Some product.
+/// Stores heap `{i8 disc, pad, i64[n] fields}` as ValueHandle (disc 0=None, 1=Some).
+#[no_mangle]
+pub extern "C" fn mimi_map_from_json_option_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> MapHandle {
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return mimi_map_new();
+    }
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_map_new();
+    if handle == 0 {
+        return 0;
+    }
+    let n = arity as usize;
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'{' {
+        return handle;
+    }
+    i += 1;
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b'}' {
+            break;
+        }
+        if bytes[i] != b'"' {
+            break;
+        }
+        i += 1;
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'"' {
+            if bytes[i] == b'\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let key = String::from_utf8_lossy(&bytes[start..i]).into_owned();
+        i += 1;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        // None: null or "None"
+        let is_none = if bytes[i] == b'n'
+            && i + 4 <= bytes.len()
+            && &bytes[i..i + 4] == b"null"
+        {
+            i += 4;
+            true
+        } else if bytes[i] == b'"'
+            && i + 6 <= bytes.len()
+            && &bytes[i..i + 6] == b"\"None\""
+        {
+            i += 6;
+            true
+        } else {
+            false
+        };
+        let pack_size = 8 + n * 8; // disc i64 + fields
+        let ptr = unsafe { libc::malloc(pack_size) as *mut i64 };
+        if ptr.is_null() {
+            continue;
+        }
+        if is_none {
+            unsafe {
+                *ptr = 0;
+                for fi in 0..n {
+                    *ptr.add(1 + fi) = 0;
+                }
+            }
+        } else {
+            // Optional {"Some": …} or bare product array.
+            if bytes[i] == b'{' {
+                while i < bytes.len() && bytes[i] != b'[' {
+                    i += 1;
+                }
+            }
+            if i >= bytes.len() || bytes[i] != b'[' {
+                unsafe {
+                    libc::free(ptr as *mut _);
+                }
+                break;
+            }
+            i += 1;
+            // Nested product array form {"Some":[[1,2]]}
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'[' {
+                i += 1;
+            }
+            let mut fields = vec![0i64; n];
+            for fi in 0..n {
+                while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+                    i += 1;
+                }
+                let neg = i < bytes.len() && bytes[i] == b'-';
+                if neg {
+                    i += 1;
+                }
+                let mut v: i64 = 0;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    v = v
+                        .saturating_mul(10)
+                        .saturating_add((bytes[i] - b'0') as i64);
+                    i += 1;
+                }
+                if neg {
+                    v = -v;
+                }
+                fields[fi] = v;
+            }
+            while i < bytes.len() && bytes[i] != b']' {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b']' {
+                i += 1;
+            }
+            // nested [[1,2]] outer close
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b']' {
+                i += 1;
+            }
+            // skip closing of Some object if present
+            while i < bytes.len() && bytes[i] != b',' && bytes[i] != b'}' {
+                if bytes[i] == b'}' {
+                    break;
+                }
+                i += 1;
+            }
+            unsafe {
+                *ptr = 1;
+                std::ptr::copy_nonoverlapping(fields.as_ptr(), ptr.add(1), n);
+            }
+        }
+        let vh = ptr as ValueHandle;
+        unsafe {
+            (*map_from_handle(handle)).inner.insert(key, vh);
+        }
+    }
+    handle
+}
+
+/// Map of Option of product Display/JSON.
+/// `display_style` 0 = JSON, 1 = Display.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_option_product_i64(
+    handle: MapHandle,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if handle == 0 || arity <= 0 || arity > 16 {
+        return alloc_c_string("{}");
+    }
+    let map = unsafe { &*map_from_handle(handle) };
+    if map.inner.len() > 1_000_000 {
+        return alloc_c_string("{...}");
+    }
+    let mut entries: Vec<_> = map.inner.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 2 + 2);
+    parts.push(String::from("{"));
+    let n = arity as usize;
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        parts.push(json_escape_string(k));
+        parts.push(String::from(":"));
+        let vh = **v;
+        if vh == 0 {
+            if display_style != 0 {
+                parts.push(String::from("None()"));
+            } else {
+                parts.push(String::from("\"None\""));
+            }
+            continue;
+        }
+        let base = vh as *const i64;
+        let disc = unsafe { *base };
+        if disc == 0 {
+            if display_style != 0 {
+                parts.push(String::from("None()"));
+            } else {
+                parts.push(String::from("\"None\""));
+            }
+        } else {
+            let fields: Vec<i64> = unsafe { std::slice::from_raw_parts(base.add(1), n).to_vec() };
+            if display_style != 0 {
+                let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
+                parts.push(format!("Some(({}))", body.join(", ")));
+            } else {
+                let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
+                parts.push(format!("{{\"Some\":[[{}]]}}", body.join(",")));
+            }
+        }
+    }
+    parts.push(String::from("}"));
+    alloc_c_string(&parts.join(""))
+}
+
+/// Map of Result of product from JSON.
+/// Values: bare product array → Ok; `{"Ok":[…]}` / `{"Err":…}`.
+#[no_mangle]
+pub extern "C" fn mimi_map_from_json_result_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> MapHandle {
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return mimi_map_new();
+    }
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_map_new();
+    if handle == 0 {
+        return 0;
+    }
+    let n = arity as usize;
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'{' {
+        return handle;
+    }
+    i += 1;
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b'}' {
+            break;
+        }
+        if bytes[i] != b'"' {
+            break;
+        }
+        i += 1;
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'"' {
+            if bytes[i] == b'\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let key = String::from_utf8_lossy(&bytes[start..i]).into_owned();
+        i += 1;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        // Heap Result: {i64 disc, i64[n] ok fields or err string handle}
+        // disc 1 = Ok, 0 = Err; for Err store string ptr in field[0]
+        let pack_size = 8 + n * 8;
+        let ptr = unsafe { libc::malloc(pack_size) as *mut i64 };
+        if ptr.is_null() {
+            continue;
+        }
+        let mut is_err = false;
+        let mut err_str = String::new();
+        if bytes[i] == b'{' {
+            // tagged Ok/Err
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'"' {
+                i += 1;
+                let ts = i;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += 1;
+                }
+                let tag = String::from_utf8_lossy(&bytes[ts..i]).into_owned();
+                if i < bytes.len() {
+                    i += 1;
+                }
+                while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+                    i += 1;
+                }
+                if tag == "Err" {
+                    is_err = true;
+                    if i < bytes.len() && bytes[i] == b'"' {
+                        i += 1;
+                        let es = i;
+                        while i < bytes.len() && bytes[i] != b'"' {
+                            if bytes[i] == b'\\' {
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                        err_str = String::from_utf8_lossy(&bytes[es..i]).into_owned();
+                        if i < bytes.len() {
+                            i += 1;
+                        }
+                    } else if i < bytes.len() && bytes[i].is_ascii_digit() {
+                        let mut v: i64 = 0;
+                        while i < bytes.len() && bytes[i].is_ascii_digit() {
+                            v = v.saturating_mul(10).saturating_add((bytes[i] - b'0') as i64);
+                            i += 1;
+                        }
+                        err_str = v.to_string();
+                    }
+                }
+                // for Ok, fall through to parse array at i
+            }
+            while i < bytes.len() && bytes[i] != b'[' && bytes[i] != b'}' && !is_err {
+                i += 1;
+            }
+        }
+        if is_err {
+            let c = alloc_c_string(&err_str);
+            unsafe {
+                *ptr = 0;
+                *ptr.add(1) = c as i64;
+                for fi in 1..n {
+                    *ptr.add(1 + fi) = 0;
+                }
+            }
+            // skip to end of object value
+            while i < bytes.len() && bytes[i] != b',' && bytes[i] != b'}' {
+                i += 1;
+            }
+        } else {
+            if i >= bytes.len() || bytes[i] != b'[' {
+                unsafe {
+                    libc::free(ptr as *mut _);
+                }
+                break;
+            }
+            i += 1;
+            let mut fields = vec![0i64; n];
+            for fi in 0..n {
+                while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+                    i += 1;
+                }
+                let neg = i < bytes.len() && bytes[i] == b'-';
+                if neg {
+                    i += 1;
+                }
+                let mut v: i64 = 0;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    v = v
+                        .saturating_mul(10)
+                        .saturating_add((bytes[i] - b'0') as i64);
+                    i += 1;
+                }
+                if neg {
+                    v = -v;
+                }
+                fields[fi] = v;
+            }
+            while i < bytes.len() && bytes[i] != b']' {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b']' {
+                i += 1;
+            }
+            while i < bytes.len() && bytes[i] != b',' && bytes[i] != b'}' {
+                i += 1;
+            }
+            unsafe {
+                *ptr = 1;
+                std::ptr::copy_nonoverlapping(fields.as_ptr(), ptr.add(1), n);
+            }
+        }
+        // Skip closing braces of tagged {"Ok":…} / {"Err":…} value.
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'}' {
+            i += 1;
+        }
+        let vh = ptr as ValueHandle;
+        unsafe {
+            (*map_from_handle(handle)).inner.insert(key, vh);
+        }
+    }
+    handle
+}
+
+/// Map of Result of product Display/JSON.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_result_product_i64(
+    handle: MapHandle,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if handle == 0 || arity <= 0 || arity > 16 {
+        return alloc_c_string("{}");
+    }
+    let map = unsafe { &*map_from_handle(handle) };
+    if map.inner.len() > 1_000_000 {
+        return alloc_c_string("{...}");
+    }
+    let mut entries: Vec<_> = map.inner.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 2 + 2);
+    parts.push(String::from("{"));
+    let n = arity as usize;
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        parts.push(json_escape_string(k));
+        parts.push(String::from(":"));
+        let vh = **v;
+        if vh == 0 {
+            if display_style != 0 {
+                parts.push(String::from("Err()"));
+            } else {
+                parts.push(String::from("{\"Err\":[\"\"]}"));
+            }
+            continue;
+        }
+        let base = vh as *const i64;
+        let disc = unsafe { *base };
+        if disc == 0 {
+            let err_ptr = unsafe { *base.add(1) } as *const std::ffi::c_char;
+            let err_s = if err_ptr.is_null() {
+                String::new()
+            } else {
+                unsafe { cstr_to_string(err_ptr) }
+            };
+            if display_style != 0 {
+                parts.push(format!("Err({})", err_s));
+            } else {
+                parts.push(format!("{{\"Err\":[{}]}}", json_escape_string(&err_s)));
+            }
+        } else {
+            let fields: Vec<i64> = unsafe { std::slice::from_raw_parts(base.add(1), n).to_vec() };
+            if display_style != 0 {
+                let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
+                parts.push(format!("Ok(({}))", body.join(", ")));
+            } else {
+                let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
+                parts.push(format!("{{\"Ok\":[[{}]]}}", body.join(",")));
+            }
+        }
+    }
+    parts.push(String::from("}"));
+    alloc_c_string(&parts.join(""))
+}
+
 /// Build a MapHandle from a JSON object with string keys and integer values.
 /// Values are stored as raw i64 ValueHandles (same as map_set of integers).
 #[no_mangle]

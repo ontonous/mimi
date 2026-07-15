@@ -1855,11 +1855,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .expect_basic_value(&result, "mimi_map_from_json_product_i64")?
                         .into());
                 }
-                // Map<string, List/Set/Map of product>.
+                // Map<string, List/Set/Map/Option/Result of product>.
                 if let Some(Type::Name(ln, largs)) = resolved_val.as_ref() {
-                    if (ln == "List" || ln == "Set" || ln == "Map") && !largs.is_empty() {
+                    if (ln == "List" || ln == "Set" || ln == "Map" || ln == "Option" || ln == "Result")
+                        && !largs.is_empty()
+                    {
                         let product_ty = if ln == "Map" && largs.len() == 2 {
                             Some(&largs[1])
+                        } else if ln == "Result" && largs.len() == 2 {
+                            Some(&largs[0])
                         } else if largs.len() == 1 {
                             Some(&largs[0])
                         } else {
@@ -1894,6 +1898,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     "Map" => (
                                         "mimi_map_from_json_map_product_i64",
                                         "map_from_json_map_product",
+                                    ),
+                                    "Option" => (
+                                        "mimi_map_from_json_option_product_i64",
+                                        "map_from_json_option_product",
+                                    ),
+                                    "Result" => (
+                                        "mimi_map_from_json_result_product_i64",
+                                        "map_from_json_result_product",
                                     ),
                                     _ => unreachable!(),
                                 };
