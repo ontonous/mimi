@@ -332,8 +332,16 @@ fn collect_refs_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
         | Stmt::Ellipsis => {}
         Stmt::Do(body) => collect_refs_in_block(body, info),
         Stmt::Delegate { expr, .. } => collect_refs_in_expr(expr, info),
-        Stmt::Pinned { expr, body, .. } => {
+        Stmt::Pinned {
+            expr,
+            timeout,
+            body,
+            ..
+        } => {
             collect_refs_in_expr(expr, info);
+            if let Some(timeout) = timeout {
+                collect_refs_in_expr(timeout, info);
+            }
             collect_refs_in_block(body, info);
         }
     }
@@ -1193,6 +1201,27 @@ mod tests {
                 .iter()
                 .any(|d| d.code.as_deref() == Some(W006)),
             "used variable should not trigger W006"
+        );
+    }
+
+    #[test]
+    fn lint_pinned_timeout_counts_as_variable_use() {
+        let src = r#"
+func main() -> i32 {
+    let timeout_ms = 5
+    let buffer = "x"
+    pinned(buffer, timeout = timeout_ms) |ptr| { println(ptr) }
+    0
+}
+"#;
+        let file = parse_source(src);
+        let result = Linter::new().lint(&file, src);
+        assert!(
+            !result.diagnostics.iter().any(|d| {
+                d.code.as_deref() == Some(W006) && d.message.contains("timeout_ms")
+            }),
+            "timeout variable should be considered used: {:?}",
+            result.diagnostics
         );
     }
 
