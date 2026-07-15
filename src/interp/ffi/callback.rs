@@ -400,11 +400,13 @@ unsafe fn callback_trampoline_inner(
         // owned strings (C malloc / strdup). Free with libc::free only (IP-C3).
         for (i, &should_free) in arg_free_mask.iter().enumerate() {
             if should_free && i < nargs {
-                let arg_ptr = *args.add(i);
-                if !arg_ptr.is_null() {
-                    // SAFETY: arg_ptr is a non-null C-allocated string transferred from C.
-                    unsafe {
-                        libc::free(arg_ptr as *mut libc::c_void);
+                let arg_slot = *args.add(i);
+                if !arg_slot.is_null() {
+                    // SAFETY: libffi passes a pointer to the argument slot. The slot
+                    // contains the transferred C string pointer allocated by malloc/strdup.
+                    let owned_ptr = unsafe { *(arg_slot as *const *mut libc::c_void) };
+                    if !owned_ptr.is_null() {
+                        unsafe { libc::free(owned_ptr) };
                     }
                 }
             }
@@ -460,11 +462,13 @@ unsafe fn callback_trampoline_inner(
     // libc::free only — never CString::from_raw (IP-C3 allocator match).
     for (i, &should_free) in arg_free_mask.iter().enumerate() {
         if should_free && i < nargs {
-            let arg_ptr = *args.add(i);
-            if !arg_ptr.is_null() {
-                // SAFETY: arg_ptr is a non-null C-allocated string transferred from C.
-                unsafe {
-                    libc::free(arg_ptr as *mut libc::c_void);
+            let arg_slot = *args.add(i);
+            if !arg_slot.is_null() {
+                // SAFETY: libffi passes a pointer to the argument slot. The slot
+                // contains the transferred C string pointer allocated by malloc/strdup.
+                let owned_ptr = unsafe { *(arg_slot as *const *mut libc::c_void) };
+                if !owned_ptr.is_null() {
+                    unsafe { libc::free(owned_ptr) };
                 }
             }
         }
