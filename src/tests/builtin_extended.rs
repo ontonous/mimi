@@ -105,6 +105,22 @@ func main() -> bool {
 }
 
 #[test]
+fn builtin_random_is_strictly_below_one() {
+    let src = r#"
+func main() -> bool {
+    let mut i = 0
+    while i < 10000 {
+        let r = random()
+        if r < 0.0 || r >= 1.0 { return false }
+        i += 1
+    }
+    true
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Bool(true));
+}
+
+#[test]
 fn builtin_pi() {
     let src = r#"
 func main() -> f64 {
