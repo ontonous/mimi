@@ -573,27 +573,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .into_pointer_value();
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
-                    } else if inner.starts_with("Option")
-                        && (inner.contains('(')
-                            || inner.contains("Tuple")
-                            || self
-                                .type_defs
-                                .get(
-                                    inner
-                                        .strip_prefix("Option<")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                        .unwrap_or(""),
-                                )
-                                .is_some_and(|td| {
-                                    matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                                }))
-                    {
-                        // List of Option of product-tuple / named record: full
-                        // Option layout, not the scalar {i1,i64} runtime helper.
-                        let raw = self.emit_list_option_product_tuple_to_json(alloca, inner)?;
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
                     } else if inner.starts_with("Option") {
+                        // Option of Result / product / record needs full Option
+                        // layout — never the scalar {i1,i64} runtime helper.
+                        // Exclude bare Option of scalar i32 (no Result/tuple/record).
+                        let opt_inner = inner
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                            .unwrap_or("");
+                        let needs_full = opt_inner.starts_with("Result")
+                            || opt_inner.starts_with('(')
+                            || opt_inner.contains("Tuple")
+                            || self.type_defs.get(opt_inner).is_some_and(|td| {
+                                matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                            });
+                        if needs_full {
+                            let raw =
+                                self.emit_list_option_product_tuple_to_json(alloca, inner)?;
+                            self.register_heap_alloc(raw);
+                            return self.wrap_c_string(raw);
+                        }
                         "mimi_list_option_i64_to_json"
                     } else if inner.starts_with("Result") && inner.contains("Map<") {
                         // List of Result of Map — typed map Ok payload.
@@ -1007,27 +1006,52 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     .build_unconditional_branch(some_merge)
                                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                                 self.builder.position_at_end(err_bb);
+                                // Err payload: string Err is heap {ptr,len}; scalar is i64.
+                                let r_err_bv =
+                                    self.build_extract_value(res_sv.into(), 2, "opt_res_tup_errv")?;
+                                let r_err_i64 = match r_err_bv {
+                                    BasicValueEnum::IntValue(iv) => {
+                                        if iv.get_type().get_bit_width() < 64 {
+                                            self.builder
+                                                .build_int_s_extend(
+                                                    iv,
+                                                    self.context.i64_type(),
+                                                    "opt_res_tup_err_i64",
+                                                )
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(e.to_string())
+                                                })?
+                                        } else {
+                                            iv
+                                        }
+                                    }
+                                    _ => self.context.i64_type().const_int(0, false),
+                                };
+                                let inner_err = self.emit_result_err_json(r_err_i64, true)?;
                                 let ewrap = self.malloc_or_abort(
-                                    self.context.i64_type().const_int(64, false),
-                                    "opt_res_tup_err",
+                                    self.context.i64_type().const_int(1024, false),
+                                    "opt_res_tup_err_outer",
                                 )?;
-                                let efmt = self
+                                let eofmt = self
                                     .builder
                                     .build_global_string_ptr(
-                                        "{\"Some\":[{\"Err\":[0]}]}",
-                                        "opt_res_tup_efmt",
+                                        "{\"Some\":[%s]}",
+                                        "opt_res_tup_eofmt",
                                     )
                                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let strcpy_fn = self.get_runtime_fn("strcpy")?;
                                 self.build_call(
-                                    strcpy_fn,
+                                    snprintf_fn,
                                     &[
                                         BasicMetadataValueEnum::PointerValue(ewrap),
-                                        BasicMetadataValueEnum::PointerValue(
-                                            efmt.as_pointer_value(),
+                                        BasicMetadataValueEnum::IntValue(
+                                            self.context.i64_type().const_int(1024, false),
                                         ),
+                                        BasicMetadataValueEnum::PointerValue(
+                                            eofmt.as_pointer_value(),
+                                        ),
+                                        BasicMetadataValueEnum::PointerValue(inner_err),
                                     ],
-                                    "opt_res_tup_ecpy",
+                                    "opt_res_tup_eosn",
                                 )?;
                                 self.build_store(out_alloca, ewrap)?;
                                 self.builder
@@ -1038,6 +1062,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     .build_unconditional_branch(merge_bb)
                                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                                 self.builder.position_at_end(none_bb);
+                                let strcpy_fn = self.get_runtime_fn("strcpy")?;
                                 let none_heap = self.malloc_or_abort(
                                     self.context.i64_type().const_int(8, false),
                                     "opt_res_tup_none",
@@ -1162,19 +1187,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .ok_or("result set to_json void")?
                             .into_pointer_value()
                         } else {
-                            let res_fn = self.get_runtime_fn("mimi_result_i64_to_json")?;
-                            self.build_call(
-                                res_fn,
-                                &[
-                                    BasicMetadataValueEnum::IntValue(r_disc_i64),
-                                    BasicMetadataValueEnum::IntValue(r_ok_i64),
-                                    BasicMetadataValueEnum::IntValue(r_err_i64),
-                                ],
-                                "opt_res_json",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("result to_json void")?
-                            .into_pointer_value()
+                            // Prefer structured Result JSON so string Err
+                            // (heap {ptr,len}) is not printed as a raw i64.
+                            self.emit_result_struct_to_json_cstr(res_sv, {
+                                obj_type
+                                    .strip_prefix("Option<")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                    .unwrap_or("Result")
+                            })?
                         };
                         let disc_is_some = self
                             .builder
@@ -3354,26 +3374,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .build_unconditional_branch(merge_bb)
                                 .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                             self.builder.position_at_end(err_bb);
-                            let ebuf = self.malloc_or_abort(
-                                self.context.i64_type().const_int(128, false),
-                                "res_tup_err_buf",
-                            )?;
-                            let efmt = self
-                                .builder
-                                .build_global_string_ptr("{\"Err\":[%ld]}", "res_tup_efmt")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            self.build_call(
-                                snprintf_fn,
-                                &[
-                                    BasicMetadataValueEnum::PointerValue(ebuf),
-                                    BasicMetadataValueEnum::IntValue(
-                                        self.context.i64_type().const_int(128, false),
-                                    ),
-                                    BasicMetadataValueEnum::PointerValue(efmt.as_pointer_value()),
-                                    BasicMetadataValueEnum::IntValue(err_i64),
-                                ],
-                                "res_tup_esn",
-                            )?;
+                            let ebuf = self.emit_result_err_json(err_i64, true)?;
                             self.build_store(out_alloca, ebuf)?;
                             self.builder
                                 .build_unconditional_branch(merge_bb)

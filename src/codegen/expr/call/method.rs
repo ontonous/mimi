@@ -1899,18 +1899,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // string elements: json_get_element already returns the unquoted
                 // heap C string (same as List<string>) — wrap directly, do not
                 // re-parse via mimi_from_json and do not free (ownership moves).
+                // Use full Tuple layout (integer fields widened to i64) so the
+                // struct matches Ok((1,2)) / list product-tuple storage.
                 let json_get_elem_fn = self.get_runtime_fn("json_get_element")?;
-                let mut field_tys = Vec::with_capacity(elems.len());
-                for e in elems {
-                    let ty = self.llvm_type_for(e).ok_or_else(|| {
-                        CompileError::Generic(format!(
-                            "from_json::<Tuple>: cannot map element type {:?}",
-                            e
-                        ))
-                    })?;
-                    field_tys.push(ty);
-                }
-                let struct_ty = self.context.struct_type(&field_tys, false);
+                let full_tuple = Type::Tuple(elems.clone());
+                let struct_ty = match self.llvm_type_for(&full_tuple) {
+                    Some(BasicTypeEnum::StructType(s)) => s,
+                    _ => {
+                        let mut field_tys = Vec::with_capacity(elems.len());
+                        for e in elems {
+                            let ty = self.llvm_type_for(e).ok_or_else(|| {
+                                CompileError::Generic(format!(
+                                    "from_json::<Tuple>: cannot map element type {:?}",
+                                    e
+                                ))
+                            })?;
+                            field_tys.push(ty);
+                        }
+                        self.context.struct_type(&field_tys, false)
+                    }
+                };
+                let field_tys = struct_ty.get_field_types();
                 let mut struct_val = struct_ty.get_undef();
                 for (i, e) in elems.iter().enumerate() {
                     let idx = self.context.i64_type().const_int(i as u64, false);

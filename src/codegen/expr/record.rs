@@ -141,6 +141,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         _elem_expr: &Expr,
         _vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        // When packing into a typed List<Result/Option/...>, inflate so Ok and
+        // Err share one layout (Err is often {i1,i64,i64} while Ok is wider).
+        // Critical: never memcpy a narrow Result into a wide buffer without
+        // inflate — field offsets diverge ({i1,i64,i64} vs {i1,{i64,i64},i64}).
+        let val = if let Some(elem_ty) = self.pending_list_elem_type.clone() {
+            let needs_inflate = match &elem_ty {
+                Type::Result(_, _) | Type::Option(_) => true,
+                Type::Name(n, _) if n == "Result" || n == "Option" => true,
+                _ => false,
+            };
+            if needs_inflate {
+                self.inflate_variant_struct(val, &elem_ty)?
+            } else {
+                val
+            }
+        } else {
+            val
+        };
         match val {
             BasicValueEnum::IntValue(iv) => {
                 // List slots are always i64 — extend i32 (or narrower) values before storing.
@@ -173,6 +191,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .into_pointer_value();
                     return self.build_ptr_to_int(raw_ptr, self.context.i64_type(), "str_to_i64");
                 }
+                // Always pack using the (possibly inflated) struct's own type —
+                // inflate already rewrote Err to the full Result layout.
                 let struct_ty = sv.get_type();
                 let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(struct_ty));
                 let size_val = self.context.i64_type().const_int(size, false);

@@ -1397,22 +1397,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => i64_ty.const_int(0, false),
         };
-        let ewrap = self.malloc_or_abort(i64_ty.const_int(64, false), "list_res_prod_err_wrap")?;
-        let efmt = self
-            .builder
-            .build_global_string_ptr("{\"Err\":[%ld]}", "list_res_prod_err_fmt")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let snprintf_fn = self.get_runtime_fn("snprintf")?;
-        self.build_call(
-            snprintf_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(ewrap),
-                BasicMetadataValueEnum::IntValue(i64_ty.const_int(64, false)),
-                BasicMetadataValueEnum::PointerValue(efmt.as_pointer_value()),
-                BasicMetadataValueEnum::IntValue(err_i64),
-            ],
-            "list_res_prod_err_sn",
-        )?;
+        // Heapish → string Err JSON; else numeric Err.
+        let ewrap = self.emit_result_err_json(err_i64, true)?;
         self.build_store(piece_slot, ewrap)?;
         self.builder
             .build_unconditional_branch(merge_bb)
@@ -1633,7 +1619,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             matches!(td.kind, crate::ast::TypeDefKind::Record(_))
         });
         let piece = if let BasicValueEnum::StructValue(pay_sv) = pay {
-            let pay_json = if is_named_record {
+            let pfields = pay_sv.get_type().get_field_types();
+            // Nested Result {i1, ok, err} — never treat as product tuple.
+            let is_result_layout = pfields.len() >= 3
+                && matches!(
+                    pfields[0],
+                    BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                );
+            let pay_json = if is_result_layout {
+                self.emit_result_struct_to_json_cstr(pay_sv, inner_name)?
+            } else if is_named_record {
                 let rec_ty = pay_sv.get_type();
                 let rec_alloca =
                     self.build_alloca(BasicTypeEnum::StructType(rec_ty), "list_opt_rec_tmp")?;
@@ -3102,6 +3097,295 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         None
+    }
+
+    /// Emit JSON for a Result Err payload: string Err is ptrtoint of heap
+    /// `{ptr,len}`; scalar Err is a plain i64. Uses the same ≥1MB + 8-aligned
+    /// heapish heuristic as Display so we do not depend on type-name strings.
+    pub(in crate::codegen) fn emit_result_err_json(
+        &self,
+        err_i64: inkwell::values::IntValue<'ctx>,
+        prefer_string: bool,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let snprintf_fn = self.get_runtime_fn("snprintf")?;
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
+        let out_slot = self.build_alloca(BasicTypeEnum::PointerType(i8_ptr), "res_err_j_out")?;
+
+        // Heapish pointer? (≥1MB and 8-byte aligned) → decode as string struct.
+        let min_heap = i64_ty.const_int(1_048_576, false);
+        let ge = self
+            .builder
+            .build_int_compare(IntPredicate::UGE, err_i64, min_heap, "res_err_ge")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let and7 = self
+            .builder
+            .build_and(err_i64, i64_ty.const_int(7, false), "res_err_and7")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let aligned = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                and7,
+                i64_ty.const_int(0, false),
+                "res_err_al",
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let mut is_heapish = self
+            .builder
+            .build_and(ge, aligned, "res_err_heapish")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        if prefer_string {
+            // Type says string Err: still require alignment, but allow lower addresses
+            // only when heapish already; prefer_string only affects non-heapish fallback
+            // path (still print as number if not a pointer).
+            let _ = prefer_string;
+        }
+
+        let str_bb = self.context.append_basic_block(parent, "res_err_j_str");
+        let int_bb = self.context.append_basic_block(parent, "res_err_j_int");
+        let merge_bb = self.context.append_basic_block(parent, "res_err_j_merge");
+        self.builder
+            .build_conditional_branch(is_heapish, str_bb, int_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+        self.builder.position_at_end(str_bb);
+        {
+            let str_sty = self.context.struct_type(
+                &[
+                    BasicTypeEnum::PointerType(i8_ptr),
+                    BasicTypeEnum::IntType(i64_ty),
+                ],
+                false,
+            );
+            let as_ptr = self
+                .builder
+                .build_int_to_ptr(err_i64, i8_ptr, "res_err_str_ptr")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            let loaded = self
+                .builder
+                .build_load(
+                    BasicTypeEnum::StructType(str_sty),
+                    as_ptr,
+                    "res_err_str_ld",
+                )
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                .into_struct_value();
+            let data_ptr = self
+                .build_extract_value(loaded.into(), 0, "res_err_data")?
+                .into_pointer_value();
+            let escape_fn = self.get_runtime_fn("mimi_json_escape_string")?;
+            let escaped = self
+                .build_call(
+                    escape_fn,
+                    &[BasicMetadataValueEnum::PointerValue(data_ptr)],
+                    "res_err_escaped",
+                )?
+                .try_as_basic_value_opt()
+                .ok_or("mimi_json_escape_string void")?
+                .into_pointer_value();
+            let wrap = self.malloc_or_abort(i64_ty.const_int(1024, false), "res_err_json_wrap")?;
+            let fmt = self
+                .builder
+                .build_global_string_ptr("{\"Err\":[%s]}", "res_err_str_fmt")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            self.build_call(
+                snprintf_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(wrap),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(1024, false)),
+                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                    BasicMetadataValueEnum::PointerValue(escaped),
+                ],
+                "res_err_str_sn",
+            )?;
+            if let Ok(free_fn) = self.get_runtime_fn("free") {
+                let _ = self.build_call(
+                    free_fn,
+                    &[BasicMetadataValueEnum::PointerValue(escaped)],
+                    "res_err_free_esc",
+                );
+            }
+            self.build_store(out_slot, wrap)?;
+        }
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+        self.builder.position_at_end(int_bb);
+        {
+            let wrap = self.malloc_or_abort(i64_ty.const_int(64, false), "res_err_num_wrap")?;
+            let fmt = self
+                .builder
+                .build_global_string_ptr("{\"Err\":[%ld]}", "res_err_num_fmt")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            self.build_call(
+                snprintf_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(wrap),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(64, false)),
+                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                    BasicMetadataValueEnum::IntValue(err_i64),
+                ],
+                "res_err_num_sn",
+            )?;
+            self.build_store(out_slot, wrap)?;
+        }
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+        self.builder.position_at_end(merge_bb);
+        Ok(self
+            .build_load(
+                BasicTypeEnum::PointerType(i8_ptr),
+                out_slot,
+                "res_err_j_ld",
+            )?
+            .into_pointer_value())
+    }
+
+    /// Convenience: always use heapish heuristic for Err JSON.
+    pub(in crate::codegen) fn emit_result_err_string_json(
+        &self,
+        err_i64: inkwell::values::IntValue<'ctx>,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        self.emit_result_err_json(err_i64, true)
+    }
+
+    /// Serialize a by-value Result struct `{i1, ok, err}` to a JSON C string.
+    /// Handles product-tuple / record Ok and string Err.
+    pub(in crate::codegen) fn emit_result_struct_to_json_cstr(
+        &mut self,
+        sv: inkwell::values::StructValue<'ctx>,
+        res_type: &str,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let disc = self
+            .build_extract_value(sv.into(), 0, "res_j_disc")?
+            .into_int_value();
+        let is_ok = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                disc,
+                disc.get_type().const_int(0, false),
+                "res_j_is_ok",
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
+        let ok_bb = self.context.append_basic_block(parent, "res_j_ok");
+        let err_bb = self.context.append_basic_block(parent, "res_j_err");
+        let merge_bb = self.context.append_basic_block(parent, "res_j_merge");
+        let out_slot = self.build_alloca(BasicTypeEnum::PointerType(i8_ptr), "res_j_out")?;
+        self.builder
+            .build_conditional_branch(is_ok, ok_bb, err_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(ok_bb);
+        let ok_pay = self.build_extract_value(sv.into(), 1, "res_j_ok")?;
+        let ok_inner = Self::strip_first_type_arg(res_type, "Result").unwrap_or_default();
+        let is_named_record = self.type_defs.get(&ok_inner).is_some_and(|td| {
+            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+        });
+        let ok_json = if let BasicValueEnum::StructValue(ok_sv) = ok_pay {
+            if is_named_record {
+                let rec_ty = ok_sv.get_type();
+                let rec_alloca =
+                    self.build_alloca(BasicTypeEnum::StructType(rec_ty), "res_j_rec")?;
+                self.build_store(rec_alloca, ok_sv)?;
+                self.compile_record_to_json_cstr(&ok_inner, rec_alloca)?
+            } else {
+                self.emit_product_tuple_to_json(ok_sv)?
+            }
+        } else {
+            // Scalar Ok.
+            let ok_i64 = match ok_pay {
+                BasicValueEnum::IntValue(iv) => {
+                    if iv.get_type().get_bit_width() < 64 {
+                        self.builder
+                            .build_int_s_extend(iv, i64_ty, "res_j_ok_i64")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        iv
+                    }
+                }
+                _ => i64_ty.const_int(0, false),
+            };
+            let tmp = self.malloc_or_abort(i64_ty.const_int(64, false), "res_j_ok_tmp")?;
+            let ifmt = self
+                .builder
+                .build_global_string_ptr("%ld", "res_j_ok_ifmt")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            let snprintf_fn = self.get_runtime_fn("snprintf")?;
+            self.build_call(
+                snprintf_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(tmp),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(64, false)),
+                    BasicMetadataValueEnum::PointerValue(ifmt.as_pointer_value()),
+                    BasicMetadataValueEnum::IntValue(ok_i64),
+                ],
+                "res_j_ok_sn",
+            )?;
+            tmp
+        };
+        let wrap = self.malloc_or_abort(i64_ty.const_int(1024, false), "res_j_ok_wrap")?;
+        let ofmt = self
+            .builder
+            .build_global_string_ptr("{\"Ok\":[%s]}", "res_j_ofmt")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let snprintf_fn = self.get_runtime_fn("snprintf")?;
+        self.build_call(
+            snprintf_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(wrap),
+                BasicMetadataValueEnum::IntValue(i64_ty.const_int(1024, false)),
+                BasicMetadataValueEnum::PointerValue(ofmt.as_pointer_value()),
+                BasicMetadataValueEnum::PointerValue(ok_json),
+            ],
+            "res_j_osn",
+        )?;
+        self.build_store(out_slot, wrap)?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(err_bb);
+        let err_pay = self.build_extract_value(sv.into(), 2, "res_j_err")?;
+        let err_i64 = match err_pay {
+            BasicValueEnum::IntValue(iv) => {
+                if iv.get_type().get_bit_width() < 64 {
+                    self.builder
+                        .build_int_s_extend(iv, i64_ty, "res_j_err_i64")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                } else {
+                    iv
+                }
+            }
+            _ => i64_ty.const_int(0, false),
+        };
+        let ewrap = self.emit_result_err_json(err_i64, true)?;
+        self.build_store(out_slot, ewrap)?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(merge_bb);
+        Ok(self
+            .build_load(
+                BasicTypeEnum::PointerType(i8_ptr),
+                out_slot,
+                "res_j_result",
+            )?
+            .into_pointer_value())
     }
 
     /// Format Result {i1, ok, err} as `Ok(...)` / `Err(...)` (int, string, or record Ok).

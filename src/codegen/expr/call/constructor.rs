@@ -227,6 +227,130 @@ impl<'ctx> CodeGenerator<'ctx> {
         let bool_ty = self.context.bool_type();
         let i64_ty = self.context.i64_type();
         let disc = bool_ty.const_int(0, false);
+        // When packing into List<Result<T,E>>, build the full Result layout
+        // (Ok pad matches Ok(T)) so list Display/to_json can load uniformly.
+        if let Some(elem_ty) = self.pending_list_elem_type.clone() {
+            // List element may be Result, or Option wrapping Result (inflate the
+            // inner Result so Some(Err(...)) packs a full Ok-pad layout).
+            let result_ty: Option<Type> = match &elem_ty {
+                Type::Result(_, _) => Some(elem_ty.clone()),
+                Type::Name(n, _) if n == "Result" => Some(elem_ty.clone()),
+                Type::Option(inner) => match inner.as_ref() {
+                    Type::Result(_, _) => Some((**inner).clone()),
+                    Type::Name(n, _) if n == "Result" => Some((**inner).clone()),
+                    _ => None,
+                },
+                Type::Name(n, args) if n == "Option" && args.len() == 1 => match &args[0] {
+                    Type::Result(_, _) => Some(args[0].clone()),
+                    Type::Name(rn, _) if rn == "Result" => Some(args[0].clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(res_ty) = result_ty {
+                if let Some(BasicTypeEnum::StructType(full_sty)) = self.llvm_type_for(&res_ty) {
+                    // Fall through to build err_val, then pack into full_sty.
+                    let err_val: BasicValueEnum = match val {
+                        BasicValueEnum::IntValue(iv) => {
+                            let bit_width = iv.get_type().get_bit_width();
+                            if bit_width < 64 {
+                                self.builder
+                                    .build_int_s_extend(iv, i64_ty, "err_sext")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!(
+                                            "int sign extend error: {}",
+                                            e
+                                        ))
+                                    })?
+                                    .into()
+                            } else if bit_width > 64 {
+                                self.builder
+                                    .build_int_truncate(iv, i64_ty, "err_trunc")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("int truncate error: {}", e))
+                                    })?
+                                    .into()
+                            } else {
+                                iv.into()
+                            }
+                        }
+                        BasicValueEnum::PointerValue(pv) => {
+                            self.build_ptr_to_int(pv, i64_ty, "err_to_i64")?.into()
+                        }
+                        BasicValueEnum::StructValue(sv) => {
+                            let sv_fields = sv.get_type().get_field_types();
+                            let is_mimi_string = sv_fields.len() == 2
+                                && matches!(&sv_fields[0], BasicTypeEnum::PointerType(_))
+                                && matches!(
+                                    &sv_fields[1],
+                                    BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                                );
+                            if is_mimi_string {
+                                let i8_ptr_ty =
+                                    self.context.ptr_type(inkwell::AddressSpace::default());
+                                let string_struct_ty = self.context.struct_type(
+                                    &[
+                                        BasicTypeEnum::PointerType(i8_ptr_ty),
+                                        BasicTypeEnum::IntType(i64_ty),
+                                    ],
+                                    false,
+                                );
+                                let heap_ty = BasicTypeEnum::StructType(string_struct_ty);
+                                let alloc_size = i64_ty.const_int(16, false);
+                                let heap_ptr =
+                                    self.malloc_or_abort(alloc_size, "err_str_malloc")?;
+                                let str_ptr_gep = self
+                                    .gep()
+                                    .build_struct_gep(heap_ty, heap_ptr, 0, "err_str_ptr_gep")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("err str gep: {}", e))
+                                    })?;
+                                self.build_store(
+                                    str_ptr_gep,
+                                    self.build_extract_value(sv.into(), 0, "err_str_ptr")?,
+                                )?;
+                                let str_len_gep = self
+                                    .gep()
+                                    .build_struct_gep(heap_ty, heap_ptr, 1, "err_str_len_gep")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("err len gep: {}", e))
+                                    })?;
+                                self.build_store(
+                                    str_len_gep,
+                                    self.build_extract_value(sv.into(), 1, "err_str_len")?,
+                                )?;
+                                self.build_ptr_to_int(heap_ptr, i64_ty, "err_str_heap_i64")?
+                                    .into()
+                            } else {
+                                let tag = self
+                                    .build_extract_value(sv.into(), 0, "enum_tag")?
+                                    .into_int_value();
+                                self.builder
+                                    .build_int_cast(tag, i64_ty, "err_tag_ext")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("int cast error: {}", e))
+                                    })?
+                                    .into()
+                            }
+                        }
+                        _ => return Err("Err: unsupported error value type".into()),
+                    };
+                    let alloca = self.build_alloca(full_sty, "err_full")?;
+                    self.build_store(alloca, full_sty.const_zero())?;
+                    let disc_gep = self
+                        .gep()
+                        .build_struct_gep(full_sty, alloca, 0, "disc")
+                        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                    self.build_store(disc_gep, disc)?;
+                    let err_gep = self
+                        .gep()
+                        .build_struct_gep(full_sty, alloca, 2, "err_payload")
+                        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                    self.build_store(err_gep, err_val)?;
+                    return self.build_load(full_sty, alloca, "loaded");
+                }
+            }
+        }
         let err_val: BasicValueEnum = match val {
             BasicValueEnum::IntValue(iv) => {
                 let bit_width = iv.get_type().get_bit_width();
@@ -1259,7 +1383,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Widen a narrow variant struct (created by Err/None constructors)
     /// to match the declared type's expected struct layout.
     /// For example, `Err(42)` produces `{i1,i64,i64}` but when the declared
-    /// type is `Result<string,i64>`, it should be `{i1,{ptr,i64},i64}`.
+    /// type is `Result<(i32,i32),string>`, it should be `{i1,{i64,i64},i64}`.
     pub(in crate::codegen) fn inflate_variant_struct(
         &self,
         val: BasicValueEnum<'ctx>,
@@ -1274,9 +1398,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         if actual_len < 2 {
             return Ok(val);
         }
-        // Get the expected struct type from the type annotation
-        let type_str = self.get_full_type_name(declared_ty).unwrap_or_default();
-        let expected = self.compute_variant_struct_type(&type_str);
+        // Prefer full llvm_type_for so product-tuple Ok layouts are correct
+        // (compute_variant_struct_type only handles Name payloads).
+        let expected = self.llvm_type_for(declared_ty).or_else(|| {
+            let type_str = self.get_full_type_name(declared_ty).unwrap_or_default();
+            self.compute_variant_struct_type(&type_str)
+        });
         let Some(BasicTypeEnum::StructType(expected_sty)) = expected else {
             return Ok(val);
         };
@@ -1289,7 +1416,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(val); // already the correct layout
         }
         // Inflation needed: rebuild the struct with the correct field 1 type.
-        // Use alloca + GEP + store to construct the value.
         // Allocate and zero-initialize the wide struct
         let wide_alloca = self.build_alloca(BasicTypeEnum::StructType(expected_sty), "inflated")?;
         let zero_init = self.const_zero_for_type(expected_sty.into());
@@ -1324,6 +1450,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
                 .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
             self.build_store(err_gep, err_val)?;
+        } else if actual_len == 2 {
+            // Option: copy payload when types differ only by width (int widen).
+            // If expected payload is a wider struct, leave zero (None case).
+            if matches!(actual_fields[1], BasicTypeEnum::IntType(_))
+                && matches!(expected_fields[1], BasicTypeEnum::IntType(_))
+            {
+                let pay = self.build_extract_value(agg_val, 1, "opt_pay")?;
+                let pay_gep = self
+                    .gep()
+                    .build_struct_gep(
+                        BasicTypeEnum::StructType(expected_sty),
+                        wide_alloca,
+                        1,
+                        "opt_pay_gep",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+                self.build_store(pay_gep, pay)?;
+            }
         }
         // Load the inflated struct
         self.build_load(
