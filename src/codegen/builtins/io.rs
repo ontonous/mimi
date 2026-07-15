@@ -197,9 +197,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.emit_list_map_to_string(*sv, inner)?
                             } else if inner.starts_with("Set") || inner == "set" {
                                 self.emit_list_set_to_string(*sv, inner)?
-                            } else if inner.starts_with('(') {
-                                // List of product tuples stored as ptrtoint.
-                                self.emit_list_product_tuple_to_string(*sv, inner)?
+                            } else if inner.starts_with('(')
+                                || self.is_product_tuple_alias(inner)
+                            {
+                                // List of product tuples (or alias of them) as ptrtoint.
+                                let elem = if self.is_product_tuple_alias(inner) {
+                                    self.resolve_alias_type_name(inner)
+                                } else {
+                                    inner.to_string()
+                                };
+                                self.emit_list_product_tuple_to_string(*sv, &elem)?
                             } else {
                                 self.emit_list_i32_to_string(*sv)?
                             }

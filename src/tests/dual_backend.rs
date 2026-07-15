@@ -7129,6 +7129,27 @@ fn dual_map_set_product_tuple_no_crash() {
     );
 }
 
+/// List of type-alias product tuples: Display + to_json dual.
+#[test]
+fn dual_list_tuple_alias() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Pair = (i32, i32)
+        func main() -> i32 {
+            let p: Pair = (1, 2)
+            let xs = [p, (3, 4)]
+            println(xs)
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[(1, 2), (3, 4)]\n[[1,2],[3,4]]"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {
