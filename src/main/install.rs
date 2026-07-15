@@ -1,5 +1,5 @@
 use mimi::{lockfile, manifest, pkg_registry, pkg_resolve};
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 /// Install all dependencies declared in `mimi.toml`.
 ///
@@ -30,15 +30,24 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
     std::fs::create_dir_all(&deps_dir).map_err(|e| format!("failed to create deps dir: {}", e))?;
 
     let mut lock = lockfile::Lockfile::load(&dir)?.unwrap_or_else(lockfile::Lockfile::new);
-    let mut visited: HashSet<String> = HashSet::new();
+    // P-H3: track first-seen version constraint; warn on conflicting re-visits.
+    let mut visited: HashMap<String, Option<String>> = HashMap::new();
     let mut queue: Vec<manifest::Dependency> = direct_deps;
     let mut installed = 0;
     let mut skipped = 0;
 
     while let Some(dep) = queue.pop() {
-        if !visited.insert(dep.name.clone()) {
+        if let Some(prev) = visited.get(&dep.name) {
+            let cur = dep.version.clone();
+            if prev != &cur {
+                eprintln!(
+                    "warning: dependency '{}' requested as {:?} and {:?}; using first resolution",
+                    dep.name, prev, cur
+                );
+            }
             continue;
         }
+        visited.insert(dep.name.clone(), dep.version.clone());
 
         let dst = deps_dir.join(&dep.name);
 
@@ -48,7 +57,7 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
             if pkg_resolve::checksum_matches(&dst, entry.checksum.as_deref()) {
                 println!("  = {} ({})", dep.name, entry.version);
                 skipped += 1;
-                let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited);
+                let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
                 for sub_dep in sub_deps {
                     queue.push(sub_dep);
                 }
@@ -68,7 +77,7 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
             if let Some(entry) = lock.get_package(&dep.name) {
                 println!("  = {} ({}, cached)", dep.name, entry.version);
                 skipped += 1;
-                let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited);
+                let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
                 for sub_dep in sub_deps {
                     queue.push(sub_dep);
                 }
@@ -86,7 +95,7 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
                 if dst.exists() {
                     println!("  = {} ({}, frozen)", dep.name, entry.version);
                     skipped += 1;
-                    let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited);
+                    let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
                     for sub_dep in sub_deps {
                         queue.push(sub_dep);
                     }
@@ -109,7 +118,7 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
         );
         installed += 1;
 
-        let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited);
+        let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
         for sub_dep in sub_deps {
             println!("    → {} (dependency of {})", sub_dep.name, dep.name);
             queue.push(sub_dep);

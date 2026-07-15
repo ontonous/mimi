@@ -1304,3 +1304,20 @@ func main() -> i32 {
         assert_eq!(r.unwrap(), crate::interp::Value::Int(42));
     }
 }
+
+
+#[test]
+fn cap_double_consume_rejected() {
+    // T-H4: linear caps cannot be dropped twice.
+    let src = r#"
+cap File
+func main() -> i32 {
+    let f: File = File
+    drop(f)
+    drop(f)
+    0
+}
+"#;
+    let r = check_source(src);
+    assert!(r.is_err(), "expected double-consume error");
+}
