@@ -3,6 +3,7 @@ use mimi::path_safety;
 use mimi::pkg_registry;
 
 fn should_skip_entry(name: &str) -> bool {
+    // P-H12: do not publish local cache / lock artifacts.
     matches!(
         name,
         ".git"
@@ -12,6 +13,8 @@ fn should_skip_entry(name: &str) -> bool {
             | ".DS_Store"
             | "Cargo.lock"
             | ".opencode"
+            | ".mimi"
+            | "mimi.lock"
     )
 }
 
