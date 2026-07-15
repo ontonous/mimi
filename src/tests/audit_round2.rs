@@ -190,8 +190,8 @@ func main() -> i32 {
 }
 
 #[test]
-fn to_json_rejects_option_type() {
-    // Option<T> is NOT supported by codegen to_json.
+fn to_json_accepts_option_type() {
+    // Option/Result to_json is supported on both backends (dual_to_json_option_*).
     let src = r#"
 func main() -> i32 {
     let x: Option<i32> = Some(42)
@@ -200,16 +200,15 @@ func main() -> i32 {
 }
 "#;
     let result = check_source(src);
-    // Option should be rejected — it has no codegen serialization path
     assert!(
-        result.is_err(),
-        "to_json(Option<T>) should be rejected: {:?}",
+        result.is_ok(),
+        "to_json(Option<T>) should typecheck: {:?}",
         result
     );
 }
 
 #[test]
-fn to_json_rejects_result_type() {
+fn to_json_accepts_result_type() {
     let src = r#"
 func main() -> i32 {
     let x: Result<i32, string> = Ok(42)
@@ -219,8 +218,8 @@ func main() -> i32 {
 "#;
     let result = check_source(src);
     assert!(
-        result.is_err(),
-        "to_json(Result<T,E>) should be rejected: {:?}",
+        result.is_ok(),
+        "to_json(Result<T,E>) should typecheck: {:?}",
         result
     );
 }
