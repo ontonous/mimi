@@ -514,14 +514,14 @@ fn flow_lexer_keywords() {
         // soft keywords appear after `pinned` and before `persistent`
         if *name == "pinned" {
             for soft in &expected_soft {
-                match &kinds[idx] {
-                    TokenKind::Ident(s) => assert_eq!(
-                        s, soft,
-                        "token[{}]: expected Ident({}), got Ident({})",
-                        idx, soft, s
-                    ),
+                // F-H7: soft keywords may tokenize as dedicated kinds or Ident.
+                match (&kinds[idx], *soft) {
+                    (TokenKind::Ident(s), name) if s == name => {}
+                    (TokenKind::Fault, "fault")
+                    | (TokenKind::Reset, "reset")
+                    | (TokenKind::Recover, "recover") => {}
                     other => panic!(
-                        "token[{}]: expected Ident for soft keyword {}, got {:?}",
+                        "token[{}]: expected soft keyword {}, got {:?}",
                         idx, soft, other
                     ),
                 }

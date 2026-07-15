@@ -153,6 +153,10 @@ impl Parser {
             TokenKind::Session => "session".to_string(),
             TokenKind::Dual => "dual".to_string(),
             TokenKind::End => "end".to_string(),
+            // F-H7: fault/reset/recover are soft keywords (transition names, states).
+            TokenKind::Fault => "fault".to_string(),
+            TokenKind::Reset => "reset".to_string(),
+            TokenKind::Recover => "recover".to_string(),
             _ => {
                 return Err(ParseError::new(
                     format!("expected identifier, found {}", tok.kind),

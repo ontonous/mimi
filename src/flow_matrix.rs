@@ -355,12 +355,27 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
         }))]
     };
 
+    // T-H12: only auto-inject enter/exit when Active and FFI_Pinned share a
+    // compatible payload field set (same names). Differing layouts would
+    // generate illegal `self.field` references.
+    let field_names = |state: &str| -> Vec<String> {
+        flow.states
+            .iter()
+            .find(|s| s.name == state)
+            .and_then(|s| s.payload.as_ref())
+            .map(|fs| fs.iter().map(|f| f.name.clone()).collect())
+            .unwrap_or_default()
+    };
+    let active_fields = field_names(&active);
+    let pinned_fields = field_names("FFI_Pinned");
+    let payloads_compatible = active_fields == pinned_fields;
+
     // enter_ffi: Active → FFI_Pinned (if not already user-defined)
     let has_enter = flow
         .transitions
         .iter()
         .any(|t| t.name == "enter_ffi" && t.from_state == active);
-    if !has_enter {
+    if !has_enter && payloads_compatible {
         flow.transitions.push(TransitionDef {
             name: "enter_ffi".to_string(),
             from_state: active.clone(),
@@ -378,7 +393,7 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
         .transitions
         .iter()
         .any(|t| t.name == "exit_ffi" && t.from_state == "FFI_Pinned");
-    if !has_exit {
+    if !has_exit && payloads_compatible {
         flow.transitions.push(TransitionDef {
             name: "exit_ffi".to_string(),
             from_state: "FFI_Pinned".to_string(),
