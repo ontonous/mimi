@@ -78,20 +78,49 @@ pub(super) fn extract_list_elem_type(type_name: &str) -> Option<crate::ast::Type
     Some(parse_inner_type(inner_str))
 }
 
-/// Parse a type name string into a Type, supporting generics like List<T>.
+/// Parse a type name string into a Type, supporting generics like List<T>
+/// and product tuples `(A, B)`.
 fn parse_inner_type(s: &str) -> crate::ast::Type {
     let s = s.trim();
+    // Product tuple: (A, B, …) — track paren depth for nested tuples.
+    if s.starts_with('(') && s.ends_with(')') && s.len() >= 2 {
+        let args_str = &s[1..s.len() - 1];
+        let mut args = Vec::new();
+        let mut depth = 0i32;
+        let mut start = 0usize;
+        for (i, ch) in args_str.char_indices() {
+            match ch {
+                '<' | '(' => depth += 1,
+                '>' | ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    let part = args_str[start..i].trim();
+                    if !part.is_empty() {
+                        args.push(parse_inner_type(part));
+                    }
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        let remaining = args_str[start..].trim();
+        if !remaining.is_empty() {
+            args.push(parse_inner_type(remaining));
+        }
+        if !args.is_empty() {
+            return crate::ast::Type::Tuple(args);
+        }
+    }
     if let Some(lt) = s.find('<') {
         if s.ends_with('>') {
             let base = s[..lt].trim();
             let args_str = s[lt + 1..s.len() - 1].trim();
             let mut args = Vec::new();
-            let mut depth = 0u32;
+            let mut depth = 0i32;
             let mut start = 0usize;
             for (i, ch) in args_str.char_indices() {
                 match ch {
-                    '<' => depth += 1,
-                    '>' => depth = depth.saturating_sub(1),
+                    '<' | '(' => depth += 1,
+                    '>' | ')' => depth -= 1,
                     ',' if depth == 0 => {
                         args.push(parse_inner_type(args_str[start..i].trim()));
                         start = i + 1;
@@ -1205,22 +1234,42 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Get the full type name including generics for a variable (for list element reconstruction).
     pub(super) fn get_full_type_name(&self, ty: &Type) -> Option<String> {
-        if let Type::Name(tn, args) = ty {
-            if args.is_empty() {
-                Some(tn.clone())
-            } else {
-                let inner: Vec<String> = args
+        match ty {
+            Type::Name(tn, args) => {
+                if args.is_empty() {
+                    Some(tn.clone())
+                } else {
+                    let inner: Vec<String> = args
+                        .iter()
+                        .filter_map(|a| self.get_full_type_name(a))
+                        .collect();
+                    if inner.len() == args.len() {
+                        Some(format!("{}<{}>", tn, inner.join(", ")))
+                    } else {
+                        Some(tn.clone())
+                    }
+                }
+            }
+            Type::Tuple(elems) => {
+                let inner: Vec<String> = elems
                     .iter()
                     .filter_map(|a| self.get_full_type_name(a))
                     .collect();
-                if inner.len() == args.len() {
-                    Some(format!("{}<{}>", tn, inner.join(", ")))
+                if inner.len() == elems.len() {
+                    Some(format!("({})", inner.join(", ")))
                 } else {
-                    Some(tn.clone())
+                    None
                 }
             }
-        } else {
-            None
+            Type::Option(inner) => self
+                .get_full_type_name(inner)
+                .map(|s| format!("Option<{}>", s)),
+            Type::Result(ok, err) => {
+                let o = self.get_full_type_name(ok)?;
+                let e = self.get_full_type_name(err)?;
+                Some(format!("Result<{},{}>", o, e))
+            }
+            _ => None,
         }
     }
 

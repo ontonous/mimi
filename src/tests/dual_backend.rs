@@ -6654,6 +6654,25 @@ fn dual_to_json_result_tuple() {
     );
 }
 
+/// from_json List of product tuples + index reconstruct.
+#[test]
+fn dual_from_json_list_tuple_index() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = from_json::<List<(i32, i32)>>("[[1,2],[3,4]]")
+            println(xs[0])
+            println(xs[1])
+            0
+        }
+        "#,
+        "(1, 2)\n(3, 4)"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {
