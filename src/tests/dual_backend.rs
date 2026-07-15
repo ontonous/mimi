@@ -4029,9 +4029,8 @@ fn dual_regex_capture_groups() {
     if !can_link() {
         return;
     }
-    // SKIP_CODEGEN: codegen runtime uses custom RegexEngine without capture group support.
-    // Codegen counterpart below verifies codegen returns "[]" as documented.
-    dual_assert_interp_only!(
+    // Runtime now uses regex crate for capture groups (matches interpreter).
+    dual_assert!(
         r#"
         func main() -> i32 {
             let groups = regex_capture_groups("2024-01-15", "([0-9]{4})-([0-9]{2})-([0-9]{2})")
@@ -4039,7 +4038,7 @@ fn dual_regex_capture_groups() {
             0
         }
         "#,
-        interp::Value::Int(0)
+        "[\"2024\",\"01\",\"15\"]"
     );
 }
 
@@ -4048,9 +4047,7 @@ fn dual_codegen_regex_capture_groups() {
     if !can_link() {
         return;
     }
-    // Codegen counterpart to dual_regex_capture_groups.
-    // Codegen uses custom RegexEngine which doesn't support capture groups,
-    // so it returns "[]" instead of the actual capture groups.
+    // Kept as codegen-only regression for the dual path above.
     let src = r#"
         func main() -> i32 {
             let groups = regex_capture_groups("2024-01-15", "([0-9]{4})-([0-9]{2})-([0-9]{2})")
@@ -4059,7 +4056,7 @@ fn dual_codegen_regex_capture_groups() {
         }
     "#;
     let out = compile_and_run(src).expect("codegen failed");
-    assert_eq!(out.trim(), "[]");
+    assert_eq!(out.trim(), "[\"2024\",\"01\",\"15\"]");
 }
 
 #[test]
