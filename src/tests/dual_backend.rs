@@ -12915,3 +12915,22 @@ fn dual_from_json_map_option_set_list_product_tuple() {
         "{\"a\":Some(Set{[(1, 2)]}),\"b\":None()}\n{\"a\":{\"Some\":[[[[1,2]]]]},\"b\":\"None\"}"
     );
 }
+
+/// from_json Map of Result of Set of List of product dual.
+#[test]
+fn dual_from_json_map_result_set_list_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, Result<Set<List<(i32, i32)>>, string>>>("{\"a\":{\"Ok\":[[[1,2],[3,4]]]},\"b\":{\"Err\":\"e\"}}")
+            println(m)
+            println(to_json(m))
+            0
+        }
+        "#,
+        "{\"a\":Ok(Set{[(1, 2), (3, 4)]}),\"b\":Err(e)}\n{\"a\":{\"Ok\":[[[[1,2],[3,4]]]]},\"b\":{\"Err\":[\"e\"]}}"
+    );
+}

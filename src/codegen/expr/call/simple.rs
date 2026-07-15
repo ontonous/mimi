@@ -1644,6 +1644,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         self.register_heap_alloc(raw);
                                         return self.wrap_c_string(raw);
                                     }
+                                    if let Some(list_elem) = set_elem
+                                        .strip_prefix("List<")
+                                        .and_then(|s| s.strip_suffix('>'))
+                                    {
+                                        if list_elem.starts_with('(')
+                                            || self.is_product_tuple_alias(list_elem)
+                                        {
+                                            let elem = if self
+                                                .is_product_tuple_alias(list_elem)
+                                            {
+                                                self.resolve_alias_type_name(list_elem)
+                                            } else {
+                                                list_elem.to_string()
+                                            };
+                                            let raw = self
+                                                .emit_map_result_set_list_product_to_json(
+                                                    handle, &elem, 0,
+                                                )?;
+                                            self.register_heap_alloc(raw);
+                                            return self.wrap_c_string(raw);
+                                        }
+                                    }
                                 }
                                 if let Some(list_elem) = ok_ty
                                     .strip_prefix("List<")

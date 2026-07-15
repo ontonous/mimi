@@ -2926,6 +2926,60 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 }
                                             }
                                         }
+                                        // Result of Set of List of product.
+                                        if ln == "Result" {
+                                            if let Type::Name(ln2, largs2) = &set_elem {
+                                                if ln2 == "List" && largs2.len() == 1 {
+                                                    let list_elem = match &largs2[0] {
+                                                        Type::Name(an, aargs)
+                                                            if aargs.is_empty() =>
+                                                        {
+                                                            if let Some(td) =
+                                                                self.type_defs.get(an)
+                                                            {
+                                                                if let crate::ast::TypeDefKind::Alias(
+                                                                    inner,
+                                                                ) = &td.kind
+                                                                {
+                                                                    inner.clone()
+                                                                } else {
+                                                                    largs2[0].clone()
+                                                                }
+                                                            } else {
+                                                                largs2[0].clone()
+                                                            }
+                                                        }
+                                                        other => other.clone(),
+                                                    };
+                                                    if let Type::Tuple(elems) = list_elem {
+                                                        let arity = elems.len() as u64;
+                                                        let func = self.get_runtime_fn(
+                                                            "mimi_map_from_json_result_set_list_product_i64",
+                                                        )?;
+                                                        let result = self.build_call(
+                                                            func,
+                                                            &[
+                                                                BasicMetadataValueEnum::PointerValue(
+                                                                    raw_ptr,
+                                                                ),
+                                                                BasicMetadataValueEnum::IntValue(
+                                                                    self.context
+                                                                        .i64_type()
+                                                                        .const_int(arity, false),
+                                                                ),
+                                                            ],
+                                                            "map_from_json_result_set_list_product",
+                                                        )?;
+                                                        return Ok(self
+                                                            .expect_basic_value(
+                                                                &result,
+                                                                "mimi_map_from_json_result_set_list_product_i64",
+                                                            )?
+                                                            .into());
+                                                    }
+                                                }
+                                            }
+                                        }
                                         if let Type::Tuple(elems) = set_elem {
                                             let arity = elems.len() as u64;
                                             let (fn_name, label) = if ln == "Option" {
