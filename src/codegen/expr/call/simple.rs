@@ -668,9 +668,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                         // Scalar / other Option / nested Result Ok — runtime i64 helper.
                         "mimi_list_result_i64_to_json"
-                    } else if inner.starts_with('(') {
-                        // List of product tuples: codegen loop → JSON array of arrays.
-                        let raw = self.emit_list_product_tuple_to_json(alloca, inner)?;
+                    } else if inner.starts_with('(') || self.is_product_tuple_alias(inner) {
+                        // List of product tuples (or type-alias of them).
+                        let elem = if self.is_product_tuple_alias(inner) {
+                            self.resolve_alias_type_name(inner)
+                        } else {
+                            inner.to_string()
+                        };
+                        let raw = self.emit_list_product_tuple_to_json(alloca, &elem)?;
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
                     } else {
