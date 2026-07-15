@@ -1064,6 +1064,17 @@ fn register_set_fns<'ctx>(
         Some(inkwell::module::Linkage::External),
     );
     module.add_function(
+        "mimi_list_result_map_to_json",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
         "mimi_result_i64_to_json",
         i8_ptr.fn_type(
             &[

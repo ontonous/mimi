@@ -407,6 +407,53 @@ impl<'ctx> CodeGenerator<'ctx> {
                         return self.wrap_c_string(raw);
                     } else if inner.starts_with("Option") {
                         "mimi_list_option_i64_to_json"
+                    } else if inner.starts_with("Result") && inner.contains("Map<") {
+                        // List of Result of Map — typed map Ok payload.
+                        let mode = if inner.contains("Map<string, string>") {
+                            1i64
+                        } else if inner.contains("Map<string, bool>") {
+                            2
+                        } else if inner.contains("Map<string, f64>")
+                            || inner.contains("Map<string, f32>")
+                        {
+                            3
+                        } else {
+                            0
+                        };
+                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let fn_ty = i8_ptr_ty.fn_type(
+                            &[
+                                BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                                BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                            ],
+                            false,
+                        );
+                        let callee = self
+                            .module
+                            .get_function("mimi_list_result_map_to_json")
+                            .unwrap_or_else(|| {
+                                self.module.add_function(
+                                    "mimi_list_result_map_to_json",
+                                    fn_ty,
+                                    Some(inkwell::module::Linkage::External),
+                                )
+                            });
+                        let raw = self
+                            .build_call(
+                                callee,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(alloca),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(mode as u64, false),
+                                    ),
+                                ],
+                                "to_json_list_res_map",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("list result map to_json void")?
+                            .into_pointer_value();
+                        self.register_heap_alloc(raw);
+                        return self.wrap_c_string(raw);
                     } else if inner.starts_with("Result") {
                         "mimi_list_result_i64_to_json"
                     } else {
@@ -877,7 +924,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         return self.wrap_c_string(raw);
                     }
                     if obj_type.contains("List<") {
-                        // Option of List: payload is pointer to list struct.
+                        // Option of List: payload is pointer to list struct
+                        // (or ptrtoint of it). Element type may be Map/Set/scalar.
                         let disc_is_some = self
                             .builder
                             .build_int_compare(
@@ -913,17 +961,34 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let list_fn_name = if obj_type.contains("List<Map")
+                            || obj_type.contains("List<Map<")
+                        {
+                            if obj_type.contains("Map<string, string>") {
+                                "mimi_list_map_to_json_string"
+                            } else {
+                                "mimi_list_map_to_string"
+                            }
+                        } else if obj_type.contains("List<Set") {
+                            "mimi_list_set_to_json"
+                        } else if obj_type.contains("List<string>") {
+                            "mimi_list_str_to_json"
+                        } else if obj_type.contains("List<f64>") || obj_type.contains("List<f32>") {
+                            "mimi_list_f64_to_json"
+                        } else if obj_type.contains("List<bool>") {
+                            "mimi_list_bool_to_json"
+                        } else {
+                            "mimi_list_i64_to_json"
+                        };
                         let list_fn_ty =
                             i8_ptr_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
-                        let list_fn = self.module.get_function("mimi_list_i64_to_json").unwrap_or_else(
-                            || {
-                                self.module.add_function(
-                                    "mimi_list_i64_to_json",
-                                    list_fn_ty,
-                                    Some(inkwell::module::Linkage::External),
-                                )
-                            },
-                        );
+                        let list_fn = self.module.get_function(list_fn_name).unwrap_or_else(|| {
+                            self.module.add_function(
+                                list_fn_name,
+                                list_fn_ty,
+                                Some(inkwell::module::Linkage::External),
+                            )
+                        });
                         let list_json = self
                             .build_call(
                                 list_fn,
@@ -1257,59 +1322,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
                     }
-                    let ok_i64 = match ok_bv {
-                        BasicValueEnum::IntValue(iv) => {
-                            if iv.get_type().get_bit_width() < 64 {
-                                self.builder
-                                    .build_int_s_extend(
-                                        iv,
-                                        self.context.i64_type(),
-                                        "res_ok_i64",
-                                    )
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                            } else {
-                                iv
-                            }
-                        }
-                        BasicValueEnum::PointerValue(pv) => self
-                            .builder
-                            .build_ptr_to_int(pv, self.context.i64_type(), "res_ok_ptr")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?,
-                        other => {
-                            return Err(CompileError::Generic(format!(
-                                "to_json Result: unexpected Ok payload {:?}",
-                                other.get_type()
-                            )));
-                        }
-                    };
-                    let err_bv = self.build_extract_value(sv.into(), 2, "res_err")?;
-                    let err_i64 = match err_bv {
-                        BasicValueEnum::IntValue(iv) => {
-                            if iv.get_type().get_bit_width() < 64 {
-                                self.builder
-                                    .build_int_s_extend(
-                                        iv,
-                                        self.context.i64_type(),
-                                        "res_err_i64",
-                                    )
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                            } else {
-                                iv
-                            }
-                        }
-                        BasicValueEnum::PointerValue(pv) => self
-                            .builder
-                            .build_ptr_to_int(pv, self.context.i64_type(), "res_err_ptr")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?,
-                        other => {
-                            return Err(CompileError::Generic(format!(
-                                "to_json Result: unexpected Err payload {:?}",
-                                other.get_type()
-                            )));
-                        }
-                    };
+                    // Result of List: Ok may be by-value list struct {i64,ptr}
+                    // or a pointer/int handle — handle before scalar ok_i64 coercion.
                     if obj_type.contains("List<") {
-                        // Result of List: Ok payload is list pointer.
+                        let err_bv = self.build_extract_value(sv.into(), 2, "res_list_err")?;
+                        let err_i64 = match err_bv {
+                            BasicValueEnum::IntValue(iv) => {
+                                if iv.get_type().get_bit_width() < 64 {
+                                    self.builder
+                                        .build_int_s_extend(
+                                            iv,
+                                            self.context.i64_type(),
+                                            "res_list_err_i64",
+                                        )
+                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                } else {
+                                    iv
+                                }
+                            }
+                            BasicValueEnum::PointerValue(pv) => self
+                                .builder
+                                .build_ptr_to_int(pv, self.context.i64_type(), "res_list_err_ptr")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                            _ => self.context.i64_type().const_int(0, false),
+                        };
                         let disc_is_ok = self
                             .builder
                             .build_int_compare(
@@ -1335,22 +1371,69 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .build_conditional_branch(disc_is_ok, ok_bb, err_bb)
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                         self.builder.position_at_end(ok_bb);
-                        let list_ptr = self
-                            .builder
-                            .build_int_to_ptr(ok_i64, i8_ptr_ty, "res_list_as_ptr")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        // Materialize list as a pointer for runtime helpers.
+                        let list_ptr = match ok_bv {
+                            BasicValueEnum::StructValue(lsv) => {
+                                let list_alloca = self.build_alloca(
+                                    BasicTypeEnum::StructType(lsv.get_type()),
+                                    "res_list_tmp",
+                                )?;
+                                self.build_store(list_alloca, lsv)?;
+                                list_alloca
+                            }
+                            BasicValueEnum::PointerValue(pv) => pv,
+                            BasicValueEnum::IntValue(iv) => {
+                                let as_i64 = if iv.get_type().get_bit_width() < 64 {
+                                    self.builder
+                                        .build_int_s_extend(
+                                            iv,
+                                            self.context.i64_type(),
+                                            "res_list_ok_i64",
+                                        )
+                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                } else {
+                                    iv
+                                };
+                                self.builder
+                                    .build_int_to_ptr(as_i64, i8_ptr_ty, "res_list_as_ptr")
+                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                            }
+                            other => {
+                                return Err(CompileError::Generic(format!(
+                                    "to_json Result List: unexpected Ok payload {:?}",
+                                    other.get_type()
+                                )));
+                            }
+                        };
+                        // Pick list element formatter: Map / Set / i64 default.
+                        let list_fn_name = if obj_type.contains("List<Map")
+                            || obj_type.contains("List<Map<")
+                        {
+                            if obj_type.contains("Map<string, string>") {
+                                "mimi_list_map_to_json_string"
+                            } else {
+                                "mimi_list_map_to_string"
+                            }
+                        } else if obj_type.contains("List<Set") {
+                            "mimi_list_set_to_json"
+                        } else if obj_type.contains("List<string>") {
+                            "mimi_list_str_to_json"
+                        } else if obj_type.contains("List<f64>") || obj_type.contains("List<f32>") {
+                            "mimi_list_f64_to_json"
+                        } else if obj_type.contains("List<bool>") {
+                            "mimi_list_bool_to_json"
+                        } else {
+                            "mimi_list_i64_to_json"
+                        };
                         let list_fn_ty = i8_ptr_ty
                             .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
-                        let list_fn = self
-                            .module
-                            .get_function("mimi_list_i64_to_json")
-                            .unwrap_or_else(|| {
-                                self.module.add_function(
-                                    "mimi_list_i64_to_json",
-                                    list_fn_ty,
-                                    Some(inkwell::module::Linkage::External),
-                                )
-                            });
+                        let list_fn = self.module.get_function(list_fn_name).unwrap_or_else(|| {
+                            self.module.add_function(
+                                list_fn_name,
+                                list_fn_ty,
+                                Some(inkwell::module::Linkage::External),
+                            )
+                        });
                         let list_json = self
                             .build_call(
                                 list_fn,
@@ -1421,6 +1504,57 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
                     }
+                    let ok_i64 = match ok_bv {
+                        BasicValueEnum::IntValue(iv) => {
+                            if iv.get_type().get_bit_width() < 64 {
+                                self.builder
+                                    .build_int_s_extend(
+                                        iv,
+                                        self.context.i64_type(),
+                                        "res_ok_i64",
+                                    )
+                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                            } else {
+                                iv
+                            }
+                        }
+                        BasicValueEnum::PointerValue(pv) => self
+                            .builder
+                            .build_ptr_to_int(pv, self.context.i64_type(), "res_ok_ptr")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                        other => {
+                            return Err(CompileError::Generic(format!(
+                                "to_json Result: unexpected Ok payload {:?}",
+                                other.get_type()
+                            )));
+                        }
+                    };
+                    let err_bv = self.build_extract_value(sv.into(), 2, "res_err")?;
+                    let err_i64 = match err_bv {
+                        BasicValueEnum::IntValue(iv) => {
+                            if iv.get_type().get_bit_width() < 64 {
+                                self.builder
+                                    .build_int_s_extend(
+                                        iv,
+                                        self.context.i64_type(),
+                                        "res_err_i64",
+                                    )
+                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                            } else {
+                                iv
+                            }
+                        }
+                        BasicValueEnum::PointerValue(pv) => self
+                            .builder
+                            .build_ptr_to_int(pv, self.context.i64_type(), "res_err_ptr")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                        other => {
+                            return Err(CompileError::Generic(format!(
+                                "to_json Result: unexpected Err payload {:?}",
+                                other.get_type()
+                            )));
+                        }
+                    };
                     if obj_type.contains("Map<") {
                         let mode = if obj_type.contains("Map<string, string>") {
                             1i64

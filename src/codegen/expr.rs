@@ -1781,13 +1781,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             .module
             .get_function("mimi_quote_new_leaf")
             .ok_or("mimi_quote_new_leaf not declared")?;
-        let i32_ty = self.context.i32_type();
         let result = self
             .builder
             .build_call(
                 func,
                 &[
-                    BasicMetadataValueEnum::IntValue(i32_ty.const_int(tag as u64, true)),
+                    // CG-H5: QAST tags are non-negative; use unsigned const_int
+                    // consistently across leaf/node/list (was mixed true/false).
+                    BasicMetadataValueEnum::IntValue(self.quote_tag_const(tag)),
                     BasicMetadataValueEnum::IntValue(value),
                 ],
                 "q_leaf",
@@ -1796,7 +1797,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(call_try_basic_value(&result).ok_or("mimi_quote_new_leaf void")?)
     }
 
+    /// CG-H5: QAST discriminant tags are always non-negative small ints.
+    /// Always emit unsigned `const_int(..., false)` so leaf/node/list agree.
+    fn quote_tag_const(&self, tag: i32) -> inkwell::values::IntValue<'ctx> {
+        debug_assert!(tag >= 0, "QAST tag must be non-negative, got {tag}");
+        self.context.i32_type().const_int(tag as u64, false)
+    }
+
     fn i64_const(&self, v: i64) -> inkwell::values::IntValue<'ctx> {
+        // Bit-pattern const: negatives use two's complement via `as u64`.
         self.context.i64_type().const_int(v as u64, false)
     }
 
@@ -1850,7 +1859,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .module
             .get_function("mimi_quote_new_node")
             .ok_or("mimi_quote_new_node not declared")?;
-        let i32_ty = self.context.i32_type();
         let i64_ty = self.context.i64_type();
         let c0_ptr = self.to_i8_ptr(child0);
         let c1_ptr = self.to_i8_ptr(child1);
@@ -1859,9 +1867,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_call(
                 func,
                 &[
-                    BasicMetadataValueEnum::IntValue(i32_ty.const_int(tag as u64, true)),
+                    // CG-H5: same unsigned tag const as leaf/list.
+                    BasicMetadataValueEnum::IntValue(self.quote_tag_const(tag)),
                     BasicMetadataValueEnum::PointerValue(c0_ptr),
                     BasicMetadataValueEnum::PointerValue(c1_ptr),
+                    // BinOp/UnOp discriminants are non-negative; bit-pattern const.
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(extra as u64, false)),
                 ],
                 "q_node",
@@ -1881,14 +1891,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             .module
             .get_function("mimi_quote_new_list")
             .ok_or("mimi_quote_new_list not declared")?;
-        let i32_ty = self.context.i32_type();
         let i64_ty = self.context.i64_type();
         let result = self
             .builder
             .build_call(
                 func,
                 &[
-                    BasicMetadataValueEnum::IntValue(i32_ty.const_int(tag as u64, false)),
+                    // CG-H5: same unsigned tag const as leaf/node.
+                    BasicMetadataValueEnum::IntValue(self.quote_tag_const(tag)),
                     BasicMetadataValueEnum::PointerValue(children_ptr),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(len as u64, false)),
                 ],

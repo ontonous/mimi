@@ -1463,6 +1463,23 @@ pub extern "C" fn mimi_list_to_string(list: *const MimiList) -> *mut std::ffi::c
 /// `{"Ok":[n]}` / `{"Err":[n]}` tags matching interp to_json.
 #[no_mangle]
 pub extern "C" fn mimi_list_result_i64_to_json(list: *const MimiList) -> *mut std::ffi::c_char {
+    list_result_to_json_impl(list, 0)
+}
+
+/// Render `List<Result<Map<string, V>, i32>>` as JSON array.
+/// `mode`: 0=i64 map, 1=string map, 2=bool map, 3=f64 map (same as other map JSON helpers).
+#[no_mangle]
+pub extern "C" fn mimi_list_result_map_to_json(
+    list: *const MimiList,
+    mode: i64,
+) -> *mut std::ffi::c_char {
+    list_result_to_json_impl(list, mode + 10)
+}
+
+/// `mode`:
+/// - 0: Ok payload is plain i64
+/// - 10..=13: Ok payload is MapHandle (mode-10 selects map value kind)
+fn list_result_to_json_impl(list: *const MimiList, mode: i64) -> *mut std::ffi::c_char {
     if list.is_null() {
         return alloc_c_string("[]");
     }
@@ -1490,7 +1507,22 @@ pub extern "C" fn mimi_list_result_i64_to_json(list: *const MimiList) -> *mut st
         let ok = unsafe { *(base.add(8) as *const i64) };
         let err = unsafe { *(base.add(16) as *const i64) };
         if disc != 0 {
-            parts.push(format!("{{\"Ok\":[{}]}}", ok));
+            if mode >= 10 {
+                let map_mode = mode - 10;
+                let json_ptr = match map_mode {
+                    1 => mimi_map_to_json_string(ok as MapHandle),
+                    2 => mimi_map_to_json_bool(ok as MapHandle),
+                    3 => mimi_map_to_json_f64_serde(ok as MapHandle),
+                    _ => mimi_map_to_json_i64(ok as MapHandle),
+                };
+                let s = unsafe { cstr_to_string(json_ptr) };
+                if !json_ptr.is_null() {
+                    unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+                }
+                parts.push(format!("{{\"Ok\":[{}]}}", s));
+            } else {
+                parts.push(format!("{{\"Ok\":[{}]}}", ok));
+            }
         } else {
             parts.push(format!("{{\"Err\":[{}]}}", err));
         }
