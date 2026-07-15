@@ -3366,8 +3366,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ofields[0],
                     BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
                 );
+            let ok_is_list = ofields.len() == 2
+                && matches!(
+                    ofields[0],
+                    BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                )
+                && matches!(ofields[1], BasicTypeEnum::PointerType(_));
             if ok_is_nested_result {
                 self.emit_result_struct_to_json_cstr(ok_sv, &ok_inner)?
+            } else if ok_is_list || ok_inner.starts_with("List") {
+                let tmp = self.build_alloca(
+                    BasicTypeEnum::StructType(ok_sv.get_type()),
+                    "res_j_list_tmp",
+                )?;
+                self.build_store(tmp, ok_sv)?;
+                self.emit_list_payload_to_json_cstr(tmp, &ok_inner)?
             } else if is_named_record {
                 let rec_ty = ok_sv.get_type();
                 let rec_alloca =
@@ -3376,6 +3389,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.compile_record_to_json_cstr(&ok_inner, rec_alloca)?
             } else {
                 self.emit_product_tuple_to_json(ok_sv)?
+            }
+        } else if let BasicValueEnum::PointerValue(pv) = ok_pay {
+            // Result Ok of List often stores a pointer to the list struct.
+            if ok_inner.starts_with("List") {
+                self.emit_list_payload_to_json_cstr(pv, &ok_inner)?
+            } else {
+                let as_i64 = self.build_ptr_to_int(pv, i64_ty, "res_j_ok_ptr_i64")?;
+                let tmp = self.malloc_or_abort(i64_ty.const_int(64, false), "res_j_ok_tmp")?;
+                let ifmt = self
+                    .builder
+                    .build_global_string_ptr("%ld", "res_j_ok_ifmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(tmp),
+                        BasicMetadataValueEnum::IntValue(i64_ty.const_int(64, false)),
+                        BasicMetadataValueEnum::PointerValue(ifmt.as_pointer_value()),
+                        BasicMetadataValueEnum::IntValue(as_i64),
+                    ],
+                    "res_j_ok_sn",
+                )?;
+                tmp
             }
         } else {
             // Scalar Ok.
@@ -3391,23 +3428,35 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 _ => i64_ty.const_int(0, false),
             };
-            let tmp = self.malloc_or_abort(i64_ty.const_int(64, false), "res_j_ok_tmp")?;
-            let ifmt = self
-                .builder
-                .build_global_string_ptr("%ld", "res_j_ok_ifmt")
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-            let snprintf_fn = self.get_runtime_fn("snprintf")?;
-            self.build_call(
-                snprintf_fn,
-                &[
-                    BasicMetadataValueEnum::PointerValue(tmp),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(64, false)),
-                    BasicMetadataValueEnum::PointerValue(ifmt.as_pointer_value()),
-                    BasicMetadataValueEnum::IntValue(ok_i64),
-                ],
-                "res_j_ok_sn",
-            )?;
-            tmp
+            if ok_inner.starts_with("List") {
+                let list_ptr = self
+                    .builder
+                    .build_int_to_ptr(
+                        ok_i64,
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "res_j_list_from_i64",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.emit_list_payload_to_json_cstr(list_ptr, &ok_inner)?
+            } else {
+                let tmp = self.malloc_or_abort(i64_ty.const_int(64, false), "res_j_ok_tmp")?;
+                let ifmt = self
+                    .builder
+                    .build_global_string_ptr("%ld", "res_j_ok_ifmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(tmp),
+                        BasicMetadataValueEnum::IntValue(i64_ty.const_int(64, false)),
+                        BasicMetadataValueEnum::PointerValue(ifmt.as_pointer_value()),
+                        BasicMetadataValueEnum::IntValue(ok_i64),
+                    ],
+                    "res_j_ok_sn",
+                )?;
+                tmp
+            }
         };
         let wrap = self.malloc_or_abort(i64_ty.const_int(1024, false), "res_j_ok_wrap")?;
         let ofmt = self
