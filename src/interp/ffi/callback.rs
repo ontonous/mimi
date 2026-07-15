@@ -250,13 +250,25 @@ unsafe fn callback_trampoline_inner(
         was > 0
     });
     if reentered {
+        // IP-C5: under MIMI_FFI_STRICT refuse nested trampolines (return 0).
+        let strict = std::env::var("MIMI_FFI_STRICT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if strict {
+            eprintln!(
+                "[mimi] FFI STRICT (IP-C5): refusing nested FFI callback reentrancy"
+            );
+            *result = 0;
+            return;
+        }
         static REENT_WARNED: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
         if !REENT_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
             eprintln!(
                 "[mimi] WARNING: nested FFI callback reentrancy detected (IP-C5). \
                  Nested callbacks cannot share the live interpreter; side effects \
-                 may be lost or evaluated on a temporary interpreter."
+                 may be lost or evaluated on a temporary interpreter. \
+                 Set MIMI_FFI_STRICT=1 to refuse."
             );
         }
     }
