@@ -24,10 +24,16 @@ fn can_cc() -> bool {
 
 macro_rules! dual_assert {
     ($src:expr, $expected:expr) => {{
-        // TC-C1: require interpreter success AND codegen stdout match.
-        // Interpreter println still goes to process stdout (no capture yet);
-        // non-panic + successful return is required. Codegen is compared to
-        // the expected string (authoritative dual gate for printed output).
+        // TC-C1/C2 (partial): typecheck, non-panicking interpreter, codegen stdout.
+        if let Err(diags) = check_source($src) {
+            panic!(
+                "typecheck failed for dual_assert source: {:?}",
+                diags
+                    .iter()
+                    .map(|d| d.message.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
         let _interp_val = std::panic::catch_unwind(|| run_source($src));
         assert!(
             _interp_val.is_ok(),

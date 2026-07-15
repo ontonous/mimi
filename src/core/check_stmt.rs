@@ -1374,20 +1374,32 @@ impl<'a> Checker<'a> {
                 self.check_block(body, ret, scopes);
             }
             Stmt::Func(func) => {
-                // Register nested function signature then check body.
-                // First, add to funcs so it can be called by name from enclosing scope.
+                // Register nested function signature then check body with
+                // enclosing scopes visible (I-H13 typecheck: free-var capture).
                 let params: Vec<Type> = func
                     .params
                     .iter()
                     .map(|p| self.resolve_type(&p.ty))
                     .collect();
-                let ret = func
+                let nested_ret = func
                     .ret
                     .as_ref()
                     .map(|t| self.resolve_type(t))
                     .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
-                self.funcs.insert(func.name.clone(), (params, ret));
-                self.check_item(&Item::Func(func.clone()));
+                self.funcs
+                    .insert(func.name.clone(), (params, nested_ret.clone()));
+                // Body sees outer locals (capture) plus its own params.
+                let mut nested_scopes = scopes.clone();
+                let mut param_scope = std::collections::HashMap::new();
+                for p in &func.params {
+                    param_scope.insert(p.name.clone(), self.resolve_type(&p.ty));
+                }
+                nested_scopes.insert(0, param_scope);
+                self.check_block_with_implicit_return(
+                    &func.body,
+                    &nested_ret,
+                    &mut nested_scopes,
+                );
             }
             Stmt::Do(body) => {
                 self.check_block(body, ret, scopes);
