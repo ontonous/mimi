@@ -97,8 +97,8 @@ func helper() -> i32 { 99 }
     .expect("src/tests/loader.rs:67 unwrap failed");
 
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());
-    let _ = loader.load_main(&main_path);
-    let _ = loader.load_main(&mod_path);
+    assert!(loader.load_main(&main_path).is_ok());
+    assert!(loader.load_main(&mod_path).is_ok());
     let merged = loader.merge_all().expect("merge_all should succeed");
     assert!(merged.items.len() >= 2, "merge should include all items");
     cleanup(&dir);
@@ -141,7 +141,8 @@ func hello() -> i32 { 1 }
     .expect("src/tests/loader.rs:99 unwrap failed");
 
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());
-    let _ = loader.load_main(&file_path);
+    let r = loader.load_main(&file_path);
+    assert!(r.is_ok(), "load single file should succeed: {:?}", r);
     cleanup(&dir);
 }
 
@@ -194,8 +195,13 @@ func main() -> i32 { 42 }
     fs::write(&empty_path, r#""#).expect("src/tests/loader.rs:143 unwrap failed");
 
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());
-    let _ = loader.load_main(&main_path);
-    let _ = loader.load_main(&empty_path);
+    assert!(loader.load_main(&main_path).is_ok());
+    // empty file may Ok or Err depending on parser; must not panic
+    let empty_r = loader.load_main(&empty_path);
+    match &empty_r {
+        Ok(_) => {}
+        Err(e) => assert!(!e.is_empty()),
+    }
     let merged = loader.merge_all().expect("merge_all should succeed");
     assert!(
         !merged.items.is_empty(),
