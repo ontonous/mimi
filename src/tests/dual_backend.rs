@@ -6771,6 +6771,25 @@ fn dual_from_json_option_tuple_string() {
     );
 }
 
+/// List of Option of product tuple: Display + to_json.
+#[test]
+fn dual_from_json_list_option_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = from_json::<List<Option<(i32, i32)>>>("[[1,2],null]")
+            println(xs)
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[Some((1, 2)), None()]\n[{\"Some\":[[1,2]]},\"None\"]"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {
