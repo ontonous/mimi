@@ -13279,3 +13279,79 @@ fn dual_from_json_map_map_set_product_tuple() {
         "{\"a\":{\"x\":Set{(1, 2), (3, 4)}}}\n{\"a\":{\"x\":[[1,2],[3,4]]}}"
     );
 }
+
+/// from_json Set of Result of Map of product dual.
+#[test]
+fn dual_from_json_set_result_map_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<Result<Map<string, (i32, i32)>, string>>>("[{\"Ok\":{\"a\":[1,2]}},{\"Err\":\"e\"}]")
+            println(s)
+            println(to_json(s))
+            0
+        }
+        "#,
+        "Set{Err(e), Ok({\"a\":(1, 2)})}\n[{\"Err\":[\"e\"]},{\"Ok\":[{\"a\":[1,2]}]}]"
+    );
+}
+
+/// from_json Map of Map of List of product dual.
+#[test]
+fn dual_from_json_map_map_list_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, Map<string, List<(i32, i32)>>>>("{\"a\":{\"x\":[[1,2],[3,4]]}}")
+            println(m)
+            println(to_json(m))
+            0
+        }
+        "#,
+        "{\"a\":{\"x\":[(1, 2), (3, 4)]}}\n{\"a\":{\"x\":[[1,2],[3,4]]}}"
+    );
+}
+
+/// from_json Map of Map of Option of product dual.
+#[test]
+fn dual_from_json_map_map_option_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, Map<string, Option<(i32, i32)>>>>("{\"a\":{\"x\":[1,2],\"y\":null}}")
+            println(m)
+            println(to_json(m))
+            0
+        }
+        "#,
+        "{\"a\":{\"x\":Some((1, 2)),\"y\":None()}}\n{\"a\":{\"x\":{\"Some\":[[1,2]]},\"y\":\"None\"}}"
+    );
+}
+
+/// from_json List of Map of Set of product dual.
+#[test]
+fn dual_from_json_list_map_set_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = from_json::<List<Map<string, Set<(i32, i32)>>>>("[{\"a\":[[1,2]]},{\"b\":[[3,4]]}]")
+            println(xs)
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[{\"a\":Set{(1, 2)}}, {\"b\":Set{(3, 4)}}]\n[{\"a\":[[1,2]]},{\"b\":[[3,4]]}]"
+    );
+}
