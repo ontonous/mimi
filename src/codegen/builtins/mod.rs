@@ -467,6 +467,17 @@ fn register_map_record_fns<'ctx>(
         Some(inkwell::module::Linkage::External),
     );
     module.add_function(
+        "mimi_list_from_json_set_product_i64",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
         "mimi_list_from_json_set_option_product_i64",
         i8_ptr.fn_type(
             &[
@@ -1003,6 +1014,29 @@ fn register_map_record_fns<'ctx>(
             &[
                 BasicMetadataTypeEnum::IntType(i64),
                 BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_map_to_json_list_set_result_product_i64",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_map_from_json_list_set_result_product_i64",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
                 BasicMetadataTypeEnum::IntType(i64),
             ],
             false,
