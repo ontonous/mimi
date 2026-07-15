@@ -6692,6 +6692,25 @@ fn dual_list_tuple_println_to_json() {
     );
 }
 
+/// Literal list of product tuples (elem type inferred as List<(i64,i64)>).
+#[test]
+fn dual_list_tuple_literal() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = [(1, 2), (3, 4)]
+            println(xs)
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[(1, 2), (3, 4)]\n[[1,2],[3,4]]"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {

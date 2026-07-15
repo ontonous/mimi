@@ -287,8 +287,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                             if let Some(first) = list_elems.first() {
                                 let elem_type = self.infer_object_type(first, vars);
                                 if !elem_type.is_empty() {
-                                    self.var_type_names
-                                        .insert(name.clone(), format!("List<{}>", elem_type));
+                                    let full = format!("List<{}>", elem_type);
+                                    self.var_type_names.insert(name.clone(), full.clone());
+                                    // Register List AST + struct elem LLVM (tuples/records).
+                                    if let Some(parsed) =
+                                        crate::codegen::extract_list_elem_type(&full)
+                                    {
+                                        let list_ast =
+                                            Type::Name("List".into(), vec![parsed]);
+                                        self.var_types.insert(name.clone(), list_ast.clone());
+                                        self.register_list_elem_type(name, &list_ast);
+                                    } else {
+                                        let list_ast = Type::Name(
+                                            "List".into(),
+                                            vec![Type::Name(elem_type, vec![])],
+                                        );
+                                        self.var_types.insert(name.clone(), list_ast.clone());
+                                        self.register_list_elem_type(name, &list_ast);
+                                    }
                                 }
                             }
                         } else if let Expr::Index(_, _) = init {
