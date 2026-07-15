@@ -866,8 +866,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else if inner.starts_with("Result") {
                         let ok_inner = inner
                             .strip_prefix("Result<")
-                            .and_then(|s| s.split(',').next())
-                            .map(|s| s.trim())
+                            .and_then(|s| {
+                                let mut depth = 0i32;
+                                for (i, ch) in s.char_indices() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            return Some(s[..i].trim());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                None
+                            })
                             .unwrap_or("");
                         // Product-tuple / named-record / nested Result Ok — not bare scalar.
                         let ok_is_product = ok_inner.starts_with('(')
@@ -882,7 +894,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 || ok_inner.contains("Tuple")
                                 || ok_inner.contains("Result"));
                         if ok_is_product {
-                            let raw = self.emit_list_result_product_to_json(alloca, inner)?;
+                            // Prefer runtime uniform pack path (from_json list result product).
+                            let elem = if self.is_product_tuple_alias(ok_inner) {
+                                self.resolve_alias_type_name(ok_inner)
+                            } else {
+                                ok_inner.to_string()
+                            };
+                            let raw =
+                                self.emit_list_result_product_runtime(alloca, &elem, 0)?;
                             self.register_heap_alloc(raw);
                             return self.wrap_c_string(raw);
                         }

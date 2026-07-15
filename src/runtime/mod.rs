@@ -4847,6 +4847,268 @@ pub extern "C" fn mimi_set_to_json_product_i64(
 }
 
 
+
+/// List of Result of product from JSON array of tagged objects / bare products.
+/// Elements stored as heap `{i64 disc, i64[n] fields or err string ptr}` ValueHandles in list data.
+#[no_mangle]
+pub extern "C" fn mimi_list_from_json_result_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> *mut MimiList {
+    let empty = || {
+        let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
+        if !list.is_null() {
+            unsafe {
+                (*list).len = 0;
+                (*list).data = std::ptr::null_mut();
+                (*list).owns_data = true;
+            }
+        }
+        list
+    };
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return empty();
+    }
+    let s = unsafe { cstr_to_string(json) };
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'[' {
+        return empty();
+    }
+    i += 1;
+    let n = arity as usize;
+    let mut handles: Vec<i64> = Vec::new();
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b']' {
+            break;
+        }
+        let pack_size = 8 + n * 8;
+        let ptr = unsafe { libc::malloc(pack_size) as *mut i64 };
+        if ptr.is_null() {
+            break;
+        }
+        let mut is_err = false;
+        let mut err_str = String::new();
+        if bytes[i] == b'{' {
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'"' {
+                i += 1;
+                let ts = i;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += 1;
+                }
+                let tag = String::from_utf8_lossy(&bytes[ts..i]).into_owned();
+                if i < bytes.len() {
+                    i += 1;
+                }
+                while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+                    i += 1;
+                }
+                if tag == "Err" {
+                    is_err = true;
+                    if i < bytes.len() && bytes[i] == b'"' {
+                        i += 1;
+                        let es = i;
+                        while i < bytes.len() && bytes[i] != b'"' {
+                            if bytes[i] == b'\\' {
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                        err_str = String::from_utf8_lossy(&bytes[es..i]).into_owned();
+                        if i < bytes.len() {
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            while i < bytes.len() && bytes[i] != b'[' && bytes[i] != b'}' && !is_err {
+                i += 1;
+            }
+        }
+        if is_err {
+            let c = alloc_c_string(&err_str);
+            unsafe {
+                *ptr = 0;
+                *ptr.add(1) = c as i64;
+                for fi in 1..n {
+                    *ptr.add(1 + fi) = 0;
+                }
+            }
+            while i < bytes.len() && bytes[i] != b',' && bytes[i] != b']' {
+                i += 1;
+            }
+        } else {
+            if i >= bytes.len() || bytes[i] != b'[' {
+                unsafe {
+                    libc::free(ptr as *mut _);
+                }
+                break;
+            }
+            i += 1;
+            // nested [[1,2]] form from {"Ok":[[1,2]]} after get may already be [1,2]
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'[' {
+                i += 1;
+            }
+            let mut fields = vec![0i64; n];
+            for fi in 0..n {
+                while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+                    i += 1;
+                }
+                let neg = i < bytes.len() && bytes[i] == b'-';
+                if neg {
+                    i += 1;
+                }
+                let mut v: i64 = 0;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    v = v
+                        .saturating_mul(10)
+                        .saturating_add((bytes[i] - b'0') as i64);
+                    i += 1;
+                }
+                if neg {
+                    v = -v;
+                }
+                fields[fi] = v;
+            }
+            while i < bytes.len() && bytes[i] != b']' {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b']' {
+                i += 1;
+            }
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b']' {
+                i += 1;
+            }
+            while i < bytes.len() && bytes[i] != b',' && bytes[i] != b']' && bytes[i] != b'}' {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'}' {
+                i += 1;
+            }
+            unsafe {
+                *ptr = 1;
+                std::ptr::copy_nonoverlapping(fields.as_ptr(), ptr.add(1), n);
+            }
+        }
+        handles.push(ptr as i64);
+    }
+    let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
+    if list.is_null() {
+        return std::ptr::null_mut();
+    }
+    let data_size = handles.len() * 8;
+    let data = if data_size == 0 {
+        std::ptr::null_mut()
+    } else {
+        unsafe { libc::malloc(data_size) as *mut i64 }
+    };
+    if data_size > 0 && data.is_null() {
+        unsafe {
+            libc::free(list as *mut _);
+        }
+        return std::ptr::null_mut();
+    }
+    if !data.is_null() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(handles.as_ptr(), data, handles.len());
+        }
+    }
+    unsafe {
+        (*list).len = handles.len() as i64;
+        (*list).data = data as *mut *mut std::ffi::c_char;
+        (*list).owns_data = true;
+    }
+    list
+}
+
+
+/// Display/JSON for List of Result of product (heap packs from list_from_json_result_product).
+/// Pack: `{i64 disc, i64[n] fields, i64 err_ptr}` where disc!=0 is Ok.
+#[no_mangle]
+pub extern "C" fn mimi_list_result_product_to_json(
+    list: *const MimiList,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if list.is_null() || arity <= 0 || arity > 16 {
+        return if display_style != 0 {
+            alloc_c_string("[]")
+        } else {
+            alloc_c_string("[]")
+        };
+    }
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let n = arity as usize;
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize * 2 + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(if display_style != 0 {
+                String::from(", ")
+            } else {
+                String::from(",")
+            });
+        }
+        let h = unsafe { *(lst.data as *const i64).offset(i) };
+        if h == 0 {
+            if display_style != 0 {
+                parts.push(String::from("Err()"));
+            } else {
+                parts.push(String::from("{\"Err\":[\"\"]}"));
+            }
+            continue;
+        }
+        let base = h as *const i64;
+        let disc = unsafe { *base };
+        if disc == 0 {
+            let err_ptr = unsafe { *base.add(1) } as *const std::ffi::c_char;
+            let err_s = if err_ptr.is_null() {
+                String::new()
+            } else {
+                unsafe { cstr_to_string(err_ptr) }
+            };
+            if display_style != 0 {
+                parts.push(format!("Err({})", err_s));
+            } else {
+                parts.push(format!("{{\"Err\":[{}]}}", json_escape_string(&err_s)));
+            }
+        } else {
+            let fields: Vec<i64> = unsafe { std::slice::from_raw_parts(base.add(1), n).to_vec() };
+            if display_style != 0 {
+                let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
+                parts.push(format!("Ok(({}))", body.join(", ")));
+            } else {
+                let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
+                parts.push(format!("{{\"Ok\":[[{}]]}}", body.join(",")));
+            }
+        }
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
 /// Set of Option of product from JSON array: `[[1,2],null,"None"]`.
 #[no_mangle]
 pub extern "C" fn mimi_set_from_json_option_product_i64(
