@@ -6626,10 +6626,11 @@ fn dual_to_json_tuple() {
         func main() -> i32 {
             println(to_json((1, true, "hi")))
             println(to_json(((1, 2), "x")))
+            println(to_json(Some((1, 2))))
             0
         }
         "#,
-        "[1,true,\"hi\"]\n[[1,2],\"x\"]"
+        "[1,true,\"hi\"]\n[[1,2],\"x\"]\n{\"Some\":[[1,2]]}"
     );
 }
 
