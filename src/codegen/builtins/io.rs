@@ -6363,6 +6363,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             if inner.starts_with("Map") {
                 return self.emit_list_map_to_string(list_sv, &inner);
             }
+            if inner.starts_with("Set") {
+                return self.emit_list_set_to_string(list_sv, &inner);
+            }
         }
         self.emit_list_i32_to_string(list_sv)
     }

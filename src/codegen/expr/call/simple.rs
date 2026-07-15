@@ -591,8 +591,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else if inner.starts_with("Set") {
                         "mimi_list_set_to_json"
                     } else if inner.starts_with("Option") && inner.contains("Map<") {
-                        // List of Option of Map — use typed map helper.
-                        // mode >= 10 means product Map with arity (mode - 10).
+                        // List of Option of Map — nested product modes via helper.
                         let mode = if inner.contains("Map<string, string>") {
                             1i64
                         } else if inner.contains("Map<string, bool>") {
@@ -601,46 +600,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             || inner.contains("Map<string, f32>")
                         {
                             3
-                        } else if let Some(val_ty) = inner
-                            .strip_prefix("Option<")
-                            .and_then(|s| s.strip_suffix('>'))
-                            .and_then(|s| s.strip_prefix("Map<string, "))
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
-                                let elem = if self.is_product_tuple_alias(val_ty) {
-                                    self.resolve_alias_type_name(val_ty)
-                                } else {
-                                    val_ty.to_string()
-                                };
-                                let mut arity: i64 = 0;
-                                let mut depth = 0i32;
-                                let mut any = false;
-                                let body = elem
-                                    .strip_prefix('(')
-                                    .and_then(|s| s.strip_suffix(')'))
-                                    .unwrap_or(elem.as_str());
-                                for ch in body.chars() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            arity += 1;
-                                            any = true;
-                                        }
-                                        c if !c.is_whitespace() => any = true,
-                                        _ => {}
-                                    }
-                                }
-                                if any {
-                                    arity += 1;
-                                }
-                                10 + arity.max(1)
-                            } else {
-                                0
-                            }
                         } else {
-                            0
+                            self.map_nested_product_mode(inner)
                         };
                         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                         let fn_ty = i8_ptr_ty.fn_type(
@@ -1497,7 +1458,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             {
                                 3
                             } else {
-                                0
+                                self.map_nested_product_mode(&obj_type)
                             };
                             let res_fn = self.get_runtime_fn("mimi_result_map_to_json")?;
                             self.build_call(
@@ -1523,6 +1484,54 @@ impl<'ctx> CodeGenerator<'ctx> {
                             } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>")
                             {
                                 3
+                            } else if let Some(elem) = obj_type
+                                .find("Set<")
+                                .map(|i| &obj_type[i + 4..])
+                                .and_then(|s| {
+                                    let mut depth = 0i32;
+                                    for (j, ch) in s.char_indices() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' if depth == 0 => return Some(&s[..j]),
+                                            '>' | ')' => depth -= 1,
+                                            _ => {}
+                                        }
+                                    }
+                                    None
+                                })
+                            {
+                                if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                                    let resolved = if self.is_product_tuple_alias(elem) {
+                                        self.resolve_alias_type_name(elem)
+                                    } else {
+                                        elem.to_string()
+                                    };
+                                    let mut arity: i64 = 0;
+                                    let mut depth = 0i32;
+                                    let mut any = false;
+                                    let body = resolved
+                                        .strip_prefix('(')
+                                        .and_then(|s| s.strip_suffix(')'))
+                                        .unwrap_or(resolved.as_str());
+                                    for ch in body.chars() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                arity += 1;
+                                                any = true;
+                                            }
+                                            c if !c.is_whitespace() => any = true,
+                                            _ => {}
+                                        }
+                                    }
+                                    if any {
+                                        arity += 1;
+                                    }
+                                    10 + arity.max(1)
+                                } else {
+                                    0
+                                }
                             } else {
                                 0
                             };
@@ -3727,11 +3736,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     // Result of List: Ok may be by-value list struct {i64,ptr}
                     // or a pointer/int handle — handle before scalar ok_i64 coercion.
-                    // Do not treat Result<Map<…, List<…>>> as Result of List.
-                    if obj_type.contains("List<")
-                        && !obj_type.contains("Map<")
-                        && !obj_type.contains("Set<")
-                    {
+                    // Result of List: Ok type must start with List (not Map/Set of List).
+                    let result_ok_is_list = obj_type
+                        .strip_prefix("Result<")
+                        .map(|s| {
+                            let mut depth = 0i32;
+                            for (i, ch) in s.char_indices() {
+                                match ch {
+                                    '<' => depth += 1,
+                                    '>' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        return s[..i].trim().starts_with("List");
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            false
+                        })
+                        .unwrap_or(false);
+                    if result_ok_is_list {
                         let err_bv = self.build_extract_value(sv.into(), 2, "res_list_err")?;
                         let err_i64 = match err_bv {
                             BasicValueEnum::IntValue(iv) => {
@@ -3879,6 +3902,78 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 )?
                                 .try_as_basic_value_opt()
                                 .ok_or("list map to_json void")?
+                                .into_pointer_value()
+                            }
+                        } else if list_elem.starts_with("Set") {
+                            if let Some(elem) = list_elem
+                                .strip_prefix("Set<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                                    let resolved = if self.is_product_tuple_alias(elem) {
+                                        self.resolve_alias_type_name(elem)
+                                    } else {
+                                        elem.to_string()
+                                    };
+                                    let mut arity: i64 = 0;
+                                    let mut depth = 0i32;
+                                    let mut any = false;
+                                    let body = resolved
+                                        .strip_prefix('(')
+                                        .and_then(|s| s.strip_suffix(')'))
+                                        .unwrap_or(resolved.as_str());
+                                    for ch in body.chars() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                arity += 1;
+                                                any = true;
+                                            }
+                                            c if !c.is_whitespace() => any = true,
+                                            _ => {}
+                                        }
+                                    }
+                                    if any {
+                                        arity += 1;
+                                    }
+                                    let func =
+                                        self.get_runtime_fn("mimi_list_set_product_to_json")?;
+                                    self.build_call(
+                                        func,
+                                        &[
+                                            BasicMetadataValueEnum::PointerValue(list_ptr),
+                                            BasicMetadataValueEnum::IntValue(
+                                                self.context
+                                                    .i64_type()
+                                                    .const_int(arity.max(1) as u64, false),
+                                            ),
+                                        ],
+                                        "res_list_set_product_json",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("list set product to_json void")?
+                                    .into_pointer_value()
+                                } else {
+                                    let list_fn = self.get_runtime_fn("mimi_list_set_to_json")?;
+                                    self.build_call(
+                                        list_fn,
+                                        &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                                        "res_list_json",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("list set to_json void")?
+                                    .into_pointer_value()
+                                }
+                            } else {
+                                let list_fn = self.get_runtime_fn("mimi_list_set_to_json")?;
+                                self.build_call(
+                                    list_fn,
+                                    &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                                    "res_list_json",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("list set to_json void")?
                                 .into_pointer_value()
                             }
                         } else {
