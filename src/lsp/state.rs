@@ -13,7 +13,15 @@ impl LspServer {
         if self.documents.contains_key(&uri) {
             self.access_order.retain(|k| *k != uri);
         } else if self.documents.len() >= super::MAX_DOCUMENTS {
-            if let Some(lru) = self.access_order.pop_front() {
+            // L-H7: never silently drop still-open documents (those with a
+            // tracked version from didOpen/didChange). Evict the oldest closed
+            // entry; if every cached doc is still open, grow past the soft limit.
+            if let Some(pos) = self
+                .access_order
+                .iter()
+                .position(|k| !self.document_versions.contains_key(k))
+            {
+                let lru = self.access_order.remove(pos).expect("index valid");
                 self.documents.remove(&lru);
                 self.document_versions.remove(&lru);
             }
