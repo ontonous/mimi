@@ -95,6 +95,9 @@ impl VerifierState {
                     if !func.body.is_empty() {
                         session.reset();
                         let result = ctx.verify_func(&mut session, &func);
+                        // V-C4: record status for later callers that trust ensures.
+                        ctx.func_status
+                            .insert(func.name.clone(), result.status.clone());
                         acc.results.push(result);
                     }
                     Ok(VerifierState::Ready {
@@ -108,6 +111,8 @@ impl VerifierState {
                     if func.requires.is_some() || func.ensures.is_some() {
                         session.reset();
                         let result = ctx.verify_extern_func(&mut session, &func);
+                        ctx.func_status
+                            .insert(func.name.clone(), result.status.clone());
                         acc.results.push(result);
                     }
                     Ok(VerifierState::Ready {

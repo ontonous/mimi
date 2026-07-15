@@ -380,6 +380,9 @@ impl SolverSession {
 #[derive(Default)]
 pub struct VerifierCtx {
     pub(crate) func_defs: HashMap<String, crate::ast::FuncDef>,
+    /// V-C4: status of each verified function. Callee ensures are only
+    /// admitted as axioms when the callee status is `Verified`.
+    pub(crate) func_status: HashMap<String, VerifStatus>,
     /// Mapping from let-variable names to their init expressions.
     /// Populated during verify_func to enable substitution of local variables
     /// when encoding body-return expressions. Fixes P0.1 for let-binding calls:
