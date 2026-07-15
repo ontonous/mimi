@@ -1651,6 +1651,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     self.register_heap_alloc(raw);
                                     return self.wrap_c_string(raw);
                                 }
+                                if let Some(opt_inner) = ok_ty
+                                    .strip_prefix("Option<")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if opt_inner.starts_with('(')
+                                        || self.is_product_tuple_alias(opt_inner)
+                                    {
+                                        let resolved = if self
+                                            .is_product_tuple_alias(opt_inner)
+                                        {
+                                            self.resolve_alias_type_name(opt_inner)
+                                        } else {
+                                            opt_inner.to_string()
+                                        };
+                                        let raw = self
+                                            .emit_set_result_option_product_to_json(
+                                                handle, &resolved, 0,
+                                            )?;
+                                        self.register_heap_alloc(raw);
+                                        return self.wrap_c_string(raw);
+                                    }
+                                }
                             }
                         }
                     }

@@ -2935,6 +2935,51 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             other => other.clone(),
                         };
+                        // Result of Option of product.
+                        if let Type::Name(on, oargs) = &inner {
+                            if on == "Option" && oargs.len() == 1 {
+                                let opt_inner = match &oargs[0] {
+                                    Type::Name(an, aargs) if aargs.is_empty() => {
+                                        if let Some(td) = self.type_defs.get(an) {
+                                            if let crate::ast::TypeDefKind::Alias(inner) =
+                                                &td.kind
+                                            {
+                                                inner.clone()
+                                            } else {
+                                                oargs[0].clone()
+                                            }
+                                        } else {
+                                            oargs[0].clone()
+                                        }
+                                    }
+                                    other => other.clone(),
+                                };
+                                if let Type::Tuple(elems) = opt_inner {
+                                    let arity = elems.len() as u64;
+                                    let func = self.get_runtime_fn(
+                                        "mimi_set_from_json_result_option_product_i64",
+                                    )?;
+                                    let result = self.build_call(
+                                        func,
+                                        &[
+                                            BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                            BasicMetadataValueEnum::IntValue(
+                                                self.context
+                                                    .i64_type()
+                                                    .const_int(arity, false),
+                                            ),
+                                        ],
+                                        "set_from_json_result_option_product",
+                                    )?;
+                                    return Ok(self
+                                        .expect_basic_value(
+                                            &result,
+                                            "mimi_set_from_json_result_option_product_i64",
+                                        )?
+                                        .into());
+                                }
+                            }
+                        }
                         if let Type::Tuple(elems) = inner {
                             let arity = elems.len() as u64;
                             let func =
