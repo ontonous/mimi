@@ -36,6 +36,7 @@ pub struct Counterexample {
 
 pub(crate) struct Z3VarMap {
     pub(crate) int_vars: HashMap<String, Z3Int>,
+    pub(crate) bool_vars: HashMap<String, Z3Bool>,
     pub(crate) real_vars: HashMap<String, Z3Real>,
     pub(crate) string_nonempty: HashMap<String, Z3Bool>,
     /// String length variables: s_len = Z3Int for each string param.
@@ -52,6 +53,7 @@ impl Z3VarMap {
     pub(crate) fn new() -> Self {
         Self {
             int_vars: HashMap::new(),
+            bool_vars: HashMap::new(),
             real_vars: HashMap::new(),
             string_nonempty: HashMap::new(),
             string_len: HashMap::new(),
@@ -62,6 +64,10 @@ impl Z3VarMap {
 
     pub(crate) fn insert_int(&mut self, name: impl Into<String>, var: Z3Int) {
         self.int_vars.insert(name.into(), var);
+    }
+
+    pub(crate) fn insert_bool(&mut self, name: impl Into<String>, var: Z3Bool) {
+        self.bool_vars.insert(name.into(), var);
     }
 
     pub(crate) fn insert_real(&mut self, name: impl Into<String>, var: Z3Real) {
@@ -80,6 +86,11 @@ impl Z3VarMap {
     #[inline]
     pub(crate) fn get_int(&self, name: &str) -> Option<&Z3Int> {
         self.int_vars.get(name)
+    }
+
+    #[inline]
+    pub(crate) fn get_bool(&self, name: &str) -> Option<&Z3Bool> {
+        self.bool_vars.get(name)
     }
 
     #[inline]

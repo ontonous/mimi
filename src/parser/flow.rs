@@ -291,6 +291,11 @@ fn recover_to_sync_slice(tokens: &[Token], mut pos: usize) -> usize {
         TokenKind::RBrace,
         TokenKind::Eof,
     ];
+    // F-H4: if we failed *on* a declaration starter, skip it so recovery
+    // does not re-enter the same broken item and cascade.
+    if pos < tokens.len() && SYNC.iter().any(|k| tokens[pos].kind == *k) {
+        pos += 1;
+    }
     let max_skip = 100;
     let mut skipped = 0;
     while pos < tokens.len() && skipped < max_skip {
