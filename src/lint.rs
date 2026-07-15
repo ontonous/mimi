@@ -34,10 +34,13 @@ impl Linter {
         let used_imports = collect_used_names(file);
         for imp in &file.imports {
             let path_str = imp.path.join("::");
-            if imp.alias.is_none()
-                && !used_imports.contains(&imp.path[imp.path.len() - 1])
-                && !used_imports.contains(&path_str)
-            {
+            let last = imp.path.last().map(|s| s.as_str()).unwrap_or("");
+            let module_used = used_imports.contains(last) || used_imports.contains(&path_str);
+            // F-H6: `use std::io` merges pub exports into the current scope, so
+            // referencing `print_line` (not `io::print_line`) still uses the import.
+            let std_export_used = imp.path.first().map(|s| s.as_str()) == Some("std")
+                && std_module_export_used(last, &used_imports);
+            if imp.alias.is_none() && !module_used && !std_export_used {
                 diagnostics.push(Diagnostic::warning_code(
                     W010,
                     format!("unused import `{}`", path_str),
@@ -901,6 +904,78 @@ fn has_conditional_guard(block: &[Stmt]) -> bool {
 
 // ---- W010: Unused import ----
 
+/// F-H6: true if any pub free-function name from `std/<module>.mimi` is referenced.
+fn std_module_export_used(module: &str, used: &std::collections::HashSet<String>) -> bool {
+    for name in std_module_pub_funcs(module) {
+        if used.contains(*name) {
+            return true;
+        }
+    }
+    false
+}
+
+fn std_module_pub_funcs(module: &str) -> &'static [&'static str] {
+    match module {
+        "io" => &[
+            "print_line", "print_raw", "print_format", "print_err", "print_int", "print_float",
+            "print_list", "input_line", "input_int", "input_float", "input_bool",
+        ],
+        "fs" => &["exists", "read", "write", "read_lines", "write_lines", "file_size"],
+        "strings" => &[
+            "char_at", "substring", "split", "join", "contains", "capitalize", "title",
+            "reverse_string", "truncate", "pad_left", "pad_right", "count_substring",
+            "is_blank", "replace_all", "to_lower", "trim",
+        ],
+        "collections" => &[
+            "find", "dedup", "concat", "sort_list", "map_list", "unique", "any", "all",
+            "partition", "group_by", "chunks", "intersperse", "min_list", "max_list",
+            "filter_list", "reduce_list",
+        ],
+        "mymath" => &[
+            "abs", "abs_float", "gcd", "lcm", "hypot", "clamp_int", "factorial", "fibonacci",
+            "is_prime", "random_int", "power", "sqrt_val", "collatz_steps", "mod_pow",
+            "is_power_of_two", "next_power_of_two",
+        ],
+        "json" => &[
+            "to_json", "from_json", "get_string", "get_int", "get_element", "get_bool",
+            "get_float", "is_valid_json", "array_length",
+        ],
+        "maps" => &[
+            "new", "get", "set", "has_key", "remove", "size", "from_list", "is_empty",
+            "get_or_default", "merge", "to_list", "filter_keys", "map_values", "update",
+            "pick", "omit",
+        ],
+        "set" => &["size", "is_empty", "contains", "insert", "remove", "to_list"],
+        "crypto" => &[
+            "sha256", "base64_encode", "base64_decode", "hex_encode", "hex_decode", "is_valid_hex",
+        ],
+        "time" => &[
+            "timestamp", "timestamp_ms", "sleep_ms", "elapsed", "seconds_since", "millis_since",
+            "duration",
+        ],
+        "env" => &[
+            "get_var", "cli_args", "get_var_or", "has_var", "get_int", "get_float", "arg_count",
+            "first_arg",
+        ],
+        "testing" => &[
+            "assert_eq_int", "assert_ne_int", "assert_approx_eq_float", "assert_true",
+            "assert_false", "assert_eq_string", "assert_eq_bool",
+        ],
+        "csv" => &["parse_csv", "serialize_csv"],
+        "template" => &["render_template"],
+        "net" => &[
+            "tcp_socket", "tcp_connect", "tcp_listen", "tcp_accept", "tcp_send", "tcp_recv",
+            "fetch", "fetch_post",
+        ],
+        "prelude" => &[
+            "identity", "clamp", "lerp", "compose", "pipe", "fail", "assert_msg",
+            "repeat_action", "times", "to_int_safe", "to_float_safe",
+        ],
+        _ => &[],
+    }
+}
+
+
 /// Collect all identifier names referenced in the file.
 fn collect_used_names(file: &File) -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::new();
@@ -1342,6 +1417,22 @@ func main() -> i32 {
                 .iter()
                 .any(|d| d.code.as_deref() == Some(W010)),
             "unused import should trigger W010"
+        );
+    }
+
+
+    #[test]
+    fn lint_std_import_used_via_export() {
+        // F-H6: use std::io + print_line should NOT warn unused import.
+        let src = "use std::io\nfunc main() -> i32 { print_line(\"hi\"); 0 }";
+        let file = parse_source(src);
+        let diags = Linter::new().lint(&file, src).diagnostics;
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code.as_deref() == Some(W010)),
+            "std import used via export must not warn: {:?}",
+            diags
         );
     }
 
