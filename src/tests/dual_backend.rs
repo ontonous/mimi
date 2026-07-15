@@ -4982,6 +4982,81 @@ fn dual_string_method_substring() {
 }
 
 #[test]
+fn dual_string_char_at_unicode() {
+    if !can_link() {
+        return;
+    }
+    // CG-H1: character index, not byte index — "你" is one scalar at index 0.
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let c = "你好".char_at(1)
+            println(c)
+            0
+        }
+    "#,
+        "好"
+    );
+}
+
+#[test]
+fn dual_string_substring_unicode() {
+    if !can_link() {
+        return;
+    }
+    // CG-H2: character indices, not bytes.
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = "你好世界".substring(1, 3)
+            println(s)
+            0
+        }
+    "#,
+        "好世"
+    );
+}
+
+#[test]
+fn dual_int_pow_basic() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(to_string(2 ** 10))
+            0
+        }
+    "#,
+        "1024"
+    );
+}
+
+#[test]
+fn dual_nested_block_string_return() {
+    if !can_link() {
+        return;
+    }
+    // R-C8: nested `return` must claim heap string ownership before free_heap_allocs.
+    dual_assert!(
+        r#"
+        func pick(flag: bool) -> string {
+            if flag {
+                return "yes" + "!"
+            }
+            "no"
+        }
+        func main() -> i32 {
+            println(pick(true))
+            0
+        }
+    "#,
+        "yes!"
+    );
+}
+
+#[test]
 fn dual_string_method_split() {
     if !can_link() {
         return;

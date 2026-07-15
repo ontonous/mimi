@@ -27,9 +27,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
-        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-        // B4: use malloc_or_abort for NULL check.
-        let buf = self.malloc_or_abort(self.context.i64_type().const_int(2, false), "char_buf")?;
         // Handle both string representations:
         // - PointerValue: char* directly (literal strings)
         // - StructValue: {i8*, i64} (builtin function results)
@@ -46,33 +43,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
-        // MEM-C6 (deep audit): bounds-check index against string length.
-        // Get string length: for struct {i8*, i64}, extract field 1; for char*, use strlen.
-        let s_len = match &args[0] {
-            BasicMetadataValueEnum::StructValue(sv) => self
-                .builder
-                .build_extract_value(*sv, 1, "str_len")
-                .map_err(|e| CompileError::LlvmError(format!("extract str len: {}", e)))?
-                .into_int_value(),
-            BasicMetadataValueEnum::PointerValue(_) => {
-                let strlen_fn = self.get_runtime_fn("strlen")?;
-                self.build_call(
-                    strlen_fn,
-                    &[BasicMetadataValueEnum::PointerValue(data_ptr)],
-                    "strlen",
-                )?
-                .try_as_basic_value_opt()
-                .ok_or("strlen returned void")?
-                .into_int_value()
-            }
-            _ => {
-                return Err(CompileError::TypeMismatch(
-                    "str_char_at: first arg must be string".to_string(),
-                ))
-            }
-        };
-        // Clamp index to [0, len-1] using select: if index >= len, use len-1 (last char).
-        // Index may be i32 — extend to i64 for comparison with string length.
+        // CG-H1: Unicode scalar indexing via runtime (matches interpreter).
         let i64_ty = self.context.i64_type();
         let index_i64 = if index.get_type().get_bit_width() < 64 {
             self.builder
@@ -81,123 +52,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             index
         };
-        let oob = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SGE, index_i64, s_len, "idx_oob")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let neg = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::SLT,
-                index_i64,
-                i64_ty.const_int(0, false),
-                "idx_neg",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let clamped_lo = self
-            .builder
-            .build_select(neg, i64_ty.const_int(0, false), index_i64, "idx_clamped_lo")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
-        let last_valid = self
-            .builder
-            .build_int_sub(s_len, i64_ty.const_int(1, false), "last_valid")
-            .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-        // MEM-C6 (deep audit): for an empty string `s_len == 0`, `last_valid`
-        // would be -1 and `safe_idx` would become -1, reading one byte *before*
-        // the buffer. Clamp `last_valid` to >= 0 so an out-of-range (or empty)
-        // index resolves to index 0 (the NUL terminator, char code 0).
-        let last_valid_neg = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::SLT,
-                last_valid,
-                i64_ty.const_int(0, false),
-                "last_valid_neg",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let last_valid_safe = self
-            .builder
-            .build_select(
-                last_valid_neg,
-                i64_ty.const_int(0, false),
-                last_valid,
-                "last_valid_safe",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
-        let safe_idx = self
-            .builder
-            .build_select(oob, last_valid_safe, clamped_lo, "safe_idx")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
-        // char = data_ptr[safe_idx]
-        let char_ptr = {
-            self.gep().build_in_bounds_gep(
-                BasicTypeEnum::IntType(self.context.i8_type()),
-                data_ptr,
-                &[safe_idx],
-                "char_ptr",
-            )
-        }
-        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let char_val = self
-            .builder
-            .build_load(
-                BasicTypeEnum::IntType(self.context.i8_type()),
-                char_ptr,
-                "char_val",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-        // Store char + null
-        self.builder
-            .build_store(buf, char_val)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let null_gep = {
-            self.gep().build_in_bounds_gep(
-                BasicTypeEnum::IntType(self.context.i8_type()),
-                buf,
-                &[self.context.i64_type().const_int(1, false)],
-                "null_byte",
-            )
-        }
-        .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(null_gep, self.context.i8_type().const_int(0, false))
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        // Build string struct { i8*, i64 }
-        let string_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::PointerType(i8_ptr_ty),
-                BasicTypeEnum::IntType(self.context.i64_type()),
-            ],
-            false,
-        );
-        let str_alloca = self.build_entry_alloca(string_ty, "char_str")?;
-        let ptr_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 0, "str_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(ptr_gep, buf)
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.register_heap_slot(str_alloca, string_ty, 0);
-        let len_gep = self
-            .gep()
-            .build_struct_gep(string_ty, str_alloca, 1, "str_len")
-            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.builder
-            .build_store(len_gep, self.context.i64_type().const_int(1, false))
-            .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        let result = self
-            .builder
-            .build_load(
-                BasicTypeEnum::StructType(string_ty),
-                str_alloca,
-                "str_char_at_result",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
-        Ok(result)
+        let char_at_fn = self.get_runtime_fn("mimi_str_char_at")?;
+        let raw_result = self
+            .build_call(
+                char_at_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(data_ptr),
+                    BasicMetadataValueEnum::IntValue(index_i64),
+                ],
+                "str_char_at_call",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_str_char_at returned void")?
+            .into_pointer_value();
+        self.register_heap_alloc(raw_result);
+        self.wrap_c_string(raw_result)
     }
     pub(super) fn compile_char_code(
         &self,

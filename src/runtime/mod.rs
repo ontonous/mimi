@@ -643,8 +643,12 @@ fn alloc_c_string_from_bytes(bytes: &[u8]) -> *mut std::ffi::c_char {
 
 #[no_mangle]
 pub extern "C" fn __mimi_pow_i64(base: i64, exp: i64) -> i64 {
+    // CG-H3: match interpreter — negative exponents and overflow are errors,
+    // not silent zero (which collides with legitimate 0**n results).
     if exp < 0 {
-        return 0;
+        mimi_runtime_abort(
+            b"negative exponent not supported for integers\0".as_ptr() as *const std::ffi::c_char,
+        );
     }
     if exp == 0 {
         return 1;
@@ -656,14 +660,22 @@ pub extern "C" fn __mimi_pow_i64(base: i64, exp: i64) -> i64 {
         if (e & 1) != 0 {
             match result.checked_mul(b) {
                 Some(v) => result = v,
-                None => return 0,
+                None => {
+                    mimi_runtime_abort(
+                        b"integer overflow in power\0".as_ptr() as *const std::ffi::c_char,
+                    );
+                }
             }
         }
         e >>= 1;
         if e > 0 {
             match b.checked_mul(b) {
                 Some(v) => b = v,
-                None => return 0,
+                None => {
+                    mimi_runtime_abort(
+                        b"integer overflow in power\0".as_ptr() as *const std::ffi::c_char,
+                    );
+                }
             }
         }
     }
@@ -1311,6 +1323,59 @@ pub extern "C" fn mimi_str_concat(
     // SAFETY: `cstr_to_string` handles null pointers safely.
     let sb = unsafe { cstr_to_string(b) };
     let result = format!("{}{}", sa, sb);
+    alloc_c_string(&result)
+}
+
+/// Character-index (Unicode scalar) `char_at`.
+/// Returns a new heap-allocated 1-char string; aborts on OOB / invalid UTF-8.
+#[no_mangle]
+pub extern "C" fn mimi_str_char_at(s: *const std::ffi::c_char, index: i64) -> *mut std::ffi::c_char {
+    // SAFETY: `cstr_to_string` handles null pointers safely.
+    let ss = unsafe { cstr_to_string(s) };
+    if index < 0 {
+        mimi_runtime_abort(
+            b"str_char_at: index out of bounds\0".as_ptr() as *const std::ffi::c_char,
+        );
+    }
+    match ss.chars().nth(index as usize) {
+        Some(c) => {
+            let mut buf = [0u8; 8];
+            let encoded = c.encode_utf8(&mut buf);
+            alloc_c_string(encoded)
+        }
+        None => mimi_runtime_abort(
+            b"str_char_at: index out of bounds\0".as_ptr() as *const std::ffi::c_char,
+        ),
+    }
+}
+
+/// Character-index (Unicode scalar) substring `[start, end)`.
+/// Returns a new heap-allocated string; aborts on `start > end` or end OOB.
+#[no_mangle]
+pub extern "C" fn mimi_str_substring(
+    s: *const std::ffi::c_char,
+    start: i64,
+    end: i64,
+) -> *mut std::ffi::c_char {
+    // SAFETY: `cstr_to_string` handles null pointers safely.
+    let ss = unsafe { cstr_to_string(s) };
+    if start < 0 || end < 0 {
+        mimi_runtime_abort(
+            b"str_substring: index out of bounds\0".as_ptr() as *const std::ffi::c_char,
+        );
+    }
+    if start > end {
+        mimi_runtime_abort(b"str_substring: start > end\0".as_ptr() as *const std::ffi::c_char);
+    }
+    let chars: Vec<char> = ss.chars().collect();
+    let s_idx = start as usize;
+    let e_idx = end as usize;
+    if e_idx > chars.len() {
+        mimi_runtime_abort(
+            b"str_substring: end out of bounds\0".as_ptr() as *const std::ffi::c_char,
+        );
+    }
+    let result: String = chars[s_idx..e_idx].iter().collect();
     alloc_c_string(&result)
 }
 
