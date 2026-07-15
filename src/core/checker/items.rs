@@ -1518,16 +1518,49 @@ impl<'a> Checker<'a> {
                             );
                         }
                     }
-                    // 3. v0.29.36: Payload covariance / invariance rules.
-                    //    - view-borrowed protocol fields: covariant (flow may have
-                    //      wider payload type — extra fields allowed, width subtyping)
-                    //    - mutate-borrowed protocol fields: invariant (flow must
-                    //      exactly match protocol payload type)
-                    //    The width subtyping (extra fields OK) is already enforced
-                    //    in step 1. Here we add the invariant check for protocol
-                    //    states with `mutate`-marked payload types.
-                    //    Currently all protocol payload types are view-covariant
-                    //    (the default), so this is a documentation point.
+                    // 3. v0.29.36 / T-H15: Payload covariance / invariance rules.
+                    //    - view (default): covariant width — flow may have extra fields
+                    //    - mutate (Type::RefMut or name "mutate T"): invariant — flow
+                    //      payload field types must exactly match protocol payload type
+                    for ps in &proto.states {
+                        let Some(proto_ty) = ps.payload_type.as_ref() else { continue };
+                        let is_mutate = matches!(proto_ty, crate::ast::Type::RefMut(_, _))
+                            || matches!(
+                                proto_ty,
+                                crate::ast::Type::Name(n, _) if n == "mutate"
+                            );
+                        if !is_mutate {
+                            continue;
+                        }
+                        let Some(fs) = f.states.iter().find(|s| s.name == ps.name) else {
+                            continue;
+                        };
+                        // Exact payload type match: if protocol names a payload field,
+                        // flow field must unify exactly (no extra fields for mutate).
+                        if let (Some(pname), Some(fields)) = (&ps.payload_name, &fs.payload) {
+                            let expected = self.resolve_type(match proto_ty {
+                                crate::ast::Type::RefMut(_, inner) => inner.as_ref(),
+                                other => other,
+                            });
+                            let has_exact = fields.iter().any(|field| {
+                                field.name == *pname
+                                    && self
+                                        .unification
+                                        .unify(&self.resolve_type(&field.ty), &expected)
+                                        .is_ok()
+                            });
+                            // Invariant: no extra fields beyond protocol payload.
+                            if fields.len() != 1 || !has_exact {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0209,
+                                    format!(
+                                        "protocol mutate payload is invariant: flow '{}' state '{}' must match protocol payload exactly (no extra fields)",
+                                        f.name, ps.name
+                                    ),
+                                );
+                            }
+                        }
+                    }
                     //
                     // 4. v0.29.36: Conservative projection (E0418).
                     //    If a flow state payload contains a subflow (nested flow
