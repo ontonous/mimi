@@ -1716,10 +1716,9 @@ func main() -> i32 { 0 }
 /// but NOT verified for preservation across iterations. This test documents
 /// the current behavior (invariant helps verification, not itself verified).
 #[test]
-fn verify_invariant_assumed_not_preserved() {
+fn verify_invariant_not_established_fails() {
     require_z3!();
-    // A wrong invariant (x > 100 when x starts at 0) should still be
-    // asserted as a constraint, but it's unsatisfiable with requires x == 0.
+    // V-H1: invariant not implied by requires must Fail at establish.
     let src = r#"
 func broken(x: i32) -> i32 {
     requires: x == 0
@@ -1729,15 +1728,20 @@ func broken(x: i32) -> i32 {
 }
 func main() -> i32 { 0 }
 "#;
-    let results = verify_source(src).expect("src/verifier/tests.rs: invariant_assumed");
+    let results = verify_source(src).expect("src/verifier/tests.rs: invariant_establish");
     let f = results.iter().find(|r| r.func_name == "broken");
     assert!(f.is_some(), "broken should be present");
-    // Invariant x > 100 + requires x == 0 is unsatisfiable → Failed (precondition unsat)
     assert_eq!(
         f.unwrap().status,
         VerifStatus::Failed,
-        "inconsistent invariant + requires should fail: {:?}",
-        f.unwrap().status,
+        "invariant not established should fail: {:?}",
+        f.unwrap()
+    );
+    assert!(
+        f.unwrap().message.contains("not established")
+            || f.unwrap().message.contains("invariant"),
+        "message: {}",
+        f.unwrap().message
     );
 }
 
