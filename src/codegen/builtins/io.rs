@@ -5065,6 +5065,27 @@ impl<'ctx> CodeGenerator<'ctx> {
             };
             return self.emit_list_product_tuple_to_json(list_ptr, &elem);
         }
+        if inner.starts_with("Map") {
+            if let Some(val_ty) = inner
+                .strip_prefix("Map<string, ")
+                .and_then(|s| s.strip_suffix('>'))
+                .or_else(|| {
+                    inner
+                        .strip_prefix("Map<string,")
+                        .and_then(|s| s.strip_suffix('>'))
+                        .map(|s| s.trim())
+                })
+            {
+                if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                    let elem = if self.is_product_tuple_alias(val_ty) {
+                        self.resolve_alias_type_name(val_ty)
+                    } else {
+                        val_ty.to_string()
+                    };
+                    return self.emit_list_map_product_to_json(list_ptr, &elem);
+                }
+            }
+        }
         if inner.starts_with("List<") {
             let mid_elem = Self::strip_first_type_arg(&format!("List<{}>", inner), "List")
                 .and_then(|mid| Self::strip_first_type_arg(&mid, "List"))
@@ -5128,6 +5149,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     inner
                 };
                 return self.emit_list_product_tuple_to_string(list_sv, &elem);
+            }
+            if inner.starts_with("Map") {
+                return self.emit_list_map_to_string(list_sv, &inner);
             }
         }
         self.emit_list_i32_to_string(list_sv)
