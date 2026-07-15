@@ -3507,6 +3507,53 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 list_elem
                             };
                             self.emit_list_product_tuple_to_json(list_ptr, &elem)?
+                        } else if list_elem.starts_with("Map") {
+                            if let Some(val_ty) = list_elem
+                                .strip_prefix("Map<string, ")
+                                .and_then(|s| s.strip_suffix('>'))
+                                .or_else(|| {
+                                    list_elem
+                                        .strip_prefix("Map<string,")
+                                        .and_then(|s| s.strip_suffix('>'))
+                                        .map(|s| s.trim())
+                                })
+                            {
+                                if val_ty.starts_with('(')
+                                    || self.is_product_tuple_alias(val_ty)
+                                {
+                                    let elem = if self.is_product_tuple_alias(val_ty) {
+                                        self.resolve_alias_type_name(val_ty)
+                                    } else {
+                                        val_ty.to_string()
+                                    };
+                                    self.emit_list_map_product_to_json(list_ptr, &elem)?
+                                } else {
+                                    let list_fn_name = if list_elem.contains("string") {
+                                        "mimi_list_map_to_json_string"
+                                    } else {
+                                        "mimi_list_map_to_string"
+                                    };
+                                    let list_fn = self.get_runtime_fn(list_fn_name)?;
+                                    self.build_call(
+                                        list_fn,
+                                        &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                                        "res_list_json",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("list map to_json void")?
+                                    .into_pointer_value()
+                                }
+                            } else {
+                                let list_fn = self.get_runtime_fn("mimi_list_map_to_string")?;
+                                self.build_call(
+                                    list_fn,
+                                    &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                                    "res_list_json",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("list map to_json void")?
+                                .into_pointer_value()
+                            }
                         } else {
                             let list_fn_name = if obj_type.contains("List<Map")
                                 || obj_type.contains("List<Map<")
