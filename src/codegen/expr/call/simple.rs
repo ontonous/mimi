@@ -1038,6 +1038,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.register_heap_alloc(raw);
                                 return self.wrap_c_string(raw);
                             }
+                            if let Some(opt_inner) = list_elem
+                                .strip_prefix("Option<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if opt_inner.starts_with('(')
+                                    || self.is_product_tuple_alias(opt_inner)
+                                {
+                                    let elem = if self.is_product_tuple_alias(opt_inner) {
+                                        self.resolve_alias_type_name(opt_inner)
+                                    } else {
+                                        opt_inner.to_string()
+                                    };
+                                    let raw = self.emit_map_list_option_product_to_json(
+                                        handle, &elem, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return self.wrap_c_string(raw);
+                                }
+                            }
                             if let Some(res_ok) = list_elem
                                 .strip_prefix("Result<")
                                 .and_then(|s| s.strip_suffix('>'))
@@ -1096,6 +1115,47 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     self.emit_map_set_product_to_json(handle, &elem, 0)?;
                                 self.register_heap_alloc(raw);
                                 return self.wrap_c_string(raw);
+                            }
+                            if let Some(res_ok) = set_elem
+                                .strip_prefix("Result<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                let product = if res_ok.starts_with('(') {
+                                    let mut depth = 0i32;
+                                    let mut end = 0usize;
+                                    for (i, ch) in res_ok.char_indices() {
+                                        match ch {
+                                            '(' => depth += 1,
+                                            ')' => {
+                                                depth -= 1;
+                                                if depth == 0 {
+                                                    end = i + 1;
+                                                    break;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    res_ok[..end].to_string()
+                                } else if let Some(c) = res_ok.find(',') {
+                                    res_ok[..c].to_string()
+                                } else {
+                                    res_ok.to_string()
+                                };
+                                if product.starts_with('(')
+                                    || self.is_product_tuple_alias(&product)
+                                {
+                                    let elem = if self.is_product_tuple_alias(&product) {
+                                        self.resolve_alias_type_name(&product)
+                                    } else {
+                                        product
+                                    };
+                                    let raw = self.emit_map_set_result_product_to_json(
+                                        handle, &elem, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return self.wrap_c_string(raw);
+                                }
                             }
                         }
                         if let Some(opt_elem) = val_ty
