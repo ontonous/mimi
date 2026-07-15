@@ -1786,11 +1786,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
             }
             Type::Name(n, args) if n == "Map" => {
-                // Map<string, V> from JSON object — scalars or product-tuple V.
+                // Map<string, V> from JSON object — scalars or product-tuple V
+                // (including type aliases like `type Pair = (i32, i32)`).
                 let val_ty = args.get(1);
-                let val_is_product = val_ty.map(|t| matches!(t, Type::Tuple(_))).unwrap_or(false);
+                let resolved_val = val_ty.map(|t| {
+                    // Expand type aliases to underlying product tuple when possible.
+                    match t {
+                        Type::Name(an, aargs) if aargs.is_empty() => {
+                            if let Some(td) = self.type_defs.get(an) {
+                                if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
+                                    return inner.clone();
+                                }
+                            }
+                            t.clone()
+                        }
+                        other => other.clone(),
+                    }
+                });
+                let val_is_product = resolved_val
+                    .as_ref()
+                    .map(|t| matches!(t, Type::Tuple(_)))
+                    .unwrap_or(false);
                 if val_is_product {
-                    let arity = match val_ty {
+                    let arity = match resolved_val.as_ref() {
                         Some(Type::Tuple(elems)) => elems.len() as u64,
                         _ => 2,
                     };

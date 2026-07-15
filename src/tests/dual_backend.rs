@@ -11371,3 +11371,43 @@ fn dual_for_keys_map_get_string_key() {
         "2"
     );
 }
+
+/// List of Map of product-tuple dual.
+#[test]
+fn dual_list_map_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, (i32, i32)>>("{\"a\":[1,2]}")
+            let xs: List<Map<string, (i32, i32)>> = [m]
+            println(xs)
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[{\"a\":(1, 2)}]\n[{\"a\":[1,2]}]"
+    );
+}
+
+/// from_json Map of product type-alias dual.
+#[test]
+fn dual_from_json_map_pair_alias() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Pair = (i32, i32)
+        func main() -> i32 {
+            let m = from_json::<Map<string, Pair>>("{\"a\":[1,2]}")
+            println(m)
+            println(to_json(m))
+            0
+        }
+        "#,
+        "{\"a\":(1, 2)}\n{\"a\":[1,2]}"
+    );
+}
