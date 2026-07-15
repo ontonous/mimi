@@ -146,30 +146,40 @@ impl<'a> Interpreter<'a> {
         // inner data. The data may be inconsistent, but we only read the
         // parent_id and is_detached fields which are set at spawn time and
         // not modified during normal operation.
-        let registry = handles.lock().unwrap_or_else(|e| e.into_inner());
-        let child_ids: Vec<usize> = registry
-            .iter()
-            .filter(|(_, h)| {
-                if let Ok(instance) = h.inner.read() {
-                    instance.parent_id == Some(parent_id) && !instance.is_detached
-                } else {
-                    false
+        // R-C9: registry holds weak entries — upgrade to strong handles.
+        let mut stale = Vec::new();
+        let child_ids: Vec<usize> = {
+            let mut registry = handles.lock().unwrap_or_else(|e| e.into_inner());
+            let mut ids = Vec::new();
+            for (id, entry) in registry.iter() {
+                match entry.upgrade() {
+                    Some(h) => {
+                        if let Ok(instance) = h.inner.read() {
+                            if instance.parent_id == Some(parent_id) && !instance.is_detached {
+                                ids.push(*id);
+                            }
+                        }
+                    }
+                    None => stale.push(*id),
                 }
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        drop(registry);
+            }
+            for id in stale {
+                registry.remove(&id);
+            }
+            ids
+        };
         // Kill each child
         for child_id in child_ids {
-            let handles = crate::interp::value::actor_handles();
-            let registry = handles.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(child) = registry.get(&child_id) {
+            let child = {
+                let registry = handles.lock().unwrap_or_else(|e| e.into_inner());
+                registry.get(&child_id).and_then(|e| e.upgrade())
+            };
+            if let Some(child) = child {
                 // Mark as faulted (short-circuit mailbox)
                 if let Ok(mut instance) = child.inner.write() {
                     instance.faulted = true;
                 }
                 // Recursively kill grandchildren
-                drop(registry);
                 self.system_kill_children(child_id);
             }
         }

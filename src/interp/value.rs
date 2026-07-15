@@ -582,15 +582,52 @@ impl PartialEq for ActorHandle {
 static ACTOR_HANDLE_COUNTER: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Live actor registry entry for PeerFault peer resolution (v0.29.20).
+///
+/// R-C9: store *weak* references so the registry does not keep actors and
+/// worker threads alive after all user handles are dropped. Upgrade fails
+/// once the last strong `ActorHandle` is gone.
+#[derive(Clone)]
+pub(crate) struct WeakActorEntry {
+    pub id: usize,
+    inner: std::sync::Weak<std::sync::RwLock<ActorInstance>>,
+    mailbox: std::sync::mpsc::Sender<ActorMailboxMsg>,
+    program: std::sync::Weak<crate::ast::File>,
+    bp: std::sync::Weak<MailboxBpState>,
+}
+
+impl WeakActorEntry {
+    fn from_handle(h: &ActorHandle) -> Self {
+        Self {
+            id: h.id,
+            inner: std::sync::Arc::downgrade(&h.inner),
+            mailbox: h.mailbox.clone(),
+            program: std::sync::Arc::downgrade(&h.program),
+            bp: std::sync::Arc::downgrade(&h.bp),
+        }
+    }
+
+    pub(crate) fn upgrade(&self) -> Option<ActorHandle> {
+        Some(ActorHandle {
+            inner: self.inner.upgrade()?,
+            mailbox: self.mailbox.clone(),
+            id: self.id,
+            program: self.program.upgrade()?,
+            bp: self.bp.upgrade()?,
+        })
+    }
+}
+
 /// Live actor handles by id for PeerFault peer resolution (v0.29.20).
 /// Entries are inserted in `ActorHandle::new` and removed on short-circuit.
 /// v0.29.37: pub(crate) for SystemKill cascade in actor.rs.
+/// R-C9: weak entries only — no strong ownership.
 static ACTOR_HANDLES: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<usize, ActorHandle>>,
+    std::sync::Mutex<std::collections::HashMap<usize, WeakActorEntry>>,
 > = std::sync::OnceLock::new();
 
 pub(crate) fn actor_handles(
-) -> &'static std::sync::Mutex<std::collections::HashMap<usize, ActorHandle>> {
+) -> &'static std::sync::Mutex<std::collections::HashMap<usize, WeakActorEntry>> {
     ACTOR_HANDLES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -725,9 +762,9 @@ impl ActorHandle {
             program,
             bp,
         };
-        // v0.29.20: register for PeerFault peer resolution.
+        // v0.29.20: register weak entry for PeerFault peer resolution (R-C9).
         if let Ok(mut map) = actor_handles().lock() {
-            map.insert(id, handle.clone());
+            map.insert(id, WeakActorEntry::from_handle(&handle));
         }
         handle
     }
@@ -770,10 +807,19 @@ impl ActorHandle {
             return;
         }
         let handles: Vec<ActorHandle> = {
-            let Ok(map) = actor_handles().lock() else {
+            let Ok(mut map) = actor_handles().lock() else {
                 return;
             };
-            peers.iter().filter_map(|id| map.get(id).cloned()).collect()
+            let mut out = Vec::new();
+            for id in &peers {
+                match map.get(id).and_then(|e| e.upgrade()) {
+                    Some(h) => out.push(h),
+                    None => {
+                        map.remove(id);
+                    }
+                }
+            }
+            out
         };
         for peer in handles {
             if peer.is_faulted() {
@@ -930,7 +976,7 @@ impl ActorHandle {
             return;
         };
         for pid in producers {
-            if let Some(handle) = map.get(&pid) {
+            if let Some(handle) = map.get(&pid).and_then(|e| e.upgrade()) {
                 handle.bp.enter_mute();
             }
         }
