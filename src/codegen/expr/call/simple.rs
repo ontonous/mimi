@@ -527,7 +527,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             return self.wrap_c_string(raw);
                         }
                     }
-                    // List of Set of product.
+                    // List of Set of product / Set of Result of product.
                     if let Some(set_elem) = inner
                         .strip_prefix("Set<")
                         .and_then(|s| s.strip_suffix('>'))
@@ -579,6 +579,37 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .into_pointer_value();
                             self.register_heap_alloc(raw);
                             return self.wrap_c_string(raw);
+                        }
+                        if set_elem.starts_with("Result<") {
+                            if let Some(ok_ty) = set_elem.strip_prefix("Result<").and_then(|s| {
+                                let mut depth = 0i32;
+                                for (i, ch) in s.char_indices() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            return Some(s[..i].trim());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                None
+                            }) {
+                                if ok_ty.starts_with('(')
+                                    || self.is_product_tuple_alias(ok_ty)
+                                {
+                                    let resolved = if self.is_product_tuple_alias(ok_ty) {
+                                        self.resolve_alias_type_name(ok_ty)
+                                    } else {
+                                        ok_ty.to_string()
+                                    };
+                                    let raw = self.emit_list_set_result_product_to_json(
+                                        alloca, &resolved, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return self.wrap_c_string(raw);
+                                }
+                            }
                         }
                     }
                     let rt_fn_name = if inner.starts_with("Map") {
