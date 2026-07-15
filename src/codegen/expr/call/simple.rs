@@ -3514,6 +3514,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
                     }
+                    // Prefer structured Result JSON so string Err (heap {ptr,len}) is
+                    // not printed as a raw i64 address.
+                    if let BasicMetadataValueEnum::StructValue(res_sv) = metadata_args[0] {
+                        let raw =
+                            self.emit_result_struct_to_json_cstr(res_sv, &obj_type)?;
+                        self.register_heap_alloc(raw);
+                        return self.wrap_c_string(raw);
+                    }
                     let func = self.get_runtime_fn("mimi_result_i64_to_json")?;
                     let raw = self
                         .build_call(

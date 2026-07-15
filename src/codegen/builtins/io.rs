@@ -1085,20 +1085,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_unconditional_branch(merge_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         self.builder.position_at_end(err_bb);
-        let ewrap =
-            self.malloc_or_abort(i64_ty.const_int(32, false), "list_res_opt_prod_err_w")?;
-        let efmt = self
-            .builder
-            .build_global_string_ptr("{\"Err\":[0]}", "list_res_opt_prod_efmt")
-            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        self.build_call(
-            strcpy_fn,
-            &[
-                BasicMetadataValueEnum::PointerValue(ewrap),
-                BasicMetadataValueEnum::PointerValue(efmt.as_pointer_value()),
-            ],
-            "list_res_opt_prod_ecpy",
-        )?;
+        let err_pay = self.build_extract_value(loaded.into(), 2, "list_res_opt_prod_err")?;
+        let err_i64 = match err_pay {
+            BasicValueEnum::IntValue(iv) => {
+                if iv.get_type().get_bit_width() < 64 {
+                    self.builder
+                        .build_int_s_extend(iv, i64_ty, "list_res_opt_prod_err_i64")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                } else {
+                    iv
+                }
+            }
+            _ => i64_ty.const_int(0, false),
+        };
+        let ewrap = self.emit_result_err_json(err_i64, true)?;
         self.build_store(piece_slot, ewrap)?;
         self.builder
             .build_unconditional_branch(merge_bb)
