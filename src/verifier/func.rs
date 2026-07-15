@@ -25,35 +25,56 @@ impl VerifierCtx {
         // Pre-populate func_defs so call-site verification can look up
         // callee ensures (cross-module contract propagation).
         self.collect_func_defs(items);
+        // V-C4 source-order independence: verify leaves (no body calls to
+        // known funcs with ensures) first via a simple multi-wave schedule.
+        // Wave 0: all funcs (status may be conservative for callers-before-callees).
+        // Wave 1: re-verify all and keep final status/results.
+        // This is O(2n) and correct once callees are Verified from wave 0.
+        let mut wave0 = Vec::new();
+        self.verify_items_collect(session, items, &mut wave0);
+        // Discard wave0 results; keep func_status. Re-verify for final results.
+        results.clear();
+        self.verify_items_collect(session, items, results);
+    }
+
+    fn verify_items_collect(
+        &mut self,
+        session: &mut SolverSession,
+        items: &[Item],
+        results: &mut Vec<VerificationResult>,
+    ) {
         for item in items {
             match item {
                 Item::Func(f) => {
                     if !f.body.is_empty() {
-                        // CRITICAL #3 fix: reset solver between functions to
-                        // prevent cross-contamination of Z3 assertions. Without
-                        // reset(), assertions from verify_func(inc) persist into
-                        // verify_func(dec), causing false positives/negatives.
                         session.reset();
                         let result = self.verify_func(session, f);
-                        // V-C4: record status so later callers only trust
-                        // ensures from successfully verified callees.
                         self.func_status
                             .insert(f.name.clone(), result.status.clone());
                         results.push(result);
                     }
                 }
-                Item::Module(m) => self.verify_items(session, &m.items, results),
+                Item::Module(m) => self.verify_items_collect(session, &m.items, results),
                 Item::ExternBlock(block) => {
                     for func in &block.funcs {
                         if func.requires.is_some() || func.ensures.is_some() {
                             session.reset();
-                            results.push(self.verify_extern_func(session, func));
+                            let result = self.verify_extern_func(session, func);
+                            self.func_status
+                                .insert(func.name.clone(), result.status.clone());
+                            results.push(result);
                         }
                     }
                 }
                 _ => {}
             }
         }
+    }
+
+    /// Pre-seed func_status for Flow Ready state (same two-wave idea).
+    pub(crate) fn preseed_func_status(&mut self, session: &mut SolverSession, items: &[Item]) {
+        let mut discard = Vec::new();
+        self.verify_items_collect(session, items, &mut discard);
     }
 
     pub(crate) fn verify_extern_func(

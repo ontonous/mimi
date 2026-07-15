@@ -34,6 +34,26 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
         file
     };
 
+    // V-H8: typecheck before Z3 so ill-typed sources cannot produce
+    // meaningless positive verification results.
+    if let Err(diags) = mimi::core::check(&merged_file) {
+        let use_color = colors_enabled();
+        let src_ref = Some(source.as_str());
+        let filename = path.display().to_string();
+        for d in &diags {
+            let formatted = format_diagnostic(d, src_ref, &filename);
+            if use_color {
+                eprint!("{}", formatted);
+            } else {
+                eprint!("{}", strip_ansi(&formatted));
+            }
+        }
+        return Err(format!(
+            "typecheck failed before verify ({} diagnostic(s))",
+            diags.len()
+        ));
+    }
+
     let results = if dump_z3 {
         // --dump-z3 needs access to Verifier::dump_smt2 after verification,
         // which the Flow state machine doesn't expose. Keep direct for this case.

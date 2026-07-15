@@ -1138,26 +1138,20 @@ func main() -> i32 { 0 }
 }
 
 #[test]
-fn verify_early_return_not_dead_code() {
-    require_z3!();
-    // V-C3: first reachable return must win over a later dead return.
-    let src = r#"
-func f() -> i32 {
-    ensures: result == 0
-    return 0
-    return 1
-}
-func main() -> i32 { 0 }
-"#;
-    let results = verify_source(src).expect("early return");
-    let f = results.iter().find(|r| r.func_name == "f");
-    assert!(f.is_some(), "f present: {:?}", results);
-    assert_eq!(
-        f.unwrap().status,
-        VerifStatus::Verified,
-        "early return 0 should satisfy ensures, not dead return 1: {:?}",
-        f.unwrap()
-    );
+fn extract_body_return_first_return_wins() {
+    // V-C3: sequential dead return must not win over the first return.
+    // Typecheck rejects dead code after return, so exercise the helper directly.
+    use crate::ast::{Expr, Lit, Stmt};
+    use crate::verifier::helpers::extract_body_return;
+    let stmts = vec![
+        Stmt::Return(Some(Expr::Literal(Lit::Int(0)))),
+        Stmt::Return(Some(Expr::Literal(Lit::Int(1)))),
+    ];
+    let e = extract_body_return(&stmts).expect("return found");
+    match e {
+        Expr::Literal(Lit::Int(0)) => {}
+        other => panic!("expected first return 0, got {:?}", other),
+    }
 }
 
 #[test]
@@ -1864,4 +1858,22 @@ func main() -> i32 { 0 }
         "caller should fail because half's ensures doesn't guarantee result >= 10: {:?}",
         caller.unwrap().message
     );
+}
+
+#[test]
+fn verify_rejects_ill_typed_source() {
+    // V-H8: production typecheck gate — ill-typed AST fails core::check.
+    let src = r#"
+func f(x: i32) -> i32 {
+    ensures: result == x
+    "not an int"
+}
+func main() -> i32 { 0 }
+"#;
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let r = crate::core::check(&file);
+    assert!(r.is_err(), "expected typecheck failure for ill-typed body");
 }
