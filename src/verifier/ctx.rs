@@ -125,12 +125,21 @@ impl Z3VarMap {
     /// Get or create an Int variable. If the same name is already registered as Real,
     /// this signals a type-conflict bug — the same logical variable is being used as
     /// both Real and Int, causing Z3 constraint fragmentation.
-    /// P2.1 fix: detect the conflict and use a suffixed name instead of silently
-    /// creating a separate Z3 variable.
+    ///
+    /// AU-H1: warn once and use a stable `{name}_i` Int const (cannot losslessly
+    /// project Real→Int). Callers that mix Int/Real on one binder still degrade,
+    /// but the conflict is no longer silent.
     pub(crate) fn get_or_create_int(&mut self, name: &str) -> Z3Int {
         if self.real_vars.contains_key(name) {
-            // Type conflict — same name used as Real. Use suffixed name to avoid
-            // creating a duplicate Z3 variable for the same logical name.
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "[mimi verifier] AU-H1: variable '{}' used as both Real and Int; \
+                     Int constraints use '{}_i' (verification may be incomplete)",
+                    name, name
+                );
+            }
             let int_name = format!("{}_i", name);
             return self
                 .int_vars
@@ -145,20 +154,11 @@ impl Z3VarMap {
     }
 
     /// Get or create a Real variable. If the same name is already registered as Int,
-    /// this signals a type-conflict bug — the same logical variable is being used as
-    /// both Int and Real, causing Z3 constraint fragmentation.
-    /// P2.1 fix: detect the conflict and use a suffixed name instead of silently
-    /// creating a separate Z3 variable.
+    /// return `Real::from_int` of that Int so constraints stay linked (AU-H1).
     pub(crate) fn get_or_create_real(&mut self, name: &str) -> Z3Real {
-        if self.int_vars.contains_key(name) {
-            // Type conflict — same name used as Int. Use suffixed name to avoid
-            // creating a duplicate Z3 variable for the same logical name.
-            let real_name = format!("{}_r", name);
-            return self
-                .real_vars
-                .entry(real_name.clone())
-                .or_insert_with(|| Z3Real::new_const(real_name))
-                .clone();
+        if let Some(iv) = self.int_vars.get(name) {
+            // Link Real view to existing Int — no separate unconnected `_r` var.
+            return Z3Real::from_int(iv);
         }
         self.real_vars
             .entry(name.to_string())
