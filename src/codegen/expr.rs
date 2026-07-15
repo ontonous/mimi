@@ -689,7 +689,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> String {
         match expr {
             Expr::Literal(Lit::String(_)) | Expr::Literal(Lit::FString(_)) => "string".to_string(),
-            Expr::Literal(Lit::Int(_)) => "i32".to_string(),
+            // Int literals lower as i64 in compile_literal; track i64 so product
+            // tuples and List<(…)> elem reconstruct match stored layout.
+            Expr::Literal(Lit::Int(_)) => "i64".to_string(),
             Expr::Literal(Lit::Float(_)) => "f64".to_string(),
             Expr::Literal(Lit::Bool(_)) => "bool".to_string(),
             Expr::Literal(Lit::Unit) => "unit".to_string(),
@@ -867,6 +869,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 } else {
                     "List".into()
+                }
+            }
+            Expr::Tuple(elems) => {
+                let parts: Vec<String> = elems
+                    .iter()
+                    .map(|e| {
+                        let t = self.infer_object_type(e, vars);
+                        if t.is_empty() {
+                            "i32".into()
+                        } else {
+                            t
+                        }
+                    })
+                    .collect();
+                if parts.is_empty() {
+                    "()".into()
+                } else {
+                    format!("({})", parts.join(", "))
                 }
             }
             Expr::Block(block) => block
