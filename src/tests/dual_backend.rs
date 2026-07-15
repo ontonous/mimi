@@ -8032,6 +8032,44 @@ fn dual_map_string_escape_println() {
     );
 }
 
+/// to_json Option of Result nested dual.
+#[test]
+fn dual_to_json_option_of_result() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a: Option<Result<i32, i32>> = Some(Ok(5))
+            let b: Option<Result<i32, i32>> = Some(Err(2))
+            println(to_json(a))
+            println(to_json(b))
+            0
+        }
+        "#,
+        "{\"Some\":[{\"Ok\":[5]}]}\n{\"Some\":[{\"Err\":[2]}]}"
+    );
+}
+
+/// from_json List of Map string dual.
+#[test]
+fn dual_from_json_list_map_string_vals() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = from_json::<List<Map<string, string>>>("[{\"a\":\"hi\"},{\"b\":\"yo\"}]")
+            println(xs)
+            0
+        }
+        "#,
+        "[{\"a\":\"hi\"}, {\"b\":\"yo\"}]"
+    );
+}
+
 /// Option of bool println Some(true)/Some(false).
 #[test]
 fn dual_option_bool_println() {

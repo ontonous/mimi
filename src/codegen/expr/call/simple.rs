@@ -509,6 +509,148 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .build_int_z_extend(disc, self.context.i64_type(), "opt_disc_i64")
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                     let payload_bv = self.build_extract_value(sv.into(), 1, "opt_payload")?;
+                    // Option of Result by-value: payload is Result struct {i1,ok,err}.
+                    if obj_type.contains("Result")
+                        && matches!(payload_bv, BasicValueEnum::StructValue(_))
+                    {
+                        let res_sv = payload_bv.into_struct_value();
+                        let r_disc = self
+                            .build_extract_value(res_sv.into(), 0, "opt_res_disc")?
+                            .into_int_value();
+                        let r_disc_i64 = self
+                            .builder
+                            .build_int_z_extend(
+                                r_disc,
+                                self.context.i64_type(),
+                                "opt_res_disc_i64",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let r_ok = self
+                            .build_extract_value(res_sv.into(), 1, "opt_res_ok")?
+                            .into_int_value();
+                        let r_ok_i64 = if r_ok.get_type().get_bit_width() < 64 {
+                            self.builder
+                                .build_int_s_extend(
+                                    r_ok,
+                                    self.context.i64_type(),
+                                    "opt_res_ok_i64",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        } else {
+                            r_ok
+                        };
+                        let r_err = self
+                            .build_extract_value(res_sv.into(), 2, "opt_res_err")?
+                            .into_int_value();
+                        let r_err_i64 = if r_err.get_type().get_bit_width() < 64 {
+                            self.builder
+                                .build_int_s_extend(
+                                    r_err,
+                                    self.context.i64_type(),
+                                    "opt_res_err_i64",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        } else {
+                            r_err
+                        };
+                        let res_fn = self.get_runtime_fn("mimi_result_i64_to_json")?;
+                        let res_json = self
+                            .build_call(
+                                res_fn,
+                                &[
+                                    BasicMetadataValueEnum::IntValue(r_disc_i64),
+                                    BasicMetadataValueEnum::IntValue(r_ok_i64),
+                                    BasicMetadataValueEnum::IntValue(r_err_i64),
+                                ],
+                                "opt_res_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("result to_json void")?
+                            .into_pointer_value();
+                        let disc_is_some = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::NE,
+                                disc_i64,
+                                self.context.i64_type().const_int(0, false),
+                                "opt_res_is_some",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let function = self.current_function().ok_or("no function")?;
+                        let some_bb =
+                            self.context.append_basic_block(function, "toj_opt_res_some");
+                        let none_bb =
+                            self.context.append_basic_block(function, "toj_opt_res_none");
+                        let merge_bb =
+                            self.context.append_basic_block(function, "toj_opt_res_merge");
+                        let i8_ptr_ty =
+                            self.context.ptr_type(inkwell::AddressSpace::default());
+                        let out_alloca = self.build_alloca(
+                            BasicTypeEnum::PointerType(i8_ptr_ty),
+                            "toj_opt_res_out",
+                        )?;
+                        self.builder
+                            .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(some_bb);
+                        let buf = self.malloc_or_abort(
+                            self.context.i64_type().const_int(512, false),
+                            "opt_res_buf",
+                        )?;
+                        let fmt = self
+                            .builder
+                            .build_global_string_ptr("{\"Some\":[%s]}", "opt_res_fmt")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(buf),
+                                BasicMetadataValueEnum::IntValue(
+                                    self.context.i64_type().const_int(512, false),
+                                ),
+                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                BasicMetadataValueEnum::PointerValue(res_json),
+                            ],
+                            "opt_res_sn",
+                        )?;
+                        self.build_store(out_alloca, buf)?;
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(none_bb);
+                        let none_heap = self.malloc_or_abort(
+                            self.context.i64_type().const_int(8, false),
+                            "opt_res_none_heap",
+                        )?;
+                        let none_lit = self
+                            .builder
+                            .build_global_string_ptr("\"None\"", "opt_res_none")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                        self.build_call(
+                            strcpy_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(none_heap),
+                                BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
+                            ],
+                            "opt_res_none_cpy",
+                        )?;
+                        self.build_store(out_alloca, none_heap)?;
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(merge_bb);
+                        let raw = self
+                            .build_load(
+                                BasicTypeEnum::PointerType(i8_ptr_ty),
+                                out_alloca,
+                                "opt_res_result",
+                            )?
+                            .into_pointer_value();
+                        self.register_heap_alloc(raw);
+                        return self.wrap_c_string(raw);
+                    }
                     let payload_i64 = match payload_bv {
                         BasicValueEnum::IntValue(iv) => {
                             if iv.get_type().get_bit_width() < 64 {
