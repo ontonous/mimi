@@ -863,7 +863,10 @@ impl<'a> Checker<'a> {
                     self.types.entry(type_name.clone()).or_insert_with(|| {
                         let fields = match &state.payload_type {
                             Some(payload_ty) => vec![Field {
-                                name: "value".to_string(),
+                                name: state
+                                    .payload_name
+                                    .clone()
+                                    .unwrap_or_else(|| "value".to_string()),
                                 ty: payload_ty.clone(),
                             }],
                             None => vec![],
@@ -1380,7 +1383,9 @@ impl<'a> Checker<'a> {
                         }
                         // Check payload compatibility: protocol state has payload_type,
                         // flow state must have a matching field
-                        if let Some(ref proto_payload_ty) = ps.payload_type {
+                        if let (Some(proto_payload_name), Some(proto_payload_ty)) =
+                            (&ps.payload_name, &ps.payload_type)
+                        {
                             // L7: missing flow state for protocol state → diagnostic, not ICE.
                             let Some(flow_state) = f.states.iter().find(|s| s.name == ps.name)
                             else {
@@ -1402,7 +1407,8 @@ impl<'a> Checker<'a> {
                                 .map(|fields| {
                                     fields.iter().any(|field| {
                                         let field_ty = self.resolve_type(&field.ty);
-                                        same_type(&field_ty, &expected_ty)
+                                        field.name == *proto_payload_name
+                                            && same_type(&field_ty, &expected_ty)
                                     })
                                 })
                                 .unwrap_or(false);
@@ -1410,8 +1416,8 @@ impl<'a> Checker<'a> {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0209,
                                     format!(
-                                        "flow '{}' state '{}' must have a field matching protocol payload type {}",
-                                        f.name, ps.name,
+                                        "flow '{}' state '{}' must have protocol payload field '{}: {}'",
+                                        f.name, ps.name, proto_payload_name,
                                         crate::core::fmt_type(&self.resolve_type(proto_payload_ty))
                                     ),
                                 );
