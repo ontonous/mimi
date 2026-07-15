@@ -2270,43 +2270,65 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        let list_fn_name = if obj_type.contains("List<Map")
-                            || obj_type.contains("List<Map<")
+                        // Product-tuple list elements need codegen JSON helpers.
+                        let list_elem = obj_type
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                            .and_then(|s| s.strip_prefix("List<"))
+                            .and_then(|s| s.strip_suffix('>'))
+                            .unwrap_or("");
+                        let list_json = if list_elem.starts_with('(')
+                            || self.is_product_tuple_alias(list_elem)
                         {
-                            if obj_type.contains("Map<string, string>") {
-                                "mimi_list_map_to_json_string"
+                            let elem = if self.is_product_tuple_alias(list_elem) {
+                                self.resolve_alias_type_name(list_elem)
                             } else {
-                                "mimi_list_map_to_string"
-                            }
-                        } else if obj_type.contains("List<Set") {
-                            "mimi_list_set_to_json"
-                        } else if obj_type.contains("List<string>") {
-                            "mimi_list_str_to_json"
-                        } else if obj_type.contains("List<f64>") || obj_type.contains("List<f32>") {
-                            "mimi_list_f64_to_json"
-                        } else if obj_type.contains("List<bool>") {
-                            "mimi_list_bool_to_json"
+                                list_elem.to_string()
+                            };
+                            self.emit_list_product_tuple_to_json(list_ptr, &elem)?
                         } else {
-                            "mimi_list_i64_to_json"
-                        };
-                        let list_fn_ty =
-                            i8_ptr_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
-                        let list_fn = self.module.get_function(list_fn_name).unwrap_or_else(|| {
-                            self.module.add_function(
-                                list_fn_name,
-                                list_fn_ty,
-                                Some(inkwell::module::Linkage::External),
-                            )
-                        });
-                        let list_json = self
-                            .build_call(
+                            let list_fn_name = if obj_type.contains("List<Map")
+                                || obj_type.contains("List<Map<")
+                            {
+                                if obj_type.contains("Map<string, string>") {
+                                    "mimi_list_map_to_json_string"
+                                } else {
+                                    "mimi_list_map_to_string"
+                                }
+                            } else if obj_type.contains("List<Set") {
+                                "mimi_list_set_to_json"
+                            } else if obj_type.contains("List<string>") {
+                                "mimi_list_str_to_json"
+                            } else if obj_type.contains("List<f64>")
+                                || obj_type.contains("List<f32>")
+                            {
+                                "mimi_list_f64_to_json"
+                            } else if obj_type.contains("List<bool>") {
+                                "mimi_list_bool_to_json"
+                            } else {
+                                "mimi_list_i64_to_json"
+                            };
+                            let list_fn_ty = i8_ptr_ty.fn_type(
+                                &[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)],
+                                false,
+                            );
+                            let list_fn =
+                                self.module.get_function(list_fn_name).unwrap_or_else(|| {
+                                    self.module.add_function(
+                                        list_fn_name,
+                                        list_fn_ty,
+                                        Some(inkwell::module::Linkage::External),
+                                    )
+                                });
+                            self.build_call(
                                 list_fn,
                                 &[BasicMetadataValueEnum::PointerValue(list_ptr)],
                                 "opt_list_json",
                             )?
                             .try_as_basic_value_opt()
                             .ok_or("list to_json void")?
-                            .into_pointer_value();
+                            .into_pointer_value()
+                        };
                         let buf = self.malloc_or_abort(
                             self.context.i64_type().const_int(4096, false),
                             "opt_list_buf",
@@ -3141,44 +3163,71 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 )));
                             }
                         };
-                        // Pick list element formatter: Map / Set / i64 default.
-                        let list_fn_name = if obj_type.contains("List<Map")
-                            || obj_type.contains("List<Map<")
+                        // Product-tuple list elements need codegen helpers.
+                        // Use paren-aware strip: Result<List<(i32,i32)>,string> must
+                        // not split on the tuple comma.
+                        let list_elem = crate::codegen::CodeGenerator::strip_first_type_arg(
+                            &obj_type,
+                            "Result",
+                        )
+                        .and_then(|s| {
+                            s.strip_prefix("List<")
+                                .and_then(|x| x.strip_suffix('>'))
+                                .map(|x| x.to_string())
+                        })
+                        .unwrap_or_default();
+                        let list_json = if list_elem.starts_with('(')
+                            || self.is_product_tuple_alias(&list_elem)
                         {
-                            if obj_type.contains("Map<string, string>") {
-                                "mimi_list_map_to_json_string"
+                            let elem = if self.is_product_tuple_alias(&list_elem) {
+                                self.resolve_alias_type_name(&list_elem)
                             } else {
-                                "mimi_list_map_to_string"
-                            }
-                        } else if obj_type.contains("List<Set") {
-                            "mimi_list_set_to_json"
-                        } else if obj_type.contains("List<string>") {
-                            "mimi_list_str_to_json"
-                        } else if obj_type.contains("List<f64>") || obj_type.contains("List<f32>") {
-                            "mimi_list_f64_to_json"
-                        } else if obj_type.contains("List<bool>") {
-                            "mimi_list_bool_to_json"
+                                list_elem
+                            };
+                            self.emit_list_product_tuple_to_json(list_ptr, &elem)?
                         } else {
-                            "mimi_list_i64_to_json"
-                        };
-                        let list_fn_ty = i8_ptr_ty
-                            .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
-                        let list_fn = self.module.get_function(list_fn_name).unwrap_or_else(|| {
-                            self.module.add_function(
-                                list_fn_name,
-                                list_fn_ty,
-                                Some(inkwell::module::Linkage::External),
-                            )
-                        });
-                        let list_json = self
-                            .build_call(
+                            let list_fn_name = if obj_type.contains("List<Map")
+                                || obj_type.contains("List<Map<")
+                            {
+                                if obj_type.contains("Map<string, string>") {
+                                    "mimi_list_map_to_json_string"
+                                } else {
+                                    "mimi_list_map_to_string"
+                                }
+                            } else if obj_type.contains("List<Set") {
+                                "mimi_list_set_to_json"
+                            } else if obj_type.contains("List<string>") {
+                                "mimi_list_str_to_json"
+                            } else if obj_type.contains("List<f64>")
+                                || obj_type.contains("List<f32>")
+                            {
+                                "mimi_list_f64_to_json"
+                            } else if obj_type.contains("List<bool>") {
+                                "mimi_list_bool_to_json"
+                            } else {
+                                "mimi_list_i64_to_json"
+                            };
+                            let list_fn_ty = i8_ptr_ty.fn_type(
+                                &[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)],
+                                false,
+                            );
+                            let list_fn =
+                                self.module.get_function(list_fn_name).unwrap_or_else(|| {
+                                    self.module.add_function(
+                                        list_fn_name,
+                                        list_fn_ty,
+                                        Some(inkwell::module::Linkage::External),
+                                    )
+                                });
+                            self.build_call(
                                 list_fn,
                                 &[BasicMetadataValueEnum::PointerValue(list_ptr)],
                                 "res_list_json",
                             )?
                             .try_as_basic_value_opt()
                             .ok_or("list to_json void")?
-                            .into_pointer_value();
+                            .into_pointer_value()
+                        };
                         let buf = self.malloc_or_abort(
                             self.context.i64_type().const_int(4096, false),
                             "res_list_buf",
@@ -3205,26 +3254,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .build_unconditional_branch(merge_bb)
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                         self.builder.position_at_end(err_bb);
-                        let ebuf = self.malloc_or_abort(
-                            self.context.i64_type().const_int(128, false),
-                            "res_list_ebuf",
-                        )?;
-                        let efmt = self
-                            .builder
-                            .build_global_string_ptr("{\"Err\":[%ld]}", "res_list_efmt")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.build_call(
-                            snprintf_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(ebuf),
-                                BasicMetadataValueEnum::IntValue(
-                                    self.context.i64_type().const_int(128, false),
-                                ),
-                                BasicMetadataValueEnum::PointerValue(efmt.as_pointer_value()),
-                                BasicMetadataValueEnum::IntValue(err_i64),
-                            ],
-                            "res_list_esn",
-                        )?;
+                        let ebuf = self.emit_result_err_json(err_i64, true)?;
                         self.build_store(out_alloca, ebuf)?;
                         self.builder
                             .build_unconditional_branch(merge_bb)
