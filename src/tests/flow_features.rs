@@ -4313,10 +4313,25 @@ flow F {
 func main() -> i32 { 0 }
 "#;
     let err = check_source(src);
-    // E0418 should be emitted (conservative projection failure)
-    // Note: this may also trigger E0412 (flatness) depending on order;
-    // either is an acceptable rejection.
-    let _ = err; // accept either ok or err for now — the check is conservative
+    // T-H17: must reject — E0418 (projection) or E0412 (flatness), not silently ok.
+    assert!(
+        err.is_err(),
+        "expected conservative projection rejection, got Ok"
+    );
+    let msgs: String = err
+        .unwrap_err()
+        .iter()
+        .map(|d| format!("{:?} {}", d.code, d.message))
+        .collect::<Vec<_>>()
+        .join(";");
+    assert!(
+        msgs.contains("0418")
+            || msgs.contains("0412")
+            || msgs.contains("projection")
+            || msgs.contains("flat"),
+        "unexpected diagnostics: {}",
+        msgs
+    );
 }
 
 // ── v0.29.35 broadcast PeerFault sentinel ─────────────────────────────
