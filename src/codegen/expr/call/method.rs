@@ -1855,6 +1855,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .expect_basic_value(&result, "mimi_map_from_json_product_i64")?
                         .into());
                 }
+                // Map<string, List<(…)>> product lists.
+                if let Some(Type::Name(ln, largs)) = resolved_val.as_ref() {
+                    if ln == "List" && largs.len() == 1 {
+                        let le = match &largs[0] {
+                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                if let Some(td) = self.type_defs.get(an) {
+                                    if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
+                                        inner.clone()
+                                    } else {
+                                        largs[0].clone()
+                                    }
+                                } else {
+                                    largs[0].clone()
+                                }
+                            }
+                            other => other.clone(),
+                        };
+                        if let Type::Tuple(elems) = le {
+                            let arity = elems.len() as u64;
+                            let func =
+                                self.get_runtime_fn("mimi_map_from_json_list_product_i64")?;
+                            let result = self.build_call(
+                                func,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(arity, false),
+                                    ),
+                                ],
+                                "map_from_json_list_product",
+                            )?;
+                            return Ok(self
+                                .expect_basic_value(
+                                    &result,
+                                    "mimi_map_from_json_list_product_i64",
+                                )?
+                                .into());
+                        }
+                    }
+                }
                 let val_is_int = val_ty
                     .map(|t| {
                         matches!(
@@ -1871,7 +1911,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .unwrap_or(false);
                 if !val_is_int && !val_is_float && !val_is_string {
                     return Err(CompileError::Generic(
-                        "from_json::<Map>: only Map<string, scalar|product-tuple> is supported in codegen"
+                        "from_json::<Map>: only Map<string, scalar|product-tuple|List<product>> is supported in codegen"
                             .into(),
                     ));
                 }

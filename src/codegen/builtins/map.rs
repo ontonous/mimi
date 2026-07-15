@@ -212,46 +212,104 @@ impl<'ctx> CodeGenerator<'ctx> {
         let value_handle = match args[2] {
             BasicMetadataValueEnum::IntValue(iv) => iv,
             BasicMetadataValueEnum::PointerValue(pv) => {
-                // Heap-copy string literal so mimi_any_to_string can detect it
-                let strlen_fn = self
-                    .module
-                    .get_function("strlen")
-                    .ok_or("strlen not declared")?;
-                let len = self
+                // List values often arrive as pointers to `{i64,ptr}` stack
+                // allocas — heap-pack the list struct rather than treating as C string.
+                let i64_ty = self.context.i64_type();
+                let list_ty = self.list_struct_type();
+                let loaded = self
                     .builder
-                    .build_call(strlen_fn, &[pv.into()], "strlen_s")
-                    .map_err(|e| format!("strlen call error: {}", e))?
-                    .try_as_basic_value_opt()
-                    .ok_or("strlen returned void")?
-                    .into_int_value();
-                let clone_fn = self
-                    .module
-                    .get_function("mimi_str_clone")
-                    .ok_or("mimi_str_clone not declared")?;
-                let result = self
-                    .builder
-                    .build_call(
-                        clone_fn,
-                        &[
-                            BasicMetadataValueEnum::PointerValue(pv),
-                            BasicMetadataValueEnum::IntValue(len),
-                        ],
-                        "str_clone_lit",
-                    )
-                    .map_err(|e| format!("mimi_str_clone call error: {}", e))?;
-                call_try_basic_value(&result)
-                    .ok_or("mimi_str_clone returned void")?
-                    .into_int_value()
+                    .build_load(BasicTypeEnum::StructType(list_ty), pv, "map_set_list_ld")
+                    .map_err(|e| format!("map_set list load: {}", e))?;
+                if let BasicValueEnum::StructValue(sv) = loaded {
+                    let fields = sv.get_type().get_field_types();
+                    let is_list = fields.len() == 2
+                        && matches!(
+                            fields[0],
+                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                        )
+                        && matches!(fields[1], BasicTypeEnum::PointerType(_));
+                    if is_list {
+                        let size =
+                            self.llvm_type_size_bytes(BasicTypeEnum::StructType(sv.get_type()));
+                        let heap =
+                            self.malloc_or_abort(i64_ty.const_int(size, false), "map_set_list_p")?;
+                        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let typed = self
+                            .build_bit_cast(
+                                heap.into(),
+                                BasicTypeEnum::PointerType(i8_ptr),
+                                "map_set_list_p_ptr",
+                            )?
+                            .into_pointer_value();
+                        self.build_store(typed, sv)?;
+                        self.build_ptr_to_int(typed, i64_ty, "map_set_list_p_h")?
+                    } else {
+                        // Heap-copy string literal so mimi_any_to_string can detect it
+                        let strlen_fn = self
+                            .module
+                            .get_function("strlen")
+                            .ok_or("strlen not declared")?;
+                        let len = self
+                            .builder
+                            .build_call(strlen_fn, &[pv.into()], "strlen_s")
+                            .map_err(|e| format!("strlen call error: {}", e))?
+                            .try_as_basic_value_opt()
+                            .ok_or("strlen returned void")?
+                            .into_int_value();
+                        let clone_fn = self
+                            .module
+                            .get_function("mimi_str_clone")
+                            .ok_or("mimi_str_clone not declared")?;
+                        let result = self
+                            .builder
+                            .build_call(
+                                clone_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(pv),
+                                    BasicMetadataValueEnum::IntValue(len),
+                                ],
+                                "str_clone_lit",
+                            )
+                            .map_err(|e| format!("mimi_str_clone call error: {}", e))?;
+                        call_try_basic_value(&result)
+                            .ok_or("mimi_str_clone returned void")?
+                            .into_int_value()
+                    }
+                } else {
+                    return Err("map_set: pointer value load failed".into());
+                }
             }
             BasicMetadataValueEnum::StructValue(sv) => {
                 let fields = sv.get_type().get_field_types();
+                // List {i64, ptr} — heap-pack before map_set (never treat as C string).
+                let is_list = fields.len() == 2
+                    && matches!(
+                        fields[0],
+                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                    )
+                    && matches!(fields[1], BasicTypeEnum::PointerType(_));
                 let is_mimi_string = fields.len() == 2
                     && matches!(fields[0], BasicTypeEnum::PointerType(_))
                     && matches!(
                         fields[1],
                         BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
                     );
-                if is_mimi_string {
+                if is_list {
+                    let i64_ty = self.context.i64_type();
+                    let size =
+                        self.llvm_type_size_bytes(BasicTypeEnum::StructType(sv.get_type()));
+                    let heap = self.malloc_or_abort(i64_ty.const_int(size, false), "map_set_list")?;
+                    let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let typed = self
+                        .build_bit_cast(
+                            heap.into(),
+                            BasicTypeEnum::PointerType(i8_ptr),
+                            "map_set_list_ptr",
+                        )?
+                        .into_pointer_value();
+                    self.build_store(typed, sv)?;
+                    self.build_ptr_to_int(typed, i64_ty, "map_set_list_h")?
+                } else if is_mimi_string {
                     let ptr = self
                         .build_extract_value(sv.into(), 0, "map_set_str_ptr")?
                         .into_pointer_value();
