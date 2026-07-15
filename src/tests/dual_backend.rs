@@ -1469,17 +1469,27 @@ fn dual_contract_ensures() {
     if !can_link() {
         return;
     }
-    // SKIP_CODEGEN: uses `result` in ensures clause (codegen-gapped)
-    dual_assert_interp_only!(
+    // ensures: result == … is dual-backend (codegen binds `result` in emit_return).
+    dual_assert_contract_ok(
         r#"
         func double(x: i32) -> i32 {
             ensures: result == x * 2
             x * 2
         }
-        func main() -> i32 { double(7) }
+        func main() -> i32 { println(double(7)); 0 }
     "#,
-        interp::Value::Int(14)
     );
+    let stdout = compile_and_verify_contracts(
+        r#"
+        func double(x: i32) -> i32 {
+            ensures: result == x * 2
+            x * 2
+        }
+        func main() -> i32 { println(double(7)); 0 }
+    "#,
+    )
+    .expect("codegen ensures result stdout");
+    assert_eq!(stdout.trim(), "14");
 }
 
 #[test]
@@ -8157,6 +8167,79 @@ fn dual_from_json_result_option_map() {
         }
         "#,
         "Ok(Some({\"a\":1}))"
+    );
+}
+
+/// to_json Result of List of i32 dual (by-value list Ok payload).
+#[test]
+fn dual_to_json_result_list_i32() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Result<List<i32>, i32>>("[1,2,3]")
+            println(to_json(a))
+            0
+        }
+        "#,
+        "{\"Ok\":[[1,2,3]]}"
+    );
+}
+
+/// to_json Result of List of Map dual.
+#[test]
+fn dual_to_json_result_list_map() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Result<List<Map<string, i32>>, i32>>("[{\"a\":1}]")
+            println(to_json(a))
+            0
+        }
+        "#,
+        "{\"Ok\":[[{\"a\":1}]]}"
+    );
+}
+
+/// to_json Option of List of Map dual.
+#[test]
+fn dual_to_json_option_list_map() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<Option<List<Map<string, i32>>>>("[{\"a\":1}]")
+            println(to_json(a))
+            0
+        }
+        "#,
+        "{\"Some\":[[{\"a\":1}]]}"
+    );
+}
+
+/// to_json List of Result of Map dual.
+#[test]
+fn dual_to_json_list_result_map() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, i32>>("{\"a\":1}")
+            let xs: List<Result<Map<string, i32>, i32>> = [Ok(m), Err(2)]
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "[{\"Ok\":[{\"a\":1}]},{\"Err\":[2]}]"
     );
 }
 
