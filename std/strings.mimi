@@ -321,6 +321,7 @@ pub func ellipsis(s: string, max_len: i32) -> string {
 
 // count_substring: Counts non-overlapping occurrences of sub in s.
 pub func count_substring(s: string, sub: string) -> i32 {
+    if len(sub) == 0 { return 0 }
     let mut cs_cnt = 0
     let mut cs_pos = 0
     let cs_sl = len(sub)

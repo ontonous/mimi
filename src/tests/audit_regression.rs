@@ -6,6 +6,31 @@
 
 use super::*;
 
+#[test]
+fn round7_stdlib_invalid_inputs_terminate() {
+    assert_eq!(
+        run_with_stdlib(
+            "mymath.mimi",
+            "func main() -> i32 { collatz_steps(0) + mod_pow(5, 3, 0) }",
+        ),
+        interp::Value::Int(-1)
+    );
+    assert_eq!(
+        run_with_stdlib(
+            "collections.mimi",
+            "func main() -> i32 { len(chunks([1, 2, 3], 0)) }",
+        ),
+        interp::Value::Int(0)
+    );
+    assert_eq!(
+        run_with_stdlib(
+            "strings.mimi",
+            "func main() -> i32 { count_substring(\"abc\", \"\") }",
+        ),
+        interp::Value::Int(0)
+    );
+}
+
 // ── CG-C1: match 非穷举应该被 type checker 拒绝 ──
 #[test]
 fn cg_c1_non_exhaustive_match_rejected() {
