@@ -962,6 +962,9 @@ fn lex_scan_token(
             }
         }
         '!' => {
+            // LX-H9: keep Bang for `quote!` / macro-invoke syntax; parser also
+            // accepts NotOp for unary not. NotOp remains a soft alias for users
+            // who emit it explicitly — not dead, dual-matched in parse_expr.
             let pos = next!(pos);
             if pos.peek() == Some('=') {
                 Ok((next!(pos), TokenKind::Ne))
