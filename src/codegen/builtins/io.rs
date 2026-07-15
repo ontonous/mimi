@@ -1408,6 +1408,72 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 "%s".to_string(),
                             ));
                         }
+                        if elem.starts_with("Map<string, ") {
+                            if let Some(val_ty) = elem
+                                .strip_prefix("Map<string, ")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if val_ty.starts_with('(')
+                                    || self.is_product_tuple_alias(val_ty)
+                                {
+                                    let resolved = if self.is_product_tuple_alias(val_ty)
+                                    {
+                                        self.resolve_alias_type_name(val_ty)
+                                    } else {
+                                        val_ty.to_string()
+                                    };
+                                    let arity = {
+                                        let body = resolved
+                                            .strip_prefix('(')
+                                            .and_then(|s| s.strip_suffix(')'))
+                                            .unwrap_or(&resolved);
+                                        let mut arity = 0i64;
+                                        let mut depth = 0i32;
+                                        let mut any = false;
+                                        for ch in body.chars() {
+                                            match ch {
+                                                '<' | '(' => depth += 1,
+                                                '>' | ')' => depth -= 1,
+                                                ',' if depth == 0 => {
+                                                    arity += 1;
+                                                    any = true;
+                                                }
+                                                c if !c.is_whitespace() => any = true,
+                                                _ => {}
+                                            }
+                                        }
+                                        if any {
+                                            arity += 1;
+                                        }
+                                        arity.max(1)
+                                    };
+                                    let func = self
+                                        .get_runtime_fn("mimi_set_to_json_map_product_i64")?;
+                                    let i64_ty = self.context.i64_type();
+                                    let raw = self
+                                        .build_call(
+                                            func,
+                                            &[
+                                                BasicMetadataValueEnum::IntValue(*iv),
+                                                BasicMetadataValueEnum::IntValue(
+                                                    i64_ty.const_int(arity as u64, false),
+                                                ),
+                                                BasicMetadataValueEnum::IntValue(
+                                                    i64_ty.const_int(1, false),
+                                                ),
+                                            ],
+                                            "set_map_product_disp",
+                                        )?
+                                        .try_as_basic_value_opt()
+                                        .ok_or("set map product display void")?
+                                        .into_pointer_value();
+                                    return Ok((
+                                        BasicMetadataValueEnum::PointerValue(raw),
+                                        "%s".to_string(),
+                                    ));
+                                }
+                            }
+                        }
                         if let Some(opt_elem) = elem
                             .strip_prefix("Option<")
                             .and_then(|s| s.strip_suffix('>'))
@@ -5464,10 +5530,182 @@ impl<'ctx> CodeGenerator<'ctx> {
                         iv
                     };
                     // Result of Map/Set: Ok payload is opaque handle (i64).
+                    // Prefer Set root before Map contains — Result<Set<Map<…>>>
+                    // must not take the Map branch (nested Map substring).
                     if label == "ok"
                         && (arg_type.contains("Map<") || arg_type.contains("Set<"))
                     {
-                        let disp = if arg_type.contains("Map<") {
+                        let ok_root = arg_type
+                            .strip_prefix("Result<")
+                            .and_then(|s| {
+                                let mut depth = 0i32;
+                                for (i, ch) in s.char_indices() {
+                                    match ch {
+                                        '<' => depth += 1,
+                                        '>' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            return Some(s[..i].trim());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                None
+                            })
+                            .unwrap_or(arg_type);
+                        let disp = if ok_root.starts_with("Set<") {
+                            // force Set branch via empty Map path skip
+                            // handled below in else branch for Set
+                            // Use a marker: fall through by not matching Map root
+                            // restructure: Set first
+                            let set_inner = ok_root;
+                            if let Some(elem) = set_inner
+                                .strip_prefix("Set<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                                    let resolved = if self.is_product_tuple_alias(elem) {
+                                        self.resolve_alias_type_name(elem)
+                                    } else {
+                                        elem.to_string()
+                                    };
+                                    self.emit_set_product_to_json(as_i64, &resolved, 1)?
+                                } else if elem.starts_with("Map<string, ") {
+                                    if let Some(val_ty) = elem
+                                        .strip_prefix("Map<string, ")
+                                        .and_then(|s| s.strip_suffix('>'))
+                                    {
+                                        if val_ty.starts_with('(')
+                                            || self.is_product_tuple_alias(val_ty)
+                                        {
+                                            let resolved = if self
+                                                .is_product_tuple_alias(val_ty)
+                                            {
+                                                self.resolve_alias_type_name(val_ty)
+                                            } else {
+                                                val_ty.to_string()
+                                            };
+                                            let arity = {
+                                                let body = resolved
+                                                    .strip_prefix('(')
+                                                    .and_then(|s| s.strip_suffix(')'))
+                                                    .unwrap_or(&resolved);
+                                                let mut arity = 0i64;
+                                                let mut depth = 0i32;
+                                                let mut any = false;
+                                                for ch in body.chars() {
+                                                    match ch {
+                                                        '<' | '(' => depth += 1,
+                                                        '>' | ')' => depth -= 1,
+                                                        ',' if depth == 0 => {
+                                                            arity += 1;
+                                                            any = true;
+                                                        }
+                                                        c if !c.is_whitespace() => any = true,
+                                                        _ => {}
+                                                    }
+                                                }
+                                                if any {
+                                                    arity += 1;
+                                                }
+                                                arity.max(1)
+                                            };
+                                            let func = self.get_runtime_fn(
+                                                "mimi_set_to_json_map_product_i64",
+                                            )?;
+                                            let i64_ty = self.context.i64_type();
+                                            self.build_call(
+                                                func,
+                                                &[
+                                                    BasicMetadataValueEnum::IntValue(as_i64),
+                                                    BasicMetadataValueEnum::IntValue(
+                                                        i64_ty.const_int(arity as u64, false),
+                                                    ),
+                                                    BasicMetadataValueEnum::IntValue(
+                                                        i64_ty.const_int(1, false),
+                                                    ),
+                                                ],
+                                                "result_set_map_disp",
+                                            )?
+                                            .try_as_basic_value_opt()
+                                            .ok_or("result set map display void")?
+                                            .into_pointer_value()
+                                        } else {
+                                            let set_fn =
+                                                self.get_runtime_fn("mimi_set_to_display")?;
+                                            self.build_call(
+                                                set_fn,
+                                                &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                                "result_set_disp",
+                                            )?
+                                            .try_as_basic_value_opt()
+                                            .ok_or("set display void")?
+                                            .into_pointer_value()
+                                        }
+                                    } else {
+                                        let set_fn =
+                                            self.get_runtime_fn("mimi_set_to_display")?;
+                                        self.build_call(
+                                            set_fn,
+                                            &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                            "result_set_disp",
+                                        )?
+                                        .try_as_basic_value_opt()
+                                        .ok_or("set display void")?
+                                        .into_pointer_value()
+                                    }
+                                } else if let Some(opt_inner) = elem
+                                    .strip_prefix("Option<")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if opt_inner.starts_with('(')
+                                        || self.is_product_tuple_alias(opt_inner)
+                                    {
+                                        let resolved = if self
+                                            .is_product_tuple_alias(opt_inner)
+                                        {
+                                            self.resolve_alias_type_name(opt_inner)
+                                        } else {
+                                            opt_inner.to_string()
+                                        };
+                                        self.emit_set_option_product_to_json(
+                                            as_i64, &resolved, 1,
+                                        )?
+                                    } else {
+                                        let set_fn =
+                                            self.get_runtime_fn("mimi_set_to_display")?;
+                                        self.build_call(
+                                            set_fn,
+                                            &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                            "result_set_disp",
+                                        )?
+                                        .try_as_basic_value_opt()
+                                        .ok_or("set display void")?
+                                        .into_pointer_value()
+                                    }
+                                } else {
+                                    let set_fn =
+                                        self.get_runtime_fn("mimi_set_to_display")?;
+                                    self.build_call(
+                                        set_fn,
+                                        &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                        "result_set_disp",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("set display void")?
+                                    .into_pointer_value()
+                                }
+                            } else {
+                                let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
+                                self.build_call(
+                                    set_fn,
+                                    &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                    "result_set_disp",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("set display void")?
+                                .into_pointer_value()
+                            }
+                        } else if ok_root.starts_with("Map<") || arg_type.contains("Map<") {
                             let map_inner = arg_type
                                 .strip_prefix("Result<")
                                 .and_then(|s| {
@@ -5637,143 +5875,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .into_pointer_value()
                             }
                         } else {
-                            // Result of Set — product or scalar.
-                            let set_inner = arg_type
-                                .strip_prefix("Result<")
-                                .and_then(|s| {
-                                    let mut depth = 0i32;
-                                    for (i, ch) in s.char_indices() {
-                                        match ch {
-                                            '<' => depth += 1,
-                                            '>' => depth -= 1,
-                                            ',' if depth == 0 => {
-                                                return Some(s[..i].trim());
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    None
-                                })
-                                .unwrap_or(arg_type);
-                            if let Some(elem) = set_inner
-                                .strip_prefix("Set<")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
-                                    let resolved = if self.is_product_tuple_alias(elem) {
-                                        self.resolve_alias_type_name(elem)
-                                    } else {
-                                        elem.to_string()
-                                    };
-                                    self.emit_set_product_to_json(as_i64, &resolved, 1)?
-                                } else if let Some(opt_inner) = elem
-                                    .strip_prefix("Option<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if opt_inner.starts_with('(')
-                                        || self.is_product_tuple_alias(opt_inner)
-                                    {
-                                        let resolved = if self
-                                            .is_product_tuple_alias(opt_inner)
-                                        {
-                                            self.resolve_alias_type_name(opt_inner)
-                                        } else {
-                                            opt_inner.to_string()
-                                        };
-                                        self.emit_set_option_product_to_json(
-                                            as_i64, &resolved, 1,
-                                        )?
-                                    } else {
-                                        let fn_name = Self::set_display_fn_for_type(arg_type);
-                                        let func = self.get_runtime_fn(fn_name)?;
-                                        self.build_call(
-                                            func,
-                                            &[BasicMetadataValueEnum::IntValue(as_i64)],
-                                            "res_ok_set",
-                                        )?
-                                        .try_as_basic_value_opt()
-                                        .ok_or("set display void")?
-                                        .into_pointer_value()
-                                    }
-                                } else if elem.starts_with("Result<") {
-                                    if let Some(ok_ty) =
-                                        elem.strip_prefix("Result<").and_then(|s| {
-                                            let mut depth = 0i32;
-                                            for (i, ch) in s.char_indices() {
-                                                match ch {
-                                                    '<' | '(' => depth += 1,
-                                                    '>' | ')' => depth -= 1,
-                                                    ',' if depth == 0 => {
-                                                        return Some(s[..i].trim());
-                                                    }
-                                                    _ => {}
-                                                }
-                                            }
-                                            None
-                                        })
-                                    {
-                                        if ok_ty.starts_with('(')
-                                            || self.is_product_tuple_alias(ok_ty)
-                                        {
-                                            let resolved = if self
-                                                .is_product_tuple_alias(ok_ty)
-                                            {
-                                                self.resolve_alias_type_name(ok_ty)
-                                            } else {
-                                                ok_ty.to_string()
-                                            };
-                                            self.emit_set_result_product_to_json(
-                                                as_i64, &resolved, 1,
-                                            )?
-                                        } else {
-                                            let fn_name =
-                                                Self::set_display_fn_for_type(arg_type);
-                                            let func = self.get_runtime_fn(fn_name)?;
-                                            self.build_call(
-                                                func,
-                                                &[BasicMetadataValueEnum::IntValue(as_i64)],
-                                                "res_ok_set",
-                                            )?
-                                            .try_as_basic_value_opt()
-                                            .ok_or("set display void")?
-                                            .into_pointer_value()
-                                        }
-                                    } else {
-                                        let fn_name = Self::set_display_fn_for_type(arg_type);
-                                        let func = self.get_runtime_fn(fn_name)?;
-                                        self.build_call(
-                                            func,
-                                            &[BasicMetadataValueEnum::IntValue(as_i64)],
-                                            "res_ok_set",
-                                        )?
-                                        .try_as_basic_value_opt()
-                                        .ok_or("set display void")?
-                                        .into_pointer_value()
-                                    }
-                                } else {
-                                    let fn_name = Self::set_display_fn_for_type(arg_type);
-                                    let func = self.get_runtime_fn(fn_name)?;
-                                    self.build_call(
-                                        func,
-                                        &[BasicMetadataValueEnum::IntValue(as_i64)],
-                                        "res_ok_set",
-                                    )?
-                                    .try_as_basic_value_opt()
-                                    .ok_or("set display void")?
-                                    .into_pointer_value()
-                                }
-                            } else {
-                                let fn_name = Self::set_display_fn_for_type(arg_type);
-                                let func = self.get_runtime_fn(fn_name)?;
-                                self.build_call(
-                                    func,
-                                    &[BasicMetadataValueEnum::IntValue(as_i64)],
-                                    "res_ok_set",
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("set display void")?
-                                .into_pointer_value()
-                            }
+                            let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
+                            self.build_call(
+                                set_fn,
+                                &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                "result_set_disp",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("set display void")?
+                            .into_pointer_value()
                         };
                         let fmt = self
                             .builder
@@ -6334,6 +6444,91 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 };
                                 // Display style for Option of Set product.
                                 self.emit_set_product_to_json(as_i64, &resolved, 1)?
+                            } else if elem.starts_with("Map<string, ") {
+                                if let Some(val_ty) = elem
+                                    .strip_prefix("Map<string, ")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if val_ty.starts_with('(')
+                                        || self.is_product_tuple_alias(val_ty)
+                                    {
+                                        let resolved = if self
+                                            .is_product_tuple_alias(val_ty)
+                                        {
+                                            self.resolve_alias_type_name(val_ty)
+                                        } else {
+                                            val_ty.to_string()
+                                        };
+                                        let arity = {
+                                            let body = resolved
+                                                .strip_prefix('(')
+                                                .and_then(|s| s.strip_suffix(')'))
+                                                .unwrap_or(&resolved);
+                                            let mut arity = 0i64;
+                                            let mut depth = 0i32;
+                                            let mut any = false;
+                                            for ch in body.chars() {
+                                                match ch {
+                                                    '<' | '(' => depth += 1,
+                                                    '>' | ')' => depth -= 1,
+                                                    ',' if depth == 0 => {
+                                                        arity += 1;
+                                                        any = true;
+                                                    }
+                                                    c if !c.is_whitespace() => any = true,
+                                                    _ => {}
+                                                }
+                                            }
+                                            if any {
+                                                arity += 1;
+                                            }
+                                            arity.max(1)
+                                        };
+                                        let func = self.get_runtime_fn(
+                                            "mimi_set_to_json_map_product_i64",
+                                        )?;
+                                        let i64_ty = self.context.i64_type();
+                                        self.build_call(
+                                            func,
+                                            &[
+                                                BasicMetadataValueEnum::IntValue(as_i64),
+                                                BasicMetadataValueEnum::IntValue(
+                                                    i64_ty.const_int(arity as u64, false),
+                                                ),
+                                                BasicMetadataValueEnum::IntValue(
+                                                    i64_ty.const_int(1, false),
+                                                ),
+                                            ],
+                                            "opt_set_map_disp",
+                                        )?
+                                        .try_as_basic_value_opt()
+                                        .ok_or("opt set map display void")?
+                                        .into_pointer_value()
+                                    } else {
+                                        let fn_name =
+                                            Self::set_display_fn_for_type(arg_type);
+                                        let func = self.get_runtime_fn(fn_name)?;
+                                        self.build_call(
+                                            func,
+                                            &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                            "opt_set_disp",
+                                        )?
+                                        .try_as_basic_value_opt()
+                                        .ok_or("set display void")?
+                                        .into_pointer_value()
+                                    }
+                                } else {
+                                    let fn_name = Self::set_display_fn_for_type(arg_type);
+                                    let func = self.get_runtime_fn(fn_name)?;
+                                    self.build_call(
+                                        func,
+                                        &[BasicMetadataValueEnum::IntValue(as_i64)],
+                                        "opt_set_disp",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("set display void")?
+                                    .into_pointer_value()
+                                }
                             } else {
                                 let fn_name = Self::set_display_fn_for_type(arg_type);
                                 let func = self.get_runtime_fn(fn_name)?;
