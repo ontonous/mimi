@@ -361,7 +361,18 @@ pub fn flow_merge_all(modules: &HashMap<String, LoadedModule>) -> Result<File, S
     let mut seen_names: HashSet<String> = HashSet::new();
 
     for module in modules.values() {
+        // P-H6: dependency modules only contribute `pub` items.
+        let is_dep = {
+            let p = module.path.to_string_lossy();
+            p.contains("/std/")
+                || p.contains("\\std\\")
+                || p.contains("/.mimi/deps/")
+                || p.contains("\\.mimi\\deps\\")
+        };
         for item in &module.file.items {
+            if is_dep && !item_is_pub(item) {
+                continue;
+            }
             if let Some(name) = item_name(item) {
                 if !seen_names.insert(name.to_string()) {
                     let dup_modules: Vec<String> = modules
@@ -376,8 +387,8 @@ pub fn flow_merge_all(modules: &HashMap<String, LoadedModule>) -> Result<File, S
                     ));
                 }
             }
+            all_items.push(item.clone());
         }
-        all_items.extend(module.file.items.clone());
         for imp in &module.file.imports {
             if seen_imports.insert(imp.path.clone()) {
                 all_imports.push(imp.clone());
@@ -390,6 +401,24 @@ pub fn flow_merge_all(modules: &HashMap<String, LoadedModule>) -> Result<File, S
         items: all_items,
         implicit_single: false,
     })
+}
+
+fn item_is_pub(item: &Item) -> bool {
+    match item {
+        Item::Func(f) => f.pub_,
+        Item::Type(td) => td.pub_,
+        Item::Actor(a) => a.pub_,
+        Item::Const { pub_, .. } => *pub_,
+        Item::Flow(f) => f.pub_,
+        Item::Session(s) => s.pub_,
+        // Traits/impls/modules/extern/protocol/cap: treat as public API surface.
+        Item::Module(_)
+        | Item::Trait(_)
+        | Item::Impl(_)
+        | Item::ExternBlock(_)
+        | Item::Protocol(_)
+        | Item::Cap(_) => true,
+    }
 }
 
 fn item_name(item: &Item) -> Option<&str> {

@@ -2064,6 +2064,18 @@ impl<'a> Checker<'a> {
         crate::session::session_from_chan_type(ty)
     }
 
+    /// T-H3: stable residual key for Ident / nested Field places (`a.b.c`).
+    fn place_key(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Ident(n) => Some(n.clone()),
+            Expr::Field(obj, f) => {
+                let base = Self::place_key(obj)?;
+                Some(format!("{}.{}", base, f))
+            }
+            _ => None,
+        }
+    }
+
     fn residual_for_var(&self, name: &str) -> Option<crate::ast::SessionType> {
         self.session_residuals.get(name).cloned()
     }
@@ -2072,14 +2084,16 @@ impl<'a> Checker<'a> {
         self.session_residuals.insert(name.to_string(), residual);
     }
 
-    /// Resolve residual for a channel expression. Only Ident endpoints are tracked.
+    /// Resolve residual for a channel expression.
+    /// T-H3: track Ident and Field places (`ch`, `pair.left`) as residual keys.
     fn residual_of_expr(
         &mut self,
         expr: &Expr,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Option<(Option<String>, crate::ast::SessionType)> {
         let ty = self.infer_expr(expr, scopes);
-        if let Expr::Ident(v) = expr {
+        let key = Self::place_key(expr);
+        if let Some(ref v) = key {
             if let Some(r) = self.residual_for_var(v) {
                 return Some((Some(v.clone()), r));
             }
