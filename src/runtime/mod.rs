@@ -1472,6 +1472,38 @@ pub extern "C" fn mimi_list_result_map_to_json(
 /// `mode`:
 /// - 0: Ok payload is plain i64
 /// - 10..=13: Ok payload is MapHandle (mode-10 selects map value kind)
+/// Decode Result Err payload to a JSON string fragment (already escaped/quoted).
+fn decode_result_err_string(err: i64) -> String {
+    const MIN_HEAP: i64 = 1_048_576;
+    if err >= MIN_HEAP && (err as u64) % 8 == 0 {
+        // Prefer Mimi string struct {ptr, i64} heap layout.
+        let base = err as *const u8;
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let page_size = if page_size == 0 { 4096 } else { page_size };
+        let page_start = ((err as usize) / page_size) * page_size;
+        let mut mvec: u8 = 0;
+        let mapped =
+            unsafe { libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec) };
+        if mapped == 0 {
+            // SAFETY: mincore confirmed mapped; load {ptr, len} if plausible.
+            let ptr = unsafe { *(base as *const *const u8) };
+            let len = unsafe { *(base.add(8) as *const i64) };
+            if !ptr.is_null() && (0..1_000_000).contains(&len) {
+                let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+                if let Ok(s) = std::str::from_utf8(slice) {
+                    return json_escape_string(s);
+                }
+            }
+            // Fallback: C string at err address.
+            if let Some(s) = safe_c_string_from_handle(err as ValueHandle) {
+                return json_escape_string(&s);
+            }
+        }
+    }
+    // Scalar Err.
+    format!("{}", err)
+}
+
 fn list_result_to_json_impl(list: *const MimiList, mode: i64) -> *mut std::ffi::c_char {
     if list.is_null() {
         return alloc_c_string("[]");
@@ -1500,7 +1532,16 @@ fn list_result_to_json_impl(list: *const MimiList, mode: i64) -> *mut std::ffi::
         let ok = unsafe { *(base.add(8) as *const i64) };
         let err = unsafe { *(base.add(16) as *const i64) };
         if disc != 0 {
-            if mode >= 10 {
+            if mode >= 20 {
+                // Product Map: mode = 20 + arity.
+                let arity = mode - 20;
+                let json_ptr = mimi_map_to_json_product_i64(ok as MapHandle, arity, 0);
+                let s = unsafe { cstr_to_string(json_ptr) };
+                if !json_ptr.is_null() {
+                    unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+                }
+                parts.push(format!("{{\"Ok\":[{}]}}", s));
+            } else if mode >= 10 {
                 let map_mode = mode - 10;
                 let json_ptr = match map_mode {
                     1 => mimi_map_to_json_string(ok as MapHandle),
@@ -1517,7 +1558,10 @@ fn list_result_to_json_impl(list: *const MimiList, mode: i64) -> *mut std::ffi::
                 parts.push(format!("{{\"Ok\":[{}]}}", ok));
             }
         } else {
-            parts.push(format!("{{\"Err\":[{}]}}", err));
+            // Err may be: (1) Mimi string heap struct {ptr,i64} as ptrtoint,
+            // (2) C-string ValueHandle, or (3) scalar i64.
+            let err_s = decode_result_err_string(err);
+            parts.push(format!("{{\"Err\":[{}]}}", err_s));
         }
     }
     parts.push(String::from("]"));
