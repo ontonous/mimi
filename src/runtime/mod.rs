@@ -1134,18 +1134,11 @@ pub extern "C" fn mimi_map_from_list(
         // a defensive upper bound).
         let key_handle = unsafe { *keys.add(i as usize) };
         let val_handle = unsafe { *values.add(i as usize) };
-        // C7 fix: only treat as C string pointer if it looks like a
-        // valid heap pointer (>= 1MB, 8-byte aligned). This is still
-        // heuristic but prevents ValueHandle integers from being
-        // interpreted as pointers.
-        // RT-H4: require heap-aligned + mincore-mapped + NUL within first page
-        // before treating key_handle as a C string pointer.
-        if key_handle >= 1_048_576 && key_handle % 8 == 0 {
-            if let Some(s) = safe_c_string_from_handle(key_handle) {
-                // SAFETY: map_ptr is the just-allocated map (handle != 0).
-                unsafe {
-                    (*map_ptr).inner.insert(s, val_handle);
-                }
+        // RT-H1/H4: only decode keys via safe_c_string_from_handle (mincore+NUL).
+        if let Some(s) = safe_c_string_from_handle(key_handle) {
+            // SAFETY: map_ptr is the just-allocated map (handle != 0).
+            unsafe {
+                (*map_ptr).inner.insert(s, val_handle);
             }
         }
     }
@@ -3247,13 +3240,9 @@ pub extern "C" fn mimi_map_to_json_string(handle: MapHandle) -> *mut std::ffi::c
         }
         parts.push(json_escape_string(k));
         parts.push(String::from(":"));
-        // Decode value handle as C string when it looks heapish.
+        // RT-H1: safe_c_string_from_handle already applies MIN_HEAP/align + mincore.
         let vh = **v;
-        let vs = if vh >= 1_048_576 && vh % 8 == 0 {
-            safe_c_string_from_handle(vh).unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let vs = safe_c_string_from_handle(vh).unwrap_or_default();
         parts.push(json_escape_string(&vs));
     }
     parts.push(String::from("}"));
@@ -3614,16 +3603,11 @@ pub extern "C" fn mimi_set_to_json_string(handle: SetHandle) -> *mut std::ffi::c
     if set.inner.len() > 1_000_000 {
         return alloc_c_string("[...]");
     }
+    // RT-H1: only decode via safe_c_string_from_handle (no bare size/align probe).
     let mut vals: Vec<String> = set
         .inner
         .iter()
-        .map(|v| {
-            if *v >= 1_048_576 && *v % 8 == 0 {
-                safe_c_string_from_handle(*v as ValueHandle).unwrap_or_default()
-            } else {
-                String::new()
-            }
-        })
+        .map(|v| safe_c_string_from_handle(*v as ValueHandle).unwrap_or_default())
         .collect();
     vals.sort();
     let mut parts: Vec<String> = Vec::with_capacity(vals.len() * 2 + 2);
@@ -3748,15 +3732,12 @@ pub extern "C" fn mimi_set_to_display_string(handle: SetHandle) -> *mut std::ffi
     if set.inner.len() > 1_000_000 {
         return alloc_c_string("Set{...}");
     }
+    // RT-H1: string decode only through safe_c_string_from_handle; else decimal.
     let mut vals: Vec<String> = set
         .inner
         .iter()
         .map(|v| {
-            if *v >= 1_048_576 && *v % 8 == 0 {
-                safe_c_string_from_handle(*v as ValueHandle).unwrap_or_default()
-            } else {
-                v.to_string()
-            }
+            safe_c_string_from_handle(*v as ValueHandle).unwrap_or_else(|| v.to_string())
         })
         .collect();
     vals.sort();
@@ -5232,18 +5213,12 @@ pub extern "C" fn mimi_json_serialize(
                 result.push_str(&trimmed);
             }
             2 => {
-                // String: raw is a C string pointer
+                // String: raw is a C string pointer. RT-H1: never CStr::from_ptr
+                // on a size/alignment heuristic alone — require mincore + NUL
+                // via safe_c_string_from_handle.
                 result.push('"');
                 if raw != 0 {
-                    // C3/C4 fix: validate that `raw` looks like a plausible
-                    // heap pointer before dereferencing. A valid heap pointer
-                    // from malloc is >= 1MB and 8-byte aligned. If it doesn't
-                    // meet these criteria, treat it as empty string instead of
-                    // passing a possibly-invalid address to CStr::from_ptr.
-                    let ptr = raw as *const std::ffi::c_char;
-                    if (raw as usize) >= 1_048_576 && (raw as usize) % 8 == 0 {
-                        let s = unsafe { std::ffi::CStr::from_ptr(ptr) };
-                        let s_str = s.to_string_lossy();
+                    if let Some(s_str) = safe_c_string_from_handle(raw as ValueHandle) {
                         for c in s_str.chars() {
                             match c {
                                 '"' => result.push_str("\\\""),
@@ -5585,13 +5560,10 @@ pub extern "C" fn mimi_tuple_serialize(
                 result.push_str(&trimmed);
             }
             2 => {
+                // RT-H1: route through safe_c_string_from_handle (mincore+NUL).
                 result.push('"');
                 if raw != 0 {
-                    // C4 fix: validate heap pointer before dereference.
-                    let ptr = raw as *const std::ffi::c_char;
-                    if (raw as usize) >= 1_048_576 && (raw as usize) % 8 == 0 {
-                        let s = unsafe { std::ffi::CStr::from_ptr(ptr) };
-                        let s_str = s.to_string_lossy();
+                    if let Some(s_str) = safe_c_string_from_handle(raw as ValueHandle) {
                         for c in s_str.chars() {
                             match c {
                                 '"' => result.push_str("\\\""),
