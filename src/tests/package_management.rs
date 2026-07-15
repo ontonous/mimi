@@ -352,3 +352,66 @@ fn test_framework_assert_ne_fails() {
     let result = interp.call_named("test_equal", vec![]);
     assert!(result.is_err());
 }
+
+
+
+fn mimi_bin() -> Option<std::path::PathBuf> {
+    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("target/debug/mimi");
+    if p.exists() {
+        return Some(p);
+    }
+    p.set_extension("exe");
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+#[test]
+fn cli_mimi_help_smoke() {
+    // P-H13: exercise the real mimi CLI binary (not just helpers).
+    let Some(bin) = mimi_bin() else {
+        eprintln!("skip P-H13: mimi binary not built");
+        return;
+    };
+    let out = std::process::Command::new(&bin)
+        .arg("--help")
+        .output()
+        .expect("spawn mimi");
+    assert!(out.status.success(), "mimi --help failed: {:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.to_lowercase().contains("mimi")
+            || stdout.contains("Usage")
+            || stdout.contains("build"),
+        "unexpected help: {}",
+        stdout
+    );
+}
+
+#[test]
+fn cli_mimi_init_tree_smoke() {
+    // P-H13: init + tree against a temp project.
+    let Some(bin) = mimi_bin() else {
+        eprintln!("skip P-H13: mimi binary not built");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("mimi_cli_pkg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let status = std::process::Command::new(&bin)
+        .args(["init"])
+        .current_dir(&dir)
+        .status()
+        .expect("mimi init");
+    assert!(status.success(), "mimi init failed");
+    assert!(dir.join("mimi.toml").exists() || dir.join("main.mimi").exists());
+    let _out = std::process::Command::new(&bin)
+        .arg("tree")
+        .current_dir(&dir)
+        .output()
+        .expect("mimi tree");
+    let _ = std::fs::remove_dir_all(&dir);
+}

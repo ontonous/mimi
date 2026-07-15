@@ -144,7 +144,29 @@ impl<'a> Checker<'a> {
                 if args.len() != 1 {
                     self.emit_code(crate::diagnostic::codes::E0242, "len expects 1 argument");
                 } else {
-                    self.infer_expr(&args[0], scopes);
+                    // T-H18: require List/string/Map/Set rather than any type.
+                    let arg_ty = self.infer_expr(&args[0], scopes);
+                    let ok = matches!(
+                        &arg_ty,
+                        Type::Name(n, _)
+                            if n == "List"
+                                || n == "list"
+                                || n == "string"
+                                || n == "String"
+                                || n == "Map"
+                                || n == "map"
+                                || n == "Set"
+                                || n == "set"
+                    );
+                    if !ok {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!(
+                                "len expects List/string/Map/Set, found {}",
+                                crate::core::fmt_type(&arg_ty)
+                            ),
+                        );
+                    }
                 }
                 return Type::Name("i32".into(), vec![]);
             }
