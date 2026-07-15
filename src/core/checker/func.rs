@@ -172,7 +172,7 @@ impl<'a> Checker<'a> {
                         return true;
                     }
                 }
-                Stmt::Block(inner) => {
+                Stmt::Block(inner) | Stmt::Do(inner) => {
                     if self.block_returns_on_all_paths(inner) {
                         return true;
                     }

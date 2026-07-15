@@ -1289,6 +1289,15 @@ impl<'a> Checker<'a> {
                     }
                     // Type-check transition body with self in scope
                     if let Some(body) = &t.body {
+                        if !t.is_fallback && !self.block_returns_on_all_paths(body) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0255,
+                                format!(
+                                    "transition '{}({})' in flow '{}' does not return a target state on all paths",
+                                    t.name, t.from_state, f.name
+                                ),
+                            );
+                        }
                         let from_payload = f
                             .states
                             .iter()

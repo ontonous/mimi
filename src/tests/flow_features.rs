@@ -105,6 +105,56 @@ fn flow_parse_empty_block() {
 }
 
 #[test]
+fn flow_check_transition_empty_body_rejected() {
+    let src = "flow F { state A state B transition go(A) -> B { } }";
+    assert!(
+        check_source(src).is_err(),
+        "implemented transitions must return a target state"
+    );
+}
+
+#[test]
+fn flow_check_transition_partial_return_rejected() {
+    let src = r#"
+flow F {
+    state A { value: i32 }
+    state B { value: i32 }
+    transition go(A, flag: bool) -> B {
+        do {
+            if flag { return B { value: self.value } }
+        }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    assert!(
+        check_source(src).is_err(),
+        "implemented transitions must return on every control-flow path"
+    );
+}
+
+#[test]
+fn flow_check_transition_all_paths_return_accepted() {
+    let src = r#"
+flow F {
+    state A { value: i32 }
+    state B { value: i32 }
+    transition go(A, flag: bool) -> B {
+        do {
+            if flag {
+                return B { value: self.value }
+            } else {
+                return B { value: 0 }
+            }
+        }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    assert!(check_source(src).is_ok());
+}
+
+#[test]
 fn flow_parse_multiple_transition_targets() {
     let src = r#"
 flow Processor {
