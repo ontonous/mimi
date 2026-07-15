@@ -826,20 +826,25 @@ impl Parser {
             if self.at(&TokenKind::Requires) {
                 let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
-                if self.expect(TokenKind::Colon, "`:`").is_ok() {
-                    if let Ok(expr) = self.parse_expr(0) {
-                        stmts.push(Stmt::Requires(expr, span));
-                    }
+                // F-H3: surface malformed contract clauses instead of swallowing them.
+                match self.expect(TokenKind::Colon, "`:` after requires") {
+                    Ok(_) => match self.parse_expr(0) {
+                        Ok(expr) => stmts.push(Stmt::Requires(expr, span)),
+                        Err(e) => self.errors.push(e),
+                    },
+                    Err(e) => self.errors.push(e),
                 }
                 continue;
             }
             if self.at(&TokenKind::Ensures) {
                 let span = Span::single(self.peek().line, self.peek().col);
                 self.advance();
-                if self.expect(TokenKind::Colon, "`:`").is_ok() {
-                    if let Ok(expr) = self.parse_expr(0) {
-                        stmts.push(Stmt::Ensures(expr, span));
-                    }
+                match self.expect(TokenKind::Colon, "`:` after ensures") {
+                    Ok(_) => match self.parse_expr(0) {
+                        Ok(expr) => stmts.push(Stmt::Ensures(expr, span)),
+                        Err(e) => self.errors.push(e),
+                    },
+                    Err(e) => self.errors.push(e),
                 }
                 continue;
             }

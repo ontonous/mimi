@@ -65,9 +65,53 @@ pub(crate) fn transition(mut server: LspServer, msg: &Value) -> (LspServer, Opti
         }
     };
 
+    // L-H6: lifecycle gates.
+    use crate::lsp::LifecycleState;
+    match server.lifecycle {
+        LifecycleState::Uninitialized if method != "initialize" => {
+            if let Some(req_id) = id {
+                return (
+                    server,
+                    Some(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32002,
+                            "message": format!("Server not initialized (got {})", method)
+                        }
+                    })),
+                );
+            }
+            return (server, None);
+        }
+        LifecycleState::Shutdown if method != "exit" => {
+            if let Some(req_id) = id {
+                return (
+                    server,
+                    Some(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32600,
+                            "message": format!("Server shutting down (got {})", method)
+                        }
+                    })),
+                );
+            }
+            return (server, None);
+        }
+        LifecycleState::Exited => return (server, None),
+        _ => {}
+    }
+
     match method {
         "initialize" => initialize(server, msg, id),
-        "initialized" => (server, None),
+        "initialized" => {
+            if server.lifecycle == LifecycleState::Initializing {
+                server.lifecycle = LifecycleState::Running;
+            }
+            (server, None)
+        }
         "textDocument/didOpen" => did_open(server, msg),
         "textDocument/didChange" => did_change(server, msg),
         "textDocument/didClose" => did_close(server, msg),
@@ -92,15 +136,19 @@ pub(crate) fn transition(mut server: LspServer, msg: &Value) -> (LspServer, Opti
         "textDocument/prepareCallHierarchy" => prepare_call_hierarchy(server, msg, id),
         "callHierarchy/incomingCalls" => incoming_calls(server, msg, id),
         "callHierarchy/outgoingCalls" => outgoing_calls(server, msg, id),
-        "shutdown" => (
-            server,
-            Some(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": null
-            })),
-        ),
+        "shutdown" => {
+            server.lifecycle = crate::lsp::LifecycleState::Shutdown;
+            (
+                server,
+                Some(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": null
+                })),
+            )
+        }
         "exit" => {
+            server.lifecycle = crate::lsp::LifecycleState::Exited;
             server.should_exit = true;
             (server, None)
         }
@@ -133,6 +181,7 @@ fn initialize(
     msg: &Value,
     id: Option<&Value>,
 ) -> (LspServer, Option<Value>) {
+    server.lifecycle = crate::lsp::LifecycleState::Initializing;
     server.workspace_root = msg
         .get("params")
         .and_then(|p| p.get("rootUri"))
