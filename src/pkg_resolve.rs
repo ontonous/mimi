@@ -54,9 +54,15 @@ fn resolve_git_dep(
         return Err(format!("invalid git tag: starts with '-': {}", tag_arg));
     }
 
-    if dst.exists() {
-        std::fs::remove_dir_all(dst)
-            .map_err(|e| format!("failed to remove old {}: {}", dep.name, e))?;
+    // P-H5: clone into a temp dir first so failures leave the old install intact.
+    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = parent.join(format!(
+        ".{}.git-tmp-{}",
+        dep.name,
+        std::process::id()
+    ));
+    if tmp.exists() {
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     let status = std::process::Command::new("git")
@@ -69,10 +75,11 @@ fn resolve_git_dep(
         .arg("1")
         .arg("--")
         .arg(git_url)
-        .arg(dst)
+        .arg(&tmp)
         .status()
         .map_err(|e| format!("git clone failed for {}: {}", dep.name, e))?;
     if !status.success() {
+        let _ = std::fs::remove_dir_all(&tmp);
         return Err(format!(
             "git clone failed for {} (url: {}, tag: {})",
             dep.name, git_url, tag_arg
@@ -83,13 +90,19 @@ fn resolve_git_dep(
         .arg("rev-parse")
         .arg("--short")
         .arg("HEAD")
-        .current_dir(dst)
+        .current_dir(&tmp)
         .output()
     {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     } else {
         tag_arg.to_string()
     };
+
+    install_dir_atomic(&tmp, dst).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&tmp);
+        format!("failed to install git dep {}: {}", dep.name, e)
+    })?;
+    let _ = std::fs::remove_dir_all(&tmp);
 
     let checksum = pkg_registry::compute_dir_checksum(dst).ok();
     Ok(ResolvedDep {
@@ -128,11 +141,8 @@ fn resolve_registry_dep(
         .ok_or_else(|| format!("no matching version for '{}' {}", dep.name, version))?;
 
     let src = pkg_dir.join(&resolved);
-    if dst.exists() {
-        std::fs::remove_dir_all(dst).map_err(|e| format!("failed to remove old: {}", e))?;
-    }
-    pkg_registry::copy_dir_recursive(&src, dst)
-        .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
+    install_dir_atomic(&src, dst)
+        .map_err(|e| format!("failed to install {}: {}", dep.name, e))?;
 
     let checksum = pkg_registry::compute_dir_checksum(dst).ok();
     Ok(ResolvedDep {
@@ -141,6 +151,43 @@ fn resolve_registry_dep(
         source: Some("registry".to_string()),
         checksum,
     })
+}
+
+
+/// P-H5: copy into a temporary sibling directory, then swap into place so a
+/// failed install never deletes a previously working cache entry first.
+fn install_dir_atomic(src: &Path, dst: &Path) -> Result<(), String> {
+    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = parent.join(format!(
+        ".{}.tmp-{}",
+        dst.file_name().and_then(|s| s.to_str()).unwrap_or("dep"),
+        std::process::id()
+    ));
+    if tmp.exists() {
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+    pkg_registry::copy_dir_recursive(src, &tmp)
+        .map_err(|e| format!("failed to stage install: {}", e))?;
+    if dst.exists() {
+        // Prefer rename swap; fall back to remove+rename.
+        let backup = parent.join(format!(
+            ".{}.bak-{}",
+            dst.file_name().and_then(|s| s.to_str()).unwrap_or("dep"),
+            std::process::id()
+        ));
+        let _ = std::fs::rename(dst, &backup);
+        if let Err(e) = std::fs::rename(&tmp, dst) {
+            // Restore backup if swap failed.
+            let _ = std::fs::rename(&backup, dst);
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(format!("failed to finalize install: {}", e));
+        }
+        let _ = std::fs::remove_dir_all(&backup);
+    } else if let Err(e) = std::fs::rename(&tmp, dst) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!("failed to finalize install: {}", e));
+    }
+    Ok(())
 }
 
 fn resolve_path_dep(
@@ -169,11 +216,8 @@ fn resolve_path_dep(
             src.display()
         ));
     }
-    if dst.exists() {
-        std::fs::remove_dir_all(dst).map_err(|e| format!("failed to remove old: {}", e))?;
-    }
-    pkg_registry::copy_dir_recursive(&src, dst)
-        .map_err(|e| format!("failed to copy {}: {}", dep.name, e))?;
+    install_dir_atomic(&src, dst)
+        .map_err(|e| format!("failed to install {}: {}", dep.name, e))?;
 
     let checksum = pkg_registry::compute_dir_checksum(dst).ok();
     Ok(ResolvedDep {
