@@ -548,6 +548,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .into_pointer_value();
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
+                    } else if inner.starts_with("Option")
+                        && (inner.contains('(') || inner.contains("Tuple"))
+                    {
+                        // List of Option of product-tuple: full Option layout
+                        // ({i1, tuple}), not the scalar {i1,i64} runtime helper.
+                        let raw = self.emit_list_option_product_tuple_to_json(alloca, inner)?;
+                        self.register_heap_alloc(raw);
+                        return self.wrap_c_string(raw);
                     } else if inner.starts_with("Option") {
                         "mimi_list_option_i64_to_json"
                     } else if inner.starts_with("Result") && inner.contains("Map<") {
