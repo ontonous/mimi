@@ -1321,3 +1321,23 @@ func main() -> i32 {
     let r = check_source(src);
     assert!(r.is_err(), "expected double-consume error");
 }
+
+
+#[test]
+fn random_half_open_range() {
+    // S-H6: random() must stay in [0, 1).
+    let src = r#"
+func main() -> i32 {
+    let mut i = 0
+    while i < 200 {
+        let r = random()
+        if r < 0.0 || r >= 1.0 {
+            return 1
+        }
+        i = i + 1
+    }
+    0
+}
+"#;
+    assert_eq!(run_source(src), crate::interp::Value::Int(0));
+}

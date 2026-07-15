@@ -4,6 +4,14 @@ use crate::ast::{Item, Pattern, Stmt};
 use crate::lsp::util::word_range_at;
 use crate::lsp::LspServer;
 
+fn byte_col_to_utf16(line: &str, byte: usize) -> usize {
+    crate::lsp::position_map::PositionMap::new(line)
+        .byte_to_lsp(byte.min(line.len()))
+        .1
+}
+
+
+
 impl LspServer {
     pub fn compute_definition(
         &self,
@@ -295,8 +303,8 @@ impl LspServer {
                     references.push(serde_json::json!({
                         "uri": uri,
                         "range": {
-                            "start": { "line": i, "character": abs_pos },
-                            "end": { "line": i, "character": abs_pos + word.len() }
+                            "start": { "line": i, "character": byte_col_to_utf16(line_text, abs_pos) },
+                            "end": { "line": i, "character": byte_col_to_utf16(line_text, abs_pos + word.len()) }
                         }
                     }));
                 }
@@ -720,8 +728,8 @@ impl LspServer {
                     }
                     highlights.push(serde_json::json!({
                         "range": {
-                            "start": { "line": i, "character": abs_pos },
-                            "end": { "line": i, "character": abs_pos + word.len() }
+                            "start": { "line": i, "character": byte_col_to_utf16(line_text, abs_pos) },
+                            "end": { "line": i, "character": byte_col_to_utf16(line_text, abs_pos + word.len()) }
                         },
                         "kind": 1 // Text
                     }));
