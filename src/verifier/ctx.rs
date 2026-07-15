@@ -446,6 +446,44 @@ impl VerifierCtx {
                     self.func_defs.insert(f.name.clone(), f.clone());
                 }
                 Item::Module(m) => self.collect_func_defs(&m.items),
+                // V-H6: register actor/impl/flow methods for call-site ensures lookup.
+                Item::Actor(a) => {
+                    for m in &a.methods {
+                        let mut f = m.clone();
+                        f.name = format!("{}::{}", a.name, m.name);
+                        self.func_defs.insert(f.name.clone(), f);
+                        self.func_defs.insert(m.name.clone(), m.clone());
+                    }
+                }
+                Item::Impl(i) => {
+                    for m in &i.methods {
+                        let mut f = m.clone();
+                        f.name = format!("{}::{}::{}", i.type_name, i.trait_name, m.name);
+                        self.func_defs.insert(f.name.clone(), f);
+                        self.func_defs.insert(m.name.clone(), m.clone());
+                    }
+                }
+                Item::Flow(flow) => {
+                    for t in &flow.transitions {
+                        if let Some(body) = &t.body {
+                            let f = crate::ast::FuncDef {
+                                name: format!("{}::{}", flow.name, t.name),
+                                pub_: false,
+                                params: t.params.clone(),
+                                ret: None,
+                                body: body.clone(),
+                                where_clause: vec![],
+                                generics: vec![],
+                                effects: vec![],
+                                is_comptime: false,
+                                is_async: false,
+                                extern_abi: None,
+                                pos: t.pos,
+                            };
+                            self.func_defs.insert(f.name.clone(), f);
+                        }
+                    }
+                }
                 _ => {}
             }
         }

@@ -1146,3 +1146,36 @@ func main() -> i32 {
 "#;
     assert_eq!(run_source(src), interp::Value::Int(20));
 }
+
+
+#[test]
+fn actor_method_requires_checked() {
+    // I-H3: actor methods honor requires when verify_contracts is on.
+    let src = r#"
+actor Box {
+    mut x: i32 = 0
+    func set(n: i32) {
+        requires: n >= 0
+        self.x = n
+    }
+    func get() -> i32 { self.x }
+}
+func main() -> i32 {
+    let b = Box.spawn()
+    b.set(-1)
+    0
+}
+"#;
+    let r = std::panic::catch_unwind(|| run_source(src));
+    // Either Err from run_source or panic on contract — both OK if violation surfaces.
+    // run_source panics on Err typically.
+    assert!(r.is_err() || matches!(r, Ok(_)));
+    // Prefer: direct Interpreter with verify_contracts
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+    let mut interp = crate::interp::Interpreter::new(&file);
+    interp.verify_contracts = true;
+    // Calling main should fail on set(-1) requires
+    let call = interp.call_named("main", vec![]);
+    assert!(call.is_err(), "expected requires failure, got {:?}", call);
+}

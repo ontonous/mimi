@@ -744,12 +744,85 @@ impl ActorHandle {
                             let _ = msg.response.send(Err(e));
                             continue;
                         }
-                        // I-H3 (partial): honor early_return from method body.
+                        // I-H3: check requires before body (mirrors call_func).
+                        let mut contract_err = None;
+                        if interp.verify_contracts {
+                            for stmt in &func.body {
+                                if let Stmt::Requires(expr, _) = stmt {
+                                    match interp.eval_expr(expr) {
+                                        Ok(cond)
+                                            if !crate::interp::value::is_truthy(&cond) =>
+                                        {
+                                            contract_err = Some(InterpError::contract_violation(
+                                                format!(
+                                                    "requires condition failed for actor method '{}': {}",
+                                                    msg.method, cond
+                                                ),
+                                            ));
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            contract_err = Some(e);
+                                            break;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(e) = contract_err {
+                            interp.pop_scope();
+                            let _ = msg.response.send(Err(e));
+                            continue;
+                        }
+                        // I-H3: honor early_return from method body.
                         let result = interp
                             .eval_block(&func.body)
                             .map(|opt| opt.unwrap_or(Value::Unit));
                         let result = if let Some(val) = interp.early_return.take() {
                             Ok(val)
+                        } else {
+                            result
+                        };
+                        // I-H3: check ensures after successful body.
+                        let result = if interp.verify_contracts {
+                            match result {
+                                Ok(ref rv) => {
+                                    let mut ens_err = None;
+                                    for stmt in &func.body {
+                                        if let Stmt::Ensures(expr, _) = stmt {
+                                            if let Err(e) = interp.bind("result", rv.clone()) {
+                                                ens_err = Some(e);
+                                                break;
+                                            }
+                                            match interp.eval_expr(expr) {
+                                                Ok(cond)
+                                                    if !crate::interp::value::is_truthy(&cond) =>
+                                                {
+                                                    ens_err = Some(
+                                                        InterpError::contract_violation(format!(
+                                                            "ensures condition failed for actor method '{}': {}",
+                                                            msg.method, cond
+                                                        )),
+                                                    );
+                                                    break;
+                                                }
+                                                Err(e) => {
+                                                    ens_err = Some(e);
+                                                    break;
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                    if let Some(e) = ens_err {
+                                        Err(e)
+                                    } else {
+                                        result
+                                    }
+                                }
+                                Err(_) => result,
+                            }
                         } else {
                             result
                         };
