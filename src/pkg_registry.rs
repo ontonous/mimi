@@ -2,33 +2,20 @@ use std::io::Read;
 use std::path::Path;
 
 /// Compute a deterministic content-based checksum for a directory.
-/// Walks all files (sorted by path), hashes path + content with FNV1a.
-///
-/// audit (MEDIUM — FNV hash collision):
-/// FNV-1a is a non-cryptographic hash.  It is suitable for file
-/// identification and change detection (its intended use here), but is
-/// NOT collision-resistant against adversarial input.  An attacker who
-/// controls file contents can craft collisions that produce the same
-/// checksum.  Do not use this checksum for integrity verification,
-/// tamper detection, or any security-sensitive purpose — use SHA-256
-/// instead (see `crypto.mimi` / `mimi_sha256`).
+/// Walks all files (sorted by path), hashes path + content with SHA-256 (P-H9).
 pub fn compute_dir_checksum(dir: &Path) -> Result<String, String> {
-    // FNV-1a offset basis and prime (64-bit).
-    // Non-cryptographic: see function-level audit comment above.
     let mut entries: Vec<_> = Vec::new();
     collect_files(dir, dir, &mut entries).map_err(|e| format!("failed to read dir: {}", e))?;
     entries.sort();
 
-    let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis (64-bit)
+    // Domain-separated SHA-256 over sorted (relpath, content) pairs.
+    let mut stream = Vec::new();
     for path in &entries {
-        // Mix in relative path
         let rel = path.strip_prefix(dir).unwrap_or(path);
-        for b in rel.to_string_lossy().as_bytes() {
-            hash ^= *b as u64;
-            hash = hash.wrapping_mul(0x100000001b3); // FNV prime (64-bit)
-        }
-        // Mix in file content
-        // CL-H13: log skipped files so incomplete checksums are diagnosable.
+        let rel_bytes = rel.to_string_lossy();
+        stream.extend_from_slice(b"PATH\0");
+        stream.extend_from_slice(rel_bytes.as_bytes());
+        stream.extend_from_slice(b"\0DATA\0");
         match std::fs::File::open(path) {
             Ok(mut f) => {
                 let mut buf = Vec::new();
@@ -39,10 +26,9 @@ pub fn compute_dir_checksum(dir: &Path) -> Result<String, String> {
                         e
                     );
                 } else {
-                    for b in &buf {
-                        hash ^= *b as u64;
-                        hash = hash.wrapping_mul(0x100000001b3);
-                    }
+                    let len = (buf.len() as u64).to_le_bytes();
+                    stream.extend_from_slice(&len);
+                    stream.extend_from_slice(&buf);
                 }
             }
             Err(e) => {
@@ -53,9 +39,11 @@ pub fn compute_dir_checksum(dir: &Path) -> Result<String, String> {
                 );
             }
         }
+        stream.extend_from_slice(b"\0END\0");
     }
 
-    Ok(format!("{:016x}", hash))
+    let digest = crate::runtime::sha256_bytes(&stream);
+    Ok(digest.iter().map(|b| format!("{:02x}", b)).collect())
 }
 
 fn collect_files(

@@ -326,10 +326,10 @@ fn checksum_handles_empty_directory() {
     let dir = std::env::temp_dir().join(format!("mimi_v02812_cs_empty_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     let h = pkg_registry::compute_dir_checksum(&dir).expect("empty cs");
-    // FNV-1a of empty input is the offset basis: cbf29ce484222325 -> "cbf29ce484222325"
+    // P-H9: SHA-256 of empty stream (no files).
     assert_eq!(
-        h, "cbf29ce484222325",
-        "empty dir hash must be FNV-1a offset basis"
+        h, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "empty dir hash must be SHA-256 of empty input"
     );
     std::fs::remove_dir_all(&dir).ok();
 }
