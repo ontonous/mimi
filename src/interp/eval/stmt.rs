@@ -849,8 +849,25 @@ impl<'a> Interpreter<'a> {
                     let (tx, rx) = std::sync::mpsc::channel();
                     let expr = expr.clone();
                     let file = self.file.clone();
+                    // I-H6: capture free variables from the lexical environment.
+                    let mut free = std::collections::HashSet::new();
+                    crate::interp::closure_utils::collect_expr_free_vars(
+                        expr.as_ref(),
+                        &std::collections::HashSet::new(),
+                        &mut free,
+                    );
+                    let mut captures = Vec::new();
+                    for name in free {
+                        if let Some(v) = self.lookup(&name) {
+                            captures.push((name, v));
+                        }
+                    }
                     super::super::pool::get_pool().execute(move || {
                         let mut interp = Interpreter::new(&file);
+                        interp.push_scope();
+                        for (n, v) in captures {
+                            let _ = interp.bind(&n, v);
+                        }
                         let result = interp.eval_expr(&expr);
                         let checked = match &result {
                             Ok(v) if crate::interp::value::contains_local_shared(v) => {
@@ -860,6 +877,7 @@ impl<'a> Interpreter<'a> {
                             }
                             other => (*other).clone(),
                         };
+                        interp.pop_scope();
                         let _ = tx.send(checked);
                     });
                     futures.push(std::sync::Arc::new(std::sync::Mutex::new(
@@ -874,9 +892,27 @@ impl<'a> Interpreter<'a> {
                             let (tx, rx) = std::sync::mpsc::channel();
                             let expr = expr.clone();
                             let file = self.file.clone();
+                            // I-H6: capture free variables from the lexical environment.
+                            let mut free = std::collections::HashSet::new();
+                            crate::interp::closure_utils::collect_expr_free_vars(
+                                expr.as_ref(),
+                                &std::collections::HashSet::new(),
+                                &mut free,
+                            );
+                            let mut captures = Vec::new();
+                            for name in free {
+                                if let Some(v) = self.lookup(&name) {
+                                    captures.push((name, v));
+                                }
+                            }
                             super::super::pool::get_pool().execute(move || {
                                 let mut interp = Interpreter::new(&file);
+                                interp.push_scope();
+                                for (n, v) in captures {
+                                    let _ = interp.bind(&n, v);
+                                }
                                 let result = interp.eval_expr(&expr);
+                                interp.pop_scope();
                                 let _ = tx.send(result);
                             });
                             let fut_arc = std::sync::Arc::new(std::sync::Mutex::new(
