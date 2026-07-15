@@ -7361,6 +7361,30 @@ fn dual_from_json_map_product_tuple() {
     );
 }
 
+/// type alias Pair expands inside Option/List annotations (E0209 residual).
+#[test]
+fn dual_option_list_pair_alias() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Pair = (i32, i32)
+        func main() -> i32 {
+            let p: Pair = (1, 2)
+            let o: Option<Pair> = Some(p)
+            let xs: List<Pair> = [(1, 2), (3, 4)]
+            println(o)
+            println(xs)
+            println(to_json(o))
+            println(to_json(xs))
+            0
+        }
+        "#,
+        "Some((1, 2))\n[(1, 2), (3, 4)]\n{\"Some\":[[1,2]]}\n[[1,2],[3,4]]"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {
