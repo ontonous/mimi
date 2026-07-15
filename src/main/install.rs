@@ -110,9 +110,10 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
 
         let resolved = pkg_resolve::resolve_single_dep_in(&dep, &dst, &reg, Some(&dir))?;
         println!("  ✓ {} (v{})", resolved.name, resolved.version);
-        lock.add_package(
+        lock.add_package_with_constraint(
             &resolved.name,
             &resolved.version,
+            dep.version.as_deref(),
             resolved.source.as_deref(),
             resolved.checksum.as_deref(),
         );
