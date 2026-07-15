@@ -368,7 +368,16 @@ impl VerifierCtx {
                 session.solver.assert(len_var.ge(&zero));
                 vars.insert_list_len(p.name.as_str(), len_var);
             } else {
-                vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
+                let iv = Z3Int::new_const(p.name.as_str());
+                vars.insert_int(p.name.as_str(), iv.clone());
+                // V-H4 (partial): constrain i32 params to machine range so
+                // unbounded Z3 Int does not prove false modular properties.
+                if matches!(&p.ty, Type::Name(n, _) if n == "i32" || n == "Int") {
+                    let lo = Z3Int::from_i64(i32::MIN as i64);
+                    let hi = Z3Int::from_i64(i32::MAX as i64);
+                    session.solver.assert(iv.ge(&lo));
+                    session.solver.assert(iv.le(&hi));
+                }
             }
             old_names.push(format!("old_{}", p.name));
         }

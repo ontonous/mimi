@@ -1341,3 +1341,11 @@ func main() -> i32 {
 "#;
     assert_eq!(run_source(src), crate::interp::Value::Int(0));
 }
+
+
+#[test]
+#[ignore = "TC-H2: requires ASan/UBSan instrumented mimi object pipeline"]
+fn asan_toolchain_gate() {
+    // Placeholder residual: full ASan/UBSan on generated objects is a
+    // toolchain/CI concern (cargo test e2e_asan -- --ignored).
+}
