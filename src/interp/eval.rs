@@ -204,16 +204,9 @@ impl<'a> Interpreter<'a> {
             | Stmt::Invariant(_, _)
             | Stmt::Ellipsis
             | Stmt::MmsBlock { .. } => {}
-            Stmt::Math(exprs) => {
-                // Math block: evaluate constant expressions at compile time
-                for expr in exprs {
-                    if let Ok(val) = self.eval_expr(expr) {
-                        // Store the result if it's a constant
-                        // For now, just evaluate and discard (verification conditions)
-                        let _ = val;
-                    }
-                }
-            }
+            // Math blocks are ghost proof obligations discharged by `mimi verify`.
+            // Runtime backends must not execute their expressions or side effects.
+            Stmt::Math(_) => {}
             Stmt::Drop(expr) => {
                 // Evaluate and discard the value (for linear capability drops)
                 self.eval_expr(expr)?;

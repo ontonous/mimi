@@ -1360,7 +1360,13 @@ impl<'a> Checker<'a> {
             }
             Stmt::Math(exprs) => {
                 for expr in exprs {
-                    self.infer_expr(expr, scopes);
+                    let ty = self.infer_expr(expr, scopes);
+                    if !matches!(&ty, Type::Name(n, _) if n == "bool") {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0212,
+                            format!("math constraint must be bool, found {}", fmt_type(&ty)),
+                        );
+                    }
                 }
             }
             Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Ellipsis | Stmt::MmsBlock { .. } => {}

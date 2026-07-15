@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn typecheck_math_constraint_must_be_bool() {
+    let src = r#"
+func main() -> i32 {
+    math: { 1 + 2 }
+    0
+}
+"#;
+    let file = parse(src);
+    let errors = core::check(&file).expect_err("non-bool math must be rejected");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("math constraint must be bool")),
+        "expected math bool diagnostic, got: {:?}",
+        errors
+    );
+}
+
+#[test]
 fn typecheck_double_mut_borrow_error() {
     // NLL: double &mut is only an error if the first is used later
     let src = r#"

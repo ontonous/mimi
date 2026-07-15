@@ -425,13 +425,56 @@ impl VerifierCtx {
         }
 
         for math in &math_exprs {
-            if let Some(z3_bool) = expr::expr_to_z3_bool(math, &mut vars) {
-                session.assert(z3_bool);
-            } else {
-                parse_errors.push(format!(
-                    "could not encode math constraint: {}",
-                    format_expr(math)
-                ));
+            let Some(z3_bool) = expr::expr_to_z3_bool(math, &mut vars) else {
+                return VerificationResult {
+                    func_name: func.name.clone(),
+                    status: VerifStatus::Unknown,
+                    message: format!(
+                        "could not encode math obligation: {}",
+                        format_expr(math)
+                    ),
+                    diagnostic: None,
+                    duration_us: start.elapsed().as_micros() as u64,
+                    constraint_count: requires_exprs.len() + math_exprs.len(),
+                };
+            };
+            let (proof, _) = session.check_scope(z3_bool.not());
+            match proof {
+                SatResult::Unsat => session.assert(z3_bool),
+                SatResult::Sat => {
+                    return VerificationResult {
+                        func_name: func.name.clone(),
+                        status: VerifStatus::Failed,
+                        message: format!(
+                            "math obligation is not implied by preconditions: {}",
+                            format_expr(math)
+                        ),
+                        diagnostic: Some(
+                            Diagnostic::error(
+                                format!("unproven math obligation in '{}'", func.name),
+                                Span::single(func.pos.0, func.pos.1),
+                            )
+                            .with_help(
+                                "add the necessary requires condition or weaken the math obligation",
+                            ),
+                        ),
+                        duration_us: start.elapsed().as_micros() as u64,
+                        constraint_count: requires_exprs.len() + math_exprs.len(),
+                    };
+                }
+                SatResult::Unknown => {
+                    return VerificationResult {
+                        func_name: func.name.clone(),
+                        status: VerifStatus::Unknown,
+                        message: format!(
+                            "solver could not prove math obligation: {}",
+                            format_expr(math)
+                        ),
+                        diagnostic: None,
+                        duration_us: start.elapsed().as_micros() as u64,
+                        constraint_count: requires_exprs.len() + math_exprs.len(),
+                    };
+                }
             }
         }
 

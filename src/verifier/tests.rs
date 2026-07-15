@@ -57,6 +57,38 @@ func first(xs: List<i32>) -> i32 {
 }
 
 #[test]
+fn verify_unproven_math_cannot_be_assumed() {
+    require_z3!();
+    let src = r#"
+func forged(x: i32) -> i32 {
+    math: { x == 1 }
+    ensures: result == 1
+    x
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, VerifStatus::Failed);
+    assert!(results[0].message.contains("math obligation"));
+}
+
+#[test]
+fn verify_proven_math_is_admitted() {
+    require_z3!();
+    let src = r#"
+func proven(x: i32) -> i32 {
+    requires: x == 1
+    math: { x > 0 }
+    ensures: result > 0
+    x
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, VerifStatus::Verified);
+}
+
+#[test]
 fn verify_body_satisfies_ensures() {
     require_z3!();
     let src = r#"
