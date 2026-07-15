@@ -1919,6 +1919,31 @@ fn register_string_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_str_char_at(s, index) → i8* (Unicode scalar index; aborts on OOB)
+    module.add_function(
+        "mimi_str_char_at",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_str_substring(s, start, end) → i8* (Unicode scalar indices; aborts on bad range)
+    module.add_function(
+        "mimi_str_substring",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
     // str_replace(s, from, to) → i8* (heap-allocated string)
     module.add_function(
         "mimi_str_replace",

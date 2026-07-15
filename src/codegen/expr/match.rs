@@ -1272,7 +1272,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     continue;
                 }
             }
-            unified_vals[i] = self.const_zero_for_type(ty);
+            // CG-H4: refuse silent zero substitution for type-mismatched match arms.
+            return Err(CompileError::TypeMismatch(format!(
+                "match arm values have incompatible types (cannot unify {:?} with {:?})",
+                v.get_type(),
+                ty
+            )));
         }
 
         // Now build the phi in the merge block.

@@ -432,12 +432,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let start = require_int_arg(&args[1], "str_substring: start must be integer")?;
         let end = require_int_arg(&args[2], "str_substring: end must be integer")?;
 
-        let i8_ty = self.context.i8_type();
+        // CG-H2: Unicode scalar indices via runtime (matches interpreter).
         let i64_ty = self.context.i64_type();
-        let s_len = self.string_len(s_ptr)?;
-
-        // MEM-C5 (deep audit): clamp start and end to [0, s_len] and ensure end >= start.
-        // Extend i32 start/end to i64 for comparison with string length.
         let start = if start.get_type().get_bit_width() < 64 {
             self.builder
                 .build_int_s_extend(start, i64_ty, "start_sext")
@@ -453,63 +449,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             end
         };
 
-        let zero = i64_ty.const_int(0, false);
-        let start_neg = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SLT, start, zero, "start_neg")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let start_oob = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SGT, start, s_len, "start_oob")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let start_clamped = self
-            .builder
-            .build_select(start_neg, zero, start, "start_clamped_lo")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
-        let start_clamped = self
-            .builder
-            .build_select(start_oob, s_len, start_clamped, "start_clamped_hi")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
-
-        let end_neg = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::SLT,
-                end,
-                start_clamped,
-                "end_lt_start",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let end_oob = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SGT, end, s_len, "end_oob")
-            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-        let end_clamped = self
-            .builder
-            .build_select(end_neg, start_clamped, end, "end_clamped_lo")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
-        let end_clamped = self
-            .builder
-            .build_select(end_oob, s_len, end_clamped, "end_clamped_hi")
-            .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-            .into_int_value();
-
-        let sub_len = self
-            .builder
-            .build_int_sub(end_clamped, start_clamped, "sub_len")
-            .map_err(|e| CompileError::LlvmError(format!("sub error: {}", e)))?;
-        let alloc_size = self
-            .builder
-            .build_int_add(sub_len, i64_ty.const_int(1, false), "alloc_size")
-            .map_err(|e| CompileError::LlvmError(format!("add error: {}", e)))?;
-        let buf = self.malloc_buffer(alloc_size)?;
-        let src = self.build_in_bounds_gep(i8_ty, s_ptr, &[start_clamped], "src")?;
-        self.memcpy_buffer(buf, src, sub_len, "memcpy_call")?;
-        self.null_terminate(buf, sub_len)?;
-        Ok(buf.into())
+        let sub_fn = self.get_runtime_fn("mimi_str_substring")?;
+        let raw_result = self
+            .build_call(
+                sub_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(s_ptr),
+                    BasicMetadataValueEnum::IntValue(start),
+                    BasicMetadataValueEnum::IntValue(end),
+                ],
+                "str_substring_call",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_str_substring returned void")?
+            .into_pointer_value();
+        self.register_heap_alloc(raw_result);
+        self.wrap_c_string(raw_result)
     }
 
     pub(in crate::codegen) fn compile_str_split(

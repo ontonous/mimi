@@ -39,6 +39,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .current_fn_ret_type()
                         .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
                     val = self.adjust_int_val(val, ret_type)?;
+                    // R-C8: claim heap-backed return ownership *before* free_heap_allocs,
+                    // matching the func/actor/lambda return paths.
+                    val = self.claim_string_return_value(val, ret_type, Some(expr), vars)?;
                     val = self.load_return_value_if_needed(val)?;
                     let ensures = self.ensures_stmts.clone();
                     for ensures_expr in &ensures {
