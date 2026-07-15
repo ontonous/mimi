@@ -65,7 +65,7 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
             }
         }
 
-        // Offline: only allow already-cached deps. Otherwise error out.
+        // Offline: only allow already-cached deps with matching checksums.
         if offline {
             if !dst.exists() {
                 return Err(format!(
@@ -73,8 +73,14 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
                     dep.name
                 ));
             }
-            // Use the version that was previously resolved (if known)
             if let Some(entry) = lock.get_package(&dep.name) {
+                // P-H2: refuse tampered cache when offline.
+                if !pkg_resolve::checksum_matches(&dst, entry.checksum.as_deref()) {
+                    return Err(format!(
+                        "offline: '{}' cache checksum mismatch (tampered or stale)",
+                        dep.name
+                    ));
+                }
                 println!("  = {} ({}, cached)", dep.name, entry.version);
                 skipped += 1;
                 let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
@@ -89,10 +95,17 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
             ));
         }
 
-        // Frozen: do not fetch, do not update lockfile. Refuse if missing.
+        // Frozen: do not fetch, do not update lockfile. Refuse if missing/tampered.
         if frozen {
             if let Some(entry) = lock.get_package(&dep.name) {
                 if dst.exists() {
+                    // P-H2: refuse tampered cache when frozen.
+                    if !pkg_resolve::checksum_matches(&dst, entry.checksum.as_deref()) {
+                        return Err(format!(
+                            "frozen: '{}' cache checksum mismatch (tampered or stale)",
+                            dep.name
+                        ));
+                    }
                     println!("  = {} ({}, frozen)", dep.name, entry.version);
                     skipped += 1;
                     let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
