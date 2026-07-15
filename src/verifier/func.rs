@@ -192,8 +192,13 @@ impl VerifierCtx {
                                 SatResult::Unsat => VerificationResult {
                                     func_name: format!("extern {}", func.name),
                                     status: VerifStatus::Verified,
-                                    message: "postconditions always satisfied given preconditions"
-                                        .into(),
+                                    message: if returns_real {
+                                            "postconditions always satisfied given preconditions (V-H3: floats modeled as exact reals; rounding not checked)"
+                                                .into()
+                                        } else {
+                                            "postconditions always satisfied given preconditions"
+                                                .into()
+                                        },
                                     diagnostic: None,
                                     duration_us: start.elapsed().as_micros() as u64,
                                     constraint_count,
