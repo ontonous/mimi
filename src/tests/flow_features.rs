@@ -190,6 +190,40 @@ func main() -> i32 { 0 }
 }
 
 #[test]
+fn flow_check_overloaded_event_inconsistent_params_rejected() {
+    let src = r#"
+flow F {
+    state A { v: i32 }
+    state B { v: i32 }
+    transition go(A, x: i32) -> B { do { return B { v: x } } }
+    transition go(B, flag: bool) -> A { do { return A { v: 0 } } }
+}
+func main() -> i32 { 0 }
+"#;
+    assert!(
+        check_source(src).is_err(),
+        "overloaded event with different param types must be rejected"
+    );
+}
+
+#[test]
+fn flow_check_overloaded_event_consistent_params_accepted() {
+    let src = r#"
+flow F {
+    state A { v: i32 }
+    state B { v: i32 }
+    transition go(A, x: i32) -> B { do { return B { v: x } } }
+    transition go(B, x: i32) -> A { do { return A { v: x } } }
+}
+func main() -> i32 { 0 }
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "overloaded event with consistent params must be accepted"
+    );
+}
+
+#[test]
 fn flow_parse_multiple_transition_targets() {
     let src = r#"
 flow Processor {
