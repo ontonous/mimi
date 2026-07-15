@@ -181,8 +181,12 @@ func main() -> i32 {
     return 0
 }
 "#;
-    // Nested lists may or may not be supported — check whatever the codegen does
-    let _ = check_source(src);
+    // TC-H3: nested list to_json should typecheck (supported path).
+    assert!(
+        check_source(src).is_ok(),
+        "to_json nested list typecheck: {:?}",
+        check_source(src)
+    );
 }
 
 #[test]
@@ -422,7 +426,11 @@ func main() -> i32 {
     return 0
 }
 "#;
-    let _ = check_source(src); // may or may not be supported
+    assert!(
+        check_source(src).is_ok(),
+        "tuple type alias Pair<i32> should typecheck: {:?}",
+        check_source(src)
+    );
 }
 
 #[test]
@@ -496,8 +504,11 @@ func main() -> i32 {
     return c2.count
 }
 "#;
-    // May not have full contract verification; at least type-check
-    let _ = check_source(src);
+    assert!(
+        check_source(src).is_ok(),
+        "counter contract typecheck: {:?}",
+        check_source(src)
+    );
 }
 
 #[test]
@@ -1085,8 +1096,11 @@ func main() -> i32 {
     return 0
 }
 "#;
-    // Should type-check at minimum
-    let _ = check_source(src);
+    assert!(
+        check_source(src).is_ok(),
+        "list float filter typecheck: {:?}",
+        check_source(src)
+    );
 }
 
 #[test]
@@ -1099,8 +1113,11 @@ func main() -> i32 {
     return 0
 }
 "#;
-    // Should type-check; running may produce overflow error
-    let _ = check_source(src);
+    assert!(
+        check_source(src).is_ok(),
+        "list sum typecheck: {:?}",
+        check_source(src)
+    );
 }
 
 #[test]
