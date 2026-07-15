@@ -43,11 +43,27 @@ fn get_line_char(msg: &Value) -> Option<(usize, usize)> {
 ///
 /// Takes ownership of `server` and returns it alongside any response.
 pub(crate) fn transition(mut server: LspServer, msg: &Value) -> (LspServer, Option<Value>) {
+    let id = msg.get("id");
     let method = match get_method(msg) {
         Some(m) => m,
-        None => return (server, None),
+        None => {
+            // L-H5: requests without a method still need an error response.
+            if let Some(req_id) = id {
+                return (
+                    server,
+                    Some(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32600,
+                            "message": "Invalid Request: missing method"
+                        }
+                    })),
+                );
+            }
+            return (server, None);
+        }
     };
-    let id = msg.get("id");
 
     match method {
         "initialize" => initialize(server, msg, id),
@@ -88,7 +104,25 @@ pub(crate) fn transition(mut server: LspServer, msg: &Value) -> (LspServer, Opti
             server.should_exit = true;
             (server, None)
         }
-        _ => (server, None),
+        // L-H5: JSON-RPC requests (with id) must always get a response.
+        // Notifications (no id) may return None.
+        _ => {
+            if let Some(req_id) = id {
+                (
+                    server,
+                    Some(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32601,
+                            "message": format!("Method not found: {}", method)
+                        }
+                    })),
+                )
+            } else {
+                (server, None)
+            }
+        }
     }
 }
 
