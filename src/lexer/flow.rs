@@ -16,6 +16,10 @@ use std::str::Chars;
 // ── Position advancement macros ──────────────────────────────────────
 
 /// Advance one character, discard it, return new position.
+///
+/// LX-H6: at EOF `advance` is a no-op (peeked stays `None`). Callers must
+/// check `peek()` before looping on `next!` — never use `next!` alone as a
+/// loop bound.
 macro_rules! next {
     ($pos:expr) => {{
         let (__p, _) = $pos.advance();
@@ -625,24 +629,23 @@ macro_rules! state_continue {
 
 #[derive(Debug)]
 pub enum LexerState<'a> {
+    // LX-C7: `at_line_start` is live state for LineStart; Start/Dispatch carry
+    // it for uniform `state_continue!` field propagation (not dead).
     Start {
         pos: LexerPos<'a>,
         mode: LexerMode,
-        #[allow(dead_code)]
         at_line_start: bool,
         acc: LexerAcc,
     },
     LineStart {
         pos: LexerPos<'a>,
         mode: LexerMode,
-        #[allow(dead_code)]
         at_line_start: bool,
         acc: LexerAcc,
     },
     Dispatch {
         pos: LexerPos<'a>,
         mode: LexerMode,
-        #[allow(dead_code)]
         at_line_start: bool,
         acc: LexerAcc,
     },
