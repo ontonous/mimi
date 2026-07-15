@@ -16058,19 +16058,22 @@ pub extern "C" fn mimi_list_result_set_product_to_json(
             }
             continue;
         }
+        // Layout: disc (word0) + Ok SetHandle (word1) + Err payload (word2).
         let base = h as *const i64;
         let disc = unsafe { *base };
         if disc == 0 {
-            let err_ptr = unsafe { *base.add(1) } as *const std::ffi::c_char;
-            let err_s = if err_ptr.is_null() {
-                String::new()
-            } else {
-                unsafe { cstr_to_string(err_ptr) }
-            };
+            let err_word = unsafe { *base.add(2) };
+            let err_json = decode_result_err_string(err_word);
             if display_style != 0 {
-                parts.push(format!("Err({})", err_s));
+                let raw = err_json
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .unwrap_or(err_json.as_str())
+                    .replace("\\\"", "\"")
+                    .replace("\\\\", "\\");
+                parts.push(format!("Err({})", raw));
             } else {
-                parts.push(format!("{{\"Err\":[{}]}}", json_escape_string(&err_s)));
+                parts.push(format!("{{\"Err\":[{}]}}", err_json));
             }
         } else {
             let set_h = unsafe { *base.add(1) } as SetHandle;
@@ -16295,19 +16298,22 @@ pub extern "C" fn mimi_list_result_map_product_to_json(
             }
             continue;
         }
+        // Layout: disc (word0) + Ok MapHandle (word1) + Err payload (word2).
         let base = h as *const i64;
         let disc = unsafe { *base };
         if disc == 0 {
-            let err_ptr = unsafe { *base.add(1) } as *const std::ffi::c_char;
-            let err_s = if err_ptr.is_null() {
-                String::new()
-            } else {
-                unsafe { cstr_to_string(err_ptr) }
-            };
+            let err_word = unsafe { *base.add(2) };
+            let err_json = decode_result_err_string(err_word);
             if display_style != 0 {
-                parts.push(format!("Err({})", err_s));
+                let raw = err_json
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .unwrap_or(err_json.as_str())
+                    .replace("\\\"", "\"")
+                    .replace("\\\\", "\\");
+                parts.push(format!("Err({})", raw));
             } else {
-                parts.push(format!("{{\"Err\":[{}]}}", json_escape_string(&err_s)));
+                parts.push(format!("{{\"Err\":[{}]}}", err_json));
             }
         } else {
             let mh = unsafe { *base.add(1) } as MapHandle;
