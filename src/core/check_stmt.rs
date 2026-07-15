@@ -170,6 +170,19 @@ impl<'a> Checker<'a> {
 
     /// Collect names of shared variables written to in a parasteps statement.
     /// Recurses into sub-blocks (if, while, for, block).
+
+    /// Root identifier of an assign place (`x`, `x.f`, `x[i].f`, ...).
+    fn place_root_ident(expr: &Expr) -> Option<&str> {
+        match expr {
+            Expr::Ident(n) => Some(n.as_str()),
+            Expr::Field(obj, _) | Expr::TupleIndex(obj, _) | Expr::Index(obj, _) => {
+                Self::place_root_ident(obj)
+            }
+            Expr::Unary(UnOp::Deref, inner) => Self::place_root_ident(inner),
+            _ => None,
+        }
+    }
+
     fn collect_shared_writes_in_stmt(
         &self,
         stmt: &Stmt,
@@ -1176,6 +1189,18 @@ impl<'a> Checker<'a> {
                         }
                     }
                     Expr::Field(obj, field) => {
+                        // T-H1: reject field writes through view params.
+                        if let Some(root) = Self::place_root_ident(obj) {
+                            if self.view_params.contains(root) {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0415,
+                                    format!(
+                                        "cannot assign through `view` parameter '{}' (read-only lexical borrow)",
+                                        root
+                                    ),
+                                );
+                            }
+                        }
                         let obj_ty = self.infer_expr(obj, scopes);
                         // Resolve obj_ty to handle TypeVar case
                         let resolved_obj_ty = self.unification.resolve(&obj_ty);
@@ -1226,6 +1251,18 @@ impl<'a> Checker<'a> {
                         }
                     }
                     Expr::Index(obj, idx) => {
+                        // T-H1: reject index writes through view params.
+                        if let Some(root) = Self::place_root_ident(obj) {
+                            if self.view_params.contains(root) {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0415,
+                                    format!(
+                                        "cannot assign through `view` parameter '{}' (read-only lexical borrow)",
+                                        root
+                                    ),
+                                );
+                            }
+                        }
                         // xs[i] = val: check that xs is a mutable list and val matches element type
                         let obj_ty = self.infer_expr(obj, scopes);
                         self.infer_expr(idx, scopes);
