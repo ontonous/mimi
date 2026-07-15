@@ -518,11 +518,52 @@ impl VerifierCtx {
             }
         }
 
+        // V-H1 (establish): prove each invariant from requires before assuming it.
+        // Full loop-preserve (body ⇒ inv') is still residual.
         for inv in &invariant_exprs {
-            if let Some(z3_bool) = expr::expr_to_z3_bool(inv, &mut vars) {
-                session.assert(z3_bool);
-            } else {
+            let Some(z3_bool) = expr::expr_to_z3_bool(inv, &mut vars) else {
                 parse_errors.push(format!("could not encode invariant: {}", format_expr(inv)));
+                continue;
+            };
+            // Check requires ⇒ inv by unsat of !inv under current (requires) assumptions.
+            let (proof, _) = session.check_scope(z3_bool.not());
+            match proof {
+                SatResult::Unsat => {
+                    // Established: safe to assume for the rest of the function.
+                    session.assert(z3_bool);
+                }
+                SatResult::Sat => {
+                    return VerificationResult {
+                        func_name: func.name.clone(),
+                        status: VerifStatus::Failed,
+                        message: format!(
+                            "loop invariant not established by requires: {}",
+                            format_expr(inv)
+                        ),
+                        diagnostic: Some(
+                            Diagnostic::error(
+                                format!(
+                                    "invariant not established at entry in '{}'",
+                                    func.name
+                                ),
+                                Span::single(func.pos.0, func.pos.1),
+                            )
+                            .with_help(
+                                "strengthen requires so the invariant holds before the loop, or weaken the invariant",
+                            ),
+                        ),
+                        duration_us: start.elapsed().as_micros() as u64,
+                        constraint_count: requires_exprs.len() + invariant_exprs.len(),
+                    };
+                }
+                SatResult::Unknown => {
+                    parse_errors.push(format!(
+                        "could not prove invariant established: {}",
+                        format_expr(inv)
+                    ));
+                    // Conservatively still assume for ensures checking, but status may be Unknown later.
+                    session.assert(z3_bool);
+                }
             }
         }
 
