@@ -1271,6 +1271,54 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let inner_ty = &type_params[0];
                 let i64_ty = self.context.i64_type();
+                // List of Option of product: dedicated runtime path.
+                if let Type::Name(on, oargs) = inner_ty {
+                    if on == "Option" && oargs.len() == 1 {
+                        let opt_inner = match &oargs[0] {
+                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                if let Some(td) = self.type_defs.get(an) {
+                                    if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
+                                        inner.clone()
+                                    } else {
+                                        oargs[0].clone()
+                                    }
+                                } else {
+                                    oargs[0].clone()
+                                }
+                            }
+                            other => other.clone(),
+                        };
+                        if let Type::Tuple(elems) = opt_inner {
+                            let arity = elems.len() as u64;
+                            let func =
+                                self.get_runtime_fn("mimi_list_from_json_option_product_i64")?;
+                            let list_ptr = self
+                                .build_call(
+                                    func,
+                                    &[
+                                        BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                        BasicMetadataValueEnum::IntValue(
+                                            i64_ty.const_int(arity, false),
+                                        ),
+                                    ],
+                                    "list_from_json_opt_product",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("list from_json option product void")?
+                                .into_pointer_value();
+                            let list_ty = self.list_struct_type();
+                            let loaded = self
+                                .builder
+                                .build_load(
+                                    BasicTypeEnum::StructType(list_ty),
+                                    list_ptr,
+                                    "list_opt_prod_ld",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            return Ok(loaded.into());
+                        }
+                    }
+                }
                 // List of Result of product / Map of product: dedicated runtime paths.
                 if let Type::Name(rn, rargs) = inner_ty {
                     if rn == "Result" && rargs.len() == 2 {
