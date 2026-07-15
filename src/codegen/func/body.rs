@@ -304,6 +304,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         val: BasicValueEnum<'ctx>,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<()> {
+        // I-H7: nested places like `o.inner.x = v` need a GEP into the live
+        // alloca of `o`, not a temporary copy of the intermediate field.
+        if let Some(base_ptr) = self.place_struct_ptr(obj, vars)? {
+            let obj_type = self.infer_object_type(obj, vars);
+            return self.compile_store_field(base_ptr, &obj_type, field_name, val);
+        }
         // Check if obj is a shared variable — use heap pointer directly
         if let Expr::Ident(name) = obj {
             if self.shared_var_names.contains(name.as_str()) {
@@ -342,6 +348,74 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         self.compile_store_field(field_ptr, &obj_type, field_name, val)
+    }
+
+    /// Resolve a place expression to a pointer into a live struct alloca.
+    /// Returns `None` for non-place / shared forms that need other handling.
+    fn place_struct_ptr(
+        &mut self,
+        place: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> MimiResult<Option<PointerValue<'ctx>>> {
+        match place {
+            Expr::Ident(name) => {
+                if self.shared_var_names.contains(name.as_str()) {
+                    return Ok(None);
+                }
+                if let Some(&(alloca, ty)) = vars.get(name.as_str()) {
+                    if matches!(ty, BasicTypeEnum::StructType(_)) {
+                        return Ok(Some(alloca));
+                    }
+                    // Pointer-to-struct slot: load the pointer.
+                    if matches!(ty, BasicTypeEnum::PointerType(_)) {
+                        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let loaded = self
+                            .build_load(ptr_ty, alloca, &format!("{}_place_ptr", name))?
+                            .into_pointer_value();
+                        return Ok(Some(loaded));
+                    }
+                }
+                Ok(None)
+            }
+            Expr::Field(obj, field_name) => {
+                let Some(base) = self.place_struct_ptr(obj, vars)? else {
+                    return Ok(None);
+                };
+                let obj_type = self.infer_object_type(obj, vars);
+                let sty = match self.type_llvm.get(&obj_type) {
+                    Some(BasicTypeEnum::StructType(s)) => *s,
+                    _ => return Ok(None),
+                };
+                let td = match self.type_defs.get(&obj_type) {
+                    Some(t) => t,
+                    None => return Ok(None),
+                };
+                let TypeDefKind::Record(fields) = &td.kind else {
+                    return Ok(None);
+                };
+                let Some(idx) = fields.iter().position(|f| f.name == *field_name) else {
+                    return Ok(None);
+                };
+                let gep = self
+                    .gep()
+                    .build_struct_gep(sty, base, idx as u32, field_name)
+                    .map_err(|e| CompileError::LlvmError(format!("place gep: {}", e)))?;
+                // Nested record fields may be stored by value (struct) or by pointer.
+                let field_ty = &fields[idx].ty;
+                match self.llvm_type_for(field_ty) {
+                    Some(BasicTypeEnum::StructType(_)) => Ok(Some(gep)),
+                    Some(BasicTypeEnum::PointerType(_)) => {
+                        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let loaded = self
+                            .build_load(ptr_ty, gep, &format!("{}_nested_ptr", field_name))?
+                            .into_pointer_value();
+                        Ok(Some(loaded))
+                    }
+                    _ => Ok(Some(gep)),
+                }
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Store a value into a struct field given a struct pointer and field name.

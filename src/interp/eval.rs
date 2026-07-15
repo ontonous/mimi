@@ -224,12 +224,22 @@ impl<'a> Interpreter<'a> {
                 return self.eval_parasteps(block);
             }
             Stmt::Func(f) => {
-                // Bind nested function as a closure in the current scope
+                // I-H13: capture free variables from enclosing scopes.
+                let mut param_names: std::collections::HashSet<String> =
+                    f.params.iter().map(|p| p.name.clone()).collect();
+                param_names.insert(f.name.clone());
+                let free = collect_free_vars(&f.body, &param_names);
+                let mut captured = HashMap::new();
+                for name in free {
+                    if let Some(val) = self.lookup(&name) {
+                        captured.insert(name, val);
+                    }
+                }
                 let closure = Value::Closure {
                     params: f.params.clone(),
                     ret: f.ret.clone(),
                     body: f.body.clone(),
-                    captured: HashMap::new(),
+                    captured,
                 };
                 self.bind(&f.name, closure)?;
             }

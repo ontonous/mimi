@@ -881,6 +881,45 @@ fn dual_record_field() {
     );
 }
 
+
+#[test]
+fn dual_nested_record_field_assign() {
+    if !can_link() {
+        return;
+    }
+    // I-H7: nested place write-back o.inner.x = 42
+    dual_assert!(
+        r#"
+        type Inner { x: i32 }
+        type Outer { inner: Inner }
+        func main() -> i32 {
+            let mut o = Outer { inner: Inner { x: 1 } }
+            o.inner.x = 42
+            println(o.inner.x)
+            0
+        }
+    "#,
+        "42"
+    );
+}
+
+#[test]
+fn dual_nested_func_captures_outer() {
+    // I-H13: nested func capture is interpreter-complete; codegen still
+    // treats nested funcs as free of outer locals (undefined variable).
+    dual_assert_interp_only!(
+        r#"
+        func main() -> i32 {
+            let n = 7
+            func add_n(x: i32) -> i32 { x + n }
+            add_n(3)
+        }
+    "#,
+        interp::Value::Int(10)
+    );
+}
+
+
 #[test]
 fn dual_record_mut() {
     if !can_link() {

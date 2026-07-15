@@ -145,4 +145,64 @@ mod tests {
             failures.join("\n")
         );
     }
+
+    /// TC-C4: cross-check ALL registry I/T flags against source match arms.
+    /// Codegen flag is already checked via is_builtin(); here we ensure names
+    /// claimed as interpreter- or typechecker-supported appear as string
+    /// literals in the corresponding dispatch sources.
+    #[test]
+    fn test_builtin_registry_interp_and_typecheck_layers() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let call_src = std::fs::read_to_string(format!("{}/src/interp/call.rs", manifest))
+            .expect("read interp/call.rs");
+        // Type inference for builtins lives under infer/call/simple.rs (and helpers).
+        let infer_dir = format!("{}/src/core/infer", manifest);
+        let mut infer_src = String::new();
+        if let Ok(entries) = std::fs::read_dir(&infer_dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                    if let Ok(s) = std::fs::read_to_string(&p) {
+                        infer_src.push_str(&s);
+                        infer_src.push('\n');
+                    }
+                }
+            }
+        }
+        // Also scan nested call/ directory.
+        let infer_call = format!("{}/src/core/infer/call", manifest);
+        if let Ok(entries) = std::fs::read_dir(&infer_call) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                    if let Ok(s) = std::fs::read_to_string(&p) {
+                        infer_src.push_str(&s);
+                        infer_src.push('\n');
+                    }
+                }
+            }
+        }
+
+        let mut failures = Vec::new();
+        for &(name, _codegen, interp, typecheck) in ALL {
+            let lit = format!("\"{}\"", name);
+            if interp && !call_src.contains(&lit) {
+                failures.push(format!(
+                    "'{}' marked I=true but not found as string literal in interp/call.rs",
+                    name
+                ));
+            }
+            if typecheck && !infer_src.contains(&lit) {
+                failures.push(format!(
+                    "'{}' marked T=true but not found as string literal under src/core/infer/",
+                    name
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "builtin registry layer mismatches (TC-C4):\n{}",
+            failures.join("\n")
+        );
+    }
 }
