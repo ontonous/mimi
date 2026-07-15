@@ -357,30 +357,37 @@ impl LspServer {
             return None;
         }
 
-        let mut changes = Vec::new();
+        // L-H2: only rename within the enclosing function of the cursor
+        // (not whole-file text replace of every occurrence).
         let lines: Vec<&str> = text.lines().collect();
+        let (range_start, range_end) = enclosing_func_line_range(text, line).unwrap_or((0, lines.len()));
 
-        for (i, line_text) in lines.iter().enumerate() {
+        let mut changes = Vec::new();
+        for (i, line_text) in lines.iter().enumerate().take(range_end).skip(range_start) {
             let mut start = 0;
             while let Some(pos) = line_text[start..].find(word.as_str()) {
                 let abs_pos = start + pos;
-                let before = abs_pos > 0
-                    && line_text
-                        .chars()
-                        .nth(abs_pos - 1)
-                        .map(|c| c.is_alphanumeric() || c == '_')
-                        .unwrap_or(false);
-                let after = line_text
+                // Word-boundary check in char space.
+                let before_ok = !line_text[..abs_pos]
                     .chars()
-                    .nth(abs_pos + word.len())
+                    .next_back()
+                    .map(|c| c.is_alphanumeric() || c == '_')
+                    .unwrap_or(false);
+                let after_ok = !line_text[abs_pos + word.len()..]
+                    .chars()
+                    .next()
                     .map(|c| c.is_alphanumeric() || c == '_')
                     .unwrap_or(false);
 
-                if !before && !after {
+                if before_ok && after_ok {
+                    // L-H1: LSP ranges use UTF-16 code units, not bytes.
+                    let map = crate::lsp::position_map::PositionMap::new(line_text);
+                    let start_utf16 = map.byte_to_lsp(abs_pos).1;
+                    let end_utf16 = map.byte_to_lsp(abs_pos + word.len()).1;
                     changes.push(serde_json::json!({
                         "range": {
-                            "start": { "line": i, "character": abs_pos },
-                            "end": { "line": i, "character": abs_pos + word.len() }
+                            "start": { "line": i, "character": start_utf16 },
+                            "end": { "line": i, "character": end_utf16 }
                         },
                         "newText": new_name
                     }));
@@ -725,4 +732,40 @@ impl LspServer {
 
         highlights
     }
+}
+
+
+/// Approximate line range of the function containing `cursor_line` (0-based).
+fn enclosing_func_line_range(text: &str, cursor_line: usize) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = text.lines().collect();
+    // Walk upward for `func` / `fn` starter.
+    let mut start = None;
+    for i in (0..=cursor_line.min(lines.len().saturating_sub(1))).rev() {
+        let t = lines[i].trim_start();
+        if t.starts_with("func ") || t.starts_with("fn ") {
+            start = Some(i);
+            break;
+        }
+    }
+    let start = start?;
+    // Walk downward until next top-level-ish func or end.
+    let mut end = lines.len();
+    for i in (start + 1)..lines.len() {
+        let t = lines[i].trim_start();
+        if (t.starts_with("func ") || t.starts_with("fn ") || t.starts_with("type ") || t.starts_with("flow "))
+            && !t.starts_with("func main")
+            && i > cursor_line
+        {
+            // Only cut if this looks like a new top-level item at column 0.
+            if lines[i].starts_with("func ")
+                || lines[i].starts_with("fn ")
+                || lines[i].starts_with("type ")
+                || lines[i].starts_with("flow ")
+            {
+                end = i;
+                break;
+            }
+        }
+    }
+    Some((start, end))
 }
