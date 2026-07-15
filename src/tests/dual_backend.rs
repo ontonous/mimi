@@ -12042,3 +12042,22 @@ fn dual_from_json_list_result_product_tuple() {
         "[Ok((1, 2)), Err(e)]\n[{\"Ok\":[[1,2]]},{\"Err\":[\"e\"]}]"
     );
 }
+
+/// from_json Set of Result of product-tuple dual.
+#[test]
+fn dual_from_json_set_result_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let s = from_json::<Set<Result<(i32, i32), string>>>("[{\"Ok\":[1,2]},{\"Err\":\"e\"}]")
+            println(s)
+            println(to_json(s))
+            0
+        }
+        "#,
+        "Set{Err(e), Ok((1, 2))}\n[{\"Err\":[\"e\"]},{\"Ok\":[[1,2]]}]"
+    );
+}

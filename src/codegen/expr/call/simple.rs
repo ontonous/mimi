@@ -1160,6 +1160,37 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 return self.wrap_c_string(raw);
                             }
                         }
+                        if elem.starts_with("Result<") {
+                            if let Some(ok_ty) = elem.strip_prefix("Result<").and_then(|s| {
+                                let mut depth = 0i32;
+                                for (i, ch) in s.char_indices() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            return Some(s[..i].trim());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                None
+                            }) {
+                                if ok_ty.starts_with('(')
+                                    || self.is_product_tuple_alias(ok_ty)
+                                {
+                                    let resolved = if self.is_product_tuple_alias(ok_ty) {
+                                        self.resolve_alias_type_name(ok_ty)
+                                    } else {
+                                        ok_ty.to_string()
+                                    };
+                                    let raw = self.emit_set_result_product_to_json(
+                                        handle, &resolved, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return self.wrap_c_string(raw);
+                                }
+                            }
+                        }
                     }
                     let fn_name = if obj_type.contains("Set<string>") {
                         "mimi_set_to_json_string"
