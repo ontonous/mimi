@@ -1,3 +1,11 @@
+
+/// L-H13: take the prefix of a line up to an LSP UTF-16 character offset.
+fn prefix_to_utf16(line: &str, character: usize) -> String {
+    let map = crate::lsp::position_map::PositionMap::new(line);
+    let byte = map.lsp_to_byte(0, character);
+    line[..byte.min(line.len())].to_string()
+}
+
 use serde_json::Value;
 
 use crate::ast::{Item, Stmt, Type};
@@ -11,7 +19,7 @@ impl LspServer {
             Some(l) => l,
             None => return "top",
         };
-        let before_cursor: String = current_line.chars().take(character).collect();
+        let before_cursor = prefix_to_utf16(current_line, character);
         let trimmed = before_cursor.trim();
 
         // After `.` — distinguish self. (actor/impl method completion)
@@ -54,7 +62,7 @@ impl LspServer {
     /// None if the context doesn't match.
     fn extract_obj_ident_for_dot(text: &str, line: usize, character: usize) -> Option<String> {
         let current_line = text.lines().nth(line)?;
-        let before_cursor: String = current_line.chars().take(character).collect();
+        let before_cursor = prefix_to_utf16(current_line, character);
         // Trim trailing whitespace and a single `.`
         let trimmed = before_cursor.trim_end();
         if !trimmed.ends_with('.') {
@@ -184,7 +192,7 @@ impl LspServer {
                 // Qualified path completions: show items from the module before `::`
                 let lines: Vec<&str> = text.lines().collect();
                 let current_line = lines.get(line).unwrap_or(&"");
-                let before_cursor: String = current_line.chars().take(character).collect();
+                let before_cursor = prefix_to_utf16(current_line, character);
                 let trimmed = before_cursor.trim().trim_end_matches(':');
                 // Extract the last identifier before `::` (the module name)
                 let prefix = trimmed
