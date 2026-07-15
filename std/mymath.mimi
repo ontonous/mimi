@@ -290,6 +290,7 @@ pub func random_int(lo: i32, hi: i32) -> i32 {
 
 // mod_pow: Modular exponentiation: (base^exp) % modulus.
 pub func mod_pow(base: i32, exp: i32, modulus: i32) -> i32 {
+    if modulus == 0 { return 0 }
     let mut mp_acc = 1
     let mut mp_bv = base % modulus
     let mut mp_ev = exp
@@ -376,6 +377,7 @@ pub func is_palindrome_number(n: i32) -> bool {
 
 // collatz_steps: Returns steps to reach 1 via Collatz sequence.
 pub func collatz_steps(n: i32) -> i32 {
+    if n < 1 { return -1 }
     let mut cs_cnt = 0
     let mut cs_val = n
     while cs_val != 1 {
@@ -556,4 +558,3 @@ pub func random_int_range(lo: i32, hi: i32) -> i32 {
     if span <= 0 { return lo }
     random_int(lo, hi)
 }
-

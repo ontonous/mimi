@@ -104,6 +104,7 @@ impl<T> ListExt<T> for List<T> {
     }
     func chunks(size: i32) -> List<List<T>> {
         let mut ch_result: List<List<T>> = []
+        if size <= 0 { return ch_result }
         let mut ch_i = 0
         let n = len(self)
         while ch_i < n {
