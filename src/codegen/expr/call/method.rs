@@ -2479,6 +2479,55 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                 }
                             }
+                            // List of Map of product.
+                            if ln == "List" {
+                                if let Type::Name(mn, margs) = &le {
+                                    if mn == "Map" && margs.len() == 2 {
+                                        let map_val = match &margs[1] {
+                                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                                if let Some(td) = self.type_defs.get(an) {
+                                                    if let crate::ast::TypeDefKind::Alias(inner) =
+                                                        &td.kind
+                                                    {
+                                                        inner.clone()
+                                                    } else {
+                                                        margs[1].clone()
+                                                    }
+                                                } else {
+                                                    margs[1].clone()
+                                                }
+                                            }
+                                            other => other.clone(),
+                                        };
+                                        if let Type::Tuple(elems) = map_val {
+                                            let arity = elems.len() as u64;
+                                            let func = self.get_runtime_fn(
+                                                "mimi_map_from_json_list_map_product_i64",
+                                            )?;
+                                            let result = self.build_call(
+                                                func,
+                                                &[
+                                                    BasicMetadataValueEnum::PointerValue(
+                                                        raw_ptr,
+                                                    ),
+                                                    BasicMetadataValueEnum::IntValue(
+                                                        self.context
+                                                            .i64_type()
+                                                            .const_int(arity, false),
+                                                    ),
+                                                ],
+                                                "map_from_json_list_map_product",
+                                            )?;
+                                            return Ok(self
+                                                .expect_basic_value(
+                                                    &result,
+                                                    "mimi_map_from_json_list_map_product_i64",
+                                                )?
+                                                .into());
+                                        }
+                                    }
+                                }
+                            }
                             // List of Option of product / Option of Set of product.
                             if ln == "List" {
                                 if let Type::Name(mn, margs) = &le {
@@ -2567,6 +2616,55 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 .expect_basic_value(
                                                     &result,
                                                     "mimi_map_from_json_list_option_product_i64",
+                                                )?
+                                                .into());
+                                        }
+                                    }
+                                }
+                            }
+                            // Set of Map of product.
+                            if ln == "Set" {
+                                if let Type::Name(mn, margs) = &le {
+                                    if mn == "Map" && margs.len() == 2 {
+                                        let map_val = match &margs[1] {
+                                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                                if let Some(td) = self.type_defs.get(an) {
+                                                    if let crate::ast::TypeDefKind::Alias(inner) =
+                                                        &td.kind
+                                                    {
+                                                        inner.clone()
+                                                    } else {
+                                                        margs[1].clone()
+                                                    }
+                                                } else {
+                                                    margs[1].clone()
+                                                }
+                                            }
+                                            other => other.clone(),
+                                        };
+                                        if let Type::Tuple(elems) = map_val {
+                                            let arity = elems.len() as u64;
+                                            let func = self.get_runtime_fn(
+                                                "mimi_map_from_json_set_map_product_i64",
+                                            )?;
+                                            let result = self.build_call(
+                                                func,
+                                                &[
+                                                    BasicMetadataValueEnum::PointerValue(
+                                                        raw_ptr,
+                                                    ),
+                                                    BasicMetadataValueEnum::IntValue(
+                                                        self.context
+                                                            .i64_type()
+                                                            .const_int(arity, false),
+                                                    ),
+                                                ],
+                                                "map_from_json_set_map_product",
+                                            )?;
+                                            return Ok(self
+                                                .expect_basic_value(
+                                                    &result,
+                                                    "mimi_map_from_json_set_map_product_i64",
                                                 )?
                                                 .into());
                                         }

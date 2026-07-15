@@ -12972,3 +12972,41 @@ fn dual_from_json_list_set_map_product_tuple() {
         "[Set{{\"a\":(1, 2)}}, Set{{\"b\":(3, 4)}}]\n[[{\"a\":[1,2]}],[{\"b\":[3,4]}]]"
     );
 }
+
+/// from_json Map of Set of Map of product dual.
+#[test]
+fn dual_from_json_map_set_map_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, Set<Map<string, (i32, i32)>>>>("{\"a\":[{\"x\":[1,2]},{\"y\":[3,4]}]}")
+            println(m)
+            println(to_json(m))
+            0
+        }
+        "#,
+        "{\"a\":Set{{\"x\":(1, 2)}, {\"y\":(3, 4)}}}\n{\"a\":[{\"x\":[1,2]},{\"y\":[3,4]}]}"
+    );
+}
+
+/// from_json Map of List of Map of product dual.
+#[test]
+fn dual_from_json_map_list_map_product_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let m = from_json::<Map<string, List<Map<string, (i32, i32)>>>>("{\"a\":[{\"x\":[1,2]},{\"y\":[3,4]}]}")
+            println(m)
+            println(to_json(m))
+            0
+        }
+        "#,
+        "{\"a\":[{\"x\":(1, 2)}, {\"y\":(3, 4)}]}\n{\"a\":[{\"x\":[1,2]},{\"y\":[3,4]}]}"
+    );
+}
