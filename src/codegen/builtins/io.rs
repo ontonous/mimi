@@ -4922,7 +4922,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                         OptPay::StrPtr(sel.into_pointer_value())
-                    } else if arg_type.contains("Map<") || arg_type == "Option<Map>" {
+                    } else if {
+                        // Only Option of Map (not Option of List/Result of Map).
+                        let inner = arg_type
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                            .unwrap_or(arg_type);
+                        inner.starts_with("Map") || arg_type == "Option<Map>"
+                    } {
                         // Option of Map of product: decode heap product values.
                         let map_inner = arg_type
                             .strip_prefix("Option<")

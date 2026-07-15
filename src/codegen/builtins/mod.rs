@@ -1398,6 +1398,11 @@ fn register_set_fns<'ctx>(
         Some(inkwell::module::Linkage::External),
     );
     module.add_function(
+        "mimi_list_map_to_string",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
         "mimi_list_option_i64_to_json",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
