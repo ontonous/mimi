@@ -1271,6 +1271,54 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let inner_ty = &type_params[0];
                 let i64_ty = self.context.i64_type();
+                // List of Result of product: dedicated runtime path (uniform heap pack).
+                if let Type::Name(rn, rargs) = inner_ty {
+                    if rn == "Result" && rargs.len() == 2 {
+                        let ok_ty = match &rargs[0] {
+                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                if let Some(td) = self.type_defs.get(an) {
+                                    if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
+                                        inner.clone()
+                                    } else {
+                                        rargs[0].clone()
+                                    }
+                                } else {
+                                    rargs[0].clone()
+                                }
+                            }
+                            other => other.clone(),
+                        };
+                        if let Type::Tuple(elems) = ok_ty {
+                            let arity = elems.len() as u64;
+                            let func =
+                                self.get_runtime_fn("mimi_list_from_json_result_product_i64")?;
+                            let list_ptr = self
+                                .build_call(
+                                    func,
+                                    &[
+                                        BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                        BasicMetadataValueEnum::IntValue(
+                                            i64_ty.const_int(arity, false),
+                                        ),
+                                    ],
+                                    "list_from_json_res_product",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("list from_json result product void")?
+                                .into_pointer_value();
+                            let list_ty = self.list_struct_type();
+                            let loaded = self
+                                .builder
+                                .build_load(
+                                    BasicTypeEnum::StructType(list_ty),
+                                    list_ptr,
+                                    "list_res_prod_ld",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            return Ok(loaded.into());
+                        }
+                    }
+                }
                 let json_arr_len_fn = self.get_runtime_fn("json_array_length")?;
                 let json_get_elem_fn = self.get_runtime_fn("json_get_element")?;
 
@@ -1559,9 +1607,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     Type::Name(n, args) if n == "Result" && !args.is_empty() => {
-                        // List of Result: bare JSON value → Ok(T) via scalar Ok path.
-                        let ok_val = self.compile_from_json_scalar_ok(&args[0], elem_json)?;
-                        let res_val = self.compile_constructor("Ok", vec![ok_val])?;
+                        // List of Result: tagged {"Ok":v}/{"Err":v} or bare → Ok(T).
+                        let res_val = self.compile_from_json_result_value(
+                            &args[0],
+                            args.get(1),
+                            elem_json,
+                        )?;
                         match res_val {
                             BasicValueEnum::StructValue(sv) => {
                                 let sty = sv.get_type();
@@ -2067,12 +2118,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(self.expect_basic_value(&result, fn_name)?.into())
             }
             Type::Name(n, args) if n == "Result" && !args.is_empty() => {
-                let ok_val = self.compile_from_json_scalar_ok(&args[0], raw_ptr)?;
-                self.compile_constructor("Ok", vec![ok_val])
+                self.compile_from_json_result_value(&args[0], args.get(1), raw_ptr)
             }
-            Type::Result(ok, _) => {
-                let ok_val = self.compile_from_json_scalar_ok(ok, raw_ptr)?;
-                self.compile_constructor("Ok", vec![ok_val])
+            Type::Result(ok, err) => {
+                self.compile_from_json_result_value(ok, Some(err), raw_ptr)
             }
             Type::Name(type_name, _) => {
                 // Type alias → underlying type; Record → field deserialize.
@@ -2182,6 +2231,147 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Parse JSON into a scalar Ok payload for `from_json::<Result<T,_>>`.
+
+    /// from_json Result: tagged `{"Ok":…}` / `{"Err":…}` or bare value → Ok(T).
+    fn compile_from_json_result_value(
+        &mut self,
+        ok_ty: &Type,
+        err_ty: Option<&Type>,
+        raw_ptr: PointerValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i64_ty = self.context.i64_type();
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
+        let has_key = self.get_runtime_fn("json_has_key")?;
+        let get_str = self.get_runtime_fn("json_get_string")?;
+        let ok_key = self
+            .builder
+            .build_global_string_ptr("Ok", "res_json_ok_key")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let err_key = self
+            .builder
+            .build_global_string_ptr("Err", "res_json_err_key")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let has_ok = self
+            .build_call(
+                has_key,
+                &[
+                    BasicMetadataValueEnum::PointerValue(raw_ptr),
+                    BasicMetadataValueEnum::PointerValue(ok_key.as_pointer_value()),
+                ],
+                "res_has_ok",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("json_has_key void")?
+            .into_int_value();
+        let has_err = self
+            .build_call(
+                has_key,
+                &[
+                    BasicMetadataValueEnum::PointerValue(raw_ptr),
+                    BasicMetadataValueEnum::PointerValue(err_key.as_pointer_value()),
+                ],
+                "res_has_err",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("json_has_key void")?
+            .into_int_value();
+        let zero = i64_ty.const_int(0, false);
+        let is_ok = self
+            .builder
+            .build_int_compare(IntPredicate::NE, has_ok, zero, "res_is_ok")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let is_err = self
+            .builder
+            .build_int_compare(IntPredicate::NE, has_err, zero, "res_is_err")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let ok_bb = self.context.append_basic_block(parent, "res_json_ok");
+        let err_bb = self.context.append_basic_block(parent, "res_json_err");
+        let bare_bb = self.context.append_basic_block(parent, "res_json_bare");
+        let cont_bb = self.context.append_basic_block(parent, "res_json_cont");
+        // if has Ok → ok; else if has Err → err; else bare Ok
+        let after_ok_check = self.context.append_basic_block(parent, "res_json_after_ok");
+        self.builder
+            .build_conditional_branch(is_ok, ok_bb, after_ok_check)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(after_ok_check);
+        self.builder
+            .build_conditional_branch(is_err, err_bb, bare_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+        self.builder.position_at_end(ok_bb);
+        let ok_payload = self
+            .build_call(
+                get_str,
+                &[
+                    BasicMetadataValueEnum::PointerValue(raw_ptr),
+                    BasicMetadataValueEnum::PointerValue(ok_key.as_pointer_value()),
+                ],
+                "res_ok_payload",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("json_get_string void")?
+            .into_pointer_value();
+        // json_get_string returns JSON text of value; for arrays/objects it's re-serialized.
+        let ok_val = self.compile_from_json_scalar_ok(ok_ty, ok_payload)?;
+        let ok_res = self.compile_constructor("Ok", vec![ok_val])?;
+        let ok_end = self.builder.get_insert_block().unwrap();
+        self.builder
+            .build_unconditional_branch(cont_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+        self.builder.position_at_end(err_bb);
+        let err_payload = self
+            .build_call(
+                get_str,
+                &[
+                    BasicMetadataValueEnum::PointerValue(raw_ptr),
+                    BasicMetadataValueEnum::PointerValue(err_key.as_pointer_value()),
+                ],
+                "res_err_payload",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("json_get_string void")?
+            .into_pointer_value();
+        let err_ty = err_ty.cloned().unwrap_or_else(|| Type::Name("string".into(), vec![]));
+        let err_val = self.compile_from_json_scalar_ok(&err_ty, err_payload)?;
+        let err_res = self.compile_constructor("Err", vec![err_val])?;
+        let err_end = self.builder.get_insert_block().unwrap();
+        self.builder
+            .build_unconditional_branch(cont_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+        self.builder.position_at_end(bare_bb);
+        let bare_ok = self.compile_from_json_scalar_ok(ok_ty, raw_ptr)?;
+        let bare_res = self.compile_constructor("Ok", vec![bare_ok])?;
+        let bare_end = self.builder.get_insert_block().unwrap();
+        self.builder
+            .build_unconditional_branch(cont_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+
+        self.builder.position_at_end(cont_bb);
+        // All Result constructors share the same LLVM struct type.
+        let phi_ty = match ok_res {
+            BasicValueEnum::StructValue(sv) => BasicTypeEnum::StructType(sv.get_type()),
+            BasicValueEnum::IntValue(iv) => BasicTypeEnum::IntType(iv.get_type()),
+            other => {
+                return Err(CompileError::Generic(format!(
+                    "from_json Result: unexpected constructor {:?}",
+                    other.get_type()
+                )));
+            }
+        };
+        let phi = self
+            .builder
+            .build_phi(phi_ty, "res_json_phi")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        phi.add_incoming(&[(&ok_res, ok_end), (&err_res, err_end), (&bare_res, bare_end)]);
+        Ok(phi.as_basic_value())
+    }
+
     fn compile_from_json_scalar_ok(
         &mut self,
         ok_ty: &Type,
