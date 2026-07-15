@@ -383,7 +383,19 @@ pub fn describe(code: &str) -> &'static str {
         W009 => "recursion depth hint",
         W010 => "unused import",
         W011 => "progressive Typestate migration (script mode → explicit flow)",
+        W012 => "type escape hatch (`_` or `Any`) bypasses static checks",
 
         _ => "unknown error",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{describe, W012};
+
+    #[test]
+    fn w012_has_a_diagnostic_description() {
+        assert_ne!(describe(W012), "unknown error");
+        assert!(describe(W012).contains("escape hatch"));
     }
 }
