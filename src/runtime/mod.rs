@@ -1600,8 +1600,14 @@ pub extern "C" fn mimi_list_option_map_to_json(
         let disc = unsafe { *base };
         let handle = unsafe { *(base.add(8) as *const i64) } as MapHandle;
         if disc != 0 {
-            // mode >= 10 encodes product arity as (10 + arity).
-            let json_ptr = if mode >= 10 {
+            // mode: 0-3 scalar; 10+ product; 20+ List; 30+ Set; 40+ Map of Map.
+            let json_ptr = if mode >= 40 {
+                mimi_map_to_json_map_product_i64(handle, mode - 40, 0)
+            } else if mode >= 30 {
+                mimi_map_to_json_set_product_i64(handle, mode - 30, 0)
+            } else if mode >= 20 {
+                mimi_map_to_json_list_product_i64(handle, mode - 20, 0)
+            } else if mode >= 10 {
                 mimi_map_to_json_product_i64(handle, mode - 10, 0)
             } else {
                 match mode {
