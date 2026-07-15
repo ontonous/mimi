@@ -364,7 +364,14 @@ impl<'a> Interpreter<'a> {
                 self.scope_env.pop_scope();
                 break;
             }
-            self.eval_block(body)?;
+            if let Some(v) = self.eval_block(body)? {
+                // Match while/loop semantics: an explicit non-Unit return from
+                // the body must propagate out of the loop immediately.
+                if v != Value::Unit {
+                    self.scope_env.pop_scope();
+                    return Ok(Some(v));
+                }
+            }
             self.scope_env.pop_scope();
             if self.early_return.is_some() {
                 break;
