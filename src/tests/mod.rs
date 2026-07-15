@@ -171,6 +171,10 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
         .arg("staticlib")
         .arg("--cfg")
         .arg("standalone")
+        // M2: enable deliberate UB test symbols only for FFI e2e .so builds.
+        // Production `mimi build` does not pass this cfg.
+        .arg("--cfg")
+        .arg("mimi_test_ub_symbols")
         .arg("--crate-name")
         .arg("mimi_runtime")
         .arg("-o")
