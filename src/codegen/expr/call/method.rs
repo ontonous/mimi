@@ -2441,6 +2441,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         raw_ptr: PointerValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let i64_ty = self.context.i64_type();
+        let bool_ty = self.context.bool_type();
         let parent = self
             .builder
             .get_insert_block()
@@ -2493,7 +2494,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         let err_bb = self.context.append_basic_block(parent, "res_json_err");
         let bare_bb = self.context.append_basic_block(parent, "res_json_bare");
         let cont_bb = self.context.append_basic_block(parent, "res_json_cont");
-        // if has Ok → ok; else if has Err → err; else bare Ok
         let after_ok_check = self.context.append_basic_block(parent, "res_json_after_ok");
         self.builder
             .build_conditional_branch(is_ok, ok_bb, after_ok_check)
@@ -2503,8 +2503,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_conditional_branch(is_err, err_bb, bare_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
 
-        // Store each arm into a shared alloca of Result LLVM type, then load once.
-        // Phi of Ok vs Err constructor values can disagree on layout (physreg ICE).
+        // Shared full Result layout — never phi Ok/Err constructor structs.
         let err_ty_owned =
             err_ty.cloned().unwrap_or_else(|| Type::Name("string".into(), vec![]));
         let result_ty = Type::Name(
@@ -2521,59 +2520,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         let out_slot = self.build_alloca(BasicTypeEnum::StructType(res_sty), "res_json_out")?;
 
-        let store_result_sv =
-            |this: &mut Self,
-             slot: inkwell::values::PointerValue<'ctx>,
-             sty: inkwell::types::StructType<'ctx>,
-             sv: inkwell::values::StructValue<'ctx>|
-             -> Result<(), CompileError> {
-                if sv.get_type() == sty {
-                    this.build_store(slot, sv)?;
-                } else {
-                    // Bitcast via memory when Ok/Err arm layout is a subset packing.
-                    let tmp =
-                        this.build_alloca(BasicTypeEnum::StructType(sv.get_type()), "res_arm_tmp")?;
-                    this.build_store(tmp, sv)?;
-                    let i8_ptr = this.context.ptr_type(inkwell::AddressSpace::default());
-                    let from_i8 = this
-                        .build_bit_cast(tmp.into(), BasicTypeEnum::PointerType(i8_ptr), "res_from")?
-                        .into_pointer_value();
-                    let to_i8 = this
-                        .build_bit_cast(slot.into(), BasicTypeEnum::PointerType(i8_ptr), "res_to")?
-                        .into_pointer_value();
-                    let src_size = this.llvm_type_size_bytes(BasicTypeEnum::StructType(sv.get_type()));
-                    let dst_size = this.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
-                    // Zero dest then copy min size.
-                    let zero = this.context.i32_type().const_int(0, false);
-                    let memset = this.get_runtime_fn("memset")?;
-                    this.build_call(
-                        memset,
-                        &[
-                            BasicMetadataValueEnum::PointerValue(to_i8),
-                            BasicMetadataValueEnum::IntValue(zero),
-                            BasicMetadataValueEnum::IntValue(
-                                this.context.i64_type().const_int(dst_size, false),
-                            ),
-                        ],
-                        "res_zero",
-                    )?;
-                    let n = src_size.min(dst_size);
-                    let memcpy = this.get_runtime_fn("memcpy")?;
-                    this.build_call(
-                        memcpy,
-                        &[
-                            BasicMetadataValueEnum::PointerValue(to_i8),
-                            BasicMetadataValueEnum::PointerValue(from_i8),
-                            BasicMetadataValueEnum::IntValue(
-                                this.context.i64_type().const_int(n, false),
-                            ),
-                        ],
-                        "res_copy",
-                    )?;
-                }
-                Ok(())
-            };
-
         self.builder.position_at_end(ok_bb);
         let ok_payload = self
             .build_call(
@@ -2588,13 +2534,72 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or("json_get_string void")?
             .into_pointer_value();
         let ok_val = self.compile_from_json_scalar_ok(ok_ty, ok_payload)?;
-        let ok_res = self.compile_constructor("Ok", vec![ok_val])?;
-        if let BasicValueEnum::StructValue(sv) = ok_res {
-            store_result_sv(self, out_slot, res_sty, sv)?;
-        } else {
-            return Err(CompileError::Generic(
-                "from_json Result Ok: expected struct constructor".into(),
-            ));
+        {
+            let disc_gep = self
+                .gep()
+                .build_struct_gep(BasicTypeEnum::StructType(res_sty), out_slot, 0, "res_ok_disc")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            self.build_store(disc_gep, bool_ty.const_int(1, false))?;
+            let ok_gep = self
+                .gep()
+                .build_struct_gep(BasicTypeEnum::StructType(res_sty), out_slot, 1, "res_ok_pay")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            let expected = res_sty.get_field_types()[1];
+            match (ok_val, expected) {
+                (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(est))
+                    if sv.get_type() == est =>
+                {
+                    self.build_store(ok_gep, sv)?;
+                }
+                (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(_)) => {
+                    let tmp = self.build_alloca(
+                        BasicTypeEnum::StructType(sv.get_type()),
+                        "res_ok_tmp",
+                    )?;
+                    self.build_store(tmp, sv)?;
+                    let loaded = self.build_load(expected, tmp, "res_ok_coerce")?;
+                    self.build_store(ok_gep, loaded)?;
+                }
+                (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(et)) => {
+                    let coerced = if iv.get_type().get_bit_width() < et.get_bit_width() {
+                        self.builder
+                            .build_int_s_extend(iv, et, "res_ok_sext")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else if iv.get_type().get_bit_width() > et.get_bit_width() {
+                        self.builder
+                            .build_int_truncate(iv, et, "res_ok_trunc")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        iv
+                    };
+                    self.build_store(ok_gep, coerced)?;
+                }
+                (other, _) => {
+                    let ok_res = self.compile_constructor("Ok", vec![other])?;
+                    if let BasicValueEnum::StructValue(sv) = ok_res {
+                        if sv.get_type() == res_sty {
+                            self.build_store(out_slot, sv)?;
+                        } else {
+                            return Err(CompileError::Generic(
+                                "from_json Result Ok: cannot store Ok payload".into(),
+                            ));
+                        }
+                    } else {
+                        return Err(CompileError::Generic(
+                            "from_json Result Ok: expected struct constructor".into(),
+                        ));
+                    }
+                }
+            }
+            if res_sty.count_fields() >= 3 {
+                let err_gep = self
+                    .gep()
+                    .build_struct_gep(BasicTypeEnum::StructType(res_sty), out_slot, 2, "res_ok_errz")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                if let BasicTypeEnum::IntType(et) = res_sty.get_field_types()[2] {
+                    self.build_store(err_gep, et.const_int(0, false))?;
+                }
+            }
         }
         self.builder
             .build_unconditional_branch(cont_bb)
@@ -2613,14 +2618,108 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("json_get_string void")?
             .into_pointer_value();
-        let err_val = self.compile_from_json_scalar_ok(&err_ty_owned, err_payload)?;
-        let err_res = self.compile_constructor("Err", vec![err_val])?;
-        if let BasicValueEnum::StructValue(sv) = err_res {
-            store_result_sv(self, out_slot, res_sty, sv)?;
-        } else {
-            return Err(CompileError::Generic(
-                "from_json Result Err: expected struct constructor".into(),
-            ));
+        // json_get_string returns unquoted string content (not a JSON token).
+        // For string Err, wrap C string as Mimi string; do not call mimi_from_json.
+        let err_is_string = matches!(
+            &err_ty_owned,
+            Type::Name(n, _) if n == "string"
+        );
+        {
+            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+            let to_i8 = self
+                .build_bit_cast(
+                    out_slot.into(),
+                    BasicTypeEnum::PointerType(i8_ptr),
+                    "res_err_z_p",
+                )?
+                .into_pointer_value();
+            let dst_size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(res_sty));
+            let memset = self.get_runtime_fn("memset")?;
+            self.build_call(
+                memset,
+                &[
+                    BasicMetadataValueEnum::PointerValue(to_i8),
+                    BasicMetadataValueEnum::IntValue(self.context.i32_type().const_int(0, false)),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(dst_size, false)),
+                ],
+                "res_err_zero",
+            )?;
+            if res_sty.count_fields() < 3 {
+                return Err(CompileError::Generic(
+                    "from_json Result Err: Result layout missing err field".into(),
+                ));
+            }
+            let err_gep = self
+                .gep()
+                .build_struct_gep(BasicTypeEnum::StructType(res_sty), out_slot, 2, "res_err_pay")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            let expected = res_sty.get_field_types()[2];
+            if err_is_string {
+                // Heap-pack {ptr,i64} string, store as i64 handle (matches Err constructor ABI).
+                let strlen_fn = self.get_runtime_fn("strlen")?;
+                let len = self
+                    .build_call(
+                        strlen_fn,
+                        &[BasicMetadataValueEnum::PointerValue(err_payload)],
+                        "res_err_strlen",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("strlen void")?
+                    .into_int_value();
+                let str_ty = self.context.struct_type(
+                    &[
+                        BasicTypeEnum::PointerType(i8_ptr),
+                        BasicTypeEnum::IntType(i64_ty),
+                    ],
+                    false,
+                );
+                let heap = self.malloc_or_abort(i64_ty.const_int(16, false), "res_err_str_heap")?;
+                let ptr_gep = self
+                    .gep()
+                    .build_struct_gep(BasicTypeEnum::StructType(str_ty), heap, 0, "res_err_sp")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_store(ptr_gep, err_payload)?;
+                let len_gep = self
+                    .gep()
+                    .build_struct_gep(BasicTypeEnum::StructType(str_ty), heap, 1, "res_err_sl")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_store(len_gep, len)?;
+                if let BasicTypeEnum::IntType(et) = expected {
+                    let h = self.build_ptr_to_int(heap, et, "res_err_str_h")?;
+                    self.build_store(err_gep, h)?;
+                } else {
+                    let loaded = self.build_load(BasicTypeEnum::StructType(str_ty), heap, "res_err_sv")?;
+                    self.build_store(err_gep, loaded)?;
+                }
+            } else {
+                let err_val = self.compile_from_json_scalar_ok(&err_ty_owned, err_payload)?;
+                match (err_val, expected) {
+                    (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(est))
+                        if sv.get_type() == est =>
+                    {
+                        self.build_store(err_gep, sv)?;
+                    }
+                    (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(et)) => {
+                        let coerced = if iv.get_type().get_bit_width() < et.get_bit_width() {
+                            self.builder
+                                .build_int_s_extend(iv, et, "res_err_sext")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        } else if iv.get_type().get_bit_width() > et.get_bit_width() {
+                            self.builder
+                                .build_int_truncate(iv, et, "res_err_trunc")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        } else {
+                            iv
+                        };
+                        self.build_store(err_gep, coerced)?;
+                    }
+                    _ => {
+                        return Err(CompileError::Generic(
+                            "from_json Result Err: cannot store Err payload".into(),
+                        ));
+                    }
+                }
+            }
         }
         self.builder
             .build_unconditional_branch(cont_bb)
@@ -2628,13 +2727,72 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.builder.position_at_end(bare_bb);
         let bare_ok = self.compile_from_json_scalar_ok(ok_ty, raw_ptr)?;
-        let bare_res = self.compile_constructor("Ok", vec![bare_ok])?;
-        if let BasicValueEnum::StructValue(sv) = bare_res {
-            store_result_sv(self, out_slot, res_sty, sv)?;
-        } else {
-            return Err(CompileError::Generic(
-                "from_json Result bare Ok: expected struct constructor".into(),
-            ));
+        {
+            let disc_gep = self
+                .gep()
+                .build_struct_gep(BasicTypeEnum::StructType(res_sty), out_slot, 0, "res_bare_disc")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            self.build_store(disc_gep, bool_ty.const_int(1, false))?;
+            let ok_gep = self
+                .gep()
+                .build_struct_gep(BasicTypeEnum::StructType(res_sty), out_slot, 1, "res_bare_ok")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            let expected = res_sty.get_field_types()[1];
+            match (bare_ok, expected) {
+                (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(est))
+                    if sv.get_type() == est =>
+                {
+                    self.build_store(ok_gep, sv)?;
+                }
+                (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(_)) => {
+                    let tmp = self.build_alloca(
+                        BasicTypeEnum::StructType(sv.get_type()),
+                        "res_bare_tmp",
+                    )?;
+                    self.build_store(tmp, sv)?;
+                    let loaded = self.build_load(expected, tmp, "res_bare_coerce")?;
+                    self.build_store(ok_gep, loaded)?;
+                }
+                (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(et)) => {
+                    let coerced = if iv.get_type().get_bit_width() < et.get_bit_width() {
+                        self.builder
+                            .build_int_s_extend(iv, et, "res_bare_sext")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else if iv.get_type().get_bit_width() > et.get_bit_width() {
+                        self.builder
+                            .build_int_truncate(iv, et, "res_bare_trunc")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        iv
+                    };
+                    self.build_store(ok_gep, coerced)?;
+                }
+                (other, _) => {
+                    let ok_res = self.compile_constructor("Ok", vec![other])?;
+                    if let BasicValueEnum::StructValue(sv) = ok_res {
+                        if sv.get_type() == res_sty {
+                            self.build_store(out_slot, sv)?;
+                        } else {
+                            return Err(CompileError::Generic(
+                                "from_json Result bare: cannot store Ok payload".into(),
+                            ));
+                        }
+                    } else {
+                        return Err(CompileError::Generic(
+                            "from_json Result bare: expected struct constructor".into(),
+                        ));
+                    }
+                }
+            }
+            if res_sty.count_fields() >= 3 {
+                let err_gep = self
+                    .gep()
+                    .build_struct_gep(BasicTypeEnum::StructType(res_sty), out_slot, 2, "res_bare_errz")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                if let BasicTypeEnum::IntType(et) = res_sty.get_field_types()[2] {
+                    self.build_store(err_gep, et.const_int(0, false))?;
+                }
+            }
         }
         self.builder
             .build_unconditional_branch(cont_bb)
