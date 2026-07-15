@@ -13,6 +13,9 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Type
             | TokenKind::Func
             | TokenKind::Fn
+            | TokenKind::Fault
+            | TokenKind::Reset
+            | TokenKind::Recover
             | TokenKind::Actor
             | TokenKind::Newtype
             | TokenKind::Let
@@ -123,9 +126,12 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "if" => TokenKind::If,
         "else" => TokenKind::Else,
         "for" => TokenKind::For,
+        "fault" => TokenKind::Fault,
         "in" => TokenKind::In,
         "while" => TokenKind::While,
         "return" => TokenKind::Return,
+        "reset" => TokenKind::Reset,
+        "recover" => TokenKind::Recover,
         "break" => TokenKind::Break,
         "continue" => TokenKind::Continue,
         "match" => TokenKind::Match,
@@ -216,5 +222,16 @@ mod tests {
         assert_eq!(keyword_or_ident("nothing"), TokenKind::Nothing);
         // Type names remain identifiers (they're not reserved at lex time).
         assert_eq!(keyword_or_ident("i32"), TokenKind::Ident("i32".into()));
+    }
+
+    #[test]
+    fn fault_reset_recover_are_keywords() {
+        // F-H7: soft keywords must tokenize as keyword kinds.
+        assert!(matches!(keyword_or_ident("fault"), TokenKind::Fault));
+        assert!(matches!(keyword_or_ident("reset"), TokenKind::Reset));
+        assert!(matches!(keyword_or_ident("recover"), TokenKind::Recover));
+        assert!(is_keyword_kind(&TokenKind::Fault));
+        assert!(is_keyword_kind(&TokenKind::Reset));
+        assert!(is_keyword_kind(&TokenKind::Recover));
     }
 }

@@ -117,14 +117,25 @@ impl Lockfile {
     /// This is a known limitation; if it becomes a bottleneck, switch
     /// to a sorted-and-indexed lookup.
     pub fn resolve_version(constraint: &str, available: &[&str]) -> Option<String> {
+        // P-H4: sort by semver so `*` / best-match are independent of filesystem order.
+        let mut sorted: Vec<&str> = available.to_vec();
+        sorted.sort_by(|a, b| {
+            match (semver::Version::parse(a), semver::Version::parse(b)) {
+                (Ok(va), Ok(vb)) => va.cmp(&vb),
+                (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                (Err(_), Err(_)) => a.cmp(b),
+            }
+        });
+
         if constraint == "*" || constraint.is_empty() {
-            return available.last().map(|s| s.to_string());
+            return sorted.last().map(|s| s.to_string());
         }
 
         // Try to parse as semver constraint
         if let Ok(req) = semver::VersionReq::parse(constraint) {
             let mut best: Option<semver::Version> = None;
-            for ver_str in available {
+            for ver_str in &sorted {
                 if let Ok(ver) = semver::Version::parse(ver_str) {
                     if req.matches(&ver) {
                         match &best {
@@ -139,7 +150,7 @@ impl Lockfile {
         }
 
         // Fallback: exact match
-        available
+        sorted
             .iter()
             .find(|&&v| v == constraint)
             .map(|s| s.to_string())
@@ -222,5 +233,17 @@ mod tests {
             Lockfile::resolve_version(">=0.5, <2.0", &available),
             Some("1.5.0".into())
         );
+    }
+
+    #[test]
+    fn resolve_version_star_independent_of_order() {
+        // P-H4: `*` must pick max semver regardless of input order.
+        let a = ["0.9.0", "1.2.0", "1.0.0"];
+        let b = ["1.0.0", "0.9.0", "1.2.0"];
+        assert_eq!(
+            Lockfile::resolve_version("*", &a),
+            Lockfile::resolve_version("*", &b)
+        );
+        assert_eq!(Lockfile::resolve_version("*", &a).as_deref(), Some("1.2.0"));
     }
 }
