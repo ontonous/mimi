@@ -263,19 +263,25 @@ fn resolve_import_path(from: &Path, import_path: &[String], acc: &Acc) -> Result
         }
     }
 
-    // 4. .mimi/deps/
+    // 4. .mimi/deps/ — P-H7: only packages declared in lockfile/manifest deps.
     let deps_dir = acc.base_dir.join(".mimi").join("deps");
     if deps_dir.exists() {
         if let Some(first) = import_path.first() {
-            let dep_root = deps_dir.join(first);
-            if dep_root.exists() {
-                let dep_relative: PathBuf = import_path.iter().skip(1).collect();
-                if let Some(found) = try_paths(&[
-                    dep_root.join(&dep_relative).with_extension("mimi"),
-                    dep_root.with_extension("mimi"),
-                ]) {
-                    if import_path.len() == 1 || found != dep_root.with_extension("mimi") {
-                        return Ok(found);
+            let declared = acc.dep_paths.contains_key(first)
+                || acc.lock_entries.contains_key(first);
+            if !declared {
+                // Fall through — do not load undeclared cached packages.
+            } else {
+                let dep_root = deps_dir.join(first);
+                if dep_root.exists() {
+                    let dep_relative: PathBuf = import_path.iter().skip(1).collect();
+                    if let Some(found) = try_paths(&[
+                        dep_root.join(&dep_relative).with_extension("mimi"),
+                        dep_root.with_extension("mimi"),
+                    ]) {
+                        if import_path.len() == 1 || found != dep_root.with_extension("mimi") {
+                            return Ok(found);
+                        }
                     }
                 }
             }
