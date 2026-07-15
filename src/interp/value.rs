@@ -1108,6 +1108,17 @@ impl std::fmt::Display for Value {
                             }
                             Value::Bool(b) => write!(f, "{}", b)?,
                             Value::Float(x) => write!(f, "{}", x)?,
+                            // Product tuples in Map Display: match codegen `(1, 2)`.
+                            Value::Tuple(items) => {
+                                write!(f, "(")?;
+                                for (j, item) in items.iter().enumerate() {
+                                    if j > 0 {
+                                        write!(f, ", ")?;
+                                    }
+                                    write!(f, "{}", item)?;
+                                }
+                                write!(f, ")")?;
+                            }
                             other => write!(f, "{}", other)?,
                         }
                     }

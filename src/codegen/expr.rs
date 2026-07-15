@@ -1013,6 +1013,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             "sort_f64" => return Some("List<f64>".to_string()),
             "exec" | "exec_safe" => return Some("ExecResult".to_string()),
             "file_stat" => return Some("StatResult".to_string()),
+            // Opaque map/set handles — keep Map/Set so println/to_json dispatch.
+            "map_new" => return Some("Map".to_string()),
+            "map_set" | "map_remove" => return Some("Map".to_string()),
+            "set_new" | "set_insert" | "set_remove" => return Some("Set".to_string()),
             _ => {}
         }
         // User-defined functions

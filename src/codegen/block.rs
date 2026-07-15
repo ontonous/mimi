@@ -483,6 +483,71 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             {
                                                 self.var_type_names.insert(name.clone(), obj_type);
                                             }
+                                            // map_set / map_remove return Map; prefer value-type
+                                            // from third arg when present (e.g. product-tuple).
+                                            match func_name.as_str() {
+                                                "map_new" => {
+                                                    self.var_type_names
+                                                        .insert(name.clone(), "Map".to_string());
+                                                }
+                                                "map_set" | "map_remove" => {
+                                                    if let Expr::Call(_, args) = init {
+                                                        if let Some(val_arg) = args.get(2) {
+                                                            let vt = self
+                                                                .infer_object_type(val_arg, vars);
+                                                            if vt.starts_with('(')
+                                                                || self.is_product_tuple_alias(&vt)
+                                                            {
+                                                                let resolved = if self
+                                                                    .is_product_tuple_alias(&vt)
+                                                                {
+                                                                    self.resolve_alias_type_name(
+                                                                        &vt,
+                                                                    )
+                                                                } else {
+                                                                    vt
+                                                                };
+                                                                self.var_type_names.insert(
+                                                                    name.clone(),
+                                                                    format!(
+                                                                        "Map<string, {}>",
+                                                                        resolved
+                                                                    ),
+                                                                );
+                                                            } else if !vt.is_empty()
+                                                                && vt != "i64"
+                                                                && vt != "int"
+                                                            {
+                                                                self.var_type_names.insert(
+                                                                    name.clone(),
+                                                                    format!(
+                                                                        "Map<string, {}>",
+                                                                        vt
+                                                                    ),
+                                                                );
+                                                            } else {
+                                                                self.var_type_names.insert(
+                                                                    name.clone(),
+                                                                    "Map".to_string(),
+                                                                );
+                                                            }
+                                                        } else {
+                                                            self.var_type_names.insert(
+                                                                name.clone(),
+                                                                "Map".to_string(),
+                                                            );
+                                                        }
+                                                    } else {
+                                                        self.var_type_names
+                                                            .insert(name.clone(), "Map".to_string());
+                                                    }
+                                                }
+                                                "set_new" | "set_insert" | "set_remove" => {
+                                                    self.var_type_names
+                                                        .insert(name.clone(), "Set".to_string());
+                                                }
+                                                _ => {}
+                                            }
                                         } else if let Some((ret_ty, is_async)) = self
                                             .func_defs
                                             .get(func_name)
@@ -626,6 +691,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             self.var_types.insert(name.clone(), ta.clone());
                                             self.register_list_elem_type(name, ta);
+                                        } else if (tn == "Map" || tn == "Set") && !args.is_empty()
+                                        {
+                                            if let Some(full) = self.get_full_type_name(ta) {
+                                                self.var_type_names.insert(name.clone(), full);
+                                            } else {
+                                                self.var_type_names
+                                                    .insert(name.clone(), tn.clone());
+                                            }
+                                            self.var_types.insert(name.clone(), ta.clone());
                                         } else {
                                             self.var_type_names.insert(name.clone(), tn.clone());
                                             self.var_types.insert(name.clone(), ta.clone());
@@ -651,6 +725,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                         self.var_types.insert(name.clone(), ta.clone());
                                         self.register_list_elem_type(name, ta);
+                                    } else if (tn == "Map" || tn == "Set") && !args.is_empty() {
+                                        if let Some(full) = self.get_full_type_name(ta) {
+                                            self.var_type_names.insert(name.clone(), full);
+                                        } else {
+                                            self.var_type_names.insert(name.clone(), tn.clone());
+                                        }
+                                        self.var_types.insert(name.clone(), ta.clone());
                                     } else {
                                         self.var_type_names.insert(name.clone(), tn.clone());
                                         self.var_types.insert(name.clone(), ta.clone());
@@ -1462,7 +1543,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // (e.g. std::strings::words/lines/split).  The callee is a
                         // function name, not a bare identifier, so it is not covered
                         // by the branch above.
-                        if let Expr::Call(callee, _) = init {
+                        if let Expr::Call(callee, args) = init {
                             if let Expr::Ident(fn_name) = callee.as_ref() {
                                 // General user-function return-type tracking (e.g. std::csv::parse
                                 // returns List<List<string>>). This lets downstream indexing and
@@ -1499,7 +1580,61 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             ),
                                         );
                                     }
+                                    "map_new" => {
+                                        self.var_type_names
+                                            .insert(name.clone(), "Map".to_string());
+                                    }
+                                    "map_set" | "map_remove" => {
+                                        if let Some(val_arg) = args.get(2) {
+                                            let vt = self.infer_object_type(val_arg, vars);
+                                            if vt.starts_with('(')
+                                                || self.is_product_tuple_alias(&vt)
+                                            {
+                                                let resolved =
+                                                    if self.is_product_tuple_alias(&vt) {
+                                                        self.resolve_alias_type_name(&vt)
+                                                    } else {
+                                                        vt
+                                                    };
+                                                self.var_type_names.insert(
+                                                    name.clone(),
+                                                    format!("Map<string, {}>", resolved),
+                                                );
+                                            } else if !vt.is_empty()
+                                                && vt != "i64"
+                                                && vt != "int"
+                                            {
+                                                self.var_type_names.insert(
+                                                    name.clone(),
+                                                    format!("Map<string, {}>", vt),
+                                                );
+                                            } else {
+                                                self.var_type_names
+                                                    .insert(name.clone(), "Map".to_string());
+                                            }
+                                        } else {
+                                            self.var_type_names
+                                                .insert(name.clone(), "Map".to_string());
+                                        }
+                                    }
+                                    "set_new" | "set_insert" | "set_remove" => {
+                                        self.var_type_names
+                                            .insert(name.clone(), "Set".to_string());
+                                    }
                                     _ => {}
+                                }
+                            }
+                        }
+                        // from_json::<Map<…>> / Set turbofish type tracking
+                        if let Expr::Turbofish(_fn, turbo_type_args, _) = init {
+                            if let Some(ta) = turbo_type_args.first() {
+                                if let Type::Name(tn, args) = ta {
+                                    if (tn == "Map" || tn == "Set") && !args.is_empty() {
+                                        if let Some(full) = self.get_full_type_name(ta) {
+                                            self.var_type_names.insert(name.clone(), full);
+                                        }
+                                        self.var_types.insert(name.clone(), ta.clone());
+                                    }
                                 }
                             }
                         }

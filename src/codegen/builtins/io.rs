@@ -392,6 +392,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::IntValue(iv) => {
                 // Map/Set opaque handles: serialize via runtime JSON helpers.
                 if arg_type == "Map" || arg_type.starts_with("Map<") {
+                    // Map of product-tuple values: decode heap ValueHandles.
+                    if let Some(val_ty) = arg_type
+                        .strip_prefix("Map<string, ")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                            let elem = if self.is_product_tuple_alias(val_ty) {
+                                self.resolve_alias_type_name(val_ty)
+                            } else {
+                                val_ty.to_string()
+                            };
+                            // Display style for println.
+                            let raw = self.emit_map_product_to_json(*iv, &elem, 1)?;
+                            return Ok((
+                                BasicMetadataValueEnum::PointerValue(raw),
+                                "%s".to_string(),
+                            ));
+                        }
+                    }
                     let fn_name = if arg_type.contains("Map<string, string>") {
                         "mimi_map_to_json_string"
                     } else if arg_type.contains("Map<string, bool>") {
@@ -4668,6 +4687,59 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         self.builder.position_at_end(merge_bb);
         Ok(buf)
+    }
+
+    /// Map of product-tuple values: values are heap-packed i64 structs.
+    /// `display_style` 0 = JSON `[1,2]`, 1 = Display `(1, 2)`.
+    pub(in crate::codegen) fn emit_map_product_to_json(
+        &self,
+        map_handle: inkwell::values::IntValue<'ctx>,
+        product_type: &str,
+        display_style: i64,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        // Count comma-separated fields at depth 0 inside `(…)`.
+        let inner = product_type
+            .strip_prefix('(')
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap_or(product_type);
+        let mut arity: i64 = 0;
+        let mut depth = 0i32;
+        let mut any = false;
+        for ch in inner.chars() {
+            match ch {
+                '<' | '(' => depth += 1,
+                '>' | ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    arity += 1;
+                    any = true;
+                }
+                c if !c.is_whitespace() => any = true,
+                _ => {}
+            }
+        }
+        if any {
+            arity += 1;
+        }
+        if arity <= 0 {
+            arity = 2;
+        }
+        let func = self.get_runtime_fn("mimi_map_to_json_product_i64")?;
+        Ok(self
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(map_handle),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
+                    BasicMetadataValueEnum::IntValue(
+                        i64_ty.const_int(display_style as u64, false),
+                    ),
+                ],
+                "map_product_json",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("map product to_json void")?
+            .into_pointer_value())
     }
 
     /// JSON for a List payload given its type string `List<…>` (or bare inner).
