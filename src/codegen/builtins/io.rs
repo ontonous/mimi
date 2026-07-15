@@ -7795,6 +7795,60 @@ impl<'ctx> CodeGenerator<'ctx> {
             };
             return self.emit_list_product_tuple_to_json(list_ptr, &elem);
         }
+        if let Some(opt_inner) = inner
+            .strip_prefix("Option<")
+            .and_then(|s| s.strip_suffix('>'))
+        {
+            if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner) {
+                let elem = if self.is_product_tuple_alias(opt_inner) {
+                    self.resolve_alias_type_name(opt_inner)
+                } else {
+                    opt_inner.to_string()
+                };
+                let arity = {
+                    let body = elem
+                        .strip_prefix('(')
+                        .and_then(|s| s.strip_suffix(')'))
+                        .unwrap_or(&elem);
+                    let mut arity = 0i64;
+                    let mut depth = 0i32;
+                    let mut any = false;
+                    for ch in body.chars() {
+                        match ch {
+                            '<' | '(' => depth += 1,
+                            '>' | ')' => depth -= 1,
+                            ',' if depth == 0 => {
+                                arity += 1;
+                                any = true;
+                            }
+                            c if !c.is_whitespace() => any = true,
+                            _ => {}
+                        }
+                    }
+                    if any {
+                        arity += 1;
+                    }
+                    arity.max(1)
+                };
+                let func = self.get_runtime_fn("mimi_list_option_product_to_json")?;
+                let i64_ty = self.context.i64_type();
+                return Ok(self
+                    .build_call(
+                        func,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(list_ptr),
+                            BasicMetadataValueEnum::IntValue(
+                                i64_ty.const_int(arity as u64, false),
+                            ),
+                            BasicMetadataValueEnum::IntValue(i64_ty.const_int(0, false)),
+                        ],
+                        "list_opt_prod_json",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("list option product to_json void")?
+                    .into_pointer_value());
+            }
+        }
         if inner.starts_with("Map") {
             if let Some(val_ty) = inner
                 .strip_prefix("Map<string, ")
@@ -7879,6 +7933,65 @@ impl<'ctx> CodeGenerator<'ctx> {
                     inner
                 };
                 return self.emit_list_product_tuple_to_string(list_sv, &elem);
+            }
+            if let Some(opt_inner) = inner
+                .strip_prefix("Option<")
+                .and_then(|s| s.strip_suffix('>'))
+            {
+                if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner) {
+                    let elem = if self.is_product_tuple_alias(opt_inner) {
+                        self.resolve_alias_type_name(opt_inner)
+                    } else {
+                        opt_inner.to_string()
+                    };
+                    // list_sv is list struct; store and pass pointer to runtime.
+                    let list_ty = self.list_struct_type();
+                    let alloca =
+                        self.build_alloca(BasicTypeEnum::StructType(list_ty), "res_ok_list_opt")?;
+                    self.build_store(alloca, list_sv)?;
+                    let arity = {
+                        let body = elem
+                            .strip_prefix('(')
+                            .and_then(|s| s.strip_suffix(')'))
+                            .unwrap_or(&elem);
+                        let mut arity = 0i64;
+                        let mut depth = 0i32;
+                        let mut any = false;
+                        for ch in body.chars() {
+                            match ch {
+                                '<' | '(' => depth += 1,
+                                '>' | ')' => depth -= 1,
+                                ',' if depth == 0 => {
+                                    arity += 1;
+                                    any = true;
+                                }
+                                c if !c.is_whitespace() => any = true,
+                                _ => {}
+                            }
+                        }
+                        if any {
+                            arity += 1;
+                        }
+                        arity.max(1)
+                    };
+                    let func = self.get_runtime_fn("mimi_list_option_product_to_json")?;
+                    let i64_ty = self.context.i64_type();
+                    return Ok(self
+                        .build_call(
+                            func,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(alloca),
+                                BasicMetadataValueEnum::IntValue(
+                                    i64_ty.const_int(arity as u64, false),
+                                ),
+                                BasicMetadataValueEnum::IntValue(i64_ty.const_int(1, false)),
+                            ],
+                            "res_ok_list_opt_disp",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("list option product display void")?
+                        .into_pointer_value());
+                }
             }
             if inner.starts_with("Map") {
                 return self.emit_list_map_to_string(list_sv, &inner);

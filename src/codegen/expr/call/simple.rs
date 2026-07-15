@@ -3532,7 +3532,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                     let ok_bv = self.build_extract_value(sv.into(), 1, "res_ok")?;
                     // Result of Option: Ok is nested Option struct {i1, payload}.
-                    if obj_type.contains("Option")
+                    // Require Option to be the Ok type root (not List<Option<…>> etc.).
+                    let result_ok_is_option = obj_type
+                        .strip_prefix("Result<")
+                        .map(|s| {
+                            let mut depth = 0i32;
+                            for (i, ch) in s.char_indices() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' | ')' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        return s[..i].trim().starts_with("Option");
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            false
+                        })
+                        .unwrap_or(false);
+                    if result_ok_is_option
                         && matches!(ok_bv, BasicValueEnum::StructValue(_))
                     {
                         let opt_sv = ok_bv.into_struct_value();
@@ -4300,6 +4318,74 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 list_elem
                             };
                             self.emit_list_product_tuple_to_json(list_ptr, &elem)?
+                        } else if let Some(opt_inner) = list_elem
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if opt_inner.starts_with('(')
+                                || self.is_product_tuple_alias(opt_inner)
+                            {
+                                let elem = if self.is_product_tuple_alias(opt_inner) {
+                                    self.resolve_alias_type_name(opt_inner)
+                                } else {
+                                    opt_inner.to_string()
+                                };
+                                let arity = {
+                                    let body = elem
+                                        .strip_prefix('(')
+                                        .and_then(|s| s.strip_suffix(')'))
+                                        .unwrap_or(&elem);
+                                    let mut arity = 0i64;
+                                    let mut depth = 0i32;
+                                    let mut any = false;
+                                    for ch in body.chars() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                arity += 1;
+                                                any = true;
+                                            }
+                                            c if !c.is_whitespace() => any = true,
+                                            _ => {}
+                                        }
+                                    }
+                                    if any {
+                                        arity += 1;
+                                    }
+                                    arity.max(1)
+                                };
+                                let func =
+                                    self.get_runtime_fn("mimi_list_option_product_to_json")?;
+                                let i64_ty = self.context.i64_type();
+                                self.build_call(
+                                    func,
+                                    &[
+                                        BasicMetadataValueEnum::PointerValue(list_ptr),
+                                        BasicMetadataValueEnum::IntValue(
+                                            i64_ty.const_int(arity as u64, false),
+                                        ),
+                                        BasicMetadataValueEnum::IntValue(
+                                            i64_ty.const_int(0, false),
+                                        ),
+                                    ],
+                                    "res_list_opt_prod_json",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("list option product to_json void")?
+                                .into_pointer_value()
+                            } else {
+                                // fallback scalar option list
+                                let list_fn = self.get_runtime_fn("mimi_list_i64_to_json")?;
+                                self.build_call(
+                                    list_fn,
+                                    &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                                    "res_list_json",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("list to_json void")?
+                                .into_pointer_value()
+                            }
                         } else if list_elem.starts_with("Map") {
                             if let Some(val_ty) = list_elem
                                 .strip_prefix("Map<string, ")
