@@ -5273,6 +5273,151 @@ pub extern "C" fn mimi_set_to_json_result_option_product_i64(
     }
 }
 
+
+/// List of Set of Result of product from JSON.
+#[no_mangle]
+pub extern "C" fn mimi_list_from_json_set_result_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> *mut MimiList {
+    let empty = || {
+        let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
+        if !list.is_null() {
+            unsafe {
+                (*list).len = 0;
+                (*list).data = std::ptr::null_mut();
+                (*list).owns_data = true;
+            }
+        }
+        list
+    };
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return empty();
+    }
+    let s = unsafe { cstr_to_string(json) };
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'[' {
+        return empty();
+    }
+    i += 1;
+    let mut handles: Vec<i64> = Vec::new();
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b']' {
+            break;
+        }
+        if bytes[i] != b'[' {
+            break;
+        }
+        let arr_start = i;
+        let mut depth = 0i32;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        if bytes[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let arr = String::from_utf8_lossy(&bytes[arr_start..i]).into_owned();
+        let c_arr = alloc_c_string(&arr);
+        let set_h = mimi_set_from_json_result_product_i64(c_arr, arity);
+        if !c_arr.is_null() {
+            unsafe {
+                libc::free(c_arr as *mut _);
+            }
+        }
+        handles.push(set_h as i64);
+    }
+    let list = unsafe { libc::malloc(std::mem::size_of::<MimiList>()) as *mut MimiList };
+    if list.is_null() {
+        return empty();
+    }
+    let data_size = handles.len() * 8;
+    let data = if data_size == 0 {
+        std::ptr::null_mut()
+    } else {
+        unsafe { libc::malloc(data_size) as *mut i64 }
+    };
+    if data_size > 0 && data.is_null() {
+        unsafe {
+            libc::free(list as *mut _);
+        }
+        return empty();
+    }
+    if !data.is_null() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(handles.as_ptr(), data, handles.len());
+        }
+    }
+    unsafe {
+        (*list).len = handles.len() as i64;
+        (*list).data = data as *mut *mut std::ffi::c_char;
+        (*list).owns_data = true;
+    }
+    list
+}
+
+/// List of Set of Result of product Display/JSON.
+#[no_mangle]
+pub extern "C" fn mimi_list_set_result_product_to_json(
+    list: *const MimiList,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if list.is_null() || arity <= 0 || arity > 16 {
+        return alloc_c_string("[]");
+    }
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len <= 0 {
+        return alloc_c_string("[]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize * 2 + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(if display_style != 0 {
+                String::from(", ")
+            } else {
+                String::from(",")
+            });
+        }
+        let h = unsafe { *(lst.data as *const i64).offset(i) };
+        let set_json =
+            mimi_set_to_json_result_product_i64(h as SetHandle, arity, display_style);
+        let s = unsafe { cstr_to_string(set_json) };
+        if !set_json.is_null() {
+            unsafe {
+                libc::free(set_json as *mut _);
+            }
+        }
+        parts.push(s);
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
 /// List of Result of Option of product from JSON.
 /// Element pack: `{i64 res_disc, i64 opt_pack_or_err}` where opt_pack is option product heap.
 #[no_mangle]

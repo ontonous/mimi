@@ -1319,6 +1319,61 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                 }
+                // List of Set of Result of product.
+                if let Type::Name(sn, sargs) = inner_ty {
+                    if sn == "Set" && sargs.len() == 1 {
+                        if let Type::Name(rn, rargs) = &sargs[0] {
+                            if rn == "Result" && !rargs.is_empty() {
+                                let res_ok = match &rargs[0] {
+                                    Type::Name(an, aargs) if aargs.is_empty() => {
+                                        if let Some(td) = self.type_defs.get(an) {
+                                            if let crate::ast::TypeDefKind::Alias(inner) =
+                                                &td.kind
+                                            {
+                                                inner.clone()
+                                            } else {
+                                                rargs[0].clone()
+                                            }
+                                        } else {
+                                            rargs[0].clone()
+                                        }
+                                    }
+                                    other => other.clone(),
+                                };
+                                if let Type::Tuple(elems) = res_ok {
+                                    let arity = elems.len() as u64;
+                                    let func = self.get_runtime_fn(
+                                        "mimi_list_from_json_set_result_product_i64",
+                                    )?;
+                                    let list_ptr = self
+                                        .build_call(
+                                            func,
+                                            &[
+                                                BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                                BasicMetadataValueEnum::IntValue(
+                                                    i64_ty.const_int(arity, false),
+                                                ),
+                                            ],
+                                            "list_from_json_set_result_product",
+                                        )?
+                                        .try_as_basic_value_opt()
+                                        .ok_or("list from_json set result product void")?
+                                        .into_pointer_value();
+                                    let list_ty = self.list_struct_type();
+                                    let loaded = self
+                                        .builder
+                                        .build_load(
+                                            BasicTypeEnum::StructType(list_ty),
+                                            list_ptr,
+                                            "list_set_res_prod_ld",
+                                        )
+                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                                    return Ok(loaded.into());
+                                }
+                            }
+                        }
+                    }
+                }
                 // List of Result of product / Map of product: dedicated runtime paths.
                 if let Type::Name(rn, rargs) = inner_ty {
                     if rn == "Result" && rargs.len() == 2 {
