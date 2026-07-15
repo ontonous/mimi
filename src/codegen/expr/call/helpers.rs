@@ -1235,6 +1235,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Wrap a raw C string pointer into the Mimi `{ ptr, len }` string struct.
+    ///
+    /// Uses pure SSA `insertvalue` (no alloca) so the result can be emitted
+    /// before a block terminator — required when fixing match-phi type
+    /// mismatches in predecessor blocks.
     pub(in crate::codegen) fn wrap_raw_string_ptr(
         &self,
         ptr: inkwell::values::PointerValue<'ctx>,
@@ -1249,7 +1253,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?
             .into_int_value();
-        self.build_string_struct(ptr, len)
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let struct_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(i8_ptr_ty),
+                BasicTypeEnum::IntType(self.context.i64_type()),
+            ],
+            false,
+        );
+        let with_ptr = self
+            .builder
+            .build_insert_value(struct_ty.get_undef(), ptr, 0, "str_wrap_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("str wrap ptr: {}", e)))?
+            .into_struct_value();
+        let with_len = self
+            .builder
+            .build_insert_value(with_ptr, len, 1, "str_wrap_len")
+            .map_err(|e| CompileError::LlvmError(format!("str wrap len: {}", e)))?;
+        Ok(with_len.into_struct_value().into())
     }
 
     /// Normalize a string value to its canonical {i8*, i64} struct form.
