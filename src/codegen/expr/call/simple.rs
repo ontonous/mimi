@@ -312,6 +312,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.maybe_load_reprc_struct_args_for_extern(name, &mut compiled_args)?;
         self.coerce_args_to_param_types(name, &mut compiled_args)?;
 
+        // read_lines_each needs the closure struct (not metadata-only) to
+        // build a void(char*) C thunk that re-wraps lines as Mimi strings.
+        if name == "read_lines_each" {
+            return self.compile_read_lines_each_call(&compiled_args);
+        }
+
         let mut metadata_args: Vec<_> = compiled_args
             .iter()
             .map(|v| types::basic_value_to_metadata_value(v, self.context.i64_type()))
@@ -2486,6 +2492,190 @@ impl<'ctx> CodeGenerator<'ctx> {
         let call = self.build_call(function, &metadata_args, name)?;
         Ok(call_try_basic_value(&call)
             .unwrap_or(self.context.i64_type().const_int(0, false).into()))
+    }
+
+    /// Codegen for `read_lines_each(path, callback)`.
+    ///
+    /// Runtime `mimi_read_lines_each` expects `void (*)(const char*)` — not a
+    /// Mimi closure. Build a thin C thunk that:
+    /// 1. Loads TLS-stored Mimi closure `{fn_ptr, env_ptr}`
+    /// 2. Wraps the C line pointer into `{ptr, len}` via strlen
+    /// 3. Calls `fn_ptr(env, string_struct)` (Mimi lambda ABI)
+    pub(in crate::codegen) fn compile_read_lines_each_call(
+        &mut self,
+        compiled_args: &[BasicValueEnum<'ctx>],
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        if compiled_args.len() != 2 {
+            return Err(CompileError::WrongArgCount(
+                "read_lines_each expects 2 arguments (path, callback)".into(),
+            ));
+        }
+        let path_ptr = match compiled_args[0] {
+            BasicValueEnum::PointerValue(pv) => pv,
+            BasicValueEnum::StructValue(sv) => {
+                // Mimi string {ptr, len} — extract data pointer.
+                self.builder
+                    .build_extract_value(sv, 0, "rle_path_ptr")
+                    .map_err(|e| CompileError::LlvmError(format!("extract path: {}", e)))?
+                    .into_pointer_value()
+            }
+            _ => {
+                return Err(CompileError::Generic(
+                    "read_lines_each: path must be string".into(),
+                ))
+            }
+        };
+
+        let closure_sv = match compiled_args[1] {
+            BasicValueEnum::StructValue(sv) => sv,
+            _ => {
+                return Err(CompileError::Generic(
+                    "read_lines_each: callback must be a closure".into(),
+                ))
+            }
+        };
+        let fn_ptr = self
+            .builder
+            .build_extract_value(closure_sv, 0, "rle_fn_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("extract fn: {}", e)))?
+            .into_pointer_value();
+        let env_ptr = self
+            .builder
+            .build_extract_value(closure_sv, 1, "rle_env_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("extract env: {}", e)))?
+            .into_pointer_value();
+
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let string_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(i8_ptr),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+
+        // TLS globals for this call site (reused pattern from callback thunks).
+        let id = self.callback_thunk_counter;
+        self.callback_thunk_counter += 1;
+        let fn_global = self.module.add_global(
+            i8_ptr,
+            None,
+            &format!("__mimi_rle_fnptr_{}", id),
+        );
+        fn_global.set_initializer(&i8_ptr.const_null());
+        fn_global.set_thread_local(true);
+        fn_global.set_thread_local_mode(Some(inkwell::ThreadLocalMode::GeneralDynamicTLSModel));
+        let env_global = self.module.add_global(
+            i8_ptr,
+            None,
+            &format!("__mimi_rle_envptr_{}", id),
+        );
+        env_global.set_initializer(&i8_ptr.const_null());
+        env_global.set_thread_local(true);
+        env_global.set_thread_local_mode(Some(inkwell::ThreadLocalMode::GeneralDynamicTLSModel));
+
+        self.build_store(fn_global.as_pointer_value(), fn_ptr)?;
+        self.build_store(env_global.as_pointer_value(), env_ptr)?;
+        self.pending_callback_tls
+            .push(fn_global.as_pointer_value());
+        self.pending_callback_tls
+            .push(env_global.as_pointer_value());
+
+        // Build void(i8*) thunk if not already present for this id.
+        let thunk_name = format!("__mimi_rle_thunk_{}", id);
+        let void_ty = self.context.void_type();
+        let thunk_fn_ty = void_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false);
+        let thunk_fn = self.module.add_function(
+            &thunk_name,
+            thunk_fn_ty,
+            Some(inkwell::module::Linkage::Internal),
+        );
+        let saved_block = self.builder.get_insert_block();
+        let entry = self.context.append_basic_block(thunk_fn, "entry");
+        self.builder.position_at_end(entry);
+
+        let line_c = thunk_fn
+            .get_nth_param(0)
+            .ok_or_else(|| CompileError::LlvmError("rle thunk missing line param".into()))?
+            .into_pointer_value();
+        let tls_fn = self
+            .build_load(i8_ptr, fn_global.as_pointer_value(), "rle_tls_fn")?
+            .into_pointer_value();
+        let tls_env = self
+            .build_load(i8_ptr, env_global.as_pointer_value(), "rle_tls_env")?
+            .into_pointer_value();
+
+        // Wrap C string as Mimi {ptr, len} without alloca (SSA only).
+        let strlen_fn = self.get_runtime_fn("strlen")?;
+        let len = self
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(line_c)],
+                "rle_strlen",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("strlen void".into()))?
+            .into_int_value();
+        let str_with_ptr = self
+            .builder
+            .build_insert_value(string_ty.get_undef(), line_c, 0, "rle_str_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("rle str ptr: {}", e)))?
+            .into_struct_value();
+        let str_val = self
+            .builder
+            .build_insert_value(str_with_ptr, len, 1, "rle_str_len")
+            .map_err(|e| CompileError::LlvmError(format!("rle str len: {}", e)))?
+            .into_struct_value();
+
+        // Mimi lambda ABI: fn(env_ptr, string) -> i64 (ignore return).
+        let mimi_fn_ty = i64_ty.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                types::basic_to_metadata(self.context, BasicTypeEnum::StructType(string_ty)),
+            ],
+            false,
+        );
+        let fn_typed = self.build_pointer_cast(
+            tls_fn,
+            self.context.ptr_type(inkwell::AddressSpace::default()),
+            "rle_fn_typed",
+        )?;
+        let _ = self
+            .builder
+            .build_indirect_call(
+                mimi_fn_ty,
+                fn_typed,
+                &[
+                    BasicMetadataValueEnum::PointerValue(tls_env),
+                    BasicMetadataValueEnum::StructValue(str_val),
+                ],
+                "rle_cb_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("rle cb call: {}", e)))?;
+        self.build_return(None)?;
+
+        if let Some(bb) = saved_block {
+            self.builder.position_at_end(bb);
+        }
+
+        let runtime_fn = self.get_runtime_fn("mimi_read_lines_each")?;
+        let thunk_ptr = thunk_fn.as_global_value().as_pointer_value();
+        let call = self.build_call(
+            runtime_fn,
+            &[
+                BasicMetadataValueEnum::PointerValue(path_ptr),
+                BasicMetadataValueEnum::PointerValue(thunk_ptr),
+            ],
+            "read_lines_each",
+        )?;
+        // Clear TLS after the call (same as other callback builtins).
+        let tls_ptrs: Vec<_> = self.pending_callback_tls.drain(..).collect();
+        for p in tls_ptrs {
+            self.build_store(p, i8_ptr.const_null())?;
+        }
+        Ok(call_try_basic_value(&call)
+            .unwrap_or(i64_ty.const_int(0, false).into()))
     }
 
     pub(in crate::codegen) fn compile_call_mangled(

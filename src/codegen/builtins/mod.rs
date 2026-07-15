@@ -1510,7 +1510,7 @@ fn register_binary_i_o_streaming_line_reading<'ctx>(
     i8_ptr: inkwell::types::PointerType<'ctx>,
     _i32: inkwell::types::IntType<'ctx>,
     i64: inkwell::types::IntType<'ctx>,
-    _void: inkwell::types::VoidType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
 ) {
     // ========== Binary I/O & streaming line reading ==========
     // mimi_read_file_partial(path: i8*, max_bytes: i64) -> i8*
@@ -1547,6 +1547,21 @@ fn register_binary_i_o_streaming_line_reading<'ctx>(
     module.add_function(
         "mimi_read_lines_json",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_read_lines_each(path: i8*, callback: void(i8*)) -> i64
+    // Callback is C-style: receives a heap C-string line (freed by runtime after return).
+    let void_cb = void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false);
+    let cb_ptr = void_cb.ptr_type(inkwell::AddressSpace::default());
+    module.add_function(
+        "mimi_read_lines_each",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(cb_ptr),
+            ],
+            false,
+        ),
         Some(inkwell::module::Linkage::External),
     );
 }
@@ -1619,7 +1634,7 @@ pub fn is_builtin(name: &str) -> bool {
         | "exec" | "exec_safe" | "file_stat" | "append_file" | "set_env"
         | "exec_pipe"
         | "read_file_partial" | "read_file_bytes" | "write_file_bytes" | "read_lines_json"
-        | "read_lines_json_builtin"
+        | "read_lines_json_builtin" | "read_lines_each"
         | "sha256" | "base64_encode" | "base64_decode"
         | "str_contains" | "str_starts_with" | "str_ends_with"
         | "pow" | "random" | "pi"
