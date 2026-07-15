@@ -247,9 +247,9 @@ pub(crate) mod legacy {
                 if let Some(deps) = &m.dependencies {
                     for dep in deps {
                         if let Some(path_str) = &dep.path {
-                            // B1: reject path deps that escape the package dir.
+                            // Path deps may use ../sibling (monorepo). Absolute/NUL rejected.
                             let dep_path =
-                                match crate::path_safety::validate_safe_path(&dir, path_str) {
+                                match crate::path_safety::resolve_path_dep(&dir, path_str) {
                                     Ok(p) => p,
                                     Err(_) => continue,
                                 };
