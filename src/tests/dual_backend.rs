@@ -12345,3 +12345,22 @@ fn dual_from_json_result_option_product_err() {
         "Err(e)"
     );
 }
+
+/// from_json Option of Result of product-tuple tagged dual.
+#[test]
+fn dual_from_json_option_result_product_tagged() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let o = from_json::<Option<Result<(i32, i32), string>>>("{\"Ok\":[1,2]}")
+            println(o)
+            println(to_json(o))
+            0
+        }
+        "#,
+        "Some(Ok((1, 2)))\n{\"Some\":[{\"Ok\":[[1,2]]}]}"
+    );
+}
