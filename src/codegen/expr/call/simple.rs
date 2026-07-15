@@ -691,8 +691,52 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .strip_prefix("Option<")
                             .and_then(|s| s.strip_suffix('>'))
                             .unwrap_or("");
+                        // List of Option of Set of product.
+                        if opt_inner.starts_with("Set<") {
+                            if let Some(elem) = opt_inner
+                                .strip_prefix("Set<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                                    let resolved = if self.is_product_tuple_alias(elem) {
+                                        self.resolve_alias_type_name(elem)
+                                    } else {
+                                        elem.to_string()
+                                    };
+                                    let mut arity: i64 = 0;
+                                    let mut depth = 0i32;
+                                    let mut any = false;
+                                    let body = resolved
+                                        .strip_prefix('(')
+                                        .and_then(|s| s.strip_suffix(')'))
+                                        .unwrap_or(resolved.as_str());
+                                    for ch in body.chars() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                arity += 1;
+                                                any = true;
+                                            }
+                                            c if !c.is_whitespace() => any = true,
+                                            _ => {}
+                                        }
+                                    }
+                                    if any {
+                                        arity += 1;
+                                    }
+                                    let raw = self.emit_list_option_set_product_to_json(
+                                        alloca,
+                                        arity.max(1),
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return self.wrap_c_string(raw);
+                                }
+                            }
+                        }
                         let needs_full = opt_inner.starts_with("Result")
                             || opt_inner.starts_with("List")
+                            || opt_inner.starts_with("Set")
                             || opt_inner.starts_with('(')
                             || opt_inner.contains("Tuple")
                             || self.type_defs.get(opt_inner).is_some_and(|td| {
@@ -3214,6 +3258,59 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 || obj_type.contains("Map<string, f32>")
                             {
                                 3
+                            } else if let Some(val_ty) = obj_type
+                                .find("Map<string,")
+                                .map(|i| &obj_type[i + "Map<string,".len()..])
+                                .map(|s| s.trim_start())
+                                .and_then(|s| {
+                                    let mut depth = 0i32;
+                                    for (j, ch) in s.char_indices() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' if depth == 0 => {
+                                                return Some(s[..j].trim());
+                                            }
+                                            '>' | ')' => depth -= 1,
+                                            _ => {}
+                                        }
+                                    }
+                                    None
+                                })
+                            {
+                                if val_ty.starts_with('(')
+                                    || self.is_product_tuple_alias(val_ty)
+                                {
+                                    let elem = if self.is_product_tuple_alias(val_ty) {
+                                        self.resolve_alias_type_name(val_ty)
+                                    } else {
+                                        val_ty.to_string()
+                                    };
+                                    let mut arity: i64 = 0;
+                                    let mut depth = 0i32;
+                                    let mut any = false;
+                                    let body = elem
+                                        .strip_prefix('(')
+                                        .and_then(|s| s.strip_suffix(')'))
+                                        .unwrap_or(elem.as_str());
+                                    for ch in body.chars() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                arity += 1;
+                                                any = true;
+                                            }
+                                            c if !c.is_whitespace() => any = true,
+                                            _ => {}
+                                        }
+                                    }
+                                    if any {
+                                        arity += 1;
+                                    }
+                                    10 + arity.max(1)
+                                } else {
+                                    0
+                                }
                             } else {
                                 0
                             };
@@ -3240,6 +3337,56 @@ impl<'ctx> CodeGenerator<'ctx> {
                             } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>")
                             {
                                 3
+                            } else if let Some(elem) = obj_type
+                                .find("Set<")
+                                .map(|i| &obj_type[i + 4..])
+                                .and_then(|s| {
+                                    let mut depth = 0i32;
+                                    for (j, ch) in s.char_indices() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' if depth == 0 => {
+                                                return Some(s[..j].trim());
+                                            }
+                                            '>' | ')' => depth -= 1,
+                                            _ => {}
+                                        }
+                                    }
+                                    None
+                                })
+                            {
+                                if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                                    let resolved = if self.is_product_tuple_alias(elem) {
+                                        self.resolve_alias_type_name(elem)
+                                    } else {
+                                        elem.to_string()
+                                    };
+                                    let mut arity: i64 = 0;
+                                    let mut depth = 0i32;
+                                    let mut any = false;
+                                    let body = resolved
+                                        .strip_prefix('(')
+                                        .and_then(|s| s.strip_suffix(')'))
+                                        .unwrap_or(resolved.as_str());
+                                    for ch in body.chars() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                arity += 1;
+                                                any = true;
+                                            }
+                                            c if !c.is_whitespace() => any = true,
+                                            _ => {}
+                                        }
+                                    }
+                                    if any {
+                                        arity += 1;
+                                    }
+                                    10 + arity.max(1)
+                                } else {
+                                    0
+                                }
                             } else {
                                 0
                             };
