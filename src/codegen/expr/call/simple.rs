@@ -1149,6 +1149,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     self.register_heap_alloc(raw);
                                     return self.wrap_c_string(raw);
                                 }
+                                if set_elem.starts_with("Map<string, ") {
+                                    if let Some(val_ty) = set_elem
+                                        .strip_prefix("Map<string, ")
+                                        .and_then(|s| s.strip_suffix('>'))
+                                    {
+                                        if val_ty.starts_with('(')
+                                            || self.is_product_tuple_alias(val_ty)
+                                        {
+                                            let elem = if self
+                                                .is_product_tuple_alias(val_ty)
+                                            {
+                                                self.resolve_alias_type_name(val_ty)
+                                            } else {
+                                                val_ty.to_string()
+                                            };
+                                            let raw = self
+                                                .emit_map_list_set_map_product_to_json(
+                                                    handle, &elem, 0,
+                                                )?;
+                                            self.register_heap_alloc(raw);
+                                            return self.wrap_c_string(raw);
+                                        }
+                                    }
+                                }
                                 if let Some(opt_inner) = set_elem
                                     .strip_prefix("Option<")
                                     .and_then(|s| s.strip_suffix('>'))
@@ -1359,6 +1383,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     )?;
                                     self.register_heap_alloc(raw);
                                     return self.wrap_c_string(raw);
+                                }
+                                if list_elem.starts_with("Map<string, ") {
+                                    if let Some(val_ty) = list_elem
+                                        .strip_prefix("Map<string, ")
+                                        .and_then(|s| s.strip_suffix('>'))
+                                    {
+                                        if val_ty.starts_with('(')
+                                            || self.is_product_tuple_alias(val_ty)
+                                        {
+                                            let elem = if self
+                                                .is_product_tuple_alias(val_ty)
+                                            {
+                                                self.resolve_alias_type_name(val_ty)
+                                            } else {
+                                                val_ty.to_string()
+                                            };
+                                            let raw = self
+                                                .emit_map_set_list_map_product_to_json(
+                                                    handle, &elem, 0,
+                                                )?;
+                                            self.register_heap_alloc(raw);
+                                            return self.wrap_c_string(raw);
+                                        }
+                                    }
                                 }
                             }
                             if set_elem.starts_with("Map<string, ") {
