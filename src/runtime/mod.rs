@@ -1497,6 +1497,57 @@ pub extern "C" fn mimi_list_result_i64_to_json(list: *const MimiList) -> *mut st
     alloc_c_string(&parts.join(""))
 }
 
+/// Render `List<Option<Map>>` as JSON array of `{"Some":[{…}]}` / `"None"`.
+/// `mode`: 0=i64 map, 1=string map, 2=bool map, 3=f64 map.
+#[no_mangle]
+pub extern "C" fn mimi_list_option_map_to_json(
+    list: *const MimiList,
+    mode: i64,
+) -> *mut std::ffi::c_char {
+    if list.is_null() {
+        return alloc_c_string("[]");
+    }
+    let lst = unsafe { &*list };
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        let base = unsafe { *(lst.data as *const i64).offset(i) } as *const u8;
+        if base.is_null() {
+            parts.push(String::from("\"None\""));
+            continue;
+        }
+        // SAFETY: heap Option {i1, i64 map handle}.
+        let disc = unsafe { *base };
+        let handle = unsafe { *(base.add(8) as *const i64) } as MapHandle;
+        if disc != 0 {
+            let json_ptr = match mode {
+                1 => mimi_map_to_json_string(handle),
+                2 => mimi_map_to_json_bool(handle),
+                3 => mimi_map_to_json_f64_serde(handle),
+                _ => mimi_map_to_json_i64(handle),
+            };
+            let s = unsafe { cstr_to_string(json_ptr) };
+            if !json_ptr.is_null() {
+                unsafe { libc::free(json_ptr as *mut std::ffi::c_void) };
+            }
+            parts.push(format!("{{\"Some\":[{}]}}", s));
+        } else {
+            parts.push(String::from("\"None\""));
+        }
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
 /// Render `List<Option<i32>>` (ptrtoint of Option structs) as JSON array of
 /// `{"Some":[n]}` / `"None"` tags matching interp to_json.
 #[no_mangle]
