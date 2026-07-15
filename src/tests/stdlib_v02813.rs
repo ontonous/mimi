@@ -5,7 +5,7 @@
 //! (via `compile_and_run`) to enforce L1 (双后端等价性).
 
 use crate::interp;
-use crate::tests::{compile_and_run, run_source};
+use crate::tests::{compile_and_run, run_source, run_with_stdlib};
 
 // =====================================================================
 // v0.28.13 — trigonometric builtins (interpreter + codegen)
@@ -207,77 +207,62 @@ fn stdlib_v02813_my_sin_wrapper_inline() {
 
 #[test]
 fn stdlib_v02813_box_muller_in_range() {
-    // Box-Muller sample (the algorithm behind random_normal in stdlib).
-    // Sample should typically be in [-6, 6] over 50 trials.
+    // TC-H5: call stdlib random_normal instead of reimplementing Box-Muller.
     let src = r#"
         func main() -> bool {
             let mut i = 0
             let mut bad = 0
-            let eps = 0.000000000001
             while i < 50 {
-                let u1 = random()
-                let u2 = random()
-                let safe_u1 = if u1 < eps { eps } else { u1 }
-                let v = sqrt(-2.0 * ln(safe_u1)) * cos(2.0 * pi() * u2)
+                let v = random_normal()
                 if v < -6.0 || v > 6.0 { bad += 1 }
                 i += 1
             }
             bad == 0
         }
     "#;
-    assert_eq!(run_source(src), interp::Value::Bool(true));
+    assert_eq!(run_with_stdlib("mymath.mimi", src), interp::Value::Bool(true));
 }
 
 #[test]
 fn stdlib_v02813_random_uniform_in_range_inline() {
-    // random_uniform(lo, hi) = lo + (hi-lo) * random()
+    // TC-H5: call stdlib random_uniform.
     let src = r#"
         func main() -> bool {
             let mut i = 0
             let mut bad = 0
             while i < 50 {
-                let v = 10.0 + (20.0 - 10.0) * random()
+                let v = random_uniform(10.0, 20.0)
                 if v < 10.0 || v >= 20.0 { bad += 1 }
                 i += 1
             }
             bad == 0
         }
     "#;
-    assert_eq!(run_source(src), interp::Value::Bool(true));
+    assert_eq!(run_with_stdlib("mymath.mimi", src), interp::Value::Bool(true));
 }
 
 #[test]
 fn stdlib_v02813_random_exponential_positive_inline() {
-    // random_exponential(lambda) = -ln(1-u) / lambda
+    // TC-H5: call stdlib random_exponential.
     let src = r#"
         func main() -> bool {
             let mut i = 0
             let mut bad = 0
-            let eps = 0.000000000001
             while i < 50 {
-                let u = random()
-                let safe_u = if u < eps { eps } else { u }
-                let v = -ln(1.0 - safe_u) / 2.0
+                let v = random_exponential(2.0)
                 if v < 0.0 { bad += 1 }
                 i += 1
             }
             bad == 0
         }
     "#;
-    assert_eq!(run_source(src), interp::Value::Bool(true));
+    assert_eq!(run_with_stdlib("mymath.mimi", src), interp::Value::Bool(true));
 }
 
 #[test]
 fn stdlib_v02813_random_int_range_via_random_int() {
-    // random_int_range(lo, hi) delegates to random_int(lo, hi)
-    // which is a stdlib function. Test via the inline arithmetic.
+    // TC-H5: call stdlib random_int_range.
     let src = r#"
-        func random_int(lo: i32, hi: i32) -> i32 {
-            let span = hi - lo
-            if span <= 0 { return lo }
-            to_int(floor(random() * to_float(span))) + lo
-        }
-        func random_int_range(lo: i32, hi: i32) -> i32 { random_int(lo, hi) }
         func main() -> bool {
             let mut i = 0
             let mut bad = 0
@@ -289,7 +274,7 @@ fn stdlib_v02813_random_int_range_via_random_int() {
             bad == 0
         }
     "#;
-    assert_eq!(run_source(src), interp::Value::Bool(true));
+    assert_eq!(run_with_stdlib("mymath.mimi", src), interp::Value::Bool(true));
 }
 
 #[test]
@@ -467,7 +452,6 @@ fn stdlib_v02813_atan2_quadrants() {
 // v0.28.13 — std/array.mimi (fixed-size helpers built on List<string>)
 // =====================================================================
 
-use crate::tests::run_with_stdlib;
 
 #[test]
 fn stdlib_v02813_array_new_default_len() {
