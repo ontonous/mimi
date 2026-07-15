@@ -1835,45 +1835,103 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.builder.position_at_end(some_bb);
                             // Dispatch list to_json helper by element type.
                             let list_json = if obj_type.contains("Map<") {
-                                let mode = if obj_type.contains("Map<string, string>") {
-                                    1i64
-                                } else if obj_type.contains("Map<string, bool>") {
-                                    2
-                                } else if obj_type.contains("Map<string, f64>")
-                                    || obj_type.contains("Map<string, f32>")
-                                {
-                                    3
-                                } else {
-                                    0
-                                };
-                                let fn_ty = i8_ptr_ty.fn_type(
-                                    &[
-                                        BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
-                                        BasicMetadataTypeEnum::IntType(
-                                            self.context.i64_type(),
-                                        ),
-                                    ],
-                                    false,
-                                );
-                                let callee = self
-                                    .module
-                                    .get_function("mimi_list_map_to_json")
-                                    .unwrap_or_else(|| {
-                                        self.module.add_function(
-                                            "mimi_list_map_to_json",
-                                            fn_ty,
-                                            Some(inkwell::module::Linkage::External),
-                                        )
+                                // Option of List of Map of product.
+                                // Accept both `Map<string, (…)>` and `Map<string,(…)>`.
+                                let map_val = obj_type
+                                    .find("Map<string,")
+                                    .map(|i| &obj_type[i + "Map<string,".len()..])
+                                    .map(|s| s.trim_start())
+                                    .and_then(|s| {
+                                        // Take until matching '>' for Map value type.
+                                        let mut depth = 0i32;
+                                        for (j, ch) in s.char_indices() {
+                                            match ch {
+                                                '<' | '(' => depth += 1,
+                                                '>' if depth == 0 => {
+                                                    return Some(s[..j].trim());
+                                                }
+                                                '>' | ')' => depth -= 1,
+                                                _ => {}
+                                            }
+                                        }
+                                        None
                                     });
-                                // Prefer typed string helper name if present.
-                                let map_fn = if obj_type.contains("Map<string, string>") {
-                                    "mimi_list_map_to_json_string"
+                                if let Some(val_ty) = map_val {
+                                    if val_ty.starts_with('(')
+                                        || self.is_product_tuple_alias(val_ty)
+                                    {
+                                        let elem = if self.is_product_tuple_alias(val_ty) {
+                                            self.resolve_alias_type_name(val_ty)
+                                        } else {
+                                            val_ty.to_string()
+                                        };
+                                        self.emit_list_map_product_to_json(list_alloca, &elem)?
+                                    } else {
+                                        let mode = if obj_type.contains("Map<string, string>") {
+                                            1i64
+                                        } else if obj_type.contains("Map<string, bool>") {
+                                            2
+                                        } else if obj_type.contains("Map<string, f64>")
+                                            || obj_type.contains("Map<string, f32>")
+                                        {
+                                            3
+                                        } else {
+                                            0
+                                        };
+                                        let fn_ty = i8_ptr_ty.fn_type(
+                                            &[
+                                                BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                                                BasicMetadataTypeEnum::IntType(
+                                                    self.context.i64_type(),
+                                                ),
+                                            ],
+                                            false,
+                                        );
+                                        let callee = self
+                                            .module
+                                            .get_function("mimi_list_map_to_json")
+                                            .unwrap_or_else(|| {
+                                                self.module.add_function(
+                                                    "mimi_list_map_to_json",
+                                                    fn_ty,
+                                                    Some(inkwell::module::Linkage::External),
+                                                )
+                                            });
+                                        self.build_call(
+                                            callee,
+                                            &[
+                                                BasicMetadataValueEnum::PointerValue(list_alloca),
+                                                BasicMetadataValueEnum::IntValue(
+                                                    self.context
+                                                        .i64_type()
+                                                        .const_int(mode as u64, false),
+                                                ),
+                                            ],
+                                            "opt_list_map_json",
+                                        )?
+                                        .try_as_basic_value_opt()
+                                        .ok_or("list map to_json void")?
+                                        .into_pointer_value()
+                                    }
                                 } else {
-                                    "mimi_list_map_to_json"
-                                };
-                                let map_callee =
-                                    self.module.get_function(map_fn).unwrap_or(callee);
-                                let raw = if map_fn == "mimi_list_map_to_json_string" {
+                                    let map_fn = if obj_type.contains("Map<string, string>") {
+                                        "mimi_list_map_to_json_string"
+                                    } else {
+                                        "mimi_list_map_to_string"
+                                    };
+                                    let map_callee = self.module.get_function(map_fn).unwrap_or_else(
+                                        || {
+                                            let fn_ty = i8_ptr_ty.fn_type(
+                                                &[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)],
+                                                false,
+                                            );
+                                            self.module.add_function(
+                                                map_fn,
+                                                fn_ty,
+                                                Some(inkwell::module::Linkage::External),
+                                            )
+                                        },
+                                    );
                                     self.build_call(
                                         map_callee,
                                         &[BasicMetadataValueEnum::PointerValue(list_alloca)],
@@ -1882,24 +1940,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     .try_as_basic_value_opt()
                                     .ok_or("list map to_json void")?
                                     .into_pointer_value()
-                                } else {
-                                    self.build_call(
-                                        map_callee,
-                                        &[
-                                            BasicMetadataValueEnum::PointerValue(list_alloca),
-                                            BasicMetadataValueEnum::IntValue(
-                                                self.context
-                                                    .i64_type()
-                                                    .const_int(mode as u64, false),
-                                            ),
-                                        ],
-                                        "opt_list_map_json",
-                                    )?
-                                    .try_as_basic_value_opt()
-                                    .ok_or("list map to_json void")?
-                                    .into_pointer_value()
-                                };
-                                raw
+                                }
                             } else {
                                 let rt_fn = if obj_type.contains("List<string>") {
                                     "mimi_list_str_to_json"
@@ -2441,6 +2482,53 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 list_inner.to_string()
                             };
                             self.emit_list_product_tuple_to_json(list_ptr, &elem)?
+                        } else if list_inner.starts_with("Map") {
+                            if let Some(val_ty) = list_inner
+                                .strip_prefix("Map<string, ")
+                                .and_then(|s| s.strip_suffix('>'))
+                                .or_else(|| {
+                                    list_inner
+                                        .strip_prefix("Map<string,")
+                                        .and_then(|s| s.strip_suffix('>'))
+                                        .map(|s| s.trim())
+                                })
+                            {
+                                if val_ty.starts_with('(')
+                                    || self.is_product_tuple_alias(val_ty)
+                                {
+                                    let elem = if self.is_product_tuple_alias(val_ty) {
+                                        self.resolve_alias_type_name(val_ty)
+                                    } else {
+                                        val_ty.to_string()
+                                    };
+                                    self.emit_list_map_product_to_json(list_ptr, &elem)?
+                                } else {
+                                    let list_fn_name = if list_inner.contains("string") {
+                                        "mimi_list_map_to_json_string"
+                                    } else {
+                                        "mimi_list_map_to_string"
+                                    };
+                                    let list_fn = self.get_runtime_fn(list_fn_name)?;
+                                    self.build_call(
+                                        list_fn,
+                                        &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                                        "opt_list_json",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("list map to_json void")?
+                                    .into_pointer_value()
+                                }
+                            } else {
+                                let list_fn = self.get_runtime_fn("mimi_list_map_to_string")?;
+                                self.build_call(
+                                    list_fn,
+                                    &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                                    "opt_list_json",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("list map to_json void")?
+                                .into_pointer_value()
+                            }
                         } else {
                             let list_fn_name = if obj_type.contains("List<Map")
                                 || obj_type.contains("List<Map<")

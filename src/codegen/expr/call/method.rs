@@ -1441,28 +1441,56 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     Type::Name(n, args) if n == "Map" => {
-                        let val_is_string = args
-                            .get(1)
-                            .map(|t| matches!(t, Type::Name(tn, _) if tn == "string"))
-                            .unwrap_or(false);
-                        let val_is_float = args
-                            .get(1)
-                            .map(|t| matches!(t, Type::Name(tn, _) if tn == "f32" || tn == "f64"))
-                            .unwrap_or(false);
-                        let fn_name = if val_is_string {
-                            "mimi_map_from_json_string"
-                        } else if val_is_float {
-                            "mimi_map_from_json_f64"
+                        let val_ty = args.get(1);
+                        let resolved_val = val_ty.map(|t| match t {
+                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                if let Some(td) = self.type_defs.get(an) {
+                                    if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
+                                        return inner.clone();
+                                    }
+                                }
+                                t.clone()
+                            }
+                            other => other.clone(),
+                        });
+                        if let Some(Type::Tuple(elems)) = resolved_val.as_ref() {
+                            let arity = elems.len() as u64;
+                            let func = self.get_runtime_fn("mimi_map_from_json_product_i64")?;
+                            let r = self.build_call(
+                                func,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(elem_json),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(arity, false),
+                                    ),
+                                ],
+                                "list_map_from_json_product",
+                            )?;
+                            self.expect_basic_value(&r, "mimi_map_from_json_product_i64")?
+                                .into_int_value()
                         } else {
-                            "mimi_map_from_json_i64"
-                        };
-                        let func = self.get_runtime_fn(fn_name)?;
-                        let r = self.build_call(
-                            func,
-                            &[BasicMetadataValueEnum::PointerValue(elem_json)],
-                            "list_map_from_json",
-                        )?;
-                        self.expect_basic_value(&r, fn_name)?.into_int_value()
+                            let val_is_string = args
+                                .get(1)
+                                .map(|t| matches!(t, Type::Name(tn, _) if tn == "string"))
+                                .unwrap_or(false);
+                            let val_is_float = args.get(1).map(|t| {
+                                matches!(t, Type::Name(tn, _) if tn == "f32" || tn == "f64")
+                            }).unwrap_or(false);
+                            let fn_name = if val_is_string {
+                                "mimi_map_from_json_string"
+                            } else if val_is_float {
+                                "mimi_map_from_json_f64"
+                            } else {
+                                "mimi_map_from_json_i64"
+                            };
+                            let func = self.get_runtime_fn(fn_name)?;
+                            let r = self.build_call(
+                                func,
+                                &[BasicMetadataValueEnum::PointerValue(elem_json)],
+                                "list_map_from_json",
+                            )?;
+                            self.expect_basic_value(&r, fn_name)?.into_int_value()
+                        }
                     }
                     Type::Name(n, args) if n == "Set" => {
                         let elem_is_string = args

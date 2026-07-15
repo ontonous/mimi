@@ -4728,6 +4728,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.emit_list_option_to_string(loaded, inner)?
                     } else if inner.starts_with("Result") {
                         self.emit_list_result_to_string(loaded, inner)?
+                    } else if inner.starts_with("Map") {
+                        self.emit_list_map_to_string(loaded, inner)?
                     } else if arg_type.contains("Map") {
                         self.emit_list_map_to_string(loaded, "List")?
                     } else {
