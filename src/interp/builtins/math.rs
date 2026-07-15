@@ -121,7 +121,10 @@ impl<'a> Interpreter<'a> {
                 .as_nanos() as u64,
         );
         let bits = hasher.finish();
-        Ok(Value::Float((bits as f64) / (u64::MAX as f64)))
+        // Use the top 53 bits so both numerator and denominator are exactly
+        // representable in f64. This guarantees the half-open range [0, 1).
+        let mantissa = bits >> 11;
+        Ok(Value::Float((mantissa as f64) / ((1_u64 << 53) as f64)))
     }
 
     pub(crate) fn builtin_pi(&self, _args: Vec<Value>) -> Result<Value, InterpError> {

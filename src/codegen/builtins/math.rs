@@ -262,11 +262,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_signed_int_to_float(raw, f64_ty, "rand_f")
             .map_err(|e| format!("random int_to_float error: {}", e))?;
-        // RAND_MAX from glibc = 2^31-1 = 2147483647
-        let rand_max = f64_ty.const_float(2147483647.0);
+        // glibc random() returns values through 2^31-1 inclusive. Divide by
+        // 2^31, not RAND_MAX, to preserve the documented half-open range.
+        let random_range = f64_ty.const_float(2147483648.0);
         let result = self
             .builder
-            .build_float_div(raw_f, rand_max, "rand_norm")
+            .build_float_div(raw_f, random_range, "rand_norm")
             .map_err(|e| format!("random div error: {}", e))?;
         Ok(result.into())
     }
