@@ -6815,39 +6815,72 @@ impl<'ctx> CodeGenerator<'ctx> {
                         return Ok(());
                     }
                     // Result<T,string> stores Err as ptrtoint of heap {ptr,len} string.
-                    // Only decode as string when value looks like a heap pointer
-                    // (>= 1MB, 8-byte aligned); small integers stay numeric.
+                    // When the declared Err type is string, always decode as string
+                    // (non-zero handle). Otherwise only decode when value looks like
+                    // a heap pointer (>= 1MB, 8-byte aligned); small integers stay numeric.
+                    let err_ty_is_string = {
+                        // Result<Ok, Err> — last top-level type arg is string.
+                        arg_type
+                            .strip_prefix("Result<")
+                            .and_then(|s| {
+                                let mut depth = 0i32;
+                                let mut last_comma = None;
+                                for (i, ch) in s.char_indices() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => last_comma = Some(i),
+                                        _ => {}
+                                    }
+                                }
+                                last_comma.map(|c| s[c + 1..].trim().trim_end_matches('>').trim())
+                            })
+                            .map(|e| e == "string" || e == "str")
+                            .unwrap_or(false)
+                    };
                     let min_heap = i64_ty.const_int(1_048_576, false);
                     let is_heapish = if iv.get_type().get_bit_width() == 64 {
-                        let ge = self
-                            .builder
-                            .build_int_compare(
-                                IntPredicate::UGE,
-                                as_i64,
-                                min_heap,
-                                &format!("{}_ge_heap", label),
-                            )
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let and7 = self
-                            .builder
-                            .build_and(
-                                as_i64,
-                                i64_ty.const_int(7, false),
-                                &format!("{}_and7", label),
-                            )
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let aligned = self
-                            .builder
-                            .build_int_compare(
-                                IntPredicate::EQ,
-                                and7,
-                                i64_ty.const_int(0, false),
-                                &format!("{}_aligned", label),
-                            )
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder
-                            .build_and(ge, aligned, &format!("{}_heapish", label))
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        if err_ty_is_string && label == "err" {
+                            // Typed string Err: any non-null handle is a string.
+                            self.builder
+                                .build_int_compare(
+                                    IntPredicate::NE,
+                                    as_i64,
+                                    i64_ty.const_int(0, false),
+                                    &format!("{}_str_nz", label),
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        } else {
+                            let ge = self
+                                .builder
+                                .build_int_compare(
+                                    IntPredicate::UGE,
+                                    as_i64,
+                                    min_heap,
+                                    &format!("{}_ge_heap", label),
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let and7 = self
+                                .builder
+                                .build_and(
+                                    as_i64,
+                                    i64_ty.const_int(7, false),
+                                    &format!("{}_and7", label),
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let aligned = self
+                                .builder
+                                .build_int_compare(
+                                    IntPredicate::EQ,
+                                    and7,
+                                    i64_ty.const_int(0, false),
+                                    &format!("{}_aligned", label),
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder
+                                .build_and(ge, aligned, &format!("{}_heapish", label))
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        }
                     } else {
                         self.context.bool_type().const_int(0, false)
                     };
