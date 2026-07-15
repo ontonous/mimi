@@ -16058,10 +16058,11 @@ pub extern "C" fn mimi_list_result_set_product_to_json(
             }
             continue;
         }
-        // Layout: disc (word0) + Ok SetHandle (word1) + Err payload (word2).
+        // Layout: disc (word0, low bit) + Ok SetHandle (word1) + Err (word2).
         let base = h as *const i64;
-        let disc = unsafe { *base };
-        if disc == 0 {
+        let disc_word = unsafe { *base };
+        let is_ok = (disc_word & 1) != 0;
+        if !is_ok {
             let err_word = unsafe { *base.add(2) };
             let err_json = decode_result_err_string(err_word);
             if display_style != 0 {
@@ -16298,10 +16299,11 @@ pub extern "C" fn mimi_list_result_map_product_to_json(
             }
             continue;
         }
-        // Layout: disc (word0) + Ok MapHandle (word1) + Err payload (word2).
+        // Layout: disc (word0, low bit) + Ok MapHandle (word1) + Err (word2).
         let base = h as *const i64;
-        let disc = unsafe { *base };
-        if disc == 0 {
+        let disc_word = unsafe { *base };
+        let is_ok = (disc_word & 1) != 0;
+        if !is_ok {
             let err_word = unsafe { *base.add(2) };
             let err_json = decode_result_err_string(err_word);
             if display_style != 0 {
@@ -16378,12 +16380,13 @@ pub extern "C" fn mimi_list_result_product_to_json(
             continue;
         }
         // Layout matches compile_ok/err for List<Result<(T..), E>>:
-        //   word0 = disc (1=Ok, 0=Err)
+        //   word0 = disc (low bit: 1=Ok, 0=Err; i1 + padding may dirty high bits)
         //   word1..n = Ok product fields (zeroed on Err)
         //   word(n+1) = Err payload (i64 handle / int)
         let base = h as *const i64;
-        let disc = unsafe { *base };
-        if disc == 0 {
+        let disc_word = unsafe { *base };
+        let is_ok = (disc_word & 1) != 0;
+        if !is_ok {
             let err_word = unsafe { *base.add(1 + n) };
             // decode_result_err_string returns a JSON string literal ("…").
             let err_json = decode_result_err_string(err_word);
