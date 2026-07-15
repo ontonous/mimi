@@ -1720,8 +1720,16 @@ pub extern "C" fn mimi_option_map_to_json(disc: i64, handle: MapHandle, mode: i6
     if disc == 0 {
         return alloc_c_string("\"None\"");
     }
-    // mode >= 10 encodes product arity as (10 + arity) for Map product JSON.
-    let json_ptr = if mode >= 10 {
+    // mode encoding:
+    // 0-3 scalar maps; 10+arity flat product; 20+arity Map of List product;
+    // 30+arity Map of Set product; 40+arity Map of Map product.
+    let json_ptr = if mode >= 40 {
+        mimi_map_to_json_map_product_i64(handle, mode - 40, 0)
+    } else if mode >= 30 {
+        mimi_map_to_json_set_product_i64(handle, mode - 30, 0)
+    } else if mode >= 20 {
+        mimi_map_to_json_list_product_i64(handle, mode - 20, 0)
+    } else if mode >= 10 {
         mimi_map_to_json_product_i64(handle, mode - 10, 0)
     } else {
         match mode {
@@ -1771,8 +1779,14 @@ pub extern "C" fn mimi_result_map_to_json(
     mode: i64,
 ) -> *mut std::ffi::c_char {
     if disc != 0 {
-        // mode >= 10 encodes product arity as (10 + arity).
-        let json_ptr = if mode >= 10 {
+        // mode: 0-3 scalar; 10+ product; 20+ List product; 30+ Set; 40+ Map.
+        let json_ptr = if mode >= 40 {
+            mimi_map_to_json_map_product_i64(ok_handle, mode - 40, 0)
+        } else if mode >= 30 {
+            mimi_map_to_json_set_product_i64(ok_handle, mode - 30, 0)
+        } else if mode >= 20 {
+            mimi_map_to_json_list_product_i64(ok_handle, mode - 20, 0)
+        } else if mode >= 10 {
             mimi_map_to_json_product_i64(ok_handle, mode - 10, 0)
         } else {
             match mode {
@@ -1788,7 +1802,8 @@ pub extern "C" fn mimi_result_map_to_json(
         }
         alloc_c_string(&format!("{{\"Ok\":[{}]}}", s))
     } else {
-        alloc_c_string(&format!("{{\"Err\":[{}]}}", err))
+        let err_s = decode_result_err_string(err);
+        alloc_c_string(&format!("{{\"Err\":[{}]}}", err_s))
     }
 }
 

@@ -517,19 +517,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.register_heap_alloc(raw);
                         return self.wrap_c_string(raw);
                     }
-                    // List of Map of product-tuple: emit via per-element product JSON.
-                    if let Some(val_ty) = inner
-                        .strip_prefix("Map<string, ")
-                        .and_then(|s| s.strip_suffix('>'))
-                    {
-                        if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
-                            let elem = if self.is_product_tuple_alias(val_ty) {
-                                self.resolve_alias_type_name(val_ty)
-                            } else {
-                                val_ty.to_string()
-                            };
+                    // List of Map of product / nested product Map values.
+                    if inner.starts_with("Map<") {
+                        let mode = self.map_nested_product_mode(inner);
+                        if mode >= 10 {
                             let raw =
-                                self.emit_list_map_product_to_json(alloca, &elem)?;
+                                self.emit_list_map_nested_product_to_json(alloca, inner)?;
                             self.register_heap_alloc(raw);
                             return self.wrap_c_string(raw);
                         }
@@ -2811,47 +2804,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             || obj_type.contains("Map<string, f32>")
                         {
                             3
-                        } else if let Some(val_ty) = obj_type
-                            .strip_prefix("Option<")
-                            .and_then(|s| s.strip_suffix('>'))
-                            .and_then(|s| s.strip_prefix("Map<string, "))
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
-                                let elem = if self.is_product_tuple_alias(val_ty) {
-                                    self.resolve_alias_type_name(val_ty)
-                                } else {
-                                    val_ty.to_string()
-                                };
-                                // mode = 10 + arity for product Map JSON.
-                                let mut arity: i64 = 0;
-                                let mut depth = 0i32;
-                                let mut any = false;
-                                let inner = elem
-                                    .strip_prefix('(')
-                                    .and_then(|s| s.strip_suffix(')'))
-                                    .unwrap_or(elem.as_str());
-                                for ch in inner.chars() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            arity += 1;
-                                            any = true;
-                                        }
-                                        c if !c.is_whitespace() => any = true,
-                                        _ => {}
-                                    }
-                                }
-                                if any {
-                                    arity += 1;
-                                }
-                                10 + arity.max(1)
-                            } else {
-                                0
-                            }
                         } else {
-                            0
+                            self.map_nested_product_mode(&obj_type)
                         };
                         let func = self.get_runtime_fn("mimi_option_map_to_json")?;
                         let raw = self
@@ -3278,61 +3232,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 || obj_type.contains("Map<string, f32>")
                             {
                                 3
-                            } else if let Some(val_ty) = obj_type
-                                .find("Map<string,")
-                                .map(|i| &obj_type[i + "Map<string,".len()..])
-                                .map(|s| s.trim_start())
-                                .and_then(|s| {
-                                    let mut depth = 0i32;
-                                    for (j, ch) in s.char_indices() {
-                                        match ch {
-                                            '<' | '(' => depth += 1,
-                                            '>' if depth == 0 => {
-                                                return Some(s[..j].trim());
-                                            }
-                                            '>' | ')' => depth -= 1,
-                                            _ => {}
-                                        }
-                                    }
-                                    None
-                                })
-                            {
-                                if val_ty.starts_with('(')
-                                    || self.is_product_tuple_alias(val_ty)
-                                {
-                                    let elem = if self.is_product_tuple_alias(val_ty) {
-                                        self.resolve_alias_type_name(val_ty)
-                                    } else {
-                                        val_ty.to_string()
-                                    };
-                                    let mut arity: i64 = 0;
-                                    let mut depth = 0i32;
-                                    let mut any = false;
-                                    let body = elem
-                                        .strip_prefix('(')
-                                        .and_then(|s| s.strip_suffix(')'))
-                                        .unwrap_or(elem.as_str());
-                                    for ch in body.chars() {
-                                        match ch {
-                                            '<' | '(' => depth += 1,
-                                            '>' | ')' => depth -= 1,
-                                            ',' if depth == 0 => {
-                                                arity += 1;
-                                                any = true;
-                                            }
-                                            c if !c.is_whitespace() => any = true,
-                                            _ => {}
-                                        }
-                                    }
-                                    if any {
-                                        arity += 1;
-                                    }
-                                    10 + arity.max(1)
-                                } else {
-                                    0
-                                }
                             } else {
-                                0
+                                self.map_nested_product_mode(&obj_type)
                             };
                             let opt_fn = self.get_runtime_fn("mimi_option_map_to_json")?;
                             self.build_call(
@@ -3696,7 +3597,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     // Result of List: Ok may be by-value list struct {i64,ptr}
                     // or a pointer/int handle — handle before scalar ok_i64 coercion.
-                    if obj_type.contains("List<") {
+                    // Do not treat Result<Map<…, List<…>>> as Result of List.
+                    if obj_type.contains("List<")
+                        && !obj_type.contains("Map<")
+                        && !obj_type.contains("Set<")
+                    {
                         let err_bv = self.build_extract_value(sv.into(), 2, "res_list_err")?;
                         let err_i64 = match err_bv {
                             BasicValueEnum::IntValue(iv) => {
@@ -4152,59 +4057,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             || obj_type.contains("Map<string, f32>")
                         {
                             3
-                        } else if let Some(val_ty) = obj_type
-                            .strip_prefix("Result<")
-                            .and_then(|s| {
-                                let mut depth = 0i32;
-                                for (i, ch) in s.char_indices() {
-                                    match ch {
-                                        '<' => depth += 1,
-                                        '>' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            return Some(s[..i].trim());
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                None
-                            })
-                            .and_then(|s| s.strip_prefix("Map<string, "))
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
-                                let elem = if self.is_product_tuple_alias(val_ty) {
-                                    self.resolve_alias_type_name(val_ty)
-                                } else {
-                                    val_ty.to_string()
-                                };
-                                let mut arity: i64 = 0;
-                                let mut depth = 0i32;
-                                let mut any = false;
-                                let inner = elem
-                                    .strip_prefix('(')
-                                    .and_then(|s| s.strip_suffix(')'))
-                                    .unwrap_or(elem.as_str());
-                                for ch in inner.chars() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            arity += 1;
-                                            any = true;
-                                        }
-                                        c if !c.is_whitespace() => any = true,
-                                        _ => {}
-                                    }
-                                }
-                                if any {
-                                    arity += 1;
-                                }
-                                10 + arity.max(1)
-                            } else {
-                                0
-                            }
                         } else {
-                            0
+                            self.map_nested_product_mode(&obj_type)
                         };
                         let func = self.get_runtime_fn("mimi_result_map_to_json")?;
                         let raw = self
