@@ -16371,19 +16371,27 @@ pub extern "C" fn mimi_list_result_product_to_json(
             }
             continue;
         }
+        // Layout matches compile_ok/err for List<Result<(T..), E>>:
+        //   word0 = disc (1=Ok, 0=Err)
+        //   word1..n = Ok product fields (zeroed on Err)
+        //   word(n+1) = Err payload (i64 handle / int)
         let base = h as *const i64;
         let disc = unsafe { *base };
         if disc == 0 {
-            let err_ptr = unsafe { *base.add(1) } as *const std::ffi::c_char;
-            let err_s = if err_ptr.is_null() {
-                String::new()
-            } else {
-                unsafe { cstr_to_string(err_ptr) }
-            };
+            let err_word = unsafe { *base.add(1 + n) };
+            // decode_result_err_string returns a JSON string literal ("…").
+            let err_json = decode_result_err_string(err_word);
             if display_style != 0 {
-                parts.push(format!("Err({})", err_s));
+                // Display: strip surrounding quotes from JSON escape.
+                let raw = err_json
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .unwrap_or(err_json.as_str())
+                    .replace("\\\"", "\"")
+                    .replace("\\\\", "\\");
+                parts.push(format!("Err({})", raw));
             } else {
-                parts.push(format!("{{\"Err\":[{}]}}", json_escape_string(&err_s)));
+                parts.push(format!("{{\"Err\":[{}]}}", err_json));
             }
         } else {
             let fields: Vec<i64> = unsafe { std::slice::from_raw_parts(base.add(1), n).to_vec() };
