@@ -354,10 +354,17 @@ fn did_save(mut server: LspServer, msg: &Value) -> (LspServer, Option<Value>) {
         Some(u) => u,
         None => return (server, None),
     };
-    let text = msg
+    // L-H12: when the client provides text on save, update the document cache
+    // so subsequent requests see the saved content (not a stale buffer).
+    let provided = msg
         .get("params")
         .and_then(|p| p.get("text"))
-        .and_then(|t| t.as_str())
+        .and_then(|t| t.as_str());
+    if let Some(t) = provided {
+        server.cache_put(uri.to_string(), t.to_string());
+        *server.parse_cache_text.borrow_mut() = (String::new(), None);
+    }
+    let text = provided
         .or_else(|| server.documents.get(uri).map(|s| s.as_str()))
         .unwrap_or("");
     let diagnostics = server.compute_diagnostics(text, Some(uri));
