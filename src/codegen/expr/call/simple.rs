@@ -545,6 +545,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "mimi_list_set_to_json"
                     } else if inner.starts_with("Option") && inner.contains("Map<") {
                         // List of Option of Map — use typed map helper.
+                        // mode >= 10 means product Map with arity (mode - 10).
                         let mode = if inner.contains("Map<string, string>") {
                             1i64
                         } else if inner.contains("Map<string, bool>") {
@@ -553,6 +554,44 @@ impl<'ctx> CodeGenerator<'ctx> {
                             || inner.contains("Map<string, f32>")
                         {
                             3
+                        } else if let Some(val_ty) = inner
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                            .and_then(|s| s.strip_prefix("Map<string, "))
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                let elem = if self.is_product_tuple_alias(val_ty) {
+                                    self.resolve_alias_type_name(val_ty)
+                                } else {
+                                    val_ty.to_string()
+                                };
+                                let mut arity: i64 = 0;
+                                let mut depth = 0i32;
+                                let mut any = false;
+                                let body = elem
+                                    .strip_prefix('(')
+                                    .and_then(|s| s.strip_suffix(')'))
+                                    .unwrap_or(elem.as_str());
+                                for ch in body.chars() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            arity += 1;
+                                            any = true;
+                                        }
+                                        c if !c.is_whitespace() => any = true,
+                                        _ => {}
+                                    }
+                                }
+                                if any {
+                                    arity += 1;
+                                }
+                                10 + arity.max(1)
+                            } else {
+                                0
+                            }
                         } else {
                             0
                         };

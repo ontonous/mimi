@@ -1556,11 +1556,16 @@ pub extern "C" fn mimi_list_option_map_to_json(
         let disc = unsafe { *base };
         let handle = unsafe { *(base.add(8) as *const i64) } as MapHandle;
         if disc != 0 {
-            let json_ptr = match mode {
-                1 => mimi_map_to_json_string(handle),
-                2 => mimi_map_to_json_bool(handle),
-                3 => mimi_map_to_json_f64_serde(handle),
-                _ => mimi_map_to_json_i64(handle),
+            // mode >= 10 encodes product arity as (10 + arity).
+            let json_ptr = if mode >= 10 {
+                mimi_map_to_json_product_i64(handle, mode - 10, 0)
+            } else {
+                match mode {
+                    1 => mimi_map_to_json_string(handle),
+                    2 => mimi_map_to_json_bool(handle),
+                    3 => mimi_map_to_json_f64_serde(handle),
+                    _ => mimi_map_to_json_i64(handle),
+                }
             };
             let s = unsafe { cstr_to_string(json_ptr) };
             if !json_ptr.is_null() {
