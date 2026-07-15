@@ -1276,6 +1276,32 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
+                // T-H13: verify overloaded event params are consistent across
+                // different source states (fallback matrix uses first-entry params).
+                let mut event_params: HashMap<&str, &[Param]> = HashMap::new();
+                for t in &f.transitions {
+                    if t.name == "reset" || t.name == "recover" || t.name == "peer_fault" {
+                        continue;
+                    }
+                    if let Some(existing) = event_params.get(&t.name.as_str()) {
+                        if existing.len() != t.params.len()
+                            || existing
+                                .iter()
+                                .zip(t.params.iter())
+                                .any(|(a, b)| a.ty != b.ty)
+                        {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0402,
+                                format!(
+                                    "event '{}' in flow '{}' has inconsistent param types across overloads; all from-states must use the same param shape",
+                                    t.name, f.name
+                                ),
+                            );
+                        }
+                    } else {
+                        event_params.insert(&t.name, &t.params);
+                    }
+                }
                 // Validate that all referenced states exist
                 let state_names: Vec<&str> = f.states.iter().map(|s| s.name.as_str()).collect();
                 for t in &f.transitions {
