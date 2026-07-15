@@ -238,7 +238,10 @@ impl SolverSession {
                 let new_solver = Solver::new();
                 new_solver.set_params(&params);
                 new_solver.reset();
-                let _ = std::mem::replace(&mut self.solver, new_solver);
+                // AU-H6: do not Drop the old solver after timeout/crash — Z3 may
+                // be corrupted and Z3_del_solver can double-free. Leak it.
+                let old = std::mem::replace(&mut self.solver, new_solver);
+                std::mem::forget(old);
                 self.replaced = true; // skip next pop() — push was on old solver
                 self.poisoned = true; // B6: assertions lost, future checks unreliable
                 SatResult::Unknown
@@ -262,7 +265,9 @@ impl SolverSession {
                 // Setting `replaced = true` ensures the next pop() is a
                 // no-op, preventing Z3 UB (pop below depth 0).
                 new_solver.reset();
-                let _ = std::mem::replace(&mut self.solver, new_solver);
+                // AU-H6: leak corrupted solver instead of Drop → Z3_del_solver.
+                let old = std::mem::replace(&mut self.solver, new_solver);
+                std::mem::forget(old);
                 self.replaced = true; // skip next pop() — push was on old solver
                 self.poisoned = true; // B6: assertions lost, future checks unreliable
                 SatResult::Unknown
@@ -418,6 +423,11 @@ impl Verifier {
         let mut params = z3::Params::new();
         params.set_u32("timeout", timeout_ms as u32);
         self.session.set_params(&params);
+    }
+
+    /// AU-H3: true after Z3 crash/timeout replacement — session assertions lost.
+    pub fn is_poisoned(&self) -> bool {
+        self.session.poisoned
     }
 
     pub fn dump_smt2(&self) -> Option<String> {

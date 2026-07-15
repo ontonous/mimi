@@ -8,13 +8,20 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Wrapper around *const File that implements Send/Sync for use in a static.
-/// SAFETY: The File is leaked (Box::leak) and lives for the process lifetime,
-/// so accessing it from any thread is safe. Callers must not mutate through
-/// this pointer.
+/// Wrapper around `*const File` for a process-static callback AST.
+///
+/// IP-H3: `File` is not inherently `Sync`, but this pointer is only used for
+/// **immutable** AST reads after a one-time `Box::into_raw` leak. No thread
+/// mutates the `File` after install; concurrent readers only traverse AST
+/// nodes that are never written. Do not use this pattern for mutable tables.
+///
+/// SAFETY: The File is leaked and lives for the process lifetime.
+/// Callers must not mutate through this pointer.
 #[derive(Copy, Clone)]
 struct SendFilePtr(*const File);
+// SAFETY: IP-H3 — immutable post-leak AST; no concurrent mutation of File.
 unsafe impl Send for SendFilePtr {}
+// SAFETY: IP-H3 — same as Send; only immutable AST traversal after install.
 unsafe impl Sync for SendFilePtr {}
 
 // F8: Thread-local context for synchronous callback invocation.
@@ -378,8 +385,7 @@ unsafe fn callback_trampoline_inner(
             }
         }
         // SAFETY: arg_free_mask marks args that were transferred from C as
-        // owned strings. Each non-null pointer was produced by CString::into_raw
-        // on the other side of the FFI boundary and must be freed with libc::free.
+        // owned strings (C malloc / strdup). Free with libc::free only (IP-C3).
         for (i, &should_free) in arg_free_mask.iter().enumerate() {
             if should_free && i < nargs {
                 let arg_ptr = *args.add(i);
@@ -438,9 +444,8 @@ unsafe fn callback_trampoline_inner(
     // active_guard dropped here — decrements count
 
     // F6: Free C-allocated string pointers that Mimi takes ownership of.
-    // SAFETY: arg_free_mask marks args that were transferred from C as owned
-    // strings. Each non-null pointer was produced by CString::into_raw on the
-    // other side of the FFI boundary and must be freed with libc::free.
+    // SAFETY: arg_free_mask marks C-owned strings (malloc/strdup). Free with
+    // libc::free only — never CString::from_raw (IP-C3 allocator match).
     for (i, &should_free) in arg_free_mask.iter().enumerate() {
         if should_free && i < nargs {
             let arg_ptr = *args.add(i);

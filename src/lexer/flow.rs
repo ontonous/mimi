@@ -6,9 +6,8 @@
 
 use crate::lexer::errors::{
     dedent_mismatch, indent_not_multiple_of_four, invalid_escape, tabs_not_allowed,
-    unexpected_character, unexpected_dollar, unterminated_block_comment, unterminated_escape,
-    unterminated_fstring, unterminated_fstring_escape, unterminated_interpolation,
-    unterminated_string, LexerError,
+    unexpected_character, unterminated_block_comment, unterminated_escape, unterminated_fstring,
+    unterminated_fstring_escape, unterminated_interpolation, unterminated_string, LexerError,
 };
 use crate::lexer::keywords::keyword_or_ident;
 use crate::lexer::token::{LexerMode, Token, TokenKind};
@@ -258,18 +257,21 @@ impl<'a> LexerPos<'a> {
                     break;
                 }
                 Some('\\') => {
+                    // LX-C4: keep ALL escapes as raw `\` + char so the parser's
+                    // parse_fstring_parts is the single unescape site (no mixed
+                    // decoded-vs-raw representation).
                     pos = next!(pos);
                     match pos.peek() {
                         Some('n') => {
-                            s.push('\n');
+                            s.push_str("\\n");
                             pos = next!(pos);
                         }
                         Some('t') => {
-                            s.push('\t');
+                            s.push_str("\\t");
                             pos = next!(pos);
                         }
                         Some('r') => {
-                            s.push('\r');
+                            s.push_str("\\r");
                             pos = next!(pos);
                         }
                         Some('\\') => {
@@ -277,7 +279,8 @@ impl<'a> LexerPos<'a> {
                             pos = next!(pos);
                         }
                         Some('"') => {
-                            s.push('"');
+                            // Keep as \" so parser can accept escaped quotes in text.
+                            s.push_str("\\\"");
                             pos = next!(pos);
                         }
                         Some('{') => {
@@ -716,6 +719,9 @@ impl<'a> LexerState<'a> {
                     let mut is_comment_line = false;
                     if pos.peek() == Some('/') {
                         if pos.chars.clone().next() == Some('*') {
+                            // LX-C1/H4: multi-line block comments advance line/col via
+                            // skip_block_comment; do NOT reuse pre-comment `spaces` for
+                            // trailing code on the `*/` line.
                             pos = pos.skip_block_comment()?;
                             pos = pos.skip_whitespace_inline();
                             // After block comment, CR may precede newline.
@@ -724,6 +730,10 @@ impl<'a> LexerState<'a> {
                             }
                             if pos.peek() == Some('\n') || pos.peek().is_none() {
                                 is_comment_line = true;
+                            } else {
+                                // Trailing tokens after `*/` on the same line: indent
+                                // was for the comment, not this content. Dispatch mid-line.
+                                return state_continue!(Dispatch {}, pos, mode, false, acc);
                             }
                         } else if pos.chars.clone().next() == Some('/') {
                             is_comment_line = true;
@@ -1001,11 +1011,14 @@ fn lex_scan_token(
         }
         '~' => Ok((next!(pos), TokenKind::Tilde)),
         '$' => {
+            // LX-C5: bare `$` used to hard-error with no recovery. Emit a
+            // distinctive Ident so the rest of the file can still tokenize;
+            // the parser/checker will reject `$` as an unexpected identifier.
             let pos = next!(pos);
             if pos.peek() == Some('(') {
                 Ok((next!(pos), TokenKind::DollarParen))
             } else {
-                Err(unexpected_dollar(line, col))
+                Ok((pos, TokenKind::Ident("$".to_string())))
             }
         }
         '(' => Ok((next!(pos), TokenKind::LParen)),

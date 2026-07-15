@@ -82,6 +82,10 @@ impl From<PathError> for String {
 /// - Absolute paths
 /// - Empty strings
 ///
+/// When both `base` and the joined path resolve via `canonicalize`, also
+/// rejects symlink escapes (AU-H4). If canonicalize fails (path not yet
+/// created), the component-level checks still apply.
+///
 /// Returns the joined path if safe.
 pub fn validate_safe_path(base: &Path, input: &str) -> Result<PathBuf, PathError> {
     if input.is_empty() {
@@ -101,7 +105,17 @@ pub fn validate_safe_path(base: &Path, input: &str) -> Result<PathBuf, PathError
             return Err(PathError::TraversalEscape);
         }
     }
-    Ok(base.join(input))
+    let joined = base.join(input);
+    // AU-H4: best-effort symlink escape check when paths exist.
+    if let (Ok(canon_base), Ok(canon_joined)) = (
+        std::fs::canonicalize(base),
+        std::fs::canonicalize(&joined),
+    ) {
+        if !canon_joined.starts_with(&canon_base) {
+            return Err(PathError::SymlinkEscape);
+        }
+    }
+    Ok(joined)
 }
 
 /// Validate a package name or version string.
@@ -197,7 +211,11 @@ pub fn read_source_capped(path: &Path) -> Result<String, String> {
 }
 
 /// Like [`read_source_capped`] but with an explicit byte limit (for tests).
+///
+/// AU-H5: open + take(max+1) so a TOCTOU swap to a huge file after metadata
+/// cannot unbounded-allocate; oversize after open is still rejected.
 pub fn read_source_capped_limit(path: &Path, max_bytes: u64) -> Result<String, String> {
+    use std::io::Read;
     if let Ok(meta) = std::fs::metadata(path) {
         if meta.len() > max_bytes {
             return Err(format!(
@@ -208,7 +226,25 @@ pub fn read_source_capped_limit(path: &Path, max_bytes: u64) -> Result<String, S
             ));
         }
     }
-    std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    // Read at most max_bytes + 1 to detect oversize without unbounded alloc.
+    let limit = max_bytes
+        .saturating_add(1)
+        .min(usize::MAX as u64) as usize;
+    let mut buf = Vec::new();
+    file.by_ref()
+        .take(limit as u64)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    if buf.len() as u64 > max_bytes {
+        return Err(format!(
+            "file too large (max {} bytes): {}",
+            max_bytes,
+            path.display()
+        ));
+    }
+    String::from_utf8(buf).map_err(|e| format!("invalid UTF-8 in {}: {}", path.display(), e))
 }
 
 #[cfg(test)]

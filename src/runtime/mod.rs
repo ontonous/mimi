@@ -496,22 +496,23 @@ pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
         return;
     }
     // SAFETY: list is non-null (checked above) and points to a valid
-    // MimiList allocated by mimi_list_alloc. The reference `&*list` is
-    // valid for the duration of this call; we copy out the fields we
-    // need before dropping the list itself.
+    // MimiList allocated by mimi_list_alloc. RT-H6: copy fields out before
+    // any free so we never hold a live `&*list` across `Box::from_raw`.
     unsafe {
-        let lst = &*list;
+        let owns_data = (*list).owns_data;
+        let data_ptr = (*list).data;
+        let list_len = (*list).len;
         // MEM-C10 (deep audit): bound iteration against a corrupt/negative `len`
         // so a hostile or buggy `len` cannot drive an out-of-bounds read or an
         // unbounded `libc::free` loop. When a capacity header is present we also
         // clamp to `cap` (no valid element can live beyond it).
         let safe_count = {
-            let l = lst.len;
-            if l < 0 {
+            if list_len < 0 {
                 0usize
             } else {
-                let cap = list_cap(lst);
-                let mut n = l as usize;
+                // Temporary view only for list_cap; not held across free.
+                let cap = list_cap(&*list);
+                let mut n = list_len as usize;
                 if cap > 0 && n > cap as usize {
                     n = cap as usize;
                 }
@@ -521,29 +522,29 @@ pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
                 n
             }
         };
-        if lst.owns_data && !lst.data.is_null() {
-            let cap = list_cap(lst);
+        if owns_data && !data_ptr.is_null() {
+            let cap = list_cap(&*list);
             if cap > 0 {
                 if free_elements {
                     for i in 0..safe_count {
-                        let e = *lst.data.add(i);
+                        let e = *data_ptr.add(i);
                         if !e.is_null() {
                             libc::free(e as *mut std::ffi::c_void);
                         }
                     }
                 }
-                let base = (lst.data as *mut i64).offset(-1) as *mut std::ffi::c_void;
+                let base = (data_ptr as *mut i64).offset(-1) as *mut std::ffi::c_void;
                 libc::free(base);
             } else {
                 if free_elements {
                     for i in 0..safe_count {
-                        let e = *lst.data.add(i);
+                        let e = *data_ptr.add(i);
                         if !e.is_null() {
                             libc::free(e as *mut std::ffi::c_void);
                         }
                     }
                 }
-                libc::free(lst.data as *mut std::ffi::c_void);
+                libc::free(data_ptr as *mut std::ffi::c_void);
             }
         }
         // C1 fix: The MimiList struct was allocated via Box::new()/Box::into_raw() in
@@ -5033,13 +5034,23 @@ pub extern "C" fn mimi_json_deserialize(
         }
     }
 
+    // RT-H3: shrink so capacity == filled len; free reconstructs with cap == len.
+    // Without this, out_len=idx may be < original count and from_raw_parts is UB.
+    data.truncate(idx as usize);
+    data.shrink_to_fit();
+    debug_assert_eq!(data.len(), data.capacity());
     let result = data.as_mut_ptr();
+    let out = idx;
     std::mem::forget(data);
     if !out_len.is_null() {
         // SAFETY: `out_len` was checked non-null above.
         unsafe {
-            *out_len = idx;
+            *out_len = out;
         }
+    }
+    // Empty result: no heap buffer (shrink_to_fit of empty Vec may leave null ptr).
+    if out == 0 {
+        return std::ptr::null_mut();
     }
     result as *mut std::ffi::c_void
 }
@@ -5047,6 +5058,8 @@ pub extern "C" fn mimi_json_deserialize(
 /// C11: Free a buffer returned by mimi_json_deserialize / mimi_list_deserialize.
 /// Reconstructs the Vec<i64> and drops it, freeing both the data buffer and
 /// any heap-allocated string pointers (elem_type==2).
+///
+/// RT-H3: `mimi_json_deserialize` shrink_to_fit so capacity == len.
 #[no_mangle]
 pub extern "C" fn mimi_json_deserialize_free(buf: *mut std::ffi::c_void, len: i64, elem_type: i64) {
     if buf.is_null() || len <= 0 {
@@ -5055,7 +5068,7 @@ pub extern "C" fn mimi_json_deserialize_free(buf: *mut std::ffi::c_void, len: i6
     let count = len as usize;
     // Rebuild Vec from the pointer, then drop it (frees the allocation).
     // SAFETY: `buf` was created by a prior mimi_json_deserialize call with
-    // matching `len` and `elem_type`.
+    // matching `len` and `elem_type`, after shrink_to_fit (capacity == len).
     unsafe {
         let ptr = buf as *mut i64;
         // If this was a string-typed deserialization, free each C string first.
@@ -5068,7 +5081,7 @@ pub extern "C" fn mimi_json_deserialize_free(buf: *mut std::ffi::c_void, len: i6
             }
         }
         // Drop the Vec without running element destructors (i64 is trivially
-        // copy, and strings were already freed above).
+        // copy, and strings were already freed above). capacity == len (RT-H3).
         let _ = Vec::from_raw_parts(ptr, 0, count);
     }
 }

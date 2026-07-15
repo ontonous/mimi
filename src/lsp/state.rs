@@ -238,6 +238,11 @@ impl LspServer {
         let param_count = func.params.len();
         let dynamic_timeout = (func_body_lines * 50 + param_count * 100).clamp(200, 5000) as u64;
 
+        // AU-H3: if a prior Z3 crash poisoned the session, drop it so
+        // get_or_insert creates a fresh solver (otherwise verify forever Unknown).
+        if self.verifier.as_ref().is_some_and(|v| v.is_poisoned()) {
+            self.verifier = None;
+        }
         // Lazily initialize the Z3 verifier with dynamic timeout
         let verifier = self
             .verifier

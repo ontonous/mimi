@@ -56,16 +56,24 @@ impl<'a> Interpreter<'a> {
             },
             FfiArgContract::StringTransfer => match arg {
                 Value::String(s) => {
-                    // Transfer ownership to C. CString::into_raw uses the
-                    // global allocator; on glibc this is compatible with
-                    // free(3). Document that C must free with free/libc.
-                    // (IP-C3: do not free with Box/from_raw on the Mimi side
-                    // after transfer — ownership has moved.)
+                    // IP-C3: allocate with libc::malloc so C's free(3) is always
+                    // correct (Rust CString::into_raw may use a different heap
+                    // on musl/Windows/custom allocators).
                     let sanitized: String = s.as_str().chars().filter(|&c| c != '\0').collect();
-                    let c_str = CString::new(sanitized)
-                        .map_err(|e| Errno::Generic(format!("failed to convert string to C string: {}", e)))?;
-                    let ptr = c_str.into_raw() as i64;
-                    Ok(ptr)
+                    let bytes = sanitized.as_bytes();
+                    let n = bytes.len() + 1;
+                    // SAFETY: malloc(n) for n >= 1; copy NUL-terminated payload.
+                    let ptr = unsafe { libc::malloc(n) as *mut i8 };
+                    if ptr.is_null() {
+                        return Err(Errno::Generic(
+                            "FFI wrapper: malloc failed for StringTransfer".to_string(),
+                        ));
+                    }
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
+                        *ptr.add(bytes.len()) = 0;
+                    }
+                    Ok(ptr as i64)
                 }
                 other => Err(Errno::Generic(format!(
                     "FFI wrapper: expected string argument for ownership transfer, found {}",

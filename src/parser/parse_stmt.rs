@@ -662,11 +662,13 @@ impl Parser {
                         'n' => current_text.push('\n'),
                         't' => current_text.push('\t'),
                         'r' => current_text.push('\r'),
+                        '0' => current_text.push('\0'),
                         '\\' => current_text.push('\\'),
                         '"' => current_text.push('"'),
                         '{' => current_text.push('{'),
                         '}' => current_text.push('}'),
                         other => {
+                            // Unknown escape: keep both chars so diagnostics remain visible.
                             current_text.push('\\');
                             current_text.push(other);
                         }

@@ -2,7 +2,7 @@
 
 use crate::lexer::errors::{
     dedent_mismatch, indent_not_multiple_of_four, invalid_escape, tabs_not_allowed,
-    unexpected_character, unexpected_dollar, unterminated_block_comment, unterminated_escape,
+    unexpected_character, unterminated_block_comment, unterminated_escape,
     unterminated_fstring, unterminated_fstring_escape, unterminated_interpolation,
     unterminated_string, LexerError,
 };
@@ -220,30 +220,28 @@ impl<'a> super::Lexer<'a> {
                     break;
                 }
                 Some('\\') => {
+                    // LX-C4: keep ALL escapes as raw `\` + char so the parser's
+                    // parse_fstring_parts is the single unescape site.
                     self.advance();
                     match self.peek() {
                         Some('n') => {
-                            // Decode common escapes immediately so f-string literals
-                            // match the semantics of ordinary string literals.
-                            s.push('\n');
+                            s.push_str("\\n");
                             self.advance();
                         }
                         Some('t') => {
-                            s.push('\t');
+                            s.push_str("\\t");
                             self.advance();
                         }
                         Some('r') => {
-                            s.push('\r');
+                            s.push_str("\\r");
                             self.advance();
                         }
-                        // Keep backslash escapes that the parser needs to see in
-                        // order to distinguish escaped braces from interpolations.
                         Some('\\') => {
                             s.push_str("\\\\");
                             self.advance();
                         }
                         Some('"') => {
-                            s.push('"');
+                            s.push_str("\\\"");
                             self.advance();
                         }
                         Some('{') => {
@@ -585,6 +583,8 @@ impl<'a> super::Lexer<'a> {
                     is_comment_line = true;
                     self.skip_line_comment();
                 } else if next == Some('*') {
+                    // LX-C1/H4: multi-line block comments update line/col; trailing
+                    // code after `*/` must not inherit the pre-comment indent.
                     self.skip_block_comment()?;
                     self.skip_whitespace_inline();
                     if self.peek() == Some('\r') {
@@ -592,6 +592,11 @@ impl<'a> super::Lexer<'a> {
                     }
                     if self.peek() == Some('\n') || self.peek().is_none() {
                         is_comment_line = true;
+                    } else {
+                        // Mid-line content after `*/`: leave line-start without
+                        // emitting Indent/Dedent based on the comment's spaces.
+                        self.at_line_start = false;
+                        return Ok(());
                     }
                 }
             }
@@ -808,12 +813,14 @@ impl<'a> super::Lexer<'a> {
                 Ok(TokenKind::Tilde)
             }
             '$' => {
+                // LX-C5: bare `$` used to hard-error with no recovery. Emit a
+                // distinctive Ident so the rest of the file can still tokenize.
                 self.advance();
                 if self.peek() == Some('(') {
                     self.advance();
                     Ok(TokenKind::DollarParen)
                 } else {
-                    Err(unexpected_dollar(line, col))
+                    Ok(TokenKind::Ident("$".to_string()))
                 }
             }
             '(' => {
