@@ -17,3 +17,17 @@ impl SetExt for Set {
     func remove(value: Any) -> Set { self.remove(value) }
     func to_list() -> List { self.to_list() }
 }
+
+// Free-function wrappers (S-H8) matching documented set API.
+// size: Number of elements in the set.
+pub func size(s: Set) -> i32 { s.size() }
+// is_empty: True when the set has no elements.
+pub func is_empty(s: Set) -> bool { s.is_empty() }
+// contains: True when value is a member of the set.
+pub func contains(s: Set, value: Any) -> bool { s.contains(value) }
+// insert: Returns a set with value added.
+pub func insert(s: Set, value: Any) -> Set { s.insert(value) }
+// remove: Returns a set with value removed.
+pub func remove(s: Set, value: Any) -> Set { s.remove(value) }
+// to_list: Converts the set to a list of elements.
+pub func to_list(s: Set) -> List { s.to_list() }
