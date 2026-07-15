@@ -1319,6 +1319,54 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                 }
+                // List of Set of product.
+                if let Type::Name(sn, sargs) = inner_ty {
+                    if sn == "Set" && sargs.len() == 1 {
+                        let set_elem = match &sargs[0] {
+                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                if let Some(td) = self.type_defs.get(an) {
+                                    if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
+                                        inner.clone()
+                                    } else {
+                                        sargs[0].clone()
+                                    }
+                                } else {
+                                    sargs[0].clone()
+                                }
+                            }
+                            other => other.clone(),
+                        };
+                        if let Type::Tuple(elems) = set_elem {
+                            let arity = elems.len() as u64;
+                            let func =
+                                self.get_runtime_fn("mimi_list_from_json_set_product_i64")?;
+                            let list_ptr = self
+                                .build_call(
+                                    func,
+                                    &[
+                                        BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                        BasicMetadataValueEnum::IntValue(
+                                            i64_ty.const_int(arity, false),
+                                        ),
+                                    ],
+                                    "list_from_json_set_product",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("list from_json set product void")?
+                                .into_pointer_value();
+                            let list_ty = self.list_struct_type();
+                            let loaded = self
+                                .builder
+                                .build_load(
+                                    BasicTypeEnum::StructType(list_ty),
+                                    list_ptr,
+                                    "list_set_prod_ld",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            return Ok(loaded.into());
+                        }
+                    }
+                }
                 // List of Set of Option of product.
                 if let Type::Name(sn, sargs) = inner_ty {
                     if sn == "Set" && sargs.len() == 1 {
@@ -2193,6 +2241,76 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     label,
                                 )?;
                                 return Ok(self.expect_basic_value(&result, fn_name)?.into());
+                            }
+                            // List of Set of Result of product.
+                            if ln == "List" {
+                                if let Type::Name(mn, margs) = &le {
+                                    if mn == "Set" && margs.len() == 1 {
+                                        let set_elem_r = match &margs[0] {
+                                            Type::Name(an, aargs) if aargs.is_empty() => {
+                                                if let Some(td) = self.type_defs.get(an) {
+                                                    if let crate::ast::TypeDefKind::Alias(inner) =
+                                                        &td.kind
+                                                    {
+                                                        inner.clone()
+                                                    } else {
+                                                        margs[0].clone()
+                                                    }
+                                                } else {
+                                                    margs[0].clone()
+                                                }
+                                            }
+                                            other => other.clone(),
+                                        };
+                                        if let Type::Name(rn, rargs) = &set_elem_r {
+                                            if rn == "Result" && !rargs.is_empty() {
+                                                let res_ok = match &rargs[0] {
+                                                    Type::Name(an, aargs) if aargs.is_empty() => {
+                                                        if let Some(td) = self.type_defs.get(an) {
+                                                            if let crate::ast::TypeDefKind::Alias(
+                                                                inner,
+                                                            ) = &td.kind
+                                                            {
+                                                                inner.clone()
+                                                            } else {
+                                                                rargs[0].clone()
+                                                            }
+                                                        } else {
+                                                            rargs[0].clone()
+                                                        }
+                                                    }
+                                                    other => other.clone(),
+                                                };
+                                                if let Type::Tuple(elems) = res_ok {
+                                                    let arity = elems.len() as u64;
+                                                    let func = self.get_runtime_fn(
+                                                        "mimi_map_from_json_list_set_result_product_i64",
+                                                    )?;
+                                                    let result = self.build_call(
+                                                        func,
+                                                        &[
+                                                            BasicMetadataValueEnum::PointerValue(
+                                                                raw_ptr,
+                                                            ),
+                                                            BasicMetadataValueEnum::IntValue(
+                                                                self.context
+                                                                    .i64_type()
+                                                                    .const_int(arity, false),
+                                                            ),
+                                                        ],
+                                                        "map_from_json_list_set_result_product",
+                                                    )?;
+                                                    return Ok(self
+                                                        .expect_basic_value(
+                                                            &result,
+                                                            "mimi_map_from_json_list_set_result_product_i64",
+                                                        )?
+                                                        .into());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             // List of Set of Option of product.
                             if ln == "List" {
