@@ -93,6 +93,22 @@ impl ModuleLoader {
         Ok(main)
     }
 
+    /// L-C1: load main using an already-parsed in-memory `File` so unsaved
+    /// editor buffers are not overwritten by stale on-disk content.
+    pub fn load_main_with_file(
+        &mut self,
+        path: &Path,
+        file: crate::ast::File,
+    ) -> Result<LoadedModule, String> {
+        let mut acc = Acc::new(self.base_dir.clone());
+        acc.loaded = self.loaded.clone();
+        acc.modules = self.modules.clone();
+        let (acc, main) = flow::flow_load_main_with_file(acc, path, file)?;
+        self.loaded = acc.loaded;
+        self.modules = acc.modules;
+        Ok(main)
+    }
+
     pub fn merge_all(&self) -> Result<File, String> {
         flow::flow_merge_all(&self.modules)
     }
