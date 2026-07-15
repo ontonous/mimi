@@ -7009,6 +7009,219 @@ pub extern "C" fn mimi_map_to_json_result_option_list_product_i64(
     alloc_c_string(&parts.join(""))
 }
 
+
+/// Map of Option of Set of List of product from JSON.
+/// Pack: `{i64 disc, i64 set_handle}` disc 1=Some set of list product, 0=None.
+#[no_mangle]
+pub extern "C" fn mimi_map_from_json_option_set_list_product_i64(
+    json: *const std::ffi::c_char,
+    arity: i64,
+) -> MapHandle {
+    if json.is_null() || arity <= 0 || arity > 16 {
+        return mimi_map_new();
+    }
+    let s = unsafe { cstr_to_string(json) };
+    let handle = mimi_map_new();
+    if handle == 0 {
+        return 0;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'{' {
+        return handle;
+    }
+    i += 1;
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b'}' {
+            break;
+        }
+        if bytes[i] != b'"' {
+            break;
+        }
+        i += 1;
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'"' {
+            if bytes[i] == b'\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let key = String::from_utf8_lossy(&bytes[start..i]).into_owned();
+        i += 1;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let pack = unsafe { libc::malloc(16) as *mut i64 };
+        if pack.is_null() {
+            continue;
+        }
+        if bytes[i] == b'n' && i + 4 <= bytes.len() && &bytes[i..i + 4] == b"null" {
+            i += 4;
+            unsafe {
+                *pack = 0;
+                *pack.add(1) = 0;
+            }
+        } else {
+            let val_start = i;
+            if bytes[i] == b'{' || bytes[i] == b'[' {
+                let open = bytes[i];
+                let close = if open == b'{' { b'}' } else { b']' };
+                let mut depth = 0i32;
+                while i < bytes.len() {
+                    if bytes[i] == open {
+                        depth += 1;
+                    } else if bytes[i] == close {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    } else if bytes[i] == b'"' {
+                        i += 1;
+                        while i < bytes.len() && bytes[i] != b'"' {
+                            if bytes[i] == b'\\' {
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                    }
+                    i += 1;
+                }
+            } else {
+                unsafe {
+                    libc::free(pack as *mut _);
+                }
+                break;
+            }
+            let val = String::from_utf8_lossy(&bytes[val_start..i]).into_owned();
+            let arr = if val.starts_with('{') {
+                // extract Some array
+                if let Some(pos) = val.find('[') {
+                    let mut depth = 0i32;
+                    let vb = val.as_bytes();
+                    let mut k = pos;
+                    while k < vb.len() {
+                        match vb[k] {
+                            b'[' => depth += 1,
+                            b']' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    k += 1;
+                                    break;
+                                }
+                            }
+                            b'"' => {
+                                k += 1;
+                                while k < vb.len() && vb[k] != b'"' {
+                                    if vb[k] == b'\\' {
+                                        k += 1;
+                                    }
+                                    k += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                        k += 1;
+                    }
+                    val[pos..k].to_string()
+                } else {
+                    String::from("[]")
+                }
+            } else {
+                val
+            };
+            let c_arr = alloc_c_string(&arr);
+            let set_h = mimi_set_from_json_list_product_i64(c_arr, arity);
+            if !c_arr.is_null() {
+                unsafe {
+                    libc::free(c_arr as *mut _);
+                }
+            }
+            unsafe {
+                *pack = 1;
+                *pack.add(1) = set_h as i64;
+            }
+        }
+        unsafe {
+            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+        }
+    }
+    handle
+}
+
+/// Map of Option of Set of List of product Display/JSON.
+#[no_mangle]
+pub extern "C" fn mimi_map_to_json_option_set_list_product_i64(
+    handle: MapHandle,
+    arity: i64,
+    display_style: i64,
+) -> *mut std::ffi::c_char {
+    if handle == 0 || arity <= 0 || arity > 16 {
+        return alloc_c_string("{}");
+    }
+    let map = unsafe { &*map_from_handle(handle) };
+    if map.inner.len() > 1_000_000 {
+        return alloc_c_string("{...}");
+    }
+    let mut entries: Vec<_> = map.inner.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 2 + 2);
+    parts.push(String::from("{"));
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        parts.push(json_escape_string(k));
+        parts.push(String::from(":"));
+        let vh = **v;
+        if vh == 0 {
+            if display_style != 0 {
+                parts.push(String::from("None()"));
+            } else {
+                parts.push(String::from("\"None\""));
+            }
+            continue;
+        }
+        let base = vh as *const i64;
+        let disc = unsafe { *base };
+        if disc == 0 {
+            if display_style != 0 {
+                parts.push(String::from("None()"));
+            } else {
+                parts.push(String::from("\"None\""));
+            }
+        } else {
+            let set_h = unsafe { *base.add(1) } as SetHandle;
+            let set_json = mimi_set_to_json_list_product_i64(set_h, arity, display_style);
+            let s = unsafe { cstr_to_string(set_json) };
+            if !set_json.is_null() {
+                unsafe {
+                    libc::free(set_json as *mut _);
+                }
+            }
+            if display_style != 0 {
+                parts.push(format!("Some({})", s));
+            } else {
+                parts.push(format!("{{\"Some\":[{}]}}", s));
+            }
+        }
+    }
+    parts.push(String::from("}"));
+    alloc_c_string(&parts.join(""))
+}
+
 /// Map of Option of Result of List of product from JSON.
 /// Pack: `{i64 disc, i64 res_handle}` where res is Result list product pack.
 #[no_mangle]
