@@ -599,6 +599,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         return self.wrap_c_string(raw);
                     } else if inner.starts_with("Result") {
                         "mimi_list_result_i64_to_json"
+                    } else if inner.starts_with('(') {
+                        // List of product tuples: codegen loop → JSON array of arrays.
+                        let raw = self.emit_list_product_tuple_to_json(alloca, inner)?;
+                        self.register_heap_alloc(raw);
+                        return self.wrap_c_string(raw);
                     } else {
                         match inner {
                             "string" => "mimi_list_str_to_json",
