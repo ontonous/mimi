@@ -1850,9 +1850,74 @@ impl<'ctx> CodeGenerator<'ctx> {
                     type_name
                 )))
             }
+            Type::Tuple(elems) if !elems.is_empty() => {
+                // from_json::<(T, U, …)>(s): JSON array → LLVM struct of field types.
+                // string elements: json_get_element already returns the unquoted
+                // heap C string (same as List<string>) — wrap directly, do not
+                // re-parse via mimi_from_json and do not free (ownership moves).
+                let json_get_elem_fn = self.get_runtime_fn("json_get_element")?;
+                let mut field_tys = Vec::with_capacity(elems.len());
+                for e in elems {
+                    let ty = self.llvm_type_for(e).ok_or_else(|| {
+                        CompileError::Generic(format!(
+                            "from_json::<Tuple>: cannot map element type {:?}",
+                            e
+                        ))
+                    })?;
+                    field_tys.push(ty);
+                }
+                let struct_ty = self.context.struct_type(&field_tys, false);
+                let mut struct_val = struct_ty.get_undef();
+                for (i, e) in elems.iter().enumerate() {
+                    let idx = self.context.i64_type().const_int(i as u64, false);
+                    let elem_json = self
+                        .build_call(
+                            json_get_elem_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(raw_ptr),
+                                BasicMetadataValueEnum::IntValue(idx),
+                            ],
+                            &format!("tuple_json_el{}", i),
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("json_get_element returned void")?
+                        .into_pointer_value();
+                    let is_string =
+                        matches!(e, Type::Name(n, _) if n == "string");
+                    let elem_val = if is_string {
+                        self.wrap_raw_string_ptr(elem_json)?
+                    } else {
+                        let v = self.compile_from_json_turbofish_with_ptr(
+                            std::slice::from_ref(e),
+                            elem_json,
+                        )?;
+                        // Free temporary JSON fragment after scalar parse.
+                        if let Ok(free_fn) = self.get_runtime_fn("free") {
+                            let _ = self.build_call(
+                                free_fn,
+                                &[BasicMetadataValueEnum::PointerValue(elem_json)],
+                                &format!("free_tuple_json_{}", i),
+                            );
+                        }
+                        v
+                    };
+                    // Scalar from_json often yields i64 while tuple field is i32 —
+                    // coerce to the LLVM field type before insertvalue.
+                    let coerced =
+                        self.coerce_value_to_expected_type(elem_val, field_tys[i])?;
+                    let agg = self
+                        .builder
+                        .build_insert_value(struct_val, coerced, i as u32, &format!("tup_f{}", i))
+                        .map_err(|err| {
+                            CompileError::LlvmError(format!("tuple insert {}: {}", i, err))
+                        })?;
+                    struct_val = agg.into_struct_value();
+                }
+                Ok(BasicValueEnum::StructValue(struct_val))
+            }
             _ => Err(CompileError::Generic(format!(
                 "from_json::<{:?}> codegen not yet implemented \
-                 (supported: scalars, Option, Result Ok-wrap, Map/Set i64, Record)",
+                 (supported: scalars, Option, Result Ok-wrap, Map/Set i64, Record, Tuple)",
                 type_args[0]
             ))),
         }

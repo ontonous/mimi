@@ -6595,6 +6595,26 @@ fn dual_from_json_record() {
     );
 }
 
+/// from_json::<(T,…)> product tuples (scalars + string).
+#[test]
+fn dual_from_json_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a = from_json::<(i32, i32)>("[1, 2]")
+            println(a)
+            let b = from_json::<(i32, bool, string)>("[1, true, \"hi\"]")
+            println(b)
+            0
+        }
+        "#,
+        "(1, 2)\n(1, true, hi)"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {
