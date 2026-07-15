@@ -7028,6 +7028,29 @@ fn dual_from_json_option_tuple_alias() {
     );
 }
 
+/// Bare type-alias product tuple: Display + to_json + from_json round-trip.
+#[test]
+fn dual_to_json_tuple_alias() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Pair = (i32, i32)
+        func main() -> i32 {
+            let p: Pair = (1, 2)
+            println(p)
+            println(to_json(p))
+            let q = from_json::<Pair>("[3,4]")
+            println(q)
+            println(to_json(q))
+            0
+        }
+        "#,
+        "(1, 2)\n[1,2]\n(3, 4)\n[3,4]"
+    );
+}
+
 /// CG-H2: nested Record fields in from_json::<T>.
 #[test]
 fn dual_from_json_nested_record() {
