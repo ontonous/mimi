@@ -353,6 +353,7 @@ fn mock_verify_items(items: &[crate::ast::Item], results: &mut Vec<VerificationR
                             Stmt::Requires(_, _)
                                 | Stmt::Ensures(_, _)
                                 | Stmt::Invariant(_, _)
+                                | Stmt::Math(_)
                                 | Stmt::MmsBlock { .. }
                         )
                     });

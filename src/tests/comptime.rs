@@ -147,12 +147,12 @@ func main() -> i32 {
 }
 
 #[test]
-fn math_constant_evaluation() {
+fn math_boolean_arithmetic_is_erased() {
     let src = r#"
 func main() -> i32 {
     math: {
-        1 + 2;
-        3 * 4;
+        1 + 2 == 3;
+        3 * 4 == 12;
     }
     42
 }
@@ -167,7 +167,7 @@ fn math_with_variables() {
 func main() -> i32 {
     let x = 5;
     math: {
-        x + 1;
+        x + 1 == 6;
     }
     x * 2
 }
@@ -210,8 +210,8 @@ fn math_with_division() {
     let src = r#"
 func main() -> i32 {
     math: {
-        10 / 2;
-        100 / 10;
+        10 / 2 == 5;
+        100 / 10 == 10;
     }
     5
 }
@@ -225,8 +225,8 @@ fn math_with_negative_numbers() {
     let src = r#"
 func main() -> i32 {
     math: {
-        -1 + 1;
-        -5 * -3;
+        -1 + 1 == 0;
+        -5 * -3 == 15;
     }
     15
 }

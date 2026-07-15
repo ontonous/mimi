@@ -2543,8 +2543,13 @@ fn dual_math_block() {
     }
     dual_assert!(
         r#"
+        func ghost_effect() -> bool {
+            println(99);
+            true
+        }
+
         func main() -> i32 {
-            math: { 1 + 2; 3 * 4; };
+            math: { ghost_effect(); };
             println(42);
             0
         }
