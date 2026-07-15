@@ -20,8 +20,10 @@
 //   let serialized = to_json(42)  // "42"
 
 // JsonExt: Trait for JSON string operations.
+// Note: free builtin `from_json(s)` is not a method — its result type is
+// dynamic (Record / List / scalar); wrapping it as `-> string` was a lie
+// and is rejected by trait impl return checking (E0207).
 trait JsonExt {
-    func from_json() -> string
     func get_string(key: string) -> string
     func get_int(key: string) -> i64
     func get_element(index: i32) -> string
@@ -37,7 +39,6 @@ trait JsonExt {
 
 // JsonExt implementation for built-in string type.
 impl JsonExt for string {
-    func from_json() -> string { from_json(self) }
     func get_string(key: string) -> string { json_get_string(self, key) }
     func get_int(key: string) -> i64 { json_get_int(self, key) }
     func get_element(index: i32) -> string { json_get_element(self, index) }
