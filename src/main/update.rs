@@ -55,9 +55,10 @@ pub(crate) fn update() -> Result<(), String> {
 
         let old_version = lock.get_package(&dep.name).map(|p| p.version.clone());
         let resolved = pkg_resolve::resolve_single_dep_in(&dep, &dst, &reg, Some(&dir))?;
-        lock.add_package(
+        lock.add_package_with_constraint(
             &resolved.name,
             &resolved.version,
+            dep.version.as_deref(),
             resolved.source.as_deref(),
             resolved.checksum.as_deref(),
         );

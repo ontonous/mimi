@@ -6,6 +6,9 @@ use std::path::Path;
 pub struct LockEntry {
     pub name: String,
     pub version: String,
+    /// P-H1: original version constraint from the manifest (e.g. "^1.0").
+    #[serde(default)]
+    pub constraint: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]
@@ -69,10 +72,23 @@ impl Lockfile {
         source: Option<&str>,
         checksum: Option<&str>,
     ) {
+        self.add_package_with_constraint(name, version, None, source, checksum);
+    }
+
+    /// P-H1: record both resolved version and original constraint.
+    pub fn add_package_with_constraint(
+        &mut self,
+        name: &str,
+        version: &str,
+        constraint: Option<&str>,
+        source: Option<&str>,
+        checksum: Option<&str>,
+    ) {
         self.package.retain(|p| p.name != name);
         self.package.push(LockEntry {
             name: name.to_string(),
             version: version.to_string(),
+            constraint: constraint.map(|s| s.to_string()),
             source: source.map(|s| s.to_string()),
             checksum: checksum.map(|c| c.to_string()),
         });
