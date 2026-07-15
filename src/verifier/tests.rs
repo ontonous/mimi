@@ -1032,7 +1032,15 @@ func caller(y: i32) -> i32 {
 func main() -> i32 { 0 }
 "#;
     let results = verify_source(src).expect("src/verifier/tests.rs: cross_module_ensures");
+    let double = results.iter().find(|r| r.func_name == "double");
     let caller = results.iter().find(|r| r.func_name == "caller");
+    assert!(double.is_some(), "double should be present: {:?}", results);
+    assert_eq!(
+        double.unwrap().status,
+        VerifStatus::Verified,
+        "double should verify first: {:?}",
+        double.unwrap()
+    );
     assert!(caller.is_some(), "caller should be present");
     // caller ensures result == y * 2. double(y) ensures result == y * 2.
     // With ensures propagation, the verifier can prove this.
@@ -1066,6 +1074,41 @@ func main() -> i32 { 0 }
         caller.unwrap().status,
         VerifStatus::Failed,
         "caller_bad should fail: {:?}",
+        caller.unwrap()
+    );
+}
+
+#[test]
+fn verify_failed_callee_ensures_not_axioms() {
+    require_z3!();
+    // V-C4: a callee whose ensures fail must not make the caller's
+    // postconditions verify via untrusted axioms.
+    let src = r#"
+func bad(x: i32) -> i32 {
+    ensures: result == x + 1
+    x
+}
+func caller(y: i32) -> i32 {
+    ensures: result == y + 1
+    bad(y)
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("src/verifier/tests.rs: failed_callee_not_axiom");
+    let bad = results.iter().find(|r| r.func_name == "bad");
+    let caller = results.iter().find(|r| r.func_name == "caller");
+    assert!(bad.is_some(), "bad should be present");
+    assert_eq!(
+        bad.unwrap().status,
+        VerifStatus::Failed,
+        "bad should fail its own ensures: {:?}",
+        bad.unwrap()
+    );
+    assert!(caller.is_some(), "caller should be present");
+    assert_ne!(
+        caller.unwrap().status,
+        VerifStatus::Verified,
+        "caller must not verify by trusting failed callee ensures: {:?}",
         caller.unwrap()
     );
 }

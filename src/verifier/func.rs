@@ -34,7 +34,12 @@ impl VerifierCtx {
                         // reset(), assertions from verify_func(inc) persist into
                         // verify_func(dec), causing false positives/negatives.
                         session.reset();
-                        results.push(self.verify_func(session, f));
+                        let result = self.verify_func(session, f);
+                        // V-C4: record status so later callers only trust
+                        // ensures from successfully verified callees.
+                        self.func_status
+                            .insert(f.name.clone(), result.status.clone());
+                        results.push(result);
                     }
                 }
                 Item::Module(m) => self.verify_items(session, &m.items, results),
@@ -1382,34 +1387,41 @@ impl VerifierCtx {
         match expr {
             Expr::Call(callee, call_args) => {
                 if let Expr::Ident(name) = callee.as_ref() {
-                    if let Some(callee_func) = self.func_defs.get(name) {
-                        let call_key = expr::call_var_key(name, call_args);
-                        // Clone callee data to avoid borrow conflict with
-                        // expr::expr_to_z3_bool (which needs &mut Z3VarMap).
-                        let callee_params = callee_func.params.clone();
-                        let callee_ensures: Vec<Expr> = callee_func
-                            .body
-                            .iter()
-                            .filter_map(|s| {
-                                if let Stmt::Ensures(e, _) = s {
-                                    Some(e.clone())
-                                } else {
-                                    None
+                    // V-C4: only admit ensures from callees that already
+                    // verified successfully. Failed/Unknown/unverified
+                    // callees must not become axioms for the caller.
+                    let callee_ok = self
+                        .func_status
+                        .get(name)
+                        .is_some_and(|s| *s == VerifStatus::Verified);
+                    if callee_ok {
+                        if let Some(callee_func) = self.func_defs.get(name) {
+                            let call_key = expr::call_var_key(name, call_args);
+                            // Clone callee data to avoid borrow conflict with
+                            // expr::expr_to_z3_bool (which needs &mut Z3VarMap).
+                            let callee_params = callee_func.params.clone();
+                            let callee_ensures: Vec<Expr> = callee_func
+                                .body
+                                .iter()
+                                .filter_map(|s| {
+                                    if let Stmt::Ensures(e, _) = s {
+                                        Some(e.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            let _ = callee_func;
+                            for ens_expr in &callee_ensures {
+                                let substituted = self.substitute_call(
+                                    ens_expr,
+                                    &callee_params,
+                                    call_args,
+                                    &call_key,
+                                );
+                                if let Some(z3_bool) = expr::expr_to_z3_bool(&substituted, vars) {
+                                    session.assert(z3_bool);
                                 }
-                            })
-                            .collect();
-                        // Drop the immutable borrow on self
-                        let _ = callee_func;
-                        // Now assert each ensures as a Z3 constraint
-                        for ens_expr in &callee_ensures {
-                            let substituted = self.substitute_call(
-                                ens_expr,
-                                &callee_params,
-                                call_args,
-                                &call_key,
-                            );
-                            if let Some(z3_bool) = expr::expr_to_z3_bool(&substituted, vars) {
-                                session.assert(z3_bool);
                             }
                         }
                     }
