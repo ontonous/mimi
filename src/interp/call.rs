@@ -65,8 +65,8 @@ impl<'a> Interpreter<'a> {
         // and `ensures` may reference `old(...)`. Avoid cloning every arg
         // on the hot path when verify_contracts is off.
         let mut old_snapshots: HashMap<String, Value> = HashMap::new();
-        let need_old = self.verify_contracts
-            && func.body.iter().any(|s| matches!(s, Stmt::Ensures(_, _)));
+        let need_old =
+            self.verify_contracts && func.body.iter().any(|s| matches!(s, Stmt::Ensures(_, _)));
         for (p, a) in func.params.iter().zip(filled_args) {
             if need_old {
                 old_snapshots.insert(p.name.clone(), a.clone());
@@ -274,8 +274,17 @@ impl<'a> Interpreter<'a> {
                 return Ok(result.clone());
             }
         }
-        // Check user-defined functions before builtins
+        // Check user-defined functions before builtins.
+        // I-H9: skip comptime functions here — they are only callable
+        // through the cache (pre-evaluated or lazy-evaluated below).
         if let Some(func) = self.find_function(name) {
+            if func.is_comptime {
+                // Comptime function — evaluate on demand and cache.
+                let result = self.call_func(&func, args)?;
+                self.comptime_results
+                    .insert(name.to_string(), result.clone());
+                return Ok(result);
+            }
             return self.call_func(&func, args);
         }
         match name {

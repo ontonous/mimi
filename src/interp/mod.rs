@@ -284,6 +284,28 @@ impl<'a> Interpreter<'a> {
         self.stdout_capture = Some(buf);
     }
 
+    /// Inherit the process-wide stdout capture buffer into this interpreter's
+    /// local field. Used by actor workers and parasteps so they share the
+    /// same buffer as the spawning interpreter without relying on the global
+    /// slot (which is cleared by `take_stdout` and races in parallel tests).
+    pub fn inherit_stdout_capture(&mut self) {
+        if self.stdout_capture.is_some() {
+            return;
+        }
+        if let Ok(slot) = global_stdout_slot().lock() {
+            if let Some(buf) = slot.as_ref() {
+                self.stdout_capture = Some(std::sync::Arc::clone(buf));
+            }
+        }
+    }
+
+    /// Set the stdout capture buffer directly (bypassed from the spawning
+    /// interpreter). This avoids the global slot entirely — the worker owns
+    /// its own reference to the same Arc.
+    pub fn set_stdout_buf(&mut self, buf: std::sync::Arc<std::sync::Mutex<String>>) {
+        self.stdout_capture = Some(buf);
+    }
+
     /// Take captured stdout and clear the process-wide sink.
     pub fn take_stdout(&mut self) -> String {
         if let Ok(mut slot) = global_stdout_slot().lock() {
@@ -980,6 +1002,11 @@ impl<'a> Interpreter<'a> {
             })
             .collect();
         for func in funcs {
+            // I-H9: skip if already cached (e.g. was called as a dependency
+            // from another comptime func's body during its pre-evaluation).
+            if self.comptime_results.contains_key(&func.name) {
+                continue;
+            }
             let result = self.call_func(&func, vec![])?;
             self.comptime_results.insert(func.name.clone(), result);
         }

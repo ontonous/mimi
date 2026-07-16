@@ -411,7 +411,7 @@ fn json_from_json_typed_option_none() {
         }
     "#,
     );
-    assert_eq!(v, interp::Value::String("unit".into()));
+    assert_eq!(v, interp::Value::String("None".into()));
 }
 
 #[test]
