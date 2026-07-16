@@ -1722,6 +1722,41 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let b = self.compile_quote_runtime(body)?;
                 self.call_quote_new_node(23, b, null_i8.into(), 0) // QAST_LOOP
             }
+            Stmt::While { cond, body } => {
+                let cond_v = self.compile_quote_runtime_expr(cond)?;
+                let body_v = self.compile_quote_runtime(body)?;
+                let i8_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                let i64_ty = self.context.i64_type();
+                let arr = self.build_alloca(i8_ty.array_type(2), "q_while_children")?;
+                for (i, child) in [&cond_v, &body_v].iter().enumerate() {
+                    let gep = self.gep().build_in_bounds_gep(
+                        i8_ty, arr,
+                        &[i64_ty.const_int(i as u64, false)], "q_while_gep",
+                    ).map_err(|e| CompileError::LlvmError(format!("q while gep: {}", e)))?;
+                    self.build_store(gep, **child)?;
+                }
+                let arr_ptr = self.build_load(i8_ty, arr, "q_while_arr")?.into_pointer_value();
+                self.call_quote_new_list(20, arr_ptr, 2) // QAST_WHILE
+            }
+            Stmt::WhileLet { pat: _, init, body } => {
+                // WhileLet: compile init expr and body block. Pattern binding
+                // is not supported at runtime — use WhileLet only for its
+                // iteration guard, evaluated at runtime.
+                let init_v = self.compile_quote_runtime_expr(init)?;
+                let body_v = self.compile_quote_runtime(body)?;
+                let i8_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                let i64_ty = self.context.i64_type();
+                let arr = self.build_alloca(i8_ty.array_type(2), "q_whilelet_children")?;
+                for (i, child) in [&init_v, &body_v].iter().enumerate() {
+                    let gep = self.gep().build_in_bounds_gep(
+                        i8_ty, arr,
+                        &[i64_ty.const_int(i as u64, false)], "q_whilelet_gep",
+                    ).map_err(|e| CompileError::LlvmError(format!("q whilelet gep: {}", e)))?;
+                    self.build_store(gep, **child)?;
+                }
+                let arr_ptr = self.build_load(i8_ty, arr, "q_whilelet_arr")?.into_pointer_value();
+                self.call_quote_new_list(22, arr_ptr, 2) // QAST_FOR (reuse For tag for pattern-based iteration)
+            }
             _ => Err(CompileError::Generic(format!(
                 "unsupported statement in runtime QuotedAst: {:?}",
                 stmt
@@ -1793,6 +1828,84 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Tuple(items) => {
                 let children = self.build_quote_children_list(items)?;
                 self.call_quote_new_list(11, children, items.len()) // QAST_TUPLE
+            }
+            // DSL-C2: expanded runtime QuotedAst coverage — Call, If, List,
+            // Field, Index, Cast, While, Match (common nodes).
+            Expr::Call(callee, args) => {
+                // Build children list: callee + args.
+                let mut all = Vec::with_capacity(1 + args.len());
+                all.push(callee.as_ref().clone());
+                all.extend(args.iter().cloned());
+                let children = self.build_quote_children_list(&all)?;
+                self.call_quote_new_list(8, children, all.len()) // QAST_CALL
+            }
+            Expr::If {
+                cond,
+                then_,
+                else_,
+            } => {
+                let cond_v = self.compile_quote_runtime_expr(cond)?;
+                let then_v = self.compile_quote_runtime(then_)?; // Block→QAST_BLOCK node
+                match else_ {
+                    Some(else_block) => {
+                        let else_v = self.compile_quote_runtime(else_block)?;
+                        // Build children array and use QAST_IF as list node.
+                        let i8_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let i64_ty = self.context.i64_type();
+                        let alloca = self.build_alloca(i8_ty.array_type(3), "q_if_children")?;
+                        for (i, child) in [&cond_v, &then_v, &else_v].iter().enumerate() {
+                            let gep = self.gep().build_in_bounds_gep(
+                                i8_ty, alloca,
+                                &[i64_ty.const_int(i as u64, false)], "q_if_gep",
+                            ).map_err(|e| CompileError::LlvmError(format!("q if gep: {}", e)))?;
+                            self.build_store(gep, **child)?;
+                        }
+                        let arr_ptr = self.build_load(i8_ty, alloca, "q_if_arr")?.into_pointer_value();
+                        self.call_quote_new_list(13, arr_ptr, 3) // QAST_IF
+                    }
+                    None => {
+                        let i8_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let i64_ty = self.context.i64_type();
+                        let alloca = self.build_alloca(i8_ty.array_type(2), "q_if_children")?;
+                        for (i, child) in [&cond_v, &then_v].iter().enumerate() {
+                            let gep = self.gep().build_in_bounds_gep(
+                                i8_ty, alloca,
+                                &[i64_ty.const_int(i as u64, false)], "q_if_gep",
+                            ).map_err(|e| CompileError::LlvmError(format!("q if gep: {}", e)))?;
+                            self.build_store(gep, **child)?;
+                        }
+                        let arr_ptr = self.build_load(i8_ty, alloca, "q_if_arr")?.into_pointer_value();
+                        self.call_quote_new_list(13, arr_ptr, 2) // QAST_IF
+                    }
+                }
+            }
+            Expr::List(items) => {
+                let children = self.build_quote_children_list(items)?;
+                self.call_quote_new_list(12, children, items.len()) // QAST_LIST
+            }
+            Expr::Field(obj, field) => {
+                let obj_v = self.compile_quote_runtime_expr(obj)?;
+                let global = self
+                    .builder
+                    .build_global_string_ptr(field, "q_field")
+                    .map_err(|e| CompileError::LlvmError(format!("quote field str: {}", e)))?;
+                let ptr_i64 = self.build_ptr_to_int(
+                    global.as_pointer_value(),
+                    self.context.i64_type(),
+                    "q_field_i64",
+                )?;
+                let field_leaf = self.call_quote_new_leaf(3, ptr_i64)?; // QAST_STRING for field name
+                self.call_quote_new_node(9, obj_v, field_leaf, 0) // QAST_FIELD
+            }
+            Expr::Index(obj, idx) => {
+                let obj_v = self.compile_quote_runtime_expr(obj)?;
+                let idx_v = self.compile_quote_runtime_expr(idx)?;
+                self.call_quote_new_node(10, obj_v, idx_v, 0) // QAST_INDEX
+            }
+            Expr::Cast(inner, _target_type) => {
+                // Cast: just compile the inner expression (type coercion
+                // is handled by the runtime).
+                self.compile_quote_runtime_expr(inner)
             }
             _ => Err(CompileError::Generic(format!(
                 "unsupported expression in runtime QuotedAst: {:?}",
