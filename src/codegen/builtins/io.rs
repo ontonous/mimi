@@ -6003,6 +6003,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Convenience: always use heapish heuristic for Err JSON.
+    #[allow(dead_code)]
     pub(in crate::codegen) fn emit_result_err_string_json(
         &self,
         err_i64: inkwell::values::IntValue<'ctx>,
@@ -8780,6 +8781,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// List of Result of Set of product — JSON via per-element result_set product.
+    #[allow(dead_code)]
     pub(in crate::codegen) fn emit_list_result_set_product_to_json(
         &self,
         list_alloca: inkwell::values::PointerValue<'ctx>,
