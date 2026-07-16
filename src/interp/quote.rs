@@ -251,15 +251,17 @@ impl<'a> Interpreter<'a> {
                 Ok(QuotedAst::If(q_cond, q_then, q_else))
             }
             Expr::Lambda {
-                params: _,
-                ret: _,
+                params,
+                ret,
                 body,
             } => {
-                // Quote the lambda body as a block
+                // C1: preserve lambda params and return type in the quoted AST.
                 let quoted_body = self.quote_block(body)?;
-                // Represent lambda as a call to a synthetic function
-                // For simplicity, just quote the body
-                Ok(quoted_body)
+                Ok(QuotedAst::Lambda {
+                    params: params.clone(),
+                    ret: ret.clone(),
+                    body: Box::new(quoted_body),
+                })
             }
             Expr::Turbofish(name, _type_args, args) => {
                 // In quote context, treat turbofish as a regular call
@@ -829,6 +831,15 @@ impl<'a> Interpreter<'a> {
                     } => self.apply_closure_inner(&params, &body, &captured, arg_vals),
                     _ => Err(InterpError::new("cannot call non-closure in quoted AST")),
                 }
+            }
+            QuotedAst::Lambda {
+                params: _,
+                ret: _,
+                body,
+            } => {
+                // C1: evaluate the lambda body (same as pre-C1 behavior but
+                // with params/ret preserved in the QuotedAst structure).
+                self.eval_quoted_ast(body)
             }
             _ => Err(InterpError::new(format!(
                 "unsupported quoted AST node: {:?}",

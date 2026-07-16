@@ -618,7 +618,19 @@ impl<'a> Interpreter<'a> {
                     shadow_persistent_into_fault(&mut fault, &restored, &flow.persistent_fields);
                     drop_fault_payload_except(&restored, &flow.persistent_fields);
                 } else {
-                    self.abort_persistent_tx(&flow.name);
+                    // C3: even without a from-payload, try to restore persistent
+                    // data from the tx snapshot so it is not silently lost.
+                    let restored =
+                        self.abort_persistent_tx_restore_or_empty(&flow.name, flow);
+                    if let Value::Record(_, fields) = &restored {
+                        for name in &flow.persistent_fields {
+                            if let Some(v) = fields.get(name) {
+                                if let Value::Record(Some(ref n), ref mut f) = fault {
+                                    f.insert(name.clone(), v.clone());
+                                }
+                            }
+                        }
+                    }
                 }
                 self.current_flow_state = prev_flow_state;
                 return Ok(fault);
@@ -647,7 +659,21 @@ impl<'a> Interpreter<'a> {
                 self.current_flow_state = prev_flow_state;
                 return Ok(out_fault);
             }
-            self.abort_persistent_tx(&flow.name);
+            // C3: from_payload is None — still try to restore persistent data
+            // from the tx snapshot so it is not silently lost on fault entry.
+            let restored = self.abort_persistent_tx_restore_or_empty(&flow.name, flow);
+            let mut out_fault = out;
+            if let Value::Record(_, fields) = &restored {
+                if matches!(&out_fault, Value::Record(Some(n), _) if n == "Fault") {
+                    shadow_persistent_into_fault(
+                        &mut out_fault,
+                        &restored,
+                        &flow.persistent_fields,
+                    );
+                }
+            }
+            self.current_flow_state = prev_flow_state;
+            return Ok(out_fault);
         } else {
             // Success: commit (drop snapshot).
             self.commit_persistent_tx(&flow.name);
@@ -682,6 +708,8 @@ impl<'a> Interpreter<'a> {
     /// Snapshot persistent fields from `self` at turn entry.
     /// v0.29.45: `@metadata_shadow` fields only snapshot their length (O(1)),
     /// not the full data — white-paper §6.3 Metadata Shadowing.
+    /// C4: metadata_shadow fields also store the full value in `snapshot` for
+    /// content-aware dirty checking (the WAL restore is still length-only).
     fn begin_persistent_tx(&mut self, flow_name: &str, flow: &FlowDef, self_val: &Value) {
         if flow.persistent_fields.is_empty() {
             return;
@@ -701,6 +729,8 @@ impl<'a> Interpreter<'a> {
                             _ => 0, // scalars: no metadata to snapshot
                         };
                         meta_snap.insert(name.clone(), len);
+                        // C4: also store full value for content-aware dirty check.
+                        snap.insert(name.clone(), v.clone());
                     } else {
                         snap.insert(name.clone(), v.clone());
                     }
@@ -783,6 +813,36 @@ impl<'a> Interpreter<'a> {
         restored
     }
 
+    /// C3: Like `abort_persistent_tx_restore` but when no `from_payload` is
+    /// available — constructs an empty record and populates it from the tx
+    /// snapshot metadata so persistent data is not silently lost.
+    fn abort_persistent_tx_restore_or_empty(
+        &mut self,
+        flow_name: &str,
+        flow: &FlowDef,
+    ) -> Value {
+        let tx = self.flow_tx.remove(flow_name);
+        let Some(tx) = tx else {
+            return Value::Unit;
+        };
+        // Build a minimal record from the snapshot data.
+        let mut fields = HashMap::new();
+        for (name, v) in &tx.snapshot {
+            fields.insert(name.clone(), v.clone());
+        }
+        for (name, &orig_len) in &tx.metadata_snapshot {
+            if !fields.contains_key(name) {
+                // Restore metadata length only for list-like values.
+                fields.insert(name.clone(), Value::List(vec![]));
+            }
+        }
+        if fields.is_empty() {
+            Value::Unit
+        } else {
+            Value::Record(Some("recovered".to_string()), fields)
+        }
+    }
+
     /// True if any non-transactional persistent field on the Fault shadow
     /// differs from the last committed snapshot — recover should degrade to reset.
     ///
@@ -801,10 +861,11 @@ impl<'a> Interpreter<'a> {
                         if flow.transactional_fields.iter().any(|t| t == name) {
                             continue; // WAL-restored, always clean
                         }
-                        // v0.29.45: metadata_shadow fields are metadata-restored
-                        if flow.metadata_shadow_fields.contains(name) {
-                            continue;
-                        }
+                        // v0.29.45 + C4: metadata_shadow fields now also have
+                        // their full value stored in tx.snapshot (by
+                        // begin_persistent_tx), so the values_equal check below
+                        // detects in-place content corruption even when length
+                        // is unchanged. The WAL restore is still length-only.
                         match (fields.get(name), tx.snapshot.get(name)) {
                             (Some(cur), Some(old))
                                 if !crate::interp::value::values_equal(cur, old) =>

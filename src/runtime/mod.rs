@@ -22527,6 +22527,9 @@ struct MimiActorRepr {
     muted: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// v0.29.25: method_id → method name for polymorphic broadcast name resolution.
     method_names: std::sync::Mutex<Vec<String>>,
+    /// C6: in-flight call counter. mimi_actor_call increments before using repr;
+    /// mimi_actor_drop waits for this to reach 0 before freeing.
+    in_flight_calls: std::sync::atomic::AtomicU32,
 }
 
 // SAFETY: `MimiActorRepr` is shared between the caller thread (which holds the
@@ -22707,6 +22710,7 @@ pub extern "C" fn mimi_actor_spawn(
         mailbox_depth,
         muted,
         method_names: std::sync::Mutex::new(Vec::new()),
+        in_flight_calls: std::sync::atomic::AtomicU32::new(0),
     });
 
     ACTOR_SPAWN_COUNT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -22742,6 +22746,26 @@ pub extern "C" fn mimi_actor_current_id() -> u64 {
     CURRENT_ACTOR_ID.with(|c| c.get())
 }
 
+/// C6: RAII guard that decrements an in-flight call counter on drop.
+/// Used by mimi_actor_call to prevent UAF during concurrent mimi_actor_drop.
+struct InFlightGuard<'a> {
+    counter: &'a std::sync::atomic::AtomicU32,
+}
+
+impl<'a> InFlightGuard<'a> {
+    fn new(counter: &'a std::sync::atomic::AtomicU32) -> Self {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Acquire);
+        InFlightGuard { counter }
+    }
+}
+
+impl<'a> Drop for InFlightGuard<'a> {
+    fn drop(&mut self) {
+        self.counter
+            .fetch_sub(1, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Call an actor method (blocking).
 ///
 /// Sends a message to the actor's mailbox and blocks waiting for the response.
@@ -22772,6 +22796,16 @@ pub extern "C" fn mimi_actor_call(
 
     // SAFETY: handle is live and registered from mimi_actor_spawn.
     let repr = unsafe { &*(handle as *const MimiActorRepr) };
+
+    // C6: increment in-flight counter to prevent UAF during concurrent drop.
+    // mimi_actor_drop waits for this to reach 0 before freeing.
+    let _guard = InFlightGuard::new(&repr.in_flight_calls);
+
+    // Re-check liveness after increment: if mimi_actor_drop removed us from
+    // the live set between check and fetch_add, release and return 0.
+    if !actor_handle_live(handle) {
+        return 0;
+    }
 
     // v0.29.11: O(1) mailbox short-circuit after Fault absorption.
     if repr.faulted.load(std::sync::atomic::Ordering::Acquire) {
@@ -22869,6 +22903,13 @@ pub extern "C" fn mimi_actor_drop(handle: *mut std::ffi::c_void) {
         std::sync::atomic::Ordering::Acquire,
         |v| Some(v.saturating_sub(1)),
     );
+    // C6: wait for all in-flight calls to complete before freeing.
+    // actor_take_live prevents NEW calls; existing calls that started before
+    // our removal hold the in_flight counter and will decrement on return.
+    let repr = unsafe { &*(handle as *const MimiActorRepr) };
+    while repr.in_flight_calls.load(std::sync::atomic::Ordering::Acquire) > 0 {
+        std::thread::yield_now();
+    }
     // SAFETY: handle was live and removed under lock; exclusive ownership restored.
     // Drop closes mailbox_tx so worker recv() returns Err and exits; then join.
     unsafe {

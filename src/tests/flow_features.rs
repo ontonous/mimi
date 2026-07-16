@@ -3226,10 +3226,14 @@ flow N {
         pf.iter().any(|t| t.from_state == "B" && t.is_fallback),
         "B.peer_fault missing"
     );
-    // Fault state itself should not get peer_fault injection (only non-Fault)
+    // Fault state itself gets a peer_fault → Fault self-loop
+    // (C5: prevents dispatch failure when peer_fault arrives in Fault state).
     assert!(
-        !pf.iter().any(|t| t.from_state == "Fault"),
-        "Fault must not receive peer_fault injection"
+        pf.iter().any(|t| t.from_state == "Fault"
+            && t.to_states == vec!["Fault".to_string()]
+            && t.is_fallback),
+        "Fault.peer_fault → Fault self-loop missing: {:?}",
+        pf
     );
 }
 
