@@ -700,6 +700,35 @@ impl<'a> Checker<'a> {
                 } else {
                     final_ty
                 };
+                // T5: linear capability move semantics — when a cap-typed variable
+                // is used as the init expression in a let-binding, mark the source
+                // as consumed (move, not copy). Without this, `let y = x` on a cap
+                // creates a copy and both variables are independently usable.
+                if matches!(&final_ty, Type::Cap(_)) {
+                    if let Some(Expr::Ident(src_name)) = init {
+                        if let Some(cap_scope) = self.cap_vars.last_mut() {
+                            if let Some(info) = cap_scope.get_mut(src_name) {
+                                if info.consumed {
+                                    self.errors.push(
+                                        Diagnostic::error_code(
+                                            crate::diagnostic::codes::E0304,
+                                            format!(
+                                                "capability '{}' has already been consumed",
+                                                src_name
+                                            ),
+                                            Span::single(self.current_line, self.current_col),
+                                        )
+                                        .with_help(
+                                            "capabilities are linear - each can only be moved once",
+                                        ),
+                                    );
+                                } else {
+                                    info.consumed = true;
+                                }
+                            }
+                        }
+                    }
+                }
                 // Track mutability
                 if let Pattern::Variable(name) = pat {
                     if let Some(s) = self.mut_vars.last_mut() {
