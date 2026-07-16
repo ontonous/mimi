@@ -76,7 +76,7 @@ impl<'a> Interpreter<'a> {
         // worker thread's Interpreter can resolve user-defined functions
         // and types when executing actor methods.
         let program = std::sync::Arc::new(self.file.clone());
-        let handle = ActorHandle::new(instance, program);
+        let handle = ActorHandle::new(instance, program, self.stdout_capture.clone());
         self.spawn_count += 1;
         // per-actor-type tracking
         *self

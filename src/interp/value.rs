@@ -93,9 +93,7 @@ fn executor_queue() -> &'static std::sync::Mutex<Vec<std::sync::Arc<std::sync::M
 /// Submit a deferred future to the global executor.
 pub fn executor_submit(future: std::sync::Arc<std::sync::Mutex<PollFuture>>) {
     // Recover from poison so a panicked poller cannot brick the queue.
-    let mut guard = executor_queue()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut guard = executor_queue().lock().unwrap_or_else(|e| e.into_inner());
     guard.push(future);
 }
 
@@ -662,8 +660,12 @@ impl ActorHandle {
     /// user-defined functions, types, and actors. Without this, actor
     /// methods cannot call any user code (see mimichat gap #1, fixed in
     /// v0.28.28).
-    pub(crate) fn new(instance: ActorInstance, program: std::sync::Arc<crate::ast::File>) -> Self {
-        Self::new_with_depth(instance, program, DEFAULT_MAILBOX_DEPTH)
+    pub(crate) fn new(
+        instance: ActorInstance,
+        program: std::sync::Arc<crate::ast::File>,
+        stdout_buf: Option<std::sync::Arc<std::sync::Mutex<String>>>,
+    ) -> Self {
+        Self::new_with_depth(instance, program, DEFAULT_MAILBOX_DEPTH, stdout_buf)
     }
 
     /// Create actor with explicit mailbox high-water depth (v0.29.21).
@@ -671,6 +673,7 @@ impl ActorHandle {
         instance: ActorInstance,
         program: std::sync::Arc<crate::ast::File>,
         depth_limit: usize,
+        stdout_buf: Option<std::sync::Arc<std::sync::Mutex<String>>>,
     ) -> Self {
         let id = ACTOR_HANDLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let (mailbox_tx, mailbox_rx) = std::sync::mpsc::channel::<ActorMailboxMsg>();
@@ -681,6 +684,7 @@ impl ActorHandle {
         let mailbox_tx_clone = mailbox_tx.clone();
         let worker_program = program.clone();
         let worker_bp = bp.clone();
+        let worker_stdout = stdout_buf.clone();
         let worker_spawn = std::thread::Builder::new()
             .name(format!("actor-{}", id))
             .spawn(move || {
@@ -725,6 +729,12 @@ impl ActorHandle {
                         // user-defined functions / types resolve inside
                         // the actor method body.
                         let mut interp = crate::interp::Interpreter::new(&worker_program);
+                        // v0.29.44: inherit stdout capture from spawning interp
+                        // via the captured Arc (not the global slot, which races
+                        // when tests run in parallel).
+                        if let Some(ref buf) = worker_stdout {
+                            interp.set_stdout_buf(std::sync::Arc::clone(buf));
+                        }
                         let self_val = Value::Actor(ActorHandle {
                             inner: worker_inner.clone(),
                             mailbox: mailbox_tx_clone.clone(),
@@ -1032,10 +1042,7 @@ impl ActorHandle {
         let caller_id = CURRENT_ACTOR_ID.with(|id| id.get());
         if caller_id != 0 && caller_id != self.id {
             // Recover from poison (worker panic) instead of crashing the sender.
-            let mut inner = self
-                .inner
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
             if !inner.producers.contains(&caller_id) {
                 inner.producers.push(caller_id);
             }
@@ -1443,16 +1450,12 @@ pub(crate) fn contains_arena_ref(v: &Value, arena_id: usize) -> bool {
             }
             false
         }
-        Value::LocalShared(inner) => contains_arena_ref(
-            &inner.0.lock().unwrap_or_else(|e| e.into_inner()),
-            arena_id,
-        ),
+        Value::LocalShared(inner) => {
+            contains_arena_ref(&inner.0.lock().unwrap_or_else(|e| e.into_inner()), arena_id)
+        }
         Value::WeakLocal(inner) => {
             if let Some(rc) = inner.0.upgrade() {
-                contains_arena_ref(
-                    &rc.lock().unwrap_or_else(|e| e.into_inner()),
-                    arena_id,
-                )
+                contains_arena_ref(&rc.lock().unwrap_or_else(|e| e.into_inner()), arena_id)
             } else {
                 false
             }
