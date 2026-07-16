@@ -288,6 +288,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         params.extend(t.params.iter().cloned());
 
         // M6: multi-target uses first as nominal; see module docs above.
+        // C6: warn when a transition has multiple target states — codegen only
+        // uses the first as the return type (multi-target dispatch unsupported).
+        if t.to_states.len() > 1 {
+            eprintln!(
+                "[mimi] warning: transition '{}.{}({})' has {} target states; \
+                 codegen only uses the first ('{}') as the return type. \
+                 Multi-target dispatch is not supported in codegen.",
+                flow.name, t.name, t.from_state, t.to_states.len(),
+                t.to_states.first().cloned().unwrap_or_default()
+            );
+        }
         // H2: recover bodies already keep persistent shadows when
         // `flow.persistent_fields` is non-empty (inject_system_verbs keep=true).
         let _ = &flow.persistent_fields;
@@ -340,10 +351,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Compile all transitions of a flow as ordinary LLVM functions.
     pub(super) fn compile_flow(&mut self, flow: &FlowDef) -> MimiResult<()> {
         if !flow.transactional_fields.is_empty() {
-            return Err(CompileError::Unsupported(format!(
-                "transactional recovery for flow '{}' is not implemented",
+            // C1: downgraded from hard error to warning — codegen skips WAL
+            // but produces a working binary (without transactional rollback).
+            eprintln!(
+                "[mimi] warning: transactional recovery for flow '{}' is not implemented \
+                 in codegen; @transactional fields will behave as ordinary persistent fields.",
                 flow.name
-            )));
+            );
         }
         for t in &flow.transitions {
             if t.body.is_none() {

@@ -7,6 +7,10 @@ use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 
 /// Encode an expression as a Z3 Int term.
 /// May create field access variables on-the-fly when encountering Expr::Field.
+///
+/// NOTE: Z3 Int is unbounded — overflow is NOT modeled. For overflow-aware
+/// verification, the Z3 encoding should use bit-vector (BV32) arithmetic.
+/// This is tracked as architecture debt (C2 / v0.30+).
 pub(crate) fn expr_to_z3_int(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Int> {
     match expr {
         Expr::Literal(Lit::Int(n)) => Some(Z3Int::from_i64(*n)),
@@ -35,8 +39,34 @@ pub(crate) fn expr_to_z3_int(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Int> 
                 BinOp::Add => Some(Z3Int::add(&[&l, &r])),
                 BinOp::Sub => Some(Z3Int::sub(&[&l, &r])),
                 BinOp::Mul => Some(Z3Int::mul(&[&l, &r])),
-                BinOp::Div => Some(l.div(&r)),
-                BinOp::Mod => Some(l.modulo(&r)),
+                BinOp::Div => {
+                    // C1: Z3's `div` uses Euclidean division (floor), but
+                    // C/LLVM uses truncation (toward zero). Encode truncation:
+                    //   trunc_div(a,b) = let aa = abs(a), ab = abs(b);
+                    //   abs_q = aa / ab;  (positive-only, Euclidean = truncation)
+                    //   result = (a>=0)==(b>=0) ? abs_q : -abs_q
+                    let zero = Z3Int::from_i64(0);
+                    let aa = l.ge(&zero).ite(&l, &l.unary_minus());
+                    let ab = r.ge(&zero).ite(&r, &r.unary_minus());
+                    let abs_q = aa.div(&ab);
+                    let same_sign = l.ge(&zero).eq(&r.ge(&zero));
+                    Some(same_sign.ite(&abs_q, &abs_q.unary_minus()))
+                }
+                BinOp::Mod => {
+                    // C1: Z3's `modulo` is also Euclidean. Encode C truncation
+                    // modulo: trunc_mod(a,b) = a - trunc_div(a,b) * b
+                    // But this creates a circular dependency. Instead use:
+                    // trunc_mod(a,b) = a - trunc_div(a,b) * b
+                    // where trunc_div is defined above.
+                    // For a standalone encoding:
+                    //   let abs_r = aa % ab;  (positive-only)
+                    //   result = a>=0 ? abs_r : -abs_r
+                    let zero = Z3Int::from_i64(0);
+                    let aa = l.ge(&zero).ite(&l, &l.unary_minus());
+                    let ab = r.ge(&zero).ite(&r, &r.unary_minus());
+                    let abs_mod = aa.modulo(&ab);
+                    Some(l.ge(&zero).ite(&abs_mod, &abs_mod.unary_minus()))
+                }
                 _ => None,
             }
         }

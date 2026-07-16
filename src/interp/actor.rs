@@ -140,6 +140,9 @@ impl<'a> Interpreter<'a> {
     /// would be worse than proceeding with potentially stale data, since
     /// we're killing children anyway. The lock is only used for the actor
     /// registry, not for mutable actor state.
+    /// C2: collect strong handles within a single lock acquisition to eliminate
+    /// the TOCTOU window where a child spawns new children between registry
+    /// reads.
     pub(crate) fn system_kill_children(&self, parent_id: usize) {
         let handles = crate::interp::value::actor_handles();
         // SAFETY: into_inner() on a poisoned mutex is safe — it returns the
@@ -147,16 +150,17 @@ impl<'a> Interpreter<'a> {
         // parent_id and is_detached fields which are set at spawn time and
         // not modified during normal operation.
         // R-C9: registry holds weak entries — upgrade to strong handles.
-        let mut stale = Vec::new();
-        let child_ids: Vec<usize> = {
+        // C2: Collect strong handles in a single lock acquisition.
+        let mut children: Vec<ActorHandle> = Vec::new();
+        {
             let mut registry = handles.lock().unwrap_or_else(|e| e.into_inner());
-            let mut ids = Vec::new();
+            let mut stale = Vec::new();
             for (id, entry) in registry.iter() {
                 match entry.upgrade() {
                     Some(h) => {
                         if let Ok(instance) = h.inner.read() {
                             if instance.parent_id == Some(parent_id) && !instance.is_detached {
-                                ids.push(*id);
+                                children.push(h.clone());
                             }
                         }
                     }
@@ -166,22 +170,15 @@ impl<'a> Interpreter<'a> {
             for id in stale {
                 registry.remove(&id);
             }
-            ids
-        };
-        // Kill each child
-        for child_id in child_ids {
-            let child = {
-                let registry = handles.lock().unwrap_or_else(|e| e.into_inner());
-                registry.get(&child_id).and_then(|e| e.upgrade())
-            };
-            if let Some(child) = child {
-                // Mark as faulted (short-circuit mailbox)
-                if let Ok(mut instance) = child.inner.write() {
-                    instance.faulted = true;
-                }
-                // Recursively kill grandchildren
-                self.system_kill_children(child_id);
+        } // registry lock dropped here
+        // Kill each child (no TOCTOU window — we hold strong references).
+        for child in children {
+            // Mark as faulted (short-circuit mailbox)
+            if let Ok(mut instance) = child.inner.write() {
+                instance.faulted = true;
             }
+            // Recursively kill grandchildren
+            self.system_kill_children(child.id);
         }
     }
 }

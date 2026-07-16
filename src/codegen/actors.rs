@@ -418,9 +418,39 @@ impl<'ctx> CodeGenerator<'ctx> {
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
-        // Allocate actor struct on stack and initialize fields.
+        // Allocate actor struct on heap (not stack) for cross-thread safety.
+        // C5: alloca is invalid after the spawning function returns, but the
+        // worker thread reads these fields after spawn returns. Use malloc
+        // (via malloc_or_abort) to keep memory alive for the worker.
+        let struct_size_val_full = match actor_ty {
+            BasicTypeEnum::StructType(sty) => {
+                if let Some(s) = sty.size_of() {
+                    if let Some(const_size) = s.get_zero_extended_constant() {
+                        i64_ty.const_int(const_size, false)
+                    } else {
+                        let s_ty = s.get_type();
+                        if s_ty.get_bit_width() < 64 {
+                            self.builder
+                                .build_int_z_extend(s, i64_ty, "struct_size")
+                                .map_err(|e| CompileError::LlvmError(format!("size error: {}", e)))?
+                        } else {
+                            s
+                        }
+                    }
+                } else {
+                    i64_ty.const_int(64, false)
+                }
+            }
+            _ => i64_ty.const_int(0, false),
+        };
+        let raw_ptr = self.malloc_or_abort(struct_size_val_full, &format!("{}_fields", actor.name))?;
+        // Cast the heap pointer to the struct type for GEP field access.
         let alloca = match actor_ty {
-            BasicTypeEnum::StructType(sty) => self.build_alloca(sty, &actor.name)?,
+            BasicTypeEnum::StructType(sty) => self
+                .builder
+                .build_bit_cast(raw_ptr, sty.ptr_type(inkwell::AddressSpace::default()), "fields_as_struct")
+                .map_err(|e| CompileError::LlvmError(format!("ptr cast: {}", e)))?
+                .into_pointer_value(),
             _ => return Err(CompileError::LlvmError("actor type error".to_string())),
         };
 
@@ -469,35 +499,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Get the struct size. If size_of() returns None (unnamed opaque type),
-        // fall back to a malloc-and-write allocation.
-        let struct_size_val = match actor_ty {
-            BasicTypeEnum::StructType(sty) => {
-                if let Some(s) = sty.size_of() {
-                    if let Some(const_size) = s.get_zero_extended_constant() {
-                        // Constant size — use stack alloca + bitcast.
-                        i64_ty.const_int(const_size, false)
-                    } else {
-                        // Non-constant size — load from sizeof value at runtime.
-                        // `s` may already be i64 (modern inkwell) — only z_extend if narrower.
-                        let s_ty = s.get_type();
-                        if s_ty.get_bit_width() < 64 {
-                            self.builder
-                                .build_int_z_extend(s, i64_ty, "struct_size")
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("size error: {}", e))
-                                })?
-                        } else {
-                            s
-                        }
-                    }
-                } else {
-                    // size_of() returned None — opaque type. Allocate via malloc.
-                    i64_ty.const_int(64, false) // safe default
-                }
-            }
-            _ => i64_ty.const_int(0, false),
-        };
+        // Use the size computed above for the spawn call.
+        let struct_size_val = struct_size_val_full;
 
         // Get the dispatch function pointer.
         let dispatch_name = format!("{}__dispatch", actor.name);
@@ -506,17 +509,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         })?;
 
         // Call mimi_actor_spawn(fields_ptr, fields_size, dispatch_fn) -> i8*
+        // C5: raw_ptr is already heap-allocated (via malloc_or_abort), so it is
+        // safe for cross-thread access. No stack-alloca + bitcast needed.
         let spawn_rt = self.get_runtime_fn("mimi_actor_spawn")?;
-        let fields_ptr = self
-            .builder
-            .build_bit_cast(alloca, i8_ptr, "fields_as_i8ptr")
-            .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
-            .into_pointer_value();
 
         let handle = self.build_call(
             spawn_rt,
             &[
-                fields_ptr.into(),
+                raw_ptr.into(),
                 struct_size_val.into(),
                 dispatch_fn.as_global_value().as_pointer_value().into(),
             ],

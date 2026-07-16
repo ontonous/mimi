@@ -44,13 +44,18 @@ pub(crate) enum LoopAction {
 ///   those fields are restored from the snapshot before recover.
 /// - **Metadata shadow strategy (`@metadata_shadow`, v0.29.45):** only metadata
 ///   (length for Lists, field count for Records) is snapshotted. On restore,
-///   metadata is reset but underlying data buffer is kept.
+///   metadata is reset but underlying data buffer is kept. C4: the dirty check
+///   also stores the full value in `snapshot` for content-aware comparison,
+///   even though the WAL restore is length-only.
 #[derive(Debug, Clone, Default)]
 pub struct FlowPersistentTx {
     /// Snapshotted values keyed by field name (turn entry).
+    /// C4: for `@metadata_shadow` fields this stores the full value content
+    /// (for dirty checking), while `metadata_snapshot` tracks the length
+    /// (for O(1) WAL restore).
     pub snapshot: HashMap<String, Value>,
     /// v0.29.45: Metadata-only snapshots for `@metadata_shadow` fields.
-    /// Stores `(length, field_count)` as a tuple Value for O(1) snapshot.
+    /// Stores the length (for Lists) as usize for O(1) snapshot/restore.
     pub metadata_snapshot: HashMap<String, usize>,
     /// True after a successful transition commit (snapshot cleared).
     pub committed: bool,

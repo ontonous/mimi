@@ -263,6 +263,10 @@ fn default_type_value_depth(ty: &Type, shapes: &HashMap<String, Vec<Field>>, dep
 /// Inject `peer_fault` → Fault for every non-Fault state missing a user handler.
 ///
 /// v0.29.20 PeerFault cascade default: unhandled peer disconnect becomes Fault.
+/// v0.29.31 C5: also inject peer_fault(Fault) → Fault (no-op self-loop) so that
+/// a peer_fault event arriving while already in Fault does not cause a dispatch
+/// failure (peer_fault is excluded from the N×M auto-completion matrix).
+///
 /// User-written `transition peer_fault(State) -> State` (self-loop) or any
 /// other target is never overridden — that is the explicit break-chain form.
 fn inject_peer_fault_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>) {
@@ -298,6 +302,22 @@ fn inject_peer_fault_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
             is_ffi_pinned: false,
         });
     }
+
+    // C5: peer_fault(Fault) → Fault no-op self-loop (if not user-defined).
+    if !defined.contains("Fault") && flow.states.iter().any(|s| s.name == "Fault") {
+        let body = fault_return_body(flow, "Fault", "peer_fault", shapes);
+        injected.push(TransitionDef {
+            name: "peer_fault".to_string(),
+            from_state: "Fault".to_string(),
+            params: vec![],
+            to_states: vec!["Fault".to_string()],
+            body: Some(body),
+            pos: (0, 0),
+            is_fallback: true,
+            is_ffi_pinned: false,
+        });
+    }
+
     flow.transitions.extend(injected);
 }
 
@@ -369,6 +389,16 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
     let active_fields = field_names(&active);
     let pinned_fields = field_names("FFI_Pinned");
     let payloads_compatible = active_fields == pinned_fields;
+
+    // C2: warn when FFI_Pinned is declared but payload fields don't match Active.
+    if !payloads_compatible && flow.states.iter().any(|s| s.name == "FFI_Pinned") {
+        eprintln!(
+            "[mimi] warning: FFI_Pinned payload fields {:?} do not match {} payload fields {:?}; \
+             enter_ffi/exit_ffi transitions will NOT be auto-injected. \
+             Declare them manually or align the payload field sets.",
+            pinned_fields, active, active_fields
+        );
+    }
 
     // enter_ffi: Active → FFI_Pinned (if not already user-defined)
     let has_enter = flow

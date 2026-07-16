@@ -189,6 +189,12 @@ pub enum QuotedAst {
         kind: AllocKind,
         body: Box<QuotedAst>,
     },
+    /// C1: preserve lambda params and return type during quote.
+    Lambda {
+        params: Vec<Param>,
+        ret: Option<Type>,
+        body: Box<QuotedAst>,
+    },
     NamedArg(String, Box<QuotedAst>),
     MapLiteral(Vec<(QuotedAst, QuotedAst)>),
     SetLiteral(Vec<QuotedAst>),
@@ -966,19 +972,24 @@ impl ActorHandle {
     /// Clears actor fields so nested payload resources are dropped. The worker
     /// loop also checks `faulted` and drains remaining messages without dispatch.
     /// Idempotent. v0.29.20: also notifies linked peers (PeerFault injection).
+    /// C3: use scoped locks — never hold inner lock across peer notification or
+    /// registry access. Each lock is acquired and dropped within its own scope.
     pub(crate) fn short_circuit_mailbox(&self) {
+        // Check faulted flag (inner read lock, scoped).
         let already = self.inner.read().map(|a| a.faulted).unwrap_or(true);
         if already {
             return;
         }
-        // Notify peers BEFORE clearing fields / marking faulted so links remain.
+        // Notify peers BEFORE marking faulted so peer_links are still available.
+        // (inner read lock acquired and released inside notify_peer_faults, not held here).
         self.notify_peer_faults("peer actor entered Fault");
+        // Mark faulted + clear fields (inner write lock, scoped — no other lock held).
         if let Ok(mut actor) = self.inner.write() {
             actor.faulted = true;
             actor.fields.clear();
             actor.peer_links.clear();
         }
-        // Drop from global registry.
+        // Remove from global registry (registry lock only, no inner lock held).
         if let Ok(mut map) = actor_handles().lock() {
             map.remove(&self.id);
         }
