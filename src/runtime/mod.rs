@@ -7828,7 +7828,7 @@ pub extern "C" fn mimi_set_to_json_option_map_product_i64(
                 }
             };
             // Sort: None before Some
-            let sort_key = if disc == 0 {
+            let _sort_key = if disc == 0 {
                 format!("0_{}", s)
             } else {
                 format!("1_{}", s)
@@ -17532,7 +17532,7 @@ impl RegexEngine {
             return None;
         }
         let mut pi = 0usize;
-        let mut ti = 0usize;
+        let ti = 0usize;
         let plen = pattern.len();
         let tlen = text.len();
         if pi < plen && pattern[pi] == b'^' {

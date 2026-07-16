@@ -5888,7 +5888,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "res_err_al",
             )
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let mut is_heapish = self
+        let is_heapish = self
             .builder
             .build_and(ge, aligned, "res_err_heapish")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
