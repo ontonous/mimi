@@ -473,6 +473,7 @@ pub struct VerifierCtx {
     pub(crate) checked_ffi_pinned_transitions: std::collections::HashSet<String>,
     pub(crate) checked_transition_param_arity: std::collections::HashMap<String, usize>,
     pub(crate) checked_transition_params: std::collections::HashMap<String, Vec<(String, String)>>,
+    pub(crate) checked_transitions_by_flow: std::collections::HashMap<String, Vec<(String, String, String, bool, bool, usize)>>,
 }
 
 /// Backward-compatible verifier with its own solver session.
@@ -992,7 +993,35 @@ impl Verifier {
                 )
             })
             .collect();
-        self.verify_file(program.file())
+        
+        let mut transitions_by_flow: std::collections::HashMap<
+            String,
+            Vec<(String, String, String, bool, bool, usize)>,
+        > = std::collections::HashMap::new();
+        for transition in program.transitions().values() {
+            let flow = transition.id.flow.0.clone();
+            let event = transition.id.event.clone();
+            let source = transition.id.source.name.clone();
+            let targets = transition
+                .targets
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+                .join("|");
+            transitions_by_flow.entry(flow).or_default().push((
+                event,
+                source,
+                targets,
+                transition.is_fallback,
+                transition.is_ffi_pinned,
+                transition.params.len(),
+            ));
+        }
+        for list in transitions_by_flow.values_mut() {
+            list.sort();
+        }
+        self.ctx.checked_transitions_by_flow = transitions_by_flow;
+self.verify_file(program.file())
     }
 
     pub(crate) fn has_checked_function(&self, name: &str) -> bool {
@@ -1338,6 +1367,13 @@ impl Verifier {
                     .map(|_| fields.clone())
             })
         })
+    }
+
+    pub(crate) fn checked_transitions_for_flow(
+        &self,
+        flow: &str,
+    ) -> Option<Vec<(String, String, String, bool, bool, usize)>> {
+        self.ctx.checked_transitions_by_flow.get(flow).cloned()
     }
 
     pub(crate) fn checked_transition_params(

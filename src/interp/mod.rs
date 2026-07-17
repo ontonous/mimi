@@ -138,6 +138,8 @@ pub struct Interpreter<'a> {
     /// Transition event parameter arity from CheckedProgram.
     pub(in crate::interp) resolved_transition_param_arity: Option<HashMap<(String, String, String), usize>>,
     pub(in crate::interp) resolved_transition_params: Option<HashMap<(String, String, String), Vec<(String, String)>>>,
+    /// Transitions grouped by flow: flow -> [(event, source, targets, fallback, pinned, argc)].
+    pub(in crate::interp) resolved_transitions_by_flow: Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
     /// Function signatures from CheckedProgram: qualified_name -> (param_count, ret_fmt, effects).
     pub(in crate::interp) resolved_functions: Option<HashMap<String, (usize, String, Vec<String>)>>,
     /// Function parameter directories: name -> [(param_name, type display)].
@@ -307,6 +309,31 @@ impl<'a> Interpreter<'a> {
         interp.resolved_fallback_transitions = Some(fallbacks);
         interp.resolved_ffi_pinned_transitions = Some(pinned);
         interp.resolved_transition_param_arity = Some(param_arity);
+        let mut transitions_by_flow: HashMap<String, Vec<(String, String, String, bool, bool, usize)>> =
+            HashMap::new();
+        for transition in program.transitions().values() {
+            let flow = transition.id.flow.0.clone();
+            let event = transition.id.event.clone();
+            let source = transition.id.source.name.clone();
+            let targets = transition
+                .targets
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+                .join("|");
+            transitions_by_flow.entry(flow).or_default().push((
+                event,
+                source,
+                targets,
+                transition.is_fallback,
+                transition.is_ffi_pinned,
+                transition.params.len(),
+            ));
+        }
+        for list in transitions_by_flow.values_mut() {
+            list.sort();
+        }
+        interp.resolved_transitions_by_flow = Some(transitions_by_flow);
         interp.resolved_transition_params = Some(param_lists);
         let mut functions = HashMap::new();
         let mut function_params = HashMap::new();
@@ -1096,6 +1123,15 @@ impl<'a> Interpreter<'a> {
         })
     }
 
+    pub(crate) fn resolved_transitions_for_flow(
+        &self,
+        flow: &str,
+    ) -> Option<Vec<(String, String, String, bool, bool, usize)>> {
+        self.resolved_transitions_by_flow
+            .as_ref()
+            .and_then(|map| map.get(flow).cloned())
+    }
+
     pub(crate) fn resolved_transition_params(
         &self,
         flow: &str,
@@ -1312,6 +1348,7 @@ impl<'a> Interpreter<'a> {
             resolved_ffi_pinned_transitions: None,
             resolved_transition_param_arity: None,
             resolved_transition_params: None,
+            resolved_transitions_by_flow: None,
             resolved_functions: None,
             resolved_function_params: None,
             resolved_comptime_functions: None,

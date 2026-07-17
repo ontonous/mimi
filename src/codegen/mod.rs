@@ -305,6 +305,7 @@ pub struct CodeGenerator<'ctx> {
     resolved_ffi_pinned_transitions: Option<std::collections::HashSet<(String, String, String)>>,
     resolved_transition_param_arity: Option<HashMap<(String, String, String), usize>>,
     resolved_transition_params: Option<HashMap<(String, String, String), Vec<(String, String)>>>,
+    resolved_transitions_by_flow: Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
     /// Function directory from CheckedProgram: qualified_name -> arity.
     resolved_function_arity: Option<HashMap<String, usize>>,
     resolved_function_effects: Option<HashMap<String, Vec<String>>>,
@@ -474,6 +475,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_ffi_pinned_transitions: None,
             resolved_transition_param_arity: None,
             resolved_transition_params: None,
+            resolved_transitions_by_flow: None,
             resolved_function_arity: None,
             resolved_function_effects: None,
             resolved_function_returns: None,
@@ -834,6 +836,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_ownership_merges
             .as_ref()
             .and_then(|map| map.get(owner).cloned())
+    }
+
+    pub(crate) fn resolved_transitions_for_flow(
+        &self,
+        flow: &str,
+    ) -> Option<Vec<(String, String, String, bool, bool, usize)>> {
+        self.resolved_transitions_by_flow
+            .as_ref()
+            .and_then(|map| map.get(flow).cloned())
     }
 
     pub fn gep(&self) -> gep::CheckedGepBuilder<'_, 'ctx> {

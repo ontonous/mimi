@@ -65,6 +65,34 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_ffi_pinned_transitions = Some(pinned);
         self.resolved_transition_param_arity = Some(param_arity);
         self.resolved_transition_params = Some(param_lists);
+
+        let mut transitions_by_flow: std::collections::HashMap<
+            String,
+            Vec<(String, String, String, bool, bool, usize)>,
+        > = std::collections::HashMap::new();
+        for transition in program.transitions().values() {
+            let flow = transition.id.flow.0.clone();
+            let event = transition.id.event.clone();
+            let source = transition.id.source.name.clone();
+            let targets = transition
+                .targets
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+                .join("|");
+            transitions_by_flow.entry(flow).or_default().push((
+                event,
+                source,
+                targets,
+                transition.is_fallback,
+                transition.is_ffi_pinned,
+                transition.params.len(),
+            ));
+        }
+        for list in transitions_by_flow.values_mut() {
+            list.sort();
+        }
+        self.resolved_transitions_by_flow = Some(transitions_by_flow);
         let mut arity = std::collections::HashMap::new();
         let mut effects = std::collections::HashMap::new();
         let mut returns = std::collections::HashMap::new();
