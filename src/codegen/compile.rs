@@ -35,6 +35,39 @@ impl<'ctx> CodeGenerator<'ctx> {
             arity.insert(function.qualified_name.clone(), function.params.len());
         }
         self.resolved_function_arity = Some(arity);
+        self.resolved_sessions = Some(
+            program
+                .sessions()
+                .values()
+                .map(|session| session.qualified_name.clone())
+                .collect(),
+        );
+        self.resolved_protocols = Some(
+            program
+                .protocols()
+                .values()
+                .map(|protocol| protocol.qualified_name.clone())
+                .collect(),
+        );
+        let mut actors = std::collections::HashMap::new();
+        for actor in program.actors().values() {
+            actors.insert(actor.qualified_name.clone(), actor.methods.clone());
+        }
+        self.resolved_actors = Some(actors);
+        self.resolved_capabilities = Some(
+            program
+                .capabilities()
+                .values()
+                .map(|capability| capability.qualified_name.clone())
+                .collect(),
+        );
+        self.resolved_constants = Some(
+            program
+                .constants()
+                .values()
+                .map(|constant| constant.qualified_name.clone())
+                .collect(),
+        );
         self.compile_file(program.file()).map_err(|error| {
             let mut diagnostic = error.to_diagnostic();
             if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {

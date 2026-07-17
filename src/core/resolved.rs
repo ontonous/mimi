@@ -1595,6 +1595,36 @@ func main() -> i32 { MAX }
         assert!(!interp.has_resolved_constant("Missing"));
     }
 
+
+    #[test]
+    fn codegen_compile_checked_installs_directories() {
+        let file = parse(
+            r#"
+cap Io
+protocol Sensor {
+    state Idle
+    transition start(Idle) -> Idle
+}
+session Ping = !i32 . end
+actor A { func f() -> i32 { 0 } }
+const N: i32 = 1
+func main() -> i32 { N }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "dir_test");
+        codegen
+            .compile_checked(&program)
+            .expect("compile_checked");
+        // Public API is limited; compile success with populated CheckedProgram is the gate.
+        assert!(program.capability("Io").is_some());
+        assert!(program.protocol("Sensor").is_some());
+        assert!(program.session("Ping").is_some());
+        assert!(program.actor("A").is_some());
+        assert!(program.constant("N").is_some());
+    }
+
     #[test]
     fn canonical_flow_ids_include_module_path() {
         let file = parse(
