@@ -1946,6 +1946,31 @@ func main() -> i32 { 0 }
         assert_eq!(program.flow("Worker").unwrap().mailbox_depth, Some(64));
     }
 
+
+    #[test]
+    fn resolved_mailbox_depth_matches_module_qualified_flow() {
+        let file = parse(
+            r#"
+module net {
+    flow Conn {
+        @mailbox(depth = 32)
+        state Idle
+        transition tick(Idle) -> Idle { do { return Idle {} } }
+    }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        assert_eq!(
+            program.flow("net::Conn").unwrap().mailbox_depth,
+            Some(32)
+        );
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert_eq!(interp.resolved_mailbox_depth("Conn"), Some(32));
+        assert_eq!(interp.resolved_mailbox_depth("net::Conn"), Some(32));
+    }
+
     #[test]
     fn consumers_install_type_and_extern_directories() {
         let file = parse(

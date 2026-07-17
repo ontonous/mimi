@@ -28,6 +28,7 @@
 - `CheckedProgram` 索引模块限定函数签名（params/ret/effects/comptime）、session 类型体、protocol 拓扑、actor 字段/方法目录、cap/const、trait/impl、type 与 extern 目录，未解析类型在 IR 边界 fail-closed。
 - ResolvedFlow 记录 `@max_children` / `@mailbox(depth=...)` 注解。
 - interpreter/codegen 从 CheckedProgram 读取 `@max_children` 配额与 `@mailbox(depth=...)` 深度。
+- 模块限定 Flow 的 mailbox depth 可通过 bare actor/flow 名解析。
 - ownership ledger 校验 callable `function:`/`transition:` NodeId 与 key/owner 一致性。
 - interpreter 从 CheckedProgram 安装函数目录（arity/effects）、session/protocol 名称目录、actor 方法目录、cap/const、trait/impl、ownership owner、type 与 extern 目录供 consumer 使用。
 - codegen `compile_checked` 同步安装 session/protocol/actor/cap/const/trait/impl/ownership/type/extern 目录表，并在 `compile_call` 用 checked arity fail-closed。
