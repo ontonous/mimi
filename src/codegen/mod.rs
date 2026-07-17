@@ -332,7 +332,7 @@ pub struct CodeGenerator<'ctx> {
     /// Extern function names from CheckedProgram.
     resolved_extern_funcs: Option<std::collections::HashSet<String>>,
     resolved_extern_abis: Option<HashMap<String, String>>,
-    resolved_call_sites: Option<HashMap<String, (String, String, usize, Option<usize>, String)>>,
+    resolved_call_sites: Option<HashMap<String, (String, String, usize, Option<usize>, Vec<String>, String)>>,
     /// Flow mailbox depths from CheckedProgram.
     resolved_mailbox_depths: Option<HashMap<String, usize>>,
     /// Persistent field sets from CheckedProgram.
@@ -475,7 +475,15 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     pub(crate) fn has_resolved_call_to(&self, callee: &str) -> bool {
         self.resolved_call_sites.as_ref().is_some_and(|map| {
-            map.values().any(|(_, name, _, _, _)| name == callee)
+            map.values().any(|(_, name, _, _, _, _)| name == callee)
+        })
+    }
+
+    pub(crate) fn has_resolved_call_with_effect(&self, callee: &str, effect: &str) -> bool {
+        self.resolved_call_sites.as_ref().is_some_and(|map| {
+            map.values().any(|(_, name, _, _, effects, _)| {
+                name == callee && effects.iter().any(|e| e == effect)
+            })
         })
     }
 
@@ -484,7 +492,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .as_ref()
             .map(|map| {
                 map.values()
-                    .filter(|(_, _, argc, expected, _)| {
+                    .filter(|(_, _, argc, expected, _, _)| {
                         expected.map(|exp| exp != *argc).unwrap_or(false)
                     })
                     .count()

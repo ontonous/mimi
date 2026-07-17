@@ -181,6 +181,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     site.callee.clone(),
                     site.argc,
                     site.expected_argc,
+                    site.effects.clone(),
                     match site.kind {
                         crate::core::ResolvedCallKind::Function => "function".into(),
                         crate::core::ResolvedCallKind::Extern => "extern".into(),
