@@ -184,6 +184,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_node_meta_count: Option<usize>,
     /// NodeMeta path ids from CheckedProgram.
     pub(in crate::interp) resolved_node_meta_paths: Option<std::collections::HashSet<String>>,
+    /// NodeMeta precision: path -> "exact"|"declaration_fallback".
+    pub(in crate::interp) resolved_node_meta_precision: Option<HashMap<String, String>>,
     /// Type definition kinds materialised from CheckedProgram.
     pub(in crate::interp) resolved_type_kinds: Option<HashMap<String, String>>,
     pub(in crate::interp) resolved_type_fields: Option<HashMap<String, Vec<(String, String)>>>,
@@ -482,6 +484,15 @@ impl<'a> Interpreter<'a> {
                 .map(|node_id| node_id.0.clone())
                 .collect(),
         );
+        let mut node_meta_precision = HashMap::new();
+        for (node_id, meta) in program.node_meta() {
+            let precision = match meta.precision {
+                crate::core::SpanPrecision::Exact => "exact",
+                crate::core::SpanPrecision::DeclarationFallback => "declaration_fallback",
+            };
+            node_meta_precision.insert(node_id.0.clone(), precision.to_string());
+        }
+        interp.resolved_node_meta_precision = Some(node_meta_precision);
                 let mut type_kinds = HashMap::new();
         let mut type_fields = HashMap::new();
         let mut type_variants = HashMap::new();
@@ -797,6 +808,12 @@ impl<'a> Interpreter<'a> {
         self.resolved_node_meta_paths
             .as_ref()
             .is_some_and(|set| set.contains(path))
+    }
+
+    pub(crate) fn resolved_node_meta_precision(&self, path: &str) -> Option<&str> {
+        self.resolved_node_meta_precision
+            .as_ref()
+            .and_then(|map| map.get(path).map(String::as_str))
     }
 
     pub(crate) fn requires_resolved_capability(&self, capability: &str) -> bool {
@@ -1174,6 +1191,7 @@ impl<'a> Interpreter<'a> {
             resolved_backend_requirements: None,
             resolved_node_meta_count: None,
             resolved_node_meta_paths: None,
+            resolved_node_meta_precision: None,
             resolved_type_kinds: None,
             resolved_type_fields: None,
             resolved_type_variants: None,

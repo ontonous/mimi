@@ -427,6 +427,7 @@ pub struct VerifierCtx {
     pub(crate) checked_backend_requirements: Vec<(String, String)>,
     pub(crate) checked_node_meta_count: usize,
     pub(crate) checked_node_meta_paths: std::collections::HashSet<String>,
+    pub(crate) checked_node_meta_precision: std::collections::HashMap<String, String>,
     /// Type definition names materialised from CheckedProgram.
     pub(crate) checked_type_defs: std::collections::HashSet<String>,
     pub(crate) checked_type_fields: std::collections::HashMap<String, Vec<(String, String)>>,
@@ -609,6 +610,15 @@ impl Verifier {
             .keys()
             .map(|node_id| node_id.0.clone())
             .collect();
+        let mut node_meta_precision = std::collections::HashMap::new();
+        for (node_id, meta) in program.node_meta() {
+            let precision = match meta.precision {
+                crate::core::SpanPrecision::Exact => "exact",
+                crate::core::SpanPrecision::DeclarationFallback => "declaration_fallback",
+            };
+            node_meta_precision.insert(node_id.0.clone(), precision.to_string());
+        }
+        self.ctx.checked_node_meta_precision = node_meta_precision;
         self.ctx.checked_type_defs = program
             .type_defs()
             .values()
@@ -951,6 +961,10 @@ impl Verifier {
 
     pub(crate) fn has_checked_node_meta_path(&self, path: &str) -> bool {
         self.ctx.checked_node_meta_paths.contains(path)
+    }
+
+    pub(crate) fn checked_node_meta_precision(&self, path: &str) -> Option<&str> {
+        self.ctx.checked_node_meta_precision.get(path).map(String::as_str)
     }
 
     pub(crate) fn requires_checked_capability(&self, capability: &str) -> bool {

@@ -340,6 +340,7 @@ pub struct CodeGenerator<'ctx> {
     resolved_backend_requirements: Option<Vec<(String, String)>>,
     resolved_node_meta_count: Option<usize>,
     resolved_node_meta_paths: Option<std::collections::HashSet<String>>,
+    resolved_node_meta_precision: Option<HashMap<String, String>>,
     /// Type definition kinds from CheckedProgram.
     resolved_type_kinds: Option<HashMap<String, String>>,
     resolved_type_fields: Option<HashMap<String, Vec<(String, String)>>>,
@@ -493,6 +494,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_backend_requirements: None,
             resolved_node_meta_count: None,
             resolved_node_meta_paths: None,
+            resolved_node_meta_precision: None,
             resolved_type_kinds: None,
             resolved_type_fields: None,
             resolved_type_variants: None,
@@ -745,6 +747,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_node_meta_paths
             .as_ref()
             .is_some_and(|set| set.contains(path))
+    }
+
+    pub(crate) fn resolved_node_meta_precision(&self, path: &str) -> Option<&str> {
+        self.resolved_node_meta_precision
+            .as_ref()
+            .and_then(|map| map.get(path).map(String::as_str))
     }
 
     pub(crate) fn requires_resolved_capability(&self, capability: &str) -> bool {

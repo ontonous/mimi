@@ -4331,6 +4331,18 @@ func main() -> i32 {
         let mut codegen = crate::codegen::CodeGenerator::new(&context, "node_meta");
         codegen.compile_checked(&program).expect("compile");
         assert!(codegen.has_resolved_node_meta_path("function:main/stmt:1/then/stmt:0/value/inner"));
+        assert_eq!(
+            interp.resolved_node_meta_precision("function:main/stmt:0"),
+            Some("exact")
+        );
+        assert_eq!(
+            verifier.checked_node_meta_precision("function:main/stmt:1/cond"),
+            Some("declaration_fallback")
+        );
+        assert_eq!(
+            codegen.resolved_node_meta_precision("function:main/stmt:0"),
+            Some("exact")
+        );
     }
 
     #[test]
