@@ -140,12 +140,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         self.resolved_type_kinds = Some(type_kinds);
         let mut extern_funcs = std::collections::HashSet::new();
+        let mut extern_abis = std::collections::HashMap::new();
         for block in program.extern_blocks().values() {
             for func in &block.funcs {
                 extern_funcs.insert(func.clone());
+                extern_abis.insert(func.clone(), block.abi.clone());
             }
         }
         self.resolved_extern_funcs = Some(extern_funcs);
+        self.resolved_extern_abis = Some(extern_abis);
         if let Some(max_children) = program.flows().values().find_map(|flow| flow.max_children) {
             self.max_children = Some(max_children);
         }

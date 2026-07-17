@@ -424,6 +424,7 @@ pub struct VerifierCtx {
     pub(crate) checked_type_defs: std::collections::HashSet<String>,
     /// Extern function names materialised from CheckedProgram.
     pub(crate) checked_extern_funcs: std::collections::HashSet<String>,
+    pub(crate) checked_extern_abis: std::collections::HashMap<String, String>,
     /// Protocol names materialised from CheckedProgram.
     pub(crate) checked_protocols: std::collections::HashSet<String>,
     /// Trait names materialised from CheckedProgram.
@@ -535,12 +536,15 @@ impl Verifier {
             .map(|type_def| type_def.qualified_name.clone())
             .collect();
         let mut extern_funcs = std::collections::HashSet::new();
+        let mut extern_abis = std::collections::HashMap::new();
         for block in program.extern_blocks().values() {
             for func in &block.funcs {
                 extern_funcs.insert(func.clone());
+                extern_abis.insert(func.clone(), block.abi.clone());
             }
         }
         self.ctx.checked_extern_funcs = extern_funcs;
+        self.ctx.checked_extern_abis = extern_abis;
         self.ctx.checked_protocols = program
             .protocols()
             .values()
@@ -677,6 +681,10 @@ impl Verifier {
 
     pub(crate) fn has_checked_extern_func(&self, name: &str) -> bool {
         self.ctx.checked_extern_funcs.contains(name)
+    }
+
+    pub(crate) fn checked_extern_abi(&self, name: &str) -> Option<&str> {
+        self.ctx.checked_extern_abis.get(name).map(String::as_str)
     }
 
     pub(crate) fn has_checked_protocol(&self, name: &str) -> bool {

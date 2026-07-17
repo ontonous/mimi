@@ -330,6 +330,7 @@ pub struct CodeGenerator<'ctx> {
     resolved_type_kinds: Option<HashMap<String, String>>,
     /// Extern function names from CheckedProgram.
     resolved_extern_funcs: Option<std::collections::HashSet<String>>,
+    resolved_extern_abis: Option<HashMap<String, String>>,
     /// Flow mailbox depths from CheckedProgram.
     resolved_mailbox_depths: Option<HashMap<String, usize>>,
     /// Persistent field sets from CheckedProgram.
@@ -458,6 +459,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_ownership_summaries: None,
             resolved_type_kinds: None,
             resolved_extern_funcs: None,
+            resolved_extern_abis: None,
             resolved_mailbox_depths: None,
             resolved_persistent_fields: None,
             resolved_transactional_fields: None,
@@ -465,6 +467,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_flow_protocols: None,
             max_children: None,
         }
+    }
+
+    pub(crate) fn resolved_extern_abi(&self, name: &str) -> Option<&str> {
+        self.resolved_extern_abis
+            .as_ref()
+            .and_then(|map| map.get(name).map(String::as_str))
     }
 
     pub(crate) fn resolved_function_return_type(&self, name: &str) -> Option<&str> {
