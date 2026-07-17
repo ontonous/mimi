@@ -31,6 +31,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut fallbacks = std::collections::HashSet::new();
         let mut pinned = std::collections::HashSet::new();
         let mut param_arity = std::collections::HashMap::new();
+        let mut param_lists = std::collections::HashMap::new();
         for (id, transition) in program.transitions() {
             let key = (
                 id.flow.0.clone(),
@@ -49,12 +50,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 pinned.insert(key.clone());
             }
             param_arity.insert(key.clone(), transition.params.len());
+            param_lists.insert(
+                key.clone(),
+                transition
+                    .params
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), crate::core::fmt_type(ty)))
+                    .collect(),
+            );
             resolved.insert(key, targets);
         }
         self.resolved_transitions = Some(resolved);
         self.resolved_fallback_transitions = Some(fallbacks);
         self.resolved_ffi_pinned_transitions = Some(pinned);
         self.resolved_transition_param_arity = Some(param_arity);
+        self.resolved_transition_params = Some(param_lists);
         let mut arity = std::collections::HashMap::new();
         let mut effects = std::collections::HashMap::new();
         let mut returns = std::collections::HashMap::new();

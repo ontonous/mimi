@@ -137,6 +137,7 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_ffi_pinned_transitions: Option<std::collections::HashSet<(String, String, String)>>,
     /// Transition event parameter arity from CheckedProgram.
     pub(in crate::interp) resolved_transition_param_arity: Option<HashMap<(String, String, String), usize>>,
+    pub(in crate::interp) resolved_transition_params: Option<HashMap<(String, String, String), Vec<(String, String)>>>,
     /// Function signatures from CheckedProgram: qualified_name -> (param_count, ret_fmt, effects).
     pub(in crate::interp) resolved_functions: Option<HashMap<String, (usize, String, Vec<String>)>>,
     /// Function parameter directories: name -> [(param_name, type display)].
@@ -246,6 +247,7 @@ impl<'a> Interpreter<'a> {
         let mut fallbacks = std::collections::HashSet::new();
         let mut pinned = std::collections::HashSet::new();
         let mut param_arity = HashMap::new();
+        let mut param_lists = HashMap::new();
         for (id, transition) in program.transitions() {
             let key = (
                 id.flow.0.clone(),
@@ -264,12 +266,21 @@ impl<'a> Interpreter<'a> {
                 pinned.insert(key.clone());
             }
             param_arity.insert(key.clone(), transition.params.len());
+            param_lists.insert(
+                key.clone(),
+                transition
+                    .params
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), crate::core::fmt_type(ty)))
+                    .collect(),
+            );
             resolved.insert(key, targets);
         }
         interp.resolved_transitions = Some(resolved);
         interp.resolved_fallback_transitions = Some(fallbacks);
         interp.resolved_ffi_pinned_transitions = Some(pinned);
         interp.resolved_transition_param_arity = Some(param_arity);
+        interp.resolved_transition_params = Some(param_lists);
         let mut functions = HashMap::new();
         let mut function_params = HashMap::new();
         let mut comptime_functions = std::collections::HashSet::new();
@@ -821,6 +832,18 @@ impl<'a> Interpreter<'a> {
         })
     }
 
+    pub(crate) fn resolved_transition_params(
+        &self,
+        flow: &str,
+        event: &str,
+        source: &str,
+    ) -> Option<Vec<(String, String)>> {
+        self.resolved_transition_params.as_ref().and_then(|map| {
+            map.get(&(flow.to_string(), event.to_string(), source.to_string()))
+                .cloned()
+        })
+    }
+
     pub(crate) fn resolved_max_children(&self) -> Option<usize> {
         self.max_children
     }
@@ -996,6 +1019,7 @@ impl<'a> Interpreter<'a> {
             resolved_fallback_transitions: None,
             resolved_ffi_pinned_transitions: None,
             resolved_transition_param_arity: None,
+            resolved_transition_params: None,
             resolved_functions: None,
             resolved_function_params: None,
             resolved_comptime_functions: None,

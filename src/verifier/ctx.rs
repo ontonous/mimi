@@ -457,6 +457,7 @@ pub struct VerifierCtx {
     pub(crate) checked_fallback_transitions: std::collections::HashSet<String>,
     pub(crate) checked_ffi_pinned_transitions: std::collections::HashSet<String>,
     pub(crate) checked_transition_param_arity: std::collections::HashMap<String, usize>,
+    pub(crate) checked_transition_params: std::collections::HashMap<String, Vec<(String, String)>>,
 }
 
 /// Backward-compatible verifier with its own solver session.
@@ -803,6 +804,24 @@ impl Verifier {
                 )
             })
             .collect();
+
+        self.ctx.checked_transition_params = program
+            .transitions()
+            .values()
+            .map(|transition| {
+                (
+                    format!(
+                        "{}::{}::{}",
+                        transition.id.flow.0, transition.id.event, transition.id.source.name
+                    ),
+                    transition
+                        .params
+                        .iter()
+                        .map(|(name, ty)| (name.clone(), crate::core::fmt_type(ty)))
+                        .collect(),
+                )
+            })
+            .collect();
         self.verify_file(program.file())
     }
 
@@ -1063,6 +1082,18 @@ impl Verifier {
                     .map(|_| fields.clone())
             })
         })
+    }
+
+    pub(crate) fn checked_transition_params(
+        &self,
+        flow: &str,
+        event: &str,
+        source: &str,
+    ) -> Option<Vec<(String, String)>> {
+        self.ctx
+            .checked_transition_params
+            .get(&format!("{}::{}::{}", flow, event, source))
+            .cloned()
     }
 
     pub(crate) fn verify_file(&mut self, file: &File) -> Vec<VerificationResult> {

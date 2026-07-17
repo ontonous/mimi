@@ -3451,6 +3451,18 @@ func main() -> i32 { 0 }
             verifier.checked_transition_param_arity("Door", "open", "Closed"),
             Some(1)
         );
+        assert_eq!(
+            interp.resolved_transition_params("Door", "open", "Closed"),
+            Some(vec![("code".into(), "i32".into())])
+        );
+        assert_eq!(
+            codegen.resolved_transition_params("Door", "open", "Closed"),
+            Some(vec![("code".into(), "i32".into())])
+        );
+        assert_eq!(
+            verifier.checked_transition_params("Door", "open", "Closed"),
+            Some(vec![("code".into(), "i32".into())])
+        );
     }
 
     #[test]
