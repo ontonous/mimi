@@ -286,6 +286,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.resolved_actor_method_signatures = Some(actor_method_signatures);
+        let mut actor_fields = std::collections::HashMap::new();
+        for actor in program.actors().values() {
+            if !actor.fields.is_empty() {
+                actor_fields.insert(
+                    actor.qualified_name.clone(),
+                    actor
+                        .fields
+                        .iter()
+                        .map(|(name, ty, mut_)| (name.clone(), crate::core::fmt_type(ty), *mut_))
+                        .collect(),
+                );
+            }
+        }
+        self.resolved_actor_fields = Some(actor_fields);
         let mut method_signatures = std::collections::HashMap::new();
         for trait_def in program.traits().values() {
             for method in &trait_def.method_signatures {

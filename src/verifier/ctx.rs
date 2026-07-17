@@ -443,6 +443,7 @@ pub struct VerifierCtx {
     /// Actor names materialised from CheckedProgram.
     pub(crate) checked_actors: std::collections::HashSet<String>,
     pub(crate) checked_actor_method_signatures: std::collections::HashMap<String, (usize, String)>,
+    pub(crate) checked_actor_fields: std::collections::HashMap<String, Vec<(String, String, bool)>>,
     /// Flow mailbox depths materialised from CheckedProgram.
     pub(crate) checked_mailbox_depths: std::collections::HashMap<String, usize>,
     pub(crate) checked_flow_state_payloads: std::collections::HashMap<String, Vec<(String, String)>>,
@@ -719,6 +720,20 @@ impl Verifier {
             }
         }
         self.ctx.checked_actor_method_signatures = actor_method_signatures;
+        let mut actor_fields = std::collections::HashMap::new();
+        for actor in program.actors().values() {
+            if !actor.fields.is_empty() {
+                actor_fields.insert(
+                    actor.qualified_name.clone(),
+                    actor
+                        .fields
+                        .iter()
+                        .map(|(name, ty, mut_)| (name.clone(), crate::core::fmt_type(ty), *mut_))
+                        .collect(),
+                );
+            }
+        }
+        self.ctx.checked_actor_fields = actor_fields;
         let mut mailbox_depths = std::collections::HashMap::new();
         for flow in program.flows().values() {
             if let Some(depth) = flow.mailbox_depth {
@@ -1006,6 +1021,13 @@ impl Verifier {
             .checked_actor_method_signatures
             .get(&format!("{actor}.{method}"))
             .cloned()
+    }
+
+    pub(crate) fn checked_actor_fields(
+        &self,
+        actor: &str,
+    ) -> Option<Vec<(String, String, bool)>> {
+        self.ctx.checked_actor_fields.get(actor).cloned()
     }
 
     pub(crate) fn checked_mailbox_depth(&self, flow_name: &str) -> Option<usize> {

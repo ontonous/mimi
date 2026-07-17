@@ -157,6 +157,7 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_actors: Option<HashMap<String, Vec<String>>>,
     /// Actor method signatures: "Actor.method" -> (arity, ret).
     pub(in crate::interp) resolved_actor_method_signatures: Option<HashMap<String, (usize, String)>>,
+    pub(in crate::interp) resolved_actor_fields: Option<HashMap<String, Vec<(String, String, bool)>>>,
     /// Capability names materialised from CheckedProgram.
     pub(in crate::interp) resolved_capabilities: Option<std::collections::HashSet<String>>,
     /// Capability combinations: name -> combined_with (if any).
@@ -354,6 +355,7 @@ impl<'a> Interpreter<'a> {
         interp.resolved_protocol_payloads = Some(protocol_payloads);
         let mut actors = HashMap::new();
         let mut actor_method_signatures = HashMap::new();
+        let mut actor_fields = HashMap::new();
         for actor in program.actors().values() {
             actors.insert(actor.qualified_name.clone(), actor.methods.clone());
             for method in &actor.method_signatures {
@@ -362,9 +364,20 @@ impl<'a> Interpreter<'a> {
                     (method.params.len(), method.ret.clone()),
                 );
             }
+            if !actor.fields.is_empty() {
+                actor_fields.insert(
+                    actor.qualified_name.clone(),
+                    actor
+                        .fields
+                        .iter()
+                        .map(|(name, ty, mut_)| (name.clone(), crate::core::fmt_type(ty), *mut_))
+                        .collect(),
+                );
+            }
         }
         interp.resolved_actors = Some(actors);
         interp.resolved_actor_method_signatures = Some(actor_method_signatures);
+        interp.resolved_actor_fields = Some(actor_fields);
         let capabilities = program
             .capabilities()
             .values()
@@ -645,6 +658,15 @@ impl<'a> Interpreter<'a> {
         self.resolved_actor_method_signatures
             .as_ref()
             .and_then(|map| map.get(&format!("{actor}.{method}")).cloned())
+    }
+
+    pub(crate) fn resolved_actor_fields(
+        &self,
+        actor: &str,
+    ) -> Option<Vec<(String, String, bool)>> {
+        self.resolved_actor_fields
+            .as_ref()
+            .and_then(|map| map.get(actor).cloned())
     }
 
     pub(crate) fn has_resolved_capability(&self, qualified_name: &str) -> bool {
@@ -1058,6 +1080,7 @@ impl<'a> Interpreter<'a> {
             resolved_protocol_payloads: None,
             resolved_actors: None,
             resolved_actor_method_signatures: None,
+            resolved_actor_fields: None,
             resolved_capabilities: None,
             resolved_capability_combined: None,
             resolved_constants: None,

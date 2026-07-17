@@ -321,6 +321,7 @@ pub struct CodeGenerator<'ctx> {
     /// Actor method directory from CheckedProgram.
     resolved_actors: Option<HashMap<String, Vec<String>>>,
     resolved_actor_method_signatures: Option<HashMap<String, (usize, String)>>,
+    resolved_actor_fields: Option<HashMap<String, Vec<(String, String, bool)>>>,
     resolved_method_signatures: Option<HashMap<String, (usize, String)>>,
     /// Capability names from CheckedProgram.
     resolved_capabilities: Option<std::collections::HashSet<String>>,
@@ -472,6 +473,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_protocol_payloads: None,
             resolved_actors: None,
             resolved_actor_method_signatures: None,
+            resolved_actor_fields: None,
             resolved_method_signatures: None,
             resolved_capabilities: None,
             resolved_capability_combined: None,
@@ -708,6 +710,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_flow_state_payloads
             .as_ref()
             .and_then(|map| map.get(&format!("{flow}.{state}")).cloned())
+    }
+
+    pub(crate) fn resolved_actor_fields(
+        &self,
+        actor: &str,
+    ) -> Option<Vec<(String, String, bool)>> {
+        self.resolved_actor_fields
+            .as_ref()
+            .and_then(|map| map.get(actor).cloned())
     }
 
     pub fn gep(&self) -> gep::CheckedGepBuilder<'_, 'ctx> {
