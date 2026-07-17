@@ -319,6 +319,7 @@ pub struct CodeGenerator<'ctx> {
     resolved_capabilities: Option<std::collections::HashSet<String>>,
     /// Constant names from CheckedProgram.
     resolved_constants: Option<std::collections::HashSet<String>>,
+    resolved_constant_values: Option<HashMap<String, (Option<String>, String)>>,
     /// Trait method directories from CheckedProgram.
     resolved_traits: Option<HashMap<String, Vec<String>>>,
     /// Impl method directories from CheckedProgram: "Trait:for:Type" -> methods.
@@ -453,6 +454,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_actors: None,
             resolved_capabilities: None,
             resolved_constants: None,
+            resolved_constant_values: None,
             resolved_traits: None,
             resolved_impls: None,
             resolved_ownership_owners: None,
@@ -467,6 +469,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_flow_protocols: None,
             max_children: None,
         }
+    }
+
+    pub(crate) fn resolved_constant_value(
+        &self,
+        name: &str,
+    ) -> Option<(Option<String>, String)> {
+        self.resolved_constant_values
+            .as_ref()
+            .and_then(|map| map.get(name).cloned())
     }
 
     pub(crate) fn resolved_extern_abi(&self, name: &str) -> Option<&str> {

@@ -38,6 +38,7 @@
 - consumers 安装 comptime 函数目录。
 - consumers 安装函数返回类型目录。
 - consumers 安装 extern 函数 ABI 目录。
+- ResolvedConstant 物化类型与字面量值；consumers 安装 constant value 目录。
 - ResolvedFlow 与 consumers 安装 `impl Protocol` 列表。
 - ResolvedTransition 记录 is_fallback/is_ffi_pinned，并安装到 interpreter/codegen/verifier 目录。
 - interpreter 暴露 resolved transition targets 查询。

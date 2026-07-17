@@ -25,7 +25,8 @@ pub use ownership::{
 };
 pub use resolved::{
     BackendProfile, CheckedProgram, FlowId, NodeId, NodeMeta, Origin, ResolvedActor,
-    ResolvedCapability, ResolvedConstant, ResolvedExternBlock, ResolvedFlow, ResolvedFunction,
+    ResolvedCapability, ResolvedConstant,
+    ResolvedConstValue, ResolvedExternBlock, ResolvedFlow, ResolvedFunction,
     ResolvedImpl, ResolvedItem, ResolvedItemKind, ResolvedProtocol, ResolvedSession, ResolvedState,
     ResolvedTrait, ResolvedTypeDef, ResolvedTypeKind, SpanPrecision, StateId, TransitionId,
     RESOLVED_IR_VERSION,
