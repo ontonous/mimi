@@ -303,6 +303,16 @@ pub struct CodeGenerator<'ctx> {
     resolved_transitions: Option<HashMap<(String, String, String), Vec<String>>>,
     /// Function directory from CheckedProgram: qualified_name -> arity.
     resolved_function_arity: Option<HashMap<String, usize>>,
+    /// Session names from CheckedProgram.
+    resolved_sessions: Option<std::collections::HashSet<String>>,
+    /// Protocol names from CheckedProgram.
+    resolved_protocols: Option<std::collections::HashSet<String>>,
+    /// Actor method directory from CheckedProgram.
+    resolved_actors: Option<HashMap<String, Vec<String>>>,
+    /// Capability names from CheckedProgram.
+    resolved_capabilities: Option<std::collections::HashSet<String>>,
+    /// Constant names from CheckedProgram.
+    resolved_constants: Option<std::collections::HashSet<String>>,
     /// v0.29.24: process spawn quota from first @max_children(N) (None = unlimited).
     max_children: Option<usize>,
 }
@@ -407,6 +417,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             flow_defs: HashMap::new(),
             resolved_transitions: None,
             resolved_function_arity: None,
+            resolved_sessions: None,
+            resolved_protocols: None,
+            resolved_actors: None,
+            resolved_capabilities: None,
+            resolved_constants: None,
             max_children: None,
         }
     }
