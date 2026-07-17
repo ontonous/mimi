@@ -25,7 +25,7 @@
 
 - `Interpreter::from_checked` / `CodeGenerator::compile_checked` 安装 canonical `(flow,event,source)` transition 表；缺失 overload fail-closed。
 - Verifier backend 不再因 multi-target Flow 单独阻断无关函数合约验证。
-- `CheckedProgram` 索引模块限定函数签名（params/ret/effects/comptime）、session 类型体与 protocol 拓扑，未解析类型在 IR 边界 fail-closed。
+- `CheckedProgram` 索引模块限定函数签名（params/ret/effects/comptime）、session 类型体、protocol 拓扑与 actor 字段/方法目录，未解析类型在 IR 边界 fail-closed。
 - 新增 resolved transition exact-key、函数签名与 verifier capability 回归测试。
 
 ### 审计修复（CG-H16 / CG-H9 / M2 / MEM-C8）

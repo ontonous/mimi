@@ -152,6 +152,15 @@ pub struct ResolvedProtocol {
     pub origin: Origin,
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedActor {
+    pub node_id: NodeId,
+    pub qualified_name: String,
+    pub fields: Vec<(String, Type, bool)>,
+    pub methods: Vec<String>,
+    pub origin: Origin,
+}
+
 #[derive(Debug)]
 pub struct CheckedProgram<'a> {
     file: &'a File,
@@ -162,6 +171,7 @@ pub struct CheckedProgram<'a> {
     functions: HashMap<NodeId, ResolvedFunction>,
     sessions: HashMap<NodeId, ResolvedSession>,
     protocols: HashMap<NodeId, ResolvedProtocol>,
+    actors: HashMap<NodeId, ResolvedActor>,
     backend_requirements: Vec<CapabilityRequirement>,
     ownership_ledgers: HashMap<NodeId, OwnershipLedger>,
 }
@@ -183,6 +193,7 @@ impl<'a> CheckedProgram<'a> {
         let mut functions = HashMap::new();
         let mut sessions = HashMap::new();
         let mut protocols = HashMap::new();
+        let mut actors = HashMap::new();
         let mut backend_requirements = Vec::new();
         let mut errors = Vec::new();
         collect_items(
@@ -193,6 +204,7 @@ impl<'a> CheckedProgram<'a> {
             &mut functions,
             &mut sessions,
             &mut protocols,
+            &mut actors,
             &mut flows,
             &mut transitions,
             &mut backend_requirements,
@@ -210,6 +222,7 @@ impl<'a> CheckedProgram<'a> {
             functions,
             sessions,
             protocols,
+            actors,
             backend_requirements,
             ownership_ledgers,
         })
@@ -259,6 +272,16 @@ impl<'a> CheckedProgram<'a> {
         self.protocols
             .values()
             .find(|protocol| protocol.qualified_name == qualified_name)
+    }
+
+    pub fn actors(&self) -> &HashMap<NodeId, ResolvedActor> {
+        &self.actors
+    }
+
+    pub fn actor(&self, qualified_name: &str) -> Option<&ResolvedActor> {
+        self.actors
+            .values()
+            .find(|actor| actor.qualified_name == qualified_name)
     }
 
     pub fn node_meta(&self) -> &HashMap<NodeId, NodeMeta> {
@@ -352,6 +375,7 @@ fn collect_items(
     functions: &mut HashMap<NodeId, ResolvedFunction>,
     sessions: &mut HashMap<NodeId, ResolvedSession>,
     protocols: &mut HashMap<NodeId, ResolvedProtocol>,
+    actors: &mut HashMap<NodeId, ResolvedActor>,
     flows: &mut HashMap<FlowId, ResolvedFlow>,
     transitions: &mut HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: &mut Vec<CapabilityRequirement>,
@@ -377,6 +401,7 @@ fn collect_items(
                     functions,
                     sessions,
                     protocols,
+                    actors,
                     flows,
                     transitions,
                     backend_requirements,
@@ -521,14 +546,52 @@ fn collect_items(
                 Span::from(block.pos),
                 errors,
             ),
-            Item::Actor(actor) => insert_item(
-                resolved_items,
-                ResolvedItemKind::Actor,
-                &qualify(module, &actor.name),
-                actor.origin,
-                Span::from(actor.pos),
-                errors,
-            ),
+            Item::Actor(actor) => {
+                let qualified = qualify(module, &actor.name);
+                let span = Span::from(actor.pos);
+                insert_item(
+                    resolved_items,
+                    ResolvedItemKind::Actor,
+                    &qualified,
+                    actor.origin,
+                    span,
+                    errors,
+                );
+                let node_id = NodeId(format!("actor:{}", qualified));
+                let fields = actor
+                    .fields
+                    .iter()
+                    .map(|field| (field.name.clone(), field.ty.clone(), field.mut_))
+                    .collect::<Vec<_>>();
+                for (name, ty, _) in &fields {
+                    if contains_unresolved_type(ty) {
+                        errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: unresolved or erased type '{}' in actor '{}' field '{}'",
+                                crate::core::fmt_type(ty),
+                                qualified,
+                                name
+                            ),
+                            span,
+                        ));
+                    }
+                }
+                let methods = actor
+                    .methods
+                    .iter()
+                    .map(|method| method.name.clone())
+                    .collect::<Vec<_>>();
+                actors.insert(
+                    node_id.clone(),
+                    ResolvedActor {
+                        node_id,
+                        qualified_name: qualified,
+                        fields,
+                        methods,
+                        origin: resolve_origin(actor.origin, &NodeId("actor".into()), span),
+                    },
+                );
+            }
             Item::Protocol(protocol) => {
                 let qualified = qualify(module, &protocol.name);
                 let span = Span::from(protocol.pos);
@@ -1321,6 +1384,24 @@ func main() -> i32 { 0 }
             .transitions
             .iter()
             .any(|(name, from, to)| name == "start" && from == "Idle" && to.as_slice() == ["Active"]));
+    }
+
+
+    #[test]
+    fn resolved_actor_fields_and_methods_are_indexed() {
+        let file = parse(
+            r#"
+actor Counter {
+    count: i32
+    func inc() -> i32 { 1 }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let actor = program.actor("Counter").expect("Counter actor");
+        assert!(actor.fields.iter().any(|(n, _, _)| n == "count"));
+        assert!(actor.methods.iter().any(|m| m == "inc"));
     }
 
     #[test]
