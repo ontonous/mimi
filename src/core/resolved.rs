@@ -130,7 +130,16 @@ pub struct ResolvedFunction {
     pub qualified_name: String,
     pub params: Vec<(String, Type)>,
     pub ret: Type,
+    pub effects: Vec<String>,
     pub is_comptime: bool,
+    pub origin: Origin,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedSession {
+    pub node_id: NodeId,
+    pub qualified_name: String,
+    pub body: crate::ast::SessionType,
     pub origin: Origin,
 }
 
@@ -142,6 +151,7 @@ pub struct CheckedProgram<'a> {
     flows: HashMap<FlowId, ResolvedFlow>,
     transitions: HashMap<TransitionId, ResolvedTransition>,
     functions: HashMap<NodeId, ResolvedFunction>,
+    sessions: HashMap<NodeId, ResolvedSession>,
     backend_requirements: Vec<CapabilityRequirement>,
     ownership_ledgers: HashMap<NodeId, OwnershipLedger>,
 }
@@ -161,6 +171,7 @@ impl<'a> CheckedProgram<'a> {
         let mut items = HashMap::new();
         let mut node_meta = HashMap::new();
         let mut functions = HashMap::new();
+        let mut sessions = HashMap::new();
         let mut backend_requirements = Vec::new();
         let mut errors = Vec::new();
         collect_items(
@@ -169,6 +180,7 @@ impl<'a> CheckedProgram<'a> {
             &mut items,
             &mut node_meta,
             &mut functions,
+            &mut sessions,
             &mut flows,
             &mut transitions,
             &mut backend_requirements,
@@ -184,6 +196,7 @@ impl<'a> CheckedProgram<'a> {
             flows,
             transitions,
             functions,
+            sessions,
             backend_requirements,
             ownership_ledgers,
         })
@@ -213,6 +226,16 @@ impl<'a> CheckedProgram<'a> {
         self.functions
             .values()
             .find(|function| function.qualified_name == qualified_name)
+    }
+
+    pub fn sessions(&self) -> &HashMap<NodeId, ResolvedSession> {
+        &self.sessions
+    }
+
+    pub fn session(&self, qualified_name: &str) -> Option<&ResolvedSession> {
+        self.sessions
+            .values()
+            .find(|session| session.qualified_name == qualified_name)
     }
 
     pub fn node_meta(&self) -> &HashMap<NodeId, NodeMeta> {
@@ -304,6 +327,7 @@ fn collect_items(
     resolved_items: &mut HashMap<NodeId, ResolvedItem>,
     node_meta: &mut HashMap<NodeId, NodeMeta>,
     functions: &mut HashMap<NodeId, ResolvedFunction>,
+    sessions: &mut HashMap<NodeId, ResolvedSession>,
     flows: &mut HashMap<FlowId, ResolvedFlow>,
     transitions: &mut HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: &mut Vec<CapabilityRequirement>,
@@ -327,6 +351,7 @@ fn collect_items(
                     resolved_items,
                     node_meta,
                     functions,
+                    sessions,
                     flows,
                     transitions,
                     backend_requirements,
@@ -404,6 +429,7 @@ fn collect_items(
                         qualified_name: qualified.clone(),
                         params,
                         ret,
+                        effects: function.effects.clone(),
                         is_comptime: function.is_comptime,
                         origin,
                     },
@@ -486,14 +512,28 @@ fn collect_items(
                 Span::from(protocol.pos),
                 errors,
             ),
-            Item::Session(session) => insert_item(
-                resolved_items,
-                ResolvedItemKind::Session,
-                &qualify(module, &session.name),
-                session.origin,
-                Span::from(session.pos),
-                errors,
-            ),
+            Item::Session(session) => {
+                let qualified = qualify(module, &session.name);
+                let span = Span::from(session.pos);
+                insert_item(
+                    resolved_items,
+                    ResolvedItemKind::Session,
+                    &qualified,
+                    session.origin,
+                    span,
+                    errors,
+                );
+                let node_id = NodeId(format!("session:{}", qualified));
+                sessions.insert(
+                    node_id.clone(),
+                    ResolvedSession {
+                        node_id,
+                        qualified_name: qualified,
+                        body: session.body.clone(),
+                        origin: resolve_origin(session.origin, &NodeId("session".into()), span),
+                    },
+                );
+            }
         }
     }
 }
@@ -1170,6 +1210,37 @@ func main() -> i32 { 0 }
         assert!(matches!(&twice.ret, Type::Name(n, _) if n == "i32"));
         assert!(program.function("twice").is_none());
         assert!(program.function("main").is_some());
+    }
+
+
+    #[test]
+    fn resolved_function_records_effect_clause() {
+        let file = parse(
+            r#"
+cap Io
+func write(x: i32) -> i32 with Io { x }
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let write = program.function("write").expect("write");
+        assert!(write.effects.iter().any(|e| e == "Io"));
+    }
+
+    #[test]
+    fn resolved_session_types_are_indexed() {
+        let file = parse(
+            r#"
+session Ping = !i32 . ?i32 . end
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let session = program.session("Ping").expect("Ping session");
+        assert!(matches!(
+            session.body,
+            crate::ast::SessionType::Send(_, _)
+        ));
     }
 
     #[test]
