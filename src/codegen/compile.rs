@@ -197,6 +197,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         );
         let mut ownership_summaries = std::collections::HashMap::new();
         let mut ownership_resources = std::collections::HashMap::new();
+        let mut ownership_actions = std::collections::HashMap::new();
         for (owner, ledger) in program.ownership_ledgers() {
             ownership_summaries.insert(
                 owner.0.clone(),
@@ -210,9 +211,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ),
             );
             ownership_resources.insert(owner.0.clone(), ledger.resources());
+            ownership_actions.insert(
+                owner.0.clone(),
+                ledger
+                    .actions
+                    .iter()
+                    .map(|action| {
+                        let kind = match action.kind {
+                            crate::core::ResourceActionKind::Introduce => "introduce",
+                            crate::core::ResourceActionKind::Move => "move",
+                            crate::core::ResourceActionKind::Drop => "drop",
+                            crate::core::ResourceActionKind::Return => "return",
+                        };
+                        (kind.to_string(), action.resource.clone())
+                    })
+                    .collect(),
+            );
         }
         self.resolved_ownership_summaries = Some(ownership_summaries);
         self.resolved_ownership_resources = Some(ownership_resources);
+        self.resolved_ownership_actions = Some(ownership_actions);
 
         self.resolved_backend_requirements = Some(
             program

@@ -178,6 +178,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_ownership_summaries: Option<HashMap<String, (usize, usize, usize, usize, usize, bool)>>,
     /// Ownership resources per owner: owner -> resource names.
     pub(in crate::interp) resolved_ownership_resources: Option<HashMap<String, Vec<String>>>,
+    /// Ownership actions: owner -> [(kind, resource)].
+    pub(in crate::interp) resolved_ownership_actions: Option<HashMap<String, Vec<(String, String)>>>,
     /// Backend capability requirements: (capability, flow).
     pub(in crate::interp) resolved_backend_requirements: Option<Vec<(String, String)>>,
     /// NodeMeta path presence count from CheckedProgram.
@@ -461,6 +463,7 @@ impl<'a> Interpreter<'a> {
         );
         let mut ownership_summaries = HashMap::new();
         let mut ownership_resources = HashMap::new();
+        let mut ownership_actions = HashMap::new();
         for (owner, ledger) in program.ownership_ledgers() {
             ownership_summaries.insert(
                 owner.0.clone(),
@@ -474,9 +477,26 @@ impl<'a> Interpreter<'a> {
                 ),
             );
             ownership_resources.insert(owner.0.clone(), ledger.resources());
+            ownership_actions.insert(
+                owner.0.clone(),
+                ledger
+                    .actions
+                    .iter()
+                    .map(|action| {
+                        let kind = match action.kind {
+                            crate::core::ResourceActionKind::Introduce => "introduce",
+                            crate::core::ResourceActionKind::Move => "move",
+                            crate::core::ResourceActionKind::Drop => "drop",
+                            crate::core::ResourceActionKind::Return => "return",
+                        };
+                        (kind.to_string(), action.resource.clone())
+                    })
+                    .collect(),
+            );
         }
         interp.resolved_ownership_summaries = Some(ownership_summaries);
         interp.resolved_ownership_resources = Some(ownership_resources);
+        interp.resolved_ownership_actions = Some(ownership_actions);
         interp.resolved_backend_requirements = Some(
             program
                 .backend_requirements()
@@ -848,6 +868,15 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn resolved_ownership_resources(&self, owner: &str) -> Option<Vec<String>> {
         self.resolved_ownership_resources
+            .as_ref()
+            .and_then(|map| map.get(owner).cloned())
+    }
+
+    pub(crate) fn resolved_ownership_actions(
+        &self,
+        owner: &str,
+    ) -> Option<Vec<(String, String)>> {
+        self.resolved_ownership_actions
             .as_ref()
             .and_then(|map| map.get(owner).cloned())
     }
@@ -1271,6 +1300,7 @@ impl<'a> Interpreter<'a> {
             resolved_ownership_owners: None,
             resolved_ownership_summaries: None,
             resolved_ownership_resources: None,
+            resolved_ownership_actions: None,
             resolved_backend_requirements: None,
             resolved_node_meta_count: None,
             resolved_node_meta_paths: None,
