@@ -426,6 +426,7 @@ pub struct VerifierCtx {
     pub(crate) checked_ownership_resources: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_backend_requirements: Vec<(String, String)>,
     pub(crate) checked_node_meta_count: usize,
+    pub(crate) checked_node_meta_paths: std::collections::HashSet<String>,
     /// Type definition names materialised from CheckedProgram.
     pub(crate) checked_type_defs: std::collections::HashSet<String>,
     pub(crate) checked_type_fields: std::collections::HashMap<String, Vec<(String, String)>>,
@@ -603,6 +604,11 @@ impl Verifier {
             .map(|req| (req.capability.to_string(), req.flow.0.clone()))
             .collect();
         self.ctx.checked_node_meta_count = program.node_meta().len();
+        self.ctx.checked_node_meta_paths = program
+            .node_meta()
+            .keys()
+            .map(|node_id| node_id.0.clone())
+            .collect();
         self.ctx.checked_type_defs = program
             .type_defs()
             .values()
@@ -941,6 +947,10 @@ impl Verifier {
 
     pub(crate) fn checked_node_meta_count(&self) -> usize {
         self.ctx.checked_node_meta_count
+    }
+
+    pub(crate) fn has_checked_node_meta_path(&self, path: &str) -> bool {
+        self.ctx.checked_node_meta_paths.contains(path)
     }
 
     pub(crate) fn requires_checked_capability(&self, capability: &str) -> bool {

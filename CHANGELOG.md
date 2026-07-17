@@ -57,6 +57,7 @@
 - backend_requirements 与 node_meta 计数安装到 consumers。
 - ownership ledger resource 名称目录安装到 consumers。
 - extern no_panic/unsafe 标志目录安装到 consumers。
+- NodeMeta path 集合安装到 consumers。
 - ResolvedFlow 与 consumers 安装 `impl Protocol` 列表。
 - ResolvedTransition 记录 is_fallback/is_ffi_pinned，并安装到 interpreter/codegen/verifier 目录。
 - interpreter 暴露 resolved transition targets 查询。
