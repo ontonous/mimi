@@ -107,6 +107,9 @@ pub struct ResolvedFlow {
     pub transitions: Vec<TransitionId>,
     pub max_children: Option<usize>,
     pub mailbox_depth: Option<usize>,
+    pub persistent_fields: Vec<String>,
+    pub transactional_fields: Vec<String>,
+    pub metadata_shadow_fields: Vec<String>,
     pub origin: Origin,
 }
 
@@ -1421,6 +1424,9 @@ fn collect_flow(
         transitions: flow_transition_ids,
         max_children,
         mailbox_depth,
+        persistent_fields: flow.persistent_fields.clone(),
+        transactional_fields: flow.transactional_fields.clone(),
+        metadata_shadow_fields: flow.metadata_shadow_fields.clone(),
         origin: resolve_origin(flow.origin, &flow_node_id, flow_span),
     };
     if flows.insert(flow_id.clone(), resolved_flow).is_some() {
@@ -1990,6 +1996,31 @@ func main() -> i32 { 0 }
         let _ = verifier.verify_checked(&program);
         assert_eq!(verifier.checked_max_children(), Some(5));
         assert_eq!(verifier.checked_mailbox_depth("Worker"), Some(16));
+    }
+
+
+    #[test]
+    fn resolved_flow_records_persistent_field_sets() {
+        let file = parse(
+            r#"
+flow ResilientService {
+    persistent state Config { max_retries: i32, timeout_ms: i64 }
+    state Active { request_id: i32 }
+    transition run(Active) -> Active { do { return Active { request_id: 1 } } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        // Materialize IR from parsed AST; full check may inject matrix defaults
+        // that interact with i64 payload fields independently of this IR slice.
+        let program = CheckedProgram::from_checked_file(&file).expect("ir");
+        let flow = program.flow("ResilientService").expect("flow");
+        assert_eq!(
+            flow.persistent_fields,
+            vec!["max_retries".to_string(), "timeout_ms".to_string()]
+        );
+        assert!(flow.states.contains_key("Config"));
+        assert!(flow.states.contains_key("Active"));
     }
 
     #[test]
