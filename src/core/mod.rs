@@ -25,8 +25,8 @@ pub use ownership::{
 };
 pub use resolved::{
     BackendProfile, CheckedProgram, FlowId, NodeId, NodeMeta, Origin, ResolvedFlow, ResolvedFunction,
-    ResolvedItem, ResolvedItemKind, ResolvedState, SpanPrecision, StateId, TransitionId,
-    RESOLVED_IR_VERSION,
+    ResolvedItem, ResolvedItemKind, ResolvedSession, ResolvedState, SpanPrecision, StateId,
+    TransitionId, RESOLVED_IR_VERSION,
 };
 
 pub fn check(file: &File) -> Result<(), Vec<Diagnostic>> {
