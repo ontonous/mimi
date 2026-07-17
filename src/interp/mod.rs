@@ -155,6 +155,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_impls: Option<HashMap<String, Vec<String>>>,
     /// Ownership ledger owners materialised from CheckedProgram.
     pub(in crate::interp) resolved_ownership_owners: Option<std::collections::HashSet<String>>,
+    /// Ownership action summaries: owner -> (intro, move, drop, return, merges, maybe_consumed).
+    pub(in crate::interp) resolved_ownership_summaries: Option<HashMap<String, (usize, usize, usize, usize, usize, bool)>>,
     /// Type definition kinds materialised from CheckedProgram.
     pub(in crate::interp) resolved_type_kinds: Option<HashMap<String, String>>,
     /// Extern function names materialised from CheckedProgram.
@@ -299,6 +301,21 @@ impl<'a> Interpreter<'a> {
                 .map(|owner| owner.0.clone())
                 .collect(),
         );
+        let mut ownership_summaries = HashMap::new();
+        for (owner, ledger) in program.ownership_ledgers() {
+            ownership_summaries.insert(
+                owner.0.clone(),
+                (
+                    ledger.action_count(crate::core::ResourceActionKind::Introduce),
+                    ledger.action_count(crate::core::ResourceActionKind::Move),
+                    ledger.action_count(crate::core::ResourceActionKind::Drop),
+                    ledger.action_count(crate::core::ResourceActionKind::Return),
+                    ledger.branch_merges.len(),
+                    ledger.has_maybe_consumed_merge(),
+                ),
+            );
+        }
+        interp.resolved_ownership_summaries = Some(ownership_summaries);
         let mut type_kinds = HashMap::new();
         for type_def in program.type_defs().values() {
             let kind = match type_def.kind {
@@ -425,6 +442,15 @@ impl<'a> Interpreter<'a> {
         self.resolved_ownership_owners
             .as_ref()
             .is_some_and(|set| set.contains(owner))
+    }
+
+    pub(crate) fn resolved_ownership_summary(
+        &self,
+        owner: &str,
+    ) -> Option<(usize, usize, usize, usize, usize, bool)> {
+        self.resolved_ownership_summaries
+            .as_ref()
+            .and_then(|map| map.get(owner).copied())
     }
 
     pub(crate) fn resolved_type_kind(&self, qualified_name: &str) -> Option<&str> {
@@ -669,6 +695,7 @@ impl<'a> Interpreter<'a> {
             resolved_traits: None,
             resolved_impls: None,
             resolved_ownership_owners: None,
+            resolved_ownership_summaries: None,
             resolved_type_kinds: None,
             resolved_extern_funcs: None,
             resolved_mailbox_depths: None,

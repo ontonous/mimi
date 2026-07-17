@@ -1900,14 +1900,28 @@ func main() -> i32 { 0 }
 "#,
         );
         let program = crate::core::check_program(&file).expect("check");
-        assert!(program
+        let ledger = program
             .ownership_ledger(&crate::core::NodeId("function:close".into()))
-            .is_some());
+            .expect("close ledger");
+        assert_eq!(
+            ledger.action_count(crate::core::ResourceActionKind::Introduce),
+            1
+        );
+        assert_eq!(ledger.action_count(crate::core::ResourceActionKind::Drop), 1);
+        assert!(ledger.resources().iter().any(|r| r == "f"));
         let interp = crate::interp::Interpreter::from_checked(&program);
         assert!(interp.has_resolved_ownership_owner("function:close"));
+        assert_eq!(
+            interp.resolved_ownership_summary("function:close"),
+            Some((1, 0, 1, 0, 0, false))
+        );
         let mut verifier = crate::verifier::Verifier::new().expect("z3");
         let _ = verifier.verify_checked(&program);
         assert!(verifier.has_checked_ownership_owner("function:close"));
+        assert_eq!(
+            verifier.checked_ownership_summary("function:close"),
+            Some((1, 0, 1, 0, 0, false))
+        );
     }
 
 

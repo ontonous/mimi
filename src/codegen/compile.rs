@@ -98,6 +98,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map(|owner| owner.0.clone())
                 .collect(),
         );
+        let mut ownership_summaries = std::collections::HashMap::new();
+        for (owner, ledger) in program.ownership_ledgers() {
+            ownership_summaries.insert(
+                owner.0.clone(),
+                (
+                    ledger.action_count(crate::core::ResourceActionKind::Introduce),
+                    ledger.action_count(crate::core::ResourceActionKind::Move),
+                    ledger.action_count(crate::core::ResourceActionKind::Drop),
+                    ledger.action_count(crate::core::ResourceActionKind::Return),
+                    ledger.branch_merges.len(),
+                    ledger.has_maybe_consumed_merge(),
+                ),
+            );
+        }
+        self.resolved_ownership_summaries = Some(ownership_summaries);
         let mut type_kinds = std::collections::HashMap::new();
         for type_def in program.type_defs().values() {
             let kind = match type_def.kind {
