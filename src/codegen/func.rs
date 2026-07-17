@@ -1702,18 +1702,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 .first()
                                                 .map(|a| self.infer_object_type(a, vars))
                                                 .unwrap_or_default();
-                                            let t = flow
-                                                .transitions
-                                                .iter()
-                                                .find(|t| {
-                                                    t.name == *method_name
-                                                        && t.from_state == from_type
-                                                })
-                                                .or_else(|| {
-                                                    flow.transitions
-                                                        .iter()
-                                                        .find(|t| t.name == *method_name)
-                                                });
+                                            let t = flow.transitions.iter().find(|t| {
+                                                t.name == *method_name && t.from_state == from_type
+                                            });
                                             if let Some(t) = t {
                                                 if let Some(to) = t.to_states.first() {
                                                     self.var_type_names
@@ -1740,18 +1731,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 .first()
                                                 .map(|a| self.infer_object_type(a, vars))
                                                 .unwrap_or_default();
-                                            let t = flow
-                                                .transitions
-                                                .iter()
-                                                .find(|t| {
-                                                    t.name == *method_name
-                                                        && t.from_state == from_type
-                                                })
-                                                .or_else(|| {
-                                                    flow.transitions
-                                                        .iter()
-                                                        .find(|t| t.name == *method_name)
-                                                });
+                                            let t = flow.transitions.iter().find(|t| {
+                                                t.name == *method_name && t.from_state == from_type
+                                            });
                                             if let Some(t) = t {
                                                 if let Some(to) = t.to_states.first() {
                                                     self.var_type_names
@@ -1921,18 +1903,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             "map_set" | "map_remove" => {
                                                 if let Some(val_arg) = call_args.get(2) {
-                                                    let vt =
-                                                        self.infer_object_type(val_arg, vars);
+                                                    let vt = self.infer_object_type(val_arg, vars);
                                                     if vt.starts_with('(')
                                                         || self.is_product_tuple_alias(&vt)
                                                     {
-                                                        let resolved = if self
-                                                            .is_product_tuple_alias(&vt)
-                                                        {
-                                                            self.resolve_alias_type_name(&vt)
-                                                        } else {
-                                                            vt
-                                                        };
+                                                        let resolved =
+                                                            if self.is_product_tuple_alias(&vt) {
+                                                                self.resolve_alias_type_name(&vt)
+                                                            } else {
+                                                                vt
+                                                            };
                                                         self.var_type_names.insert(
                                                             name.clone(),
                                                             format!("Map<string, {}>", resolved),
@@ -1946,8 +1926,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                             format!("Map<string, {}>", vt),
                                                         );
                                                     } else {
-                                                        self.var_type_names
-                                                            .insert(name.clone(), "Map".to_string());
+                                                        self.var_type_names.insert(
+                                                            name.clone(),
+                                                            "Map".to_string(),
+                                                        );
                                                     }
                                                 } else {
                                                     self.var_type_names
@@ -1977,10 +1959,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if let Some(full) = self.get_full_type_name(ta) {
                                             self.var_type_names.insert(name.clone(), full);
                                         } else {
-                                            self.var_type_names.insert(
-                                                name.clone(),
-                                                crate::core::fmt_type(ta),
-                                            );
+                                            self.var_type_names
+                                                .insert(name.clone(), crate::core::fmt_type(ta));
                                         }
                                     } else {
                                         self.var_type_names.insert(name.clone(), tn.clone());
