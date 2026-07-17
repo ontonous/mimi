@@ -49,4 +49,25 @@ impl OwnershipLedger {
             branch_merges: Vec::new(),
         }
     }
+
+    pub fn action_count(&self, kind: ResourceActionKind) -> usize {
+        self.actions.iter().filter(|action| action.kind == kind).count()
+    }
+
+    pub fn resources(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .actions
+            .iter()
+            .map(|action| action.resource.clone())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    pub fn has_maybe_consumed_merge(&self) -> bool {
+        self.branch_merges
+            .iter()
+            .any(|merge| merge.merged_state == ResourceState::MaybeConsumed)
+    }
 }

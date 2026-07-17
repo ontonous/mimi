@@ -415,6 +415,8 @@ pub struct VerifierCtx {
     pub(crate) checked_sessions: std::collections::HashSet<String>,
     /// Ownership ledger owners materialised from CheckedProgram.
     pub(crate) checked_ownership_owners: std::collections::HashSet<String>,
+    pub(crate) checked_ownership_summaries:
+        std::collections::HashMap<String, (usize, usize, usize, usize, usize, bool)>,
     /// Type definition names materialised from CheckedProgram.
     pub(crate) checked_type_defs: std::collections::HashSet<String>,
     /// Extern function names materialised from CheckedProgram.
@@ -488,6 +490,21 @@ impl Verifier {
             .keys()
             .map(|owner| owner.0.clone())
             .collect();
+        let mut ownership_summaries = std::collections::HashMap::new();
+        for (owner, ledger) in program.ownership_ledgers() {
+            ownership_summaries.insert(
+                owner.0.clone(),
+                (
+                    ledger.action_count(crate::core::ResourceActionKind::Introduce),
+                    ledger.action_count(crate::core::ResourceActionKind::Move),
+                    ledger.action_count(crate::core::ResourceActionKind::Drop),
+                    ledger.action_count(crate::core::ResourceActionKind::Return),
+                    ledger.branch_merges.len(),
+                    ledger.has_maybe_consumed_merge(),
+                ),
+            );
+        }
+        self.ctx.checked_ownership_summaries = ownership_summaries;
         self.ctx.checked_type_defs = program
             .type_defs()
             .values()
@@ -609,6 +626,13 @@ impl Verifier {
 
     pub(crate) fn has_checked_ownership_owner(&self, owner: &str) -> bool {
         self.ctx.checked_ownership_owners.contains(owner)
+    }
+
+    pub(crate) fn checked_ownership_summary(
+        &self,
+        owner: &str,
+    ) -> Option<(usize, usize, usize, usize, usize, bool)> {
+        self.ctx.checked_ownership_summaries.get(owner).copied()
     }
 
     pub(crate) fn has_checked_type_def(&self, name: &str) -> bool {

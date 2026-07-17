@@ -33,6 +33,7 @@
 - interpreter/codegen 安装并优先使用 transactional 与 metadata_shadow 字段目录。
 - verifier 安装 transactional 与 metadata_shadow 字段目录。
 - `CheckedProgram::backend_requirements()` / `requires_capability()` 查询 API。
+- OwnershipLedger 提供 action_count/resources 查询；consumers 安装 ownership action summaries。
 - ResolvedFlow 与 consumers 安装 `impl Protocol` 列表。
 - ResolvedTransition 记录 is_fallback/is_ffi_pinned，并安装到 interpreter/codegen/verifier 目录。
 - interpreter 暴露 resolved transition targets 查询。

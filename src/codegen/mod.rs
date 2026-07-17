@@ -322,6 +322,7 @@ pub struct CodeGenerator<'ctx> {
     resolved_impls: Option<HashMap<String, Vec<String>>>,
     /// Ownership ledger owners from CheckedProgram.
     resolved_ownership_owners: Option<std::collections::HashSet<String>>,
+    resolved_ownership_summaries: Option<HashMap<String, (usize, usize, usize, usize, usize, bool)>>,
     /// Type definition kinds from CheckedProgram.
     resolved_type_kinds: Option<HashMap<String, String>>,
     /// Extern function names from CheckedProgram.
@@ -448,6 +449,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_traits: None,
             resolved_impls: None,
             resolved_ownership_owners: None,
+            resolved_ownership_summaries: None,
             resolved_type_kinds: None,
             resolved_extern_funcs: None,
             resolved_mailbox_depths: None,
