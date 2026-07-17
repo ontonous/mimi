@@ -543,4 +543,59 @@ mod tests {
         assert!(table.unify(&option_any, &option_i32).is_err());
         assert!(table.unify_inference(&option_any, &option_i32).is_ok());
     }
+
+    #[test]
+    fn unify_is_symmetric() {
+        let mut table = UnificationTable::new();
+        let v = table.fresh_var();
+        let var_ty = Type::TypeVar(v);
+        assert_eq!(table.unify(&var_ty, &i32_ty()).is_ok(), {
+            let mut t2 = UnificationTable::new();
+            t2.unify(&i32_ty(), &Type::TypeVar(v)).is_ok()
+        });
+    }
+
+    #[test]
+    fn unify_transitivity_propagates_bindings() {
+        let mut table = UnificationTable::new();
+        let a = table.fresh_var();
+        let b = table.fresh_var();
+        assert!(table.unify(&Type::TypeVar(a), &Type::TypeVar(b)).is_ok());
+        assert!(table.unify(&Type::TypeVar(a), &i32_ty()).is_ok());
+        assert_eq!(table.resolve(&Type::TypeVar(b)), i32_ty());
+    }
+
+    #[test]
+    fn checked_never_allows_escape_on_either_side() {
+        let mut table = UnificationTable::new();
+        let any = Type::Name("Any".into(), vec![]);
+        let infer = Type::Infer;
+        let underscore = Type::Name("_".into(), vec![]);
+        for escape in [&any, &infer, &underscore] {
+            assert!(table.unify(escape, &i32_ty()).is_err());
+            assert!(table.unify(&i32_ty(), escape).is_err());
+        }
+    }
+
+    #[test]
+    fn resolve_is_idempotent_on_concrete_types() {
+        let mut table = UnificationTable::new();
+        let ty = Type::Option(Box::new(i32_ty()));
+        assert_eq!(table.resolve(&ty), ty);
+        assert_eq!(table.resolve(&ty), ty);
+    }
+
+    #[test]
+    fn path_compression_does_not_lose_binding() {
+        let mut table = UnificationTable::new();
+        let a = table.fresh_var();
+        let b = table.fresh_var();
+        let c = table.fresh_var();
+        table.unify(&Type::TypeVar(a), &Type::TypeVar(b)).unwrap();
+        table.unify(&Type::TypeVar(b), &Type::TypeVar(c)).unwrap();
+        table.unify(&Type::TypeVar(c), &i32_ty()).unwrap();
+        assert_eq!(table.resolve(&Type::TypeVar(a)), i32_ty());
+        assert_eq!(table.resolve(&Type::TypeVar(b)), i32_ty());
+        assert_eq!(table.resolve(&Type::TypeVar(c)), i32_ty());
+    }
 }
