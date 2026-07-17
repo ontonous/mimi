@@ -419,6 +419,12 @@ pub struct VerifierCtx {
     pub(crate) checked_type_defs: std::collections::HashSet<String>,
     /// Extern function names materialised from CheckedProgram.
     pub(crate) checked_extern_funcs: std::collections::HashSet<String>,
+    /// Protocol names materialised from CheckedProgram.
+    pub(crate) checked_protocols: std::collections::HashSet<String>,
+    /// Trait names materialised from CheckedProgram.
+    pub(crate) checked_traits: std::collections::HashSet<String>,
+    /// Actor names materialised from CheckedProgram.
+    pub(crate) checked_actors: std::collections::HashSet<String>,
 }
 
 /// Backward-compatible verifier with its own solver session.
@@ -481,6 +487,21 @@ impl Verifier {
             }
         }
         self.ctx.checked_extern_funcs = extern_funcs;
+        self.ctx.checked_protocols = program
+            .protocols()
+            .values()
+            .map(|protocol| protocol.qualified_name.clone())
+            .collect();
+        self.ctx.checked_traits = program
+            .traits()
+            .values()
+            .map(|trait_def| trait_def.qualified_name.clone())
+            .collect();
+        self.ctx.checked_actors = program
+            .actors()
+            .values()
+            .map(|actor| actor.qualified_name.clone())
+            .collect();
         self.verify_file(program.file())
     }
 
@@ -508,6 +529,18 @@ impl Verifier {
 
     pub(crate) fn has_checked_extern_func(&self, name: &str) -> bool {
         self.ctx.checked_extern_funcs.contains(name)
+    }
+
+    pub(crate) fn has_checked_protocol(&self, name: &str) -> bool {
+        self.ctx.checked_protocols.contains(name)
+    }
+
+    pub(crate) fn has_checked_trait(&self, name: &str) -> bool {
+        self.ctx.checked_traits.contains(name)
+    }
+
+    pub(crate) fn has_checked_actor(&self, name: &str) -> bool {
+        self.ctx.checked_actors.contains(name)
     }
 
     pub(crate) fn verify_file(&mut self, file: &File) -> Vec<VerificationResult> {
