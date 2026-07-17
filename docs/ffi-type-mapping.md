@@ -1,7 +1,10 @@
 # Mimi FFI 类型映射矩阵
 
-> 版本: v0.28.30-dev
-> 最后更新: 2026-07-09
+> **Authority**: `docs/language-spec.md` §7 (Component Boundary, Native Cross-boundary Types).
+> This document describes the current transitional FFI type mapping.
+> The 1.0 target uses typed Component IR (`.mimiabi`) with `ffi view/mutate/owned/shared/handle` ABI modes.
+> Version: v0.30.0
+> Last updated: 2026-07-17
 
 ## 1. 类型映射表
 

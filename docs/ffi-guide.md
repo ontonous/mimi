@@ -1,5 +1,11 @@
 # Mimi FFI 开发者指南
 
+> **Authority**: `docs/language-spec.md` §7 (Component Boundary).
+> This document describes the current `extern "C"` FFI mechanism.
+> The 1.0 target is a first-class Component Boundary with typed Component IR, generational handles,
+> and typed error/callback/async semantics (see `devdocs/pre-1.0/07-first-class-ffi.md`).
+> The current FFI described here is a transitional mechanism, not the 1.0 stable ABI.
+
 本指南面向需要在 Mimi 与其他语言（C/C++/Rust/Go/Python/Node.js/Java）之间建立互操作的开发者。
 
 ## 1. 两种 FFI 方向
