@@ -153,6 +153,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_type_kinds: Option<HashMap<String, String>>,
     /// Extern function names materialised from CheckedProgram.
     pub(in crate::interp) resolved_extern_funcs: Option<std::collections::HashSet<String>>,
+    /// Flow mailbox depth limits materialised from CheckedProgram: flow -> depth.
+    pub(in crate::interp) resolved_mailbox_depths: Option<HashMap<String, usize>>,
     /// v0.29.24: process-wide max children (None = unlimited).
     /// Taken from first `@max_children(N)` flow annotation in the file.
     max_children: Option<usize>,
@@ -294,6 +296,13 @@ impl<'a> Interpreter<'a> {
         if checked_max.is_some() {
             interp.max_children = checked_max;
         }
+        let mut mailbox_depths = HashMap::new();
+        for flow in program.flows().values() {
+            if let Some(depth) = flow.mailbox_depth {
+                mailbox_depths.insert(flow.id.0.clone(), depth);
+            }
+        }
+        interp.resolved_mailbox_depths = Some(mailbox_depths);
         interp
     }
 
@@ -378,6 +387,12 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn resolved_max_children(&self) -> Option<usize> {
         self.max_children
+    }
+
+    pub(crate) fn resolved_mailbox_depth(&self, flow_name: &str) -> Option<usize> {
+        self.resolved_mailbox_depths
+            .as_ref()
+            .and_then(|map| map.get(flow_name).copied())
     }
 
     pub(crate) fn new(file: &'a File) -> Self {
@@ -488,6 +503,7 @@ impl<'a> Interpreter<'a> {
             resolved_ownership_owners: None,
             resolved_type_kinds: None,
             resolved_extern_funcs: None,
+            resolved_mailbox_depths: None,
             max_children,
             spawn_count: 0,
             actor_spawn_counts: std::collections::HashMap::new(),
