@@ -667,12 +667,27 @@ impl<'a> Interpreter<'a> {
                 // The first argument is the from-state payload (becomes self),
                 // remaining args are the transition's event parameters.
                 // Overloads are distinguished by from_state (first arg type name).
+                // Prefer CheckedProgram transition table when present (TOOL-RESOLUTION-001).
                 if let Expr::Ident(flow_name) = obj.as_ref() {
                     if let Some(flow) = self.find_flow(flow_name) {
                         let from_name = vals.first().and_then(|v| match v {
                             Value::Record(Some(n), _) => Some(n.as_str()),
                             _ => None,
                         });
+                        if let (Some(table), Some(source)) =
+                            (self.resolved_transitions.as_ref(), from_name)
+                        {
+                            if !table.contains_key(&(
+                                flow_name.clone(),
+                                method.clone(),
+                                source.to_string(),
+                            )) {
+                                return Err(InterpError::new(format!(
+                                    "flow transition '{}::{}' has no overload for source state {}",
+                                    flow_name, method, source
+                                )));
+                            }
+                        }
                         let t = flow.transitions.iter().find(|t| {
                             t.name == *method
                                 && from_name.map(|n| n == t.from_state).unwrap_or(false)

@@ -299,6 +299,8 @@ pub struct CodeGenerator<'ctx> {
     /// Flow definitions keyed by flow name — used to compile transitions
     /// as ordinary functions and dispatch `Flow::transition(...)` calls.
     flow_defs: HashMap<String, crate::ast::FlowDef>,
+    /// Canonical transitions from CheckedProgram for fail-closed dispatch.
+    resolved_transitions: Option<HashMap<(String, String, String), Vec<String>>>,
     /// v0.29.24: process spawn quota from first @max_children(N) (None = unlimited).
     max_children: Option<usize>,
 }
@@ -401,6 +403,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             actor_defs: HashMap::new(),
             // v0.29.9 flow transitions
             flow_defs: HashMap::new(),
+            resolved_transitions: None,
             max_children: None,
         }
     }

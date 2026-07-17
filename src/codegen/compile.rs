@@ -15,6 +15,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &crate::core::CheckedProgram<'_>,
     ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
+        let mut resolved = std::collections::HashMap::new();
+        for (id, transition) in program.transitions() {
+            let key = (
+                id.flow.0.clone(),
+                id.event.clone(),
+                id.source.name.clone(),
+            );
+            let targets = transition
+                .targets
+                .iter()
+                .map(|state| state.name.clone())
+                .collect();
+            resolved.insert(key, targets);
+        }
+        self.resolved_transitions = Some(resolved);
         self.compile_file(program.file()).map_err(|error| {
             let mut diagnostic = error.to_diagnostic();
             if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {

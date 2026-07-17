@@ -260,10 +260,17 @@ impl<'a> CheckedProgram<'a> {
 
 fn backend_supports(backend: BackendProfile, capability: &str) -> bool {
     match backend {
+        // Interpreter implements the current Flow surface, including experimental multi-target.
         BackendProfile::Interpreter => true,
+        // Native still lacks tagged multi-target ABI and transactional WAL.
         BackendProfile::Native => !matches!(capability, "flow.multi_target" | "flow.transactional"),
-        BackendProfile::Verifier => false,
-        BackendProfile::Component => false,
+        // Verifier proves function contracts; it does not claim Proven for Flow turns.
+        // Multi-target / transactional flows must not block unrelated contract verification.
+        BackendProfile::Verifier => true,
+        // Component IR consumers cannot yet lower Flow runtime features.
+        BackendProfile::Component => {
+            !matches!(capability, "flow.multi_target" | "flow.transactional")
+        }
     }
 }
 
@@ -1020,6 +1027,54 @@ flow Decision {
         assert!(diagnostics[0].message.contains("FLOW-MULTI-001"));
         assert!(diagnostics[0].message.contains("flow.multi_target"));
         assert_eq!(diagnostics[0].span.start_line, 6);
+    }
+
+    #[test]
+    fn verifier_capability_gate_allows_multi_target_for_contract_verification() {
+        // Verifier proves function contracts; multi-target must not block
+        // unrelated verification of the same CheckedProgram.
+        let file = parse(
+            r#"
+flow Decision {
+    state Pending
+    state Yes
+    state No
+    transition decide(Pending) -> Yes | No { do { return Yes {} } }
+}
+func abs(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result >= 0
+    x
+}
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        program
+            .validate_backend(BackendProfile::Verifier)
+            .expect("verifier must not reject multi-target flows for contract verification");
+        assert!(program
+            .transition("Decision", "decide", "Pending")
+            .is_some());
+    }
+
+    #[test]
+    fn resolved_transition_table_is_exact_source_keyed() {
+        let file = parse(
+            r#"
+flow Counter {
+    state Zero
+    state Pos
+    transition inc(Zero) -> Pos { do { return Pos {} } }
+    transition inc(Pos) -> Pos { do { return Pos {} } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        assert!(program.transition("Counter", "inc", "Zero").is_some());
+        assert!(program.transition("Counter", "inc", "Pos").is_some());
+        assert!(program.transition("Counter", "inc", "Missing").is_none());
+        assert!(program.transition("Counter", "dec", "Zero").is_none());
     }
 
     #[test]
