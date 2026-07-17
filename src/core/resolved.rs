@@ -659,6 +659,28 @@ func main() -> i32 { 0 }
             .filter_map(|id| program.transitions().get(id))
             .all(|transition| transition.origin.user_span().start_line > 0));
     }
+
+    #[test]
+    fn checked_diagnostics_never_use_zero_sentinel_spans() {
+        for source in [
+            "func broken(x: Missing) -> i32 { 0 }",
+            "actor Worker { value: Missing }",
+            "protocol P { state A { value: Missing } }",
+            "session S = Missing",
+            "flow F { state A { value: Missing } }",
+        ] {
+            let file = parse(source);
+            let diagnostics = crate::core::check_program(&file).expect_err(source);
+            assert!(!diagnostics.is_empty(), "expected diagnostics for {source}");
+            for diagnostic in diagnostics {
+                assert!(
+                    diagnostic.span.start_line > 0 && diagnostic.span.start_col > 0,
+                    "sentinel span for {source}: {:?}",
+                    diagnostic
+                );
+            }
+        }
+    }
 }
 
 fn qualify(module: &str, name: &str) -> String {
