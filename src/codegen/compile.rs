@@ -393,6 +393,37 @@ impl<'ctx> CodeGenerator<'ctx> {
             flow_states.insert(flow.id.0.clone(), names);
         }
         self.resolved_flow_states = Some(flow_states);
+        let mut flow_events = std::collections::HashMap::new();
+        for flow in program.flows().values() {
+            let mut events: Vec<String> = flow
+                .transitions
+                .iter()
+                .map(|tid| tid.event.clone())
+                .collect();
+            events.sort();
+            events.dedup();
+            flow_events.insert(flow.id.0.clone(), events);
+        }
+        self.resolved_flow_events = Some(flow_events);
+        let mut item_kinds = std::collections::HashMap::new();
+        for item in program.items().values() {
+            let kind = match item.kind {
+                crate::core::ResolvedItemKind::Function => "function",
+                crate::core::ResolvedItemKind::Type => "type",
+                crate::core::ResolvedItemKind::Constant => "const",
+                crate::core::ResolvedItemKind::Capability => "capability",
+                crate::core::ResolvedItemKind::Trait => "trait",
+                crate::core::ResolvedItemKind::Impl => "impl",
+                crate::core::ResolvedItemKind::ExternBlock => "extern",
+                crate::core::ResolvedItemKind::Module => "module",
+                crate::core::ResolvedItemKind::Actor => "actor",
+                crate::core::ResolvedItemKind::Flow => "flow",
+                crate::core::ResolvedItemKind::Protocol => "protocol",
+                crate::core::ResolvedItemKind::Session => "session",
+            };
+            item_kinds.insert(item.qualified_name.clone(), kind.to_string());
+        }
+        self.resolved_item_kinds = Some(item_kinds);
         let mut persistent_fields = std::collections::HashMap::new();
         for flow in program.flows().values() {
             if !flow.persistent_fields.is_empty() {

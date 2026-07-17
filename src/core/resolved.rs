@@ -3944,6 +3944,18 @@ func main() -> i32 { 0 }
         assert!(codegen
             .resolved_flow_states("Counter")
             .is_some_and(|ss| ss.iter().any(|s| s == "Zero")));
+        assert!(interp
+            .resolved_flow_events("Counter")
+            .is_some_and(|es| es.iter().any(|e| e == "inc")));
+        assert!(verifier
+            .checked_flow_events("Counter")
+            .is_some_and(|es| es.iter().any(|e| e == "inc")));
+        assert!(codegen
+            .resolved_flow_events("Counter")
+            .is_some_and(|es| es.iter().any(|e| e == "inc")));
+        assert_eq!(interp.resolved_item_kind("Counter"), Some("flow"));
+        assert_eq!(verifier.checked_item_kind("Counter"), Some("flow"));
+        assert_eq!(codegen.resolved_item_kind("main"), Some("function"));
     }
 
 
