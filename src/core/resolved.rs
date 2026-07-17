@@ -110,6 +110,7 @@ pub struct ResolvedFlow {
     pub persistent_fields: Vec<String>,
     pub transactional_fields: Vec<String>,
     pub metadata_shadow_fields: Vec<String>,
+    pub impl_protocols: Vec<String>,
     pub origin: Origin,
 }
 
@@ -1437,6 +1438,7 @@ fn collect_flow(
         persistent_fields: flow.persistent_fields.clone(),
         transactional_fields: flow.transactional_fields.clone(),
         metadata_shadow_fields: flow.metadata_shadow_fields.clone(),
+        impl_protocols: flow.impl_protocols.clone(),
         origin: resolve_origin(flow.origin, &flow_node_id, flow_span),
     };
     if flows.insert(flow_id.clone(), resolved_flow).is_some() {
@@ -2108,6 +2110,58 @@ func main() -> i32 { 0 }
             .backend_requirements()
             .iter()
             .any(|r| r.requirement_id == "FLOW-MULTI-001"));
+    }
+
+
+    #[test]
+    fn resolved_flow_records_impl_protocols() {
+        let file = parse(
+            r#"
+protocol Sensor {
+    state Idle
+    transition tick(Idle) -> Idle
+}
+flow Lidar {
+    impl Sensor
+    state Idle
+    transition tick(Idle) -> Idle { do { return Idle {} } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let flow = program.flow("Lidar").expect("Lidar");
+        assert!(flow.impl_protocols.iter().any(|p| p == "Sensor"));
+    }
+
+
+    #[test]
+    fn consumers_install_flow_impl_protocol_directories() {
+        let file = parse(
+            r#"
+protocol Sensor {
+    state Idle
+    transition tick(Idle) -> Idle
+}
+flow Lidar {
+    impl Sensor
+    state Idle
+    transition tick(Idle) -> Idle { do { return Idle {} } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        let protocols = interp
+            .resolved_flow_protocols("Lidar")
+            .expect("Lidar protocols");
+        assert!(protocols.iter().any(|p| p == "Sensor"));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert!(verifier
+            .checked_flow_protocols("Lidar")
+            .is_some_and(|p| p.iter().any(|n| n == "Sensor")));
     }
 
     #[test]

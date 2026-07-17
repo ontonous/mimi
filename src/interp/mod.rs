@@ -161,6 +161,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_transactional_fields: Option<HashMap<String, Vec<String>>>,
     /// Metadata-shadow field sets materialised from CheckedProgram: flow -> fields.
     pub(in crate::interp) resolved_metadata_shadow_fields: Option<HashMap<String, Vec<String>>>,
+    /// Flow impl Protocol names materialised from CheckedProgram.
+    pub(in crate::interp) resolved_flow_protocols: Option<HashMap<String, Vec<String>>>,
     /// v0.29.24: process-wide max children (None = unlimited).
     /// Taken from first `@max_children(N)` flow annotation in the file.
     max_children: Option<usize>,
@@ -329,6 +331,13 @@ impl<'a> Interpreter<'a> {
         }
         interp.resolved_transactional_fields = Some(transactional_fields);
         interp.resolved_metadata_shadow_fields = Some(metadata_shadow_fields);
+        let mut flow_protocols = HashMap::new();
+        for flow in program.flows().values() {
+            if !flow.impl_protocols.is_empty() {
+                flow_protocols.insert(flow.id.0.clone(), flow.impl_protocols.clone());
+            }
+        }
+        interp.resolved_flow_protocols = Some(flow_protocols);
         interp
     }
 
@@ -465,6 +474,10 @@ impl<'a> Interpreter<'a> {
             .unwrap_or_else(|| flow.metadata_shadow_fields.clone())
     }
 
+    pub(crate) fn resolved_flow_protocols(&self, flow_name: &str) -> Option<Vec<String>> {
+        Self::resolved_field_set(&self.resolved_flow_protocols, flow_name)
+    }
+
     pub(crate) fn resolved_mailbox_depth(&self, flow_name: &str) -> Option<usize> {
         let Some(map) = self.resolved_mailbox_depths.as_ref() else {
             return None;
@@ -594,6 +607,7 @@ impl<'a> Interpreter<'a> {
             resolved_persistent_fields: None,
             resolved_transactional_fields: None,
             resolved_metadata_shadow_fields: None,
+            resolved_flow_protocols: None,
             max_children,
             spawn_count: 0,
             actor_spawn_counts: std::collections::HashMap::new(),

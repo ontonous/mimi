@@ -329,6 +329,7 @@ pub struct CodeGenerator<'ctx> {
     resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
     resolved_transactional_fields: Option<HashMap<String, Vec<String>>>,
     resolved_metadata_shadow_fields: Option<HashMap<String, Vec<String>>>,
+    resolved_flow_protocols: Option<HashMap<String, Vec<String>>>,
     /// v0.29.24: process spawn quota from first @max_children(N) (None = unlimited).
     max_children: Option<usize>,
 }
@@ -447,6 +448,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_persistent_fields: None,
             resolved_transactional_fields: None,
             resolved_metadata_shadow_fields: None,
+            resolved_flow_protocols: None,
             max_children: None,
         }
     }

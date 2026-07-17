@@ -434,6 +434,7 @@ pub struct VerifierCtx {
     pub(crate) checked_transactional_fields: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_metadata_shadow_fields: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_constants: std::collections::HashSet<String>,
+    pub(crate) checked_flow_protocols: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// Backward-compatible verifier with its own solver session.
@@ -544,6 +545,13 @@ impl Verifier {
             .values()
             .map(|constant| constant.qualified_name.clone())
             .collect();
+        let mut flow_protocols = std::collections::HashMap::new();
+        for flow in program.flows().values() {
+            if !flow.impl_protocols.is_empty() {
+                flow_protocols.insert(flow.id.0.clone(), flow.impl_protocols.clone());
+            }
+        }
+        self.ctx.checked_flow_protocols = flow_protocols;
         self.verify_file(program.file())
     }
 
@@ -615,6 +623,10 @@ impl Verifier {
 
     pub(crate) fn has_checked_constant(&self, name: &str) -> bool {
         self.ctx.checked_constants.contains(name)
+    }
+
+    pub(crate) fn checked_flow_protocols(&self, flow_name: &str) -> Option<Vec<String>> {
+        self.lookup_checked_field_set(&self.ctx.checked_flow_protocols, flow_name)
     }
 
     fn lookup_checked_field_set(
