@@ -143,6 +143,15 @@ pub struct ResolvedSession {
     pub origin: Origin,
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedProtocol {
+    pub node_id: NodeId,
+    pub qualified_name: String,
+    pub states: Vec<String>,
+    pub transitions: Vec<(String, String, Vec<String>)>, // (event, from, to_states)
+    pub origin: Origin,
+}
+
 #[derive(Debug)]
 pub struct CheckedProgram<'a> {
     file: &'a File,
@@ -152,6 +161,7 @@ pub struct CheckedProgram<'a> {
     transitions: HashMap<TransitionId, ResolvedTransition>,
     functions: HashMap<NodeId, ResolvedFunction>,
     sessions: HashMap<NodeId, ResolvedSession>,
+    protocols: HashMap<NodeId, ResolvedProtocol>,
     backend_requirements: Vec<CapabilityRequirement>,
     ownership_ledgers: HashMap<NodeId, OwnershipLedger>,
 }
@@ -172,6 +182,7 @@ impl<'a> CheckedProgram<'a> {
         let mut node_meta = HashMap::new();
         let mut functions = HashMap::new();
         let mut sessions = HashMap::new();
+        let mut protocols = HashMap::new();
         let mut backend_requirements = Vec::new();
         let mut errors = Vec::new();
         collect_items(
@@ -181,6 +192,7 @@ impl<'a> CheckedProgram<'a> {
             &mut node_meta,
             &mut functions,
             &mut sessions,
+            &mut protocols,
             &mut flows,
             &mut transitions,
             &mut backend_requirements,
@@ -197,6 +209,7 @@ impl<'a> CheckedProgram<'a> {
             transitions,
             functions,
             sessions,
+            protocols,
             backend_requirements,
             ownership_ledgers,
         })
@@ -236,6 +249,16 @@ impl<'a> CheckedProgram<'a> {
         self.sessions
             .values()
             .find(|session| session.qualified_name == qualified_name)
+    }
+
+    pub fn protocols(&self) -> &HashMap<NodeId, ResolvedProtocol> {
+        &self.protocols
+    }
+
+    pub fn protocol(&self, qualified_name: &str) -> Option<&ResolvedProtocol> {
+        self.protocols
+            .values()
+            .find(|protocol| protocol.qualified_name == qualified_name)
     }
 
     pub fn node_meta(&self) -> &HashMap<NodeId, NodeMeta> {
@@ -328,6 +351,7 @@ fn collect_items(
     node_meta: &mut HashMap<NodeId, NodeMeta>,
     functions: &mut HashMap<NodeId, ResolvedFunction>,
     sessions: &mut HashMap<NodeId, ResolvedSession>,
+    protocols: &mut HashMap<NodeId, ResolvedProtocol>,
     flows: &mut HashMap<FlowId, ResolvedFlow>,
     transitions: &mut HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: &mut Vec<CapabilityRequirement>,
@@ -352,6 +376,7 @@ fn collect_items(
                     node_meta,
                     functions,
                     sessions,
+                    protocols,
                     flows,
                     transitions,
                     backend_requirements,
@@ -504,14 +529,45 @@ fn collect_items(
                 Span::from(actor.pos),
                 errors,
             ),
-            Item::Protocol(protocol) => insert_item(
-                resolved_items,
-                ResolvedItemKind::Protocol,
-                &qualify(module, &protocol.name),
-                protocol.origin,
-                Span::from(protocol.pos),
-                errors,
-            ),
+            Item::Protocol(protocol) => {
+                let qualified = qualify(module, &protocol.name);
+                let span = Span::from(protocol.pos);
+                insert_item(
+                    resolved_items,
+                    ResolvedItemKind::Protocol,
+                    &qualified,
+                    protocol.origin,
+                    span,
+                    errors,
+                );
+                let node_id = NodeId(format!("protocol:{}", qualified));
+                let states = protocol
+                    .states
+                    .iter()
+                    .map(|state| state.name.clone())
+                    .collect::<Vec<_>>();
+                let transitions = protocol
+                    .transitions
+                    .iter()
+                    .map(|transition| {
+                        (
+                            transition.name.clone(),
+                            transition.from_state.clone(),
+                            vec![transition.to_state.clone()],
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                protocols.insert(
+                    node_id.clone(),
+                    ResolvedProtocol {
+                        node_id,
+                        qualified_name: qualified,
+                        states,
+                        transitions,
+                        origin: resolve_origin(protocol.origin, &NodeId("protocol".into()), span),
+                    },
+                );
+            }
             Item::Session(session) => {
                 let qualified = qualify(module, &session.name);
                 let span = Span::from(session.pos);
@@ -1241,6 +1297,30 @@ func main() -> i32 { 0 }
             session.body,
             crate::ast::SessionType::Send(_, _)
         ));
+    }
+
+
+    #[test]
+    fn resolved_protocol_topology_is_indexed() {
+        let file = parse(
+            r#"
+protocol Sensor {
+    state Idle
+    state Active
+    transition start(Idle) -> Active
+    transition stop(Active) -> Idle
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let protocol = program.protocol("Sensor").expect("Sensor");
+        assert!(protocol.states.iter().any(|s| s == "Idle"));
+        assert!(protocol.states.iter().any(|s| s == "Active"));
+        assert!(protocol
+            .transitions
+            .iter()
+            .any(|(name, from, to)| name == "start" && from == "Idle" && to.as_slice() == ["Active"]));
     }
 
     #[test]
