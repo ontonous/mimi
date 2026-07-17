@@ -34,6 +34,7 @@
 - verifier 安装 transactional 与 metadata_shadow 字段目录。
 - `CheckedProgram::backend_requirements()` / `requires_capability()` 查询 API。
 - ResolvedFlow 与 consumers 安装 `impl Protocol` 列表。
+- ResolvedTransition 记录 is_fallback/is_ffi_pinned，并安装到 interpreter/codegen 目录。
 - interpreter/codegen 从 CheckedProgram 读取 `@max_children` 配额与 `@mailbox(depth=...)` 深度。
 - 模块限定 Flow 的 mailbox depth 可通过 bare actor/flow 名解析。
 - ownership ledger 校验 callable `function:`/`transition:` NodeId 与 key/owner 一致性。
