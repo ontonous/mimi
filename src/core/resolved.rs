@@ -3556,6 +3556,24 @@ func main() -> i32 { 0 }
             verifier.checked_transition_params("Door", "open", "Closed"),
             Some(vec![("code".into(), "i32".into())])
         );
+        let by_flow = interp
+            .resolved_transitions_for_flow("Door")
+            .expect("Door transitions");
+        assert!(by_flow.iter().any(|(event, source, targets, fallback, _pinned, argc)| {
+            event == "open"
+                && source == "Closed"
+                && targets.contains("Open")
+                && !*fallback
+                && *argc == 1
+        }));
+        assert!(verifier
+            .checked_transitions_for_flow("Door")
+            .is_some_and(|trs| trs.iter().any(|(e, s, _, _, _, _)| e == "open" && s == "Closed")));
+        assert!(codegen
+            .resolved_transitions_for_flow("Door")
+            .is_some_and(|trs| trs.iter().any(|(e, _, targets, _, _, argc)| {
+                e == "open" && targets.contains("Open") && *argc == 1
+            })));
     }
 
     #[test]
