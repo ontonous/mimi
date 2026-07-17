@@ -1469,6 +1469,26 @@ func main() -> i32 { 0 }
         assert!(!interp.has_resolved_protocol("Missing"));
     }
 
+
+    #[test]
+    fn interpreter_from_checked_installs_actor_directory() {
+        let file = parse(
+            r#"
+actor Counter {
+    count: i32
+    func inc() -> i32 { 1 }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        let methods = interp
+            .resolved_actor_methods("Counter")
+            .expect("Counter methods");
+        assert!(methods.iter().any(|m| m == "inc"));
+    }
+
     #[test]
     fn canonical_flow_ids_include_module_path() {
         let file = parse(

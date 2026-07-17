@@ -137,6 +137,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_sessions: Option<HashMap<String, crate::ast::SessionType>>,
     /// Protocol names materialised from CheckedProgram.
     pub(in crate::interp) resolved_protocols: Option<std::collections::HashSet<String>>,
+    /// Actor method directories materialised from CheckedProgram: actor -> methods.
+    pub(in crate::interp) resolved_actors: Option<HashMap<String, Vec<String>>>,
     /// v0.29.24: process-wide max children (None = unlimited).
     /// Taken from first `@max_children(N)` flow annotation in the file.
     max_children: Option<usize>,
@@ -220,6 +222,11 @@ impl<'a> Interpreter<'a> {
             .map(|protocol| protocol.qualified_name.clone())
             .collect();
         interp.resolved_protocols = Some(protocols);
+        let mut actors = HashMap::new();
+        for actor in program.actors().values() {
+            actors.insert(actor.qualified_name.clone(), actor.methods.clone());
+        }
+        interp.resolved_actors = Some(actors);
         interp
     }
 
@@ -247,6 +254,12 @@ impl<'a> Interpreter<'a> {
         self.resolved_protocols
             .as_ref()
             .is_some_and(|set| set.contains(qualified_name))
+    }
+
+    pub(crate) fn resolved_actor_methods(&self, qualified_name: &str) -> Option<Vec<String>> {
+        self.resolved_actors
+            .as_ref()
+            .and_then(|map| map.get(qualified_name).cloned())
     }
 
     pub(crate) fn new(file: &'a File) -> Self {
@@ -349,6 +362,7 @@ impl<'a> Interpreter<'a> {
             resolved_functions: None,
             resolved_sessions: None,
             resolved_protocols: None,
+            resolved_actors: None,
             max_children,
             spawn_count: 0,
             actor_spawn_counts: std::collections::HashMap::new(),
