@@ -1,6 +1,8 @@
 # Mimi Error Codes Reference
 
-Sourced from `src/diagnostic/codes.rs`.
+> **Semantic authority**: `docs/language-spec.md` §4 (Error Model).
+> Error code values remain valid; semantic definitions (Result/Fault/PeerFault/exit layering) defer to the specification.
+> Sourced from `src/diagnostic/codes.rs`.
 
 ## Code Ranges
 
