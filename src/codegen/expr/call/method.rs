@@ -338,6 +338,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|a| self.infer_object_type(a, vars))
             .unwrap_or_default();
 
+        if let Some(table) = self.resolved_transitions.as_ref() {
+            if !from_type.is_empty()
+                && !table.contains_key(&(
+                    flow_name.to_string(),
+                    transition_name.to_string(),
+                    from_type.clone(),
+                ))
+            {
+                return Err(CompileError::TypeMismatch(format!(
+                    "flow transition '{}::{}' has no overload for source state {}",
+                    flow_name, transition_name, from_type
+                )));
+            }
+        }
         let candidates: Vec<&TransitionDef> = flow
             .transitions
             .iter()

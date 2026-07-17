@@ -128,6 +128,9 @@ pub struct Interpreter<'a> {
     actor_index: HashMap<String, ActorDef>,
     /// Flow definitions: flow_name -> FlowDef
     flow_index: HashMap<String, FlowDef>,
+    /// Canonical transitions from CheckedProgram: (flow, event, source) -> targets.
+    /// When present, transition dispatch prefers this table over re-scanning FlowDef.
+    resolved_transitions: Option<HashMap<(String, String, String), Vec<String>>>,
     /// v0.29.24: process-wide max children (None = unlimited).
     /// Taken from first `@max_children(N)` flow annotation in the file.
     max_children: Option<usize>,
@@ -172,7 +175,23 @@ fn global_stdout_slot(
 
 impl<'a> Interpreter<'a> {
     pub fn from_checked(program: &crate::core::CheckedProgram<'a>) -> Self {
-        Self::new(program.file())
+        let mut interp = Self::new(program.file());
+        let mut resolved = HashMap::new();
+        for (id, transition) in program.transitions() {
+            let key = (
+                id.flow.0.clone(),
+                id.event.clone(),
+                id.source.name.clone(),
+            );
+            let targets = transition
+                .targets
+                .iter()
+                .map(|state| state.name.clone())
+                .collect();
+            resolved.insert(key, targets);
+        }
+        interp.resolved_transitions = Some(resolved);
+        interp
     }
 
     pub(crate) fn new(file: &'a File) -> Self {
@@ -271,6 +290,7 @@ impl<'a> Interpreter<'a> {
             func_index,
             actor_index,
             flow_index,
+            resolved_transitions: None,
             max_children,
             spawn_count: 0,
             actor_spawn_counts: std::collections::HashMap::new(),
