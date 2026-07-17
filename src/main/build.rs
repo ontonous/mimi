@@ -126,30 +126,33 @@ pub(crate) fn build(
         merged_file.items.push(main_item);
     }
 
-    let check_result = if strict {
-        mimi::core::check_strict(&merged_file)
+    let checked_program = if strict {
+        mimi::core::check_program_strict(&merged_file)
     } else {
-        mimi::core::check(&merged_file)
+        mimi::core::check_program(&merged_file)
     };
-    if let Err(diagnostics) = check_result {
-        eprintln!(
-            "{} has {} type error(s):",
-            path.display(),
-            diagnostics.len()
-        );
-        let use_color = colors_enabled();
-        let src = mimi::path_safety::read_source_capped(&path).ok();
-        let src_ref = src.as_deref();
-        for d in &diagnostics {
-            let formatted = format_diagnostic(d, src_ref, &path.display().to_string());
-            if use_color {
-                eprint!("{}", formatted);
-            } else {
-                eprint!("{}", strip_ansi(&formatted));
+    let checked_program = match checked_program {
+        Ok(program) => program,
+        Err(diagnostics) => {
+            eprintln!(
+                "{} has {} type error(s):",
+                path.display(),
+                diagnostics.len()
+            );
+            let use_color = colors_enabled();
+            let src = mimi::path_safety::read_source_capped(&path).ok();
+            let src_ref = src.as_deref();
+            for d in &diagnostics {
+                let formatted = format_diagnostic(d, src_ref, &path.display().to_string());
+                if use_color {
+                    eprint!("{}", formatted);
+                } else {
+                    eprint!("{}", strip_ansi(&formatted));
+                }
             }
+            return Err("type checking failed".into());
         }
-        return Err("type checking failed".into());
-    }
+    };
 
     if verify_ffi {
         match verifier::flow_verify_ffi_call_sites_or_mock(&merged_file) {
@@ -194,9 +197,19 @@ pub(crate) fn build(
     codegen.shared = shared;
     codegen.target_triple = target.map(|s| s.to_string());
 
-    codegen
-        .compile_file(&merged_file)
-        .map_err(|e| e.to_diagnostic().to_string())?;
+    if let Err(diagnostics) = codegen.compile_checked(&checked_program) {
+        let use_color = colors_enabled();
+        let filename = path.display().to_string();
+        for diagnostic in &diagnostics {
+            let formatted = format_diagnostic(diagnostic, Some(source.as_str()), &filename);
+            if use_color {
+                eprint!("{}", formatted);
+            } else {
+                eprint!("{}", strip_ansi(&formatted));
+            }
+        }
+        return Err("native backend capability check failed".into());
+    }
 
     if emit_ir {
         println!("{}", codegen.emit_ir());

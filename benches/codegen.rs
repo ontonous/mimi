@@ -8,10 +8,10 @@ fn codegen_simple(c: &mut Criterion) {
         b.iter(|| {
             let tokens = lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
             let file = parser::Parser::new(tokens).parse_file().unwrap();
-            core::check(&file).unwrap();
+            let program = core::check_program(&file).unwrap();
             let context = inkwell::context::Context::create();
             let mut gen = codegen::CodeGenerator::new(&context, "bench");
-            gen.compile_file(&file).unwrap();
+            gen.compile_checked(&program).unwrap();
             gen.emit_ir()
         })
     });
@@ -35,10 +35,10 @@ func main() -> f64 {
         b.iter(|| {
             let tokens = lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
             let file = parser::Parser::new(tokens).parse_file().unwrap();
-            core::check(&file).unwrap();
+            let program = core::check_program(&file).unwrap();
             let context = inkwell::context::Context::create();
             let mut gen = codegen::CodeGenerator::new(&context, "bench");
-            gen.compile_file(&file).unwrap();
+            gen.compile_checked(&program).unwrap();
             gen.emit_ir()
         })
     });
@@ -56,10 +56,10 @@ func main() -> i32 { fib(20) }
         b.iter(|| {
             let tokens = lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
             let file = parser::Parser::new(tokens).parse_file().unwrap();
-            core::check(&file).unwrap();
+            let program = core::check_program(&file).unwrap();
             let context = inkwell::context::Context::create();
             let mut gen = codegen::CodeGenerator::new(&context, "bench");
-            gen.compile_file(&file).unwrap();
+            gen.compile_checked(&program).unwrap();
             gen.emit_ir()
         })
     });
@@ -79,10 +79,10 @@ func main() -> i32 { factorial(10) }
         b.iter(|| {
             let tokens = lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
             let file = parser::Parser::new(tokens).parse_file().unwrap();
-            core::check(&file).unwrap();
+            let program = core::check_program(&file).unwrap();
             let context = inkwell::context::Context::create();
             let mut gen = codegen::CodeGenerator::new(&context, "bench");
-            gen.compile_file(&file).unwrap();
+            gen.compile_checked(&program).unwrap();
             gen.emit_ir()
         })
     });

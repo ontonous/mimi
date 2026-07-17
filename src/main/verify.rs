@@ -36,7 +36,7 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
 
     // V-H8: typecheck before Z3 so ill-typed sources cannot produce
     // meaningless positive verification results.
-    if let Err(diags) = mimi::core::check(&merged_file) {
+    if let Err(diags) = mimi::core::check_program(&merged_file) {
         let use_color = colors_enabled();
         let src_ref = Some(source.as_str());
         let filename = path.display().to_string();

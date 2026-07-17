@@ -171,7 +171,11 @@ fn global_stdout_slot(
 }
 
 impl<'a> Interpreter<'a> {
-    pub fn new(file: &'a File) -> Self {
+    pub fn from_checked(program: &crate::core::CheckedProgram<'a>) -> Self {
+        Self::new(program.file())
+    }
+
+    pub(crate) fn new(file: &'a File) -> Self {
         let mut constructors = HashMap::new();
         let mut newtype_constructors = HashMap::new();
         let mut type_variants: HashMap<String, Vec<String>> = HashMap::new();

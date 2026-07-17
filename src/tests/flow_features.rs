@@ -1120,6 +1120,29 @@ flow BadFlow {
 }
 
 #[test]
+fn flow_codegen_multi_target_fails_closed() {
+    let src = r#"
+flow Decision {
+    state Pending { value: i32 }
+    state Approved { value: i32 }
+    state Rejected { value: i32 }
+
+    transition decide(Pending) -> Approved | Rejected {
+        do { return Approved { value: self.value } }
+    }
+}
+
+func main() -> i32 { 0 }
+"#;
+    let error = compile_and_run(src).expect_err("native multi-target must fail closed");
+    assert!(
+        error.contains("tagged-state-union ABI"),
+        "unexpected native capability error: {}",
+        error
+    );
+}
+
+#[test]
 fn flow_check_no_payload_state_return_no_braces() {
     let src = r#"
 flow GoodFlow {
