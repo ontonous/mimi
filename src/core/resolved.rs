@@ -3902,6 +3902,40 @@ func main() -> i32 { 0 }
         );
     }
 
+
+    #[test]
+    fn actor_fields_are_installed() {
+        let file = parse(
+            r#"
+actor Worker {
+    count: i32
+    mut flag: bool
+    func run() -> i32 { 0 }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let fields = program.actor("Worker").expect("Worker").fields.clone();
+        assert!(fields.iter().any(|(n, _, m)| n == "count" && !*m));
+        assert!(fields.iter().any(|(n, _, m)| n == "flag" && *m));
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        let installed = interp.resolved_actor_fields("Worker").expect("fields");
+        assert!(installed.iter().any(|(n, ty, m)| n == "count" && ty == "i32" && !*m));
+        assert!(installed.iter().any(|(n, ty, m)| n == "flag" && ty == "bool" && *m));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert!(verifier
+            .checked_actor_fields("Worker")
+            .is_some_and(|fs| fs.iter().any(|(n, _, m)| n == "flag" && *m)));
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "actor_fields");
+        codegen.compile_checked(&program).expect("compile");
+        assert!(codegen
+            .resolved_actor_fields("Worker")
+            .is_some_and(|fs| fs.iter().any(|(n, ty, _)| n == "count" && ty == "i32")));
+    }
+
     #[test]
     fn call_sites_bind_callee_effects_from_function_directory() {
         // IR-only materialization: avoid effect-scope runtime checks at call sites.
