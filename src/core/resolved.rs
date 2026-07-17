@@ -2440,11 +2440,18 @@ func main() -> i32 { 0 }
         let interp = crate::interp::Interpreter::from_checked(&program);
         assert_eq!(interp.resolved_type_kind("Point"), Some("record"));
         assert!(interp.has_resolved_extern_func("c_abs"));
+        assert_eq!(interp.resolved_extern_abi("c_abs"), Some("C"));
         let mut verifier = crate::verifier::Verifier::new().expect("z3");
         let _ = verifier.verify_checked(&program);
         assert!(verifier.has_checked_type_def("Point"));
         assert!(verifier.has_checked_extern_func("c_abs"));
+        assert_eq!(verifier.checked_extern_abi("c_abs"), Some("C"));
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "abi");
+        codegen.compile_checked(&program).expect("compile");
+        assert_eq!(codegen.resolved_extern_abi("c_abs"), Some("C"));
     }
+
 
 
     #[test]
