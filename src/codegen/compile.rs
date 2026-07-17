@@ -45,16 +45,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_transition_param_arity = Some(param_arity);
         let mut arity = std::collections::HashMap::new();
         let mut effects = std::collections::HashMap::new();
+        let mut returns = std::collections::HashMap::new();
         let mut comptime_functions = std::collections::HashSet::new();
         for function in program.functions().values() {
             arity.insert(function.qualified_name.clone(), function.params.len());
             effects.insert(function.qualified_name.clone(), function.effects.clone());
+            returns.insert(
+                function.qualified_name.clone(),
+                crate::core::fmt_type(&function.ret),
+            );
             if function.is_comptime {
                 comptime_functions.insert(function.qualified_name.clone());
             }
         }
         self.resolved_function_arity = Some(arity);
         self.resolved_function_effects = Some(effects);
+        self.resolved_function_returns = Some(returns);
         self.resolved_comptime_functions = Some(comptime_functions);
         self.resolved_sessions = Some(
             program
