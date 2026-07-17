@@ -181,6 +181,8 @@ pub struct ResolvedSession {
     pub node_id: NodeId,
     pub qualified_name: String,
     pub body: crate::ast::SessionType,
+    /// Pretty-printed residual session type for directory consumers.
+    pub body_display: String,
     pub origin: Origin,
 }
 
@@ -478,6 +480,11 @@ impl<'a> CheckedProgram<'a> {
         self.sessions
             .values()
             .find(|session| session.qualified_name == qualified_name)
+    }
+
+    pub fn session_body_display(&self, qualified_name: &str) -> Option<&str> {
+        self.session(qualified_name)
+            .map(|session| session.body_display.as_str())
     }
 
     pub fn protocols(&self) -> &HashMap<NodeId, ResolvedProtocol> {
@@ -1336,15 +1343,17 @@ fn collect_items(
                     errors,
                 );
                 let node_id = NodeId(format!("session:{}", qualified));
-                sessions.insert(
+                                sessions.insert(
                     node_id.clone(),
                     ResolvedSession {
                         node_id,
                         qualified_name: qualified,
                         body: session.body.clone(),
+                        body_display: format_session_type(&session.body),
                         origin: resolve_origin(session.origin, &NodeId("session".into()), span),
                     },
                 );
+
             }
         }
     }
@@ -2356,6 +2365,21 @@ fn resolve_call_callee(
             }
         }
         _ => ("<expr>".into(), ResolvedCallKind::Unknown, None, Vec::new(), None),
+    }
+}
+
+
+fn format_session_type(ty: &crate::ast::SessionType) -> String {
+    match ty {
+        crate::ast::SessionType::Send(payload, cont) => {
+            format!("!{}.{}", crate::core::fmt_type(payload), format_session_type(cont))
+        }
+        crate::ast::SessionType::Recv(payload, cont) => {
+            format!("?{}.{}", crate::core::fmt_type(payload), format_session_type(cont))
+        }
+        crate::ast::SessionType::Dual(inner) => format!("dual({})", format_session_type(inner)),
+        crate::ast::SessionType::Name(name) => name.clone(),
+        crate::ast::SessionType::End => "end".into(),
     }
 }
 
@@ -3606,6 +3630,31 @@ func main() -> i32 { 0 }
             codegen.resolved_protocol_payload("Sensor", "Active").as_deref(),
             Some("i32")
         );
+    }
+
+
+    #[test]
+    fn session_body_display_is_materialised() {
+        let file = parse(
+            r#"
+session Ping = !i32 . ?i32 . end
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        assert_eq!(
+            program.session_body_display("Ping"),
+            Some("!i32.?i32.end")
+        );
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert_eq!(interp.resolved_session_display("Ping"), Some("!i32.?i32.end"));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert_eq!(verifier.checked_session_display("Ping"), Some("!i32.?i32.end"));
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "sess");
+        codegen.compile_checked(&program).expect("compile");
+        assert_eq!(codegen.resolved_session_display("Ping"), Some("!i32.?i32.end"));
     }
 
     #[test]

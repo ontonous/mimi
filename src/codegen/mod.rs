@@ -311,6 +311,7 @@ pub struct CodeGenerator<'ctx> {
     resolved_comptime_functions: Option<std::collections::HashSet<String>>,
     /// Session names from CheckedProgram.
     resolved_sessions: Option<std::collections::HashSet<String>>,
+    resolved_session_displays: Option<HashMap<String, String>>,
     /// Protocol names from CheckedProgram.
     resolved_protocols: Option<std::collections::HashSet<String>>,
     resolved_protocol_transitions: Option<HashMap<String, Vec<(String, String, String)>>>,
@@ -456,6 +457,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_function_returns: None,
             resolved_comptime_functions: None,
             resolved_sessions: None,
+            resolved_session_displays: None,
             resolved_protocols: None,
             resolved_protocol_transitions: None,
             resolved_protocol_payloads: None,
@@ -625,6 +627,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             map.get(&(flow.to_string(), event.to_string(), source.to_string()))
                 .copied()
         })
+    }
+
+    pub(crate) fn resolved_session_display(&self, name: &str) -> Option<&str> {
+        self.resolved_session_displays
+            .as_ref()
+            .and_then(|map| map.get(name).map(String::as_str))
     }
 
     pub fn gep(&self) -> gep::CheckedGepBuilder<'_, 'ctx> {
