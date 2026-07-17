@@ -24,10 +24,11 @@ pub use ownership::{
     BranchMerge, OwnershipLedger, ResourceAction, ResourceActionKind, ResourceState,
 };
 pub use resolved::{
-    BackendProfile, CheckedProgram, FlowId, NodeId, NodeMeta, Origin, ResolvedFlow, ResolvedFunction,
-    ResolvedItem, ResolvedItemKind, ResolvedActor, ResolvedCapability, ResolvedConstant, ResolvedImpl, ResolvedProtocol, ResolvedSession,
-    ResolvedState, ResolvedTrait, SpanPrecision, StateId,
-    TransitionId, RESOLVED_IR_VERSION,
+    BackendProfile, CheckedProgram, FlowId, NodeId, NodeMeta, Origin, ResolvedActor,
+    ResolvedCapability, ResolvedConstant, ResolvedExternBlock, ResolvedFlow, ResolvedFunction,
+    ResolvedImpl, ResolvedItem, ResolvedItemKind, ResolvedProtocol, ResolvedSession, ResolvedState,
+    ResolvedTrait, ResolvedTypeDef, ResolvedTypeKind, SpanPrecision, StateId, TransitionId,
+    RESOLVED_IR_VERSION,
 };
 
 pub fn check(file: &File) -> Result<(), Vec<Diagnostic>> {
