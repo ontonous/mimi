@@ -308,6 +308,7 @@ pub struct CodeGenerator<'ctx> {
     resolved_function_arity: Option<HashMap<String, usize>>,
     resolved_function_effects: Option<HashMap<String, Vec<String>>>,
     resolved_function_returns: Option<HashMap<String, String>>,
+    resolved_function_params: Option<HashMap<String, Vec<(String, String)>>>,
     resolved_comptime_functions: Option<std::collections::HashSet<String>>,
     /// Session names from CheckedProgram.
     resolved_sessions: Option<std::collections::HashSet<String>>,
@@ -458,6 +459,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_function_arity: None,
             resolved_function_effects: None,
             resolved_function_returns: None,
+            resolved_function_params: None,
             resolved_comptime_functions: None,
             resolved_sessions: None,
             resolved_session_displays: None,
@@ -580,6 +582,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_extern_abis
             .as_ref()
             .and_then(|map| map.get(name).map(String::as_str))
+    }
+
+    pub(crate) fn resolved_function_params(
+        &self,
+        name: &str,
+    ) -> Option<Vec<(String, String)>> {
+        self.resolved_function_params
+            .as_ref()
+            .and_then(|map| map.get(name).cloned())
     }
 
     pub(crate) fn resolved_function_return_type(&self, name: &str) -> Option<&str> {

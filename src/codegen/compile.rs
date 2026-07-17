@@ -58,6 +58,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut arity = std::collections::HashMap::new();
         let mut effects = std::collections::HashMap::new();
         let mut returns = std::collections::HashMap::new();
+        let mut params = std::collections::HashMap::new();
         let mut comptime_functions = std::collections::HashSet::new();
         for function in program.functions().values() {
             arity.insert(function.qualified_name.clone(), function.params.len());
@@ -66,6 +67,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 function.qualified_name.clone(),
                 crate::core::fmt_type(&function.ret),
             );
+            params.insert(
+                function.qualified_name.clone(),
+                function
+                    .params
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), crate::core::fmt_type(ty)))
+                    .collect(),
+            );
             if function.is_comptime {
                 comptime_functions.insert(function.qualified_name.clone());
             }
@@ -73,6 +82,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_function_arity = Some(arity);
         self.resolved_function_effects = Some(effects);
         self.resolved_function_returns = Some(returns);
+        self.resolved_function_params = Some(params);
         self.resolved_comptime_functions = Some(comptime_functions);
         self.resolved_sessions = Some(
             program
