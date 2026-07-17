@@ -250,6 +250,14 @@ impl<'a> Interpreter<'a> {
         }
 
         // Handle extern function calls via their FFI contract (wrapper layer).
+        if let Some(resolved) = self.resolved_extern_funcs.as_ref() {
+            if resolved.contains(name) && !self.extern_funcs.contains_key(name) {
+                return Err(InterpError::new(format!(
+                    "extern function '{}' is present in CheckedProgram but missing from runtime FFI index",
+                    name
+                )));
+            }
+        }
         if let Some(extern_func) = self.extern_funcs.get(name).cloned() {
             let contract = self
                 .ffi_contracts
