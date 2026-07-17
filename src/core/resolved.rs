@@ -299,6 +299,12 @@ pub struct ResolvedTypeDef {
     pub node_id: NodeId,
     pub qualified_name: String,
     pub kind: ResolvedTypeKind,
+    /// Alias/newtype target type display when applicable.
+    pub alias_of: Option<String>,
+    /// Record/union fields: (name, type display).
+    pub fields: Vec<(String, String)>,
+    /// Enum variants: (name, optional payload display).
+    pub variants: Vec<(String, Option<String>)>,
     pub origin: Origin,
 }
 
@@ -616,6 +622,24 @@ impl<'a> CheckedProgram<'a> {
             .find(|type_def| type_def.qualified_name == qualified_name)
     }
 
+    pub fn type_def_fields(&self, qualified_name: &str) -> Option<&[(String, String)]> {
+        self.type_def(qualified_name)
+            .map(|type_def| type_def.fields.as_slice())
+    }
+
+    pub fn type_def_variants(
+        &self,
+        qualified_name: &str,
+    ) -> Option<&[(String, Option<String>)]> {
+        self.type_def(qualified_name)
+            .map(|type_def| type_def.variants.as_slice())
+    }
+
+    pub fn type_def_alias_of(&self, qualified_name: &str) -> Option<&str> {
+        self.type_def(qualified_name)
+            .and_then(|type_def| type_def.alias_of.as_deref())
+    }
+
     pub fn extern_blocks(&self) -> &HashMap<NodeId, ResolvedExternBlock> {
         &self.extern_blocks
     }
@@ -883,6 +907,90 @@ fn collect_items(
                     crate::ast::TypeDefKind::Enum(_) => ResolvedTypeKind::Enum,
                     crate::ast::TypeDefKind::Union(_) => ResolvedTypeKind::Union,
                 };
+                let mut alias_of = None;
+                let mut fields = Vec::new();
+                let mut variants = Vec::new();
+                match &type_def.kind {
+                    crate::ast::TypeDefKind::Alias(ty) | crate::ast::TypeDefKind::Newtype(ty) => {
+                        if contains_unresolved_type(ty) {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: unresolved alias/newtype target in type '{}'",
+                                    qualified
+                                ),
+                                span,
+                            ));
+                        }
+                        alias_of = Some(crate::core::fmt_type(ty));
+                    }
+                    crate::ast::TypeDefKind::Record(record_fields)
+                    | crate::ast::TypeDefKind::Union(record_fields) => {
+                        for field in record_fields {
+                            if contains_unresolved_type(&field.ty) {
+                                errors.push(Diagnostic::error(
+                                    format!(
+                                        "TOOL-RESOLUTION-001: unresolved field type in type '{}' field '{}'",
+                                        qualified,
+                                        field.name
+                                    ),
+                                    span,
+                                ));
+                            }
+                            fields.push((field.name.clone(), crate::core::fmt_type(&field.ty)));
+                        }
+                    }
+                    crate::ast::TypeDefKind::Enum(enum_variants) => {
+                        for variant in enum_variants {
+                            let payload = match &variant.payload {
+                                Some(crate::ast::VariantPayload::Tuple(types)) => {
+                                    for ty in types {
+                                        if contains_unresolved_type(ty) {
+                                            errors.push(Diagnostic::error(
+                                                format!(
+                                                    "TOOL-RESOLUTION-001: unresolved enum payload in type '{}' variant '{}'",
+                                                    qualified,
+                                                    variant.name
+                                                ),
+                                                span,
+                                            ));
+                                        }
+                                    }
+                                    Some(format!(
+                                        "({})",
+                                        types
+                                            .iter()
+                                            .map(crate::core::fmt_type)
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    ))
+                                }
+                                Some(crate::ast::VariantPayload::Record(record_fields)) => {
+                                    let mut parts = Vec::new();
+                                    for field in record_fields {
+                                        if contains_unresolved_type(&field.ty) {
+                                            errors.push(Diagnostic::error(
+                                                format!(
+                                                    "TOOL-RESOLUTION-001: unresolved enum record field in type '{}' variant '{}'",
+                                                    qualified,
+                                                    variant.name
+                                                ),
+                                                span,
+                                            ));
+                                        }
+                                        parts.push(format!(
+                                            "{}: {}",
+                                            field.name,
+                                            crate::core::fmt_type(&field.ty)
+                                        ));
+                                    }
+                                    Some(format!("{{{}}}", parts.join(", ")))
+                                }
+                                None => None,
+                            };
+                            variants.push((variant.name.clone(), payload));
+                        }
+                    }
+                }
                 let node_id = NodeId(format!("type:{}", qualified));
                 type_defs.insert(
                     node_id.clone(),
@@ -890,9 +998,13 @@ fn collect_items(
                         node_id,
                         qualified_name: qualified,
                         kind,
+                        alias_of,
+                        fields,
+                        variants,
                         origin: Origin::User(span),
                     },
                 );
+
             }
             Item::Const {
                 name,
@@ -3655,6 +3767,45 @@ func main() -> i32 { 0 }
         let mut codegen = crate::codegen::CodeGenerator::new(&context, "sess");
         codegen.compile_checked(&program).expect("compile");
         assert_eq!(codegen.resolved_session_display("Ping"), Some("!i32.?i32.end"));
+    }
+
+
+    #[test]
+    fn type_def_fields_and_variants_are_materialised() {
+        let file = parse(
+            r#"
+type Point { x: i32, y: i32 }
+type Id = i32
+type Color { Red Green Blue }
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let fields = program.type_def_fields("Point").expect("Point fields");
+        assert!(fields.iter().any(|(n, ty)| n == "x" && ty == "i32"));
+        assert!(fields.iter().any(|(n, ty)| n == "y" && ty == "i32"));
+        assert_eq!(program.type_def_alias_of("Id"), Some("i32"));
+        let variants = program.type_def_variants("Color").expect("Color");
+        assert!(variants.iter().any(|(n, p)| n == "Red" && p.is_none()));
+        assert!(variants.iter().any(|(n, _)| n == "Green"));
+        assert!(variants.iter().any(|(n, _)| n == "Blue"));
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert!(interp
+            .resolved_type_fields("Point")
+            .is_some_and(|fields| fields.iter().any(|(n, ty)| n == "x" && ty == "i32")));
+        assert_eq!(interp.resolved_type_alias_of("Id"), Some("i32"));
+        assert!(interp
+            .resolved_type_variants("Color")
+            .is_some_and(|vs| vs.iter().any(|(n, _)| n == "Blue")));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert_eq!(verifier.checked_type_alias_of("Id"), Some("i32"));
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "types");
+        codegen.compile_checked(&program).expect("compile");
+        assert!(codegen
+            .resolved_type_fields("Point")
+            .is_some_and(|fields| fields.iter().any(|(n, _)| n == "y")));
     }
 
     #[test]

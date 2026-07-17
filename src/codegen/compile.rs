@@ -184,6 +184,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         self.resolved_ownership_summaries = Some(ownership_summaries);
         let mut type_kinds = std::collections::HashMap::new();
+        let mut type_fields = std::collections::HashMap::new();
+        let mut type_variants = std::collections::HashMap::new();
+        let mut type_aliases = std::collections::HashMap::new();
         for type_def in program.type_defs().values() {
             let kind = match type_def.kind {
                 crate::core::ResolvedTypeKind::Alias => "alias",
@@ -193,8 +196,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 crate::core::ResolvedTypeKind::Union => "union",
             };
             type_kinds.insert(type_def.qualified_name.clone(), kind.to_string());
+            if !type_def.fields.is_empty() {
+                type_fields.insert(type_def.qualified_name.clone(), type_def.fields.clone());
+            }
+            if !type_def.variants.is_empty() {
+                type_variants.insert(type_def.qualified_name.clone(), type_def.variants.clone());
+            }
+            if let Some(alias) = &type_def.alias_of {
+                type_aliases.insert(type_def.qualified_name.clone(), alias.clone());
+            }
         }
         self.resolved_type_kinds = Some(type_kinds);
+        self.resolved_type_fields = Some(type_fields);
+        self.resolved_type_variants = Some(type_variants);
+        self.resolved_type_aliases = Some(type_aliases);
+
         let mut extern_funcs = std::collections::HashSet::new();
         let mut extern_abis = std::collections::HashMap::new();
         for block in program.extern_blocks().values() {

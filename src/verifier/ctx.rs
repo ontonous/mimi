@@ -423,6 +423,9 @@ pub struct VerifierCtx {
         std::collections::HashMap<String, (usize, usize, usize, usize, usize, bool)>,
     /// Type definition names materialised from CheckedProgram.
     pub(crate) checked_type_defs: std::collections::HashSet<String>,
+    pub(crate) checked_type_fields: std::collections::HashMap<String, Vec<(String, String)>>,
+    pub(crate) checked_type_variants: std::collections::HashMap<String, Vec<(String, Option<String>)>>,
+    pub(crate) checked_type_aliases: std::collections::HashMap<String, String>,
     /// Extern function names materialised from CheckedProgram.
     pub(crate) checked_extern_funcs: std::collections::HashSet<String>,
     pub(crate) checked_extern_abis: std::collections::HashMap<String, String>,
@@ -560,6 +563,24 @@ impl Verifier {
             .values()
             .map(|type_def| type_def.qualified_name.clone())
             .collect();
+        let mut type_fields = std::collections::HashMap::new();
+        let mut type_variants = std::collections::HashMap::new();
+        let mut type_aliases = std::collections::HashMap::new();
+        for type_def in program.type_defs().values() {
+            if !type_def.fields.is_empty() {
+                type_fields.insert(type_def.qualified_name.clone(), type_def.fields.clone());
+            }
+            if !type_def.variants.is_empty() {
+                type_variants.insert(type_def.qualified_name.clone(), type_def.variants.clone());
+            }
+            if let Some(alias) = &type_def.alias_of {
+                type_aliases.insert(type_def.qualified_name.clone(), alias.clone());
+            }
+        }
+        self.ctx.checked_type_fields = type_fields;
+        self.ctx.checked_type_variants = type_variants;
+        self.ctx.checked_type_aliases = type_aliases;
+
         let mut extern_funcs = std::collections::HashSet::new();
         let mut extern_abis = std::collections::HashMap::new();
         for block in program.extern_blocks().values() {
@@ -801,6 +822,24 @@ impl Verifier {
 
     pub(crate) fn has_checked_type_def(&self, name: &str) -> bool {
         self.ctx.checked_type_defs.contains(name)
+    }
+
+    pub(crate) fn checked_type_fields(
+        &self,
+        name: &str,
+    ) -> Option<Vec<(String, String)>> {
+        self.ctx.checked_type_fields.get(name).cloned()
+    }
+
+    pub(crate) fn checked_type_variants(
+        &self,
+        name: &str,
+    ) -> Option<Vec<(String, Option<String>)>> {
+        self.ctx.checked_type_variants.get(name).cloned()
+    }
+
+    pub(crate) fn checked_type_alias_of(&self, name: &str) -> Option<&str> {
+        self.ctx.checked_type_aliases.get(name).map(String::as_str)
     }
 
     pub(crate) fn has_checked_extern_func(&self, name: &str) -> bool {
