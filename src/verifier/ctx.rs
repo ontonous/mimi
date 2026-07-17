@@ -440,6 +440,7 @@ pub struct VerifierCtx {
     pub(crate) checked_extern_no_panic: std::collections::HashSet<String>,
     pub(crate) checked_extern_unsafe: std::collections::HashSet<String>,
     pub(crate) checked_call_sites: std::collections::HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>,
+    pub(crate) checked_call_sites_by_owner: std::collections::HashMap<String, Vec<(String, usize, String)>>,
     /// Protocol names materialised from CheckedProgram.
     pub(crate) checked_protocols: std::collections::HashSet<String>,
     pub(crate) checked_protocol_transitions: std::collections::HashMap<String, Vec<(String, String, String)>>,
@@ -697,6 +698,15 @@ impl Verifier {
             );
         }
         self.ctx.checked_call_sites = call_sites;
+        let mut call_sites_by_owner: std::collections::HashMap<String, Vec<(String, usize, String)>> =
+            std::collections::HashMap::new();
+        for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in &self.ctx.checked_call_sites {
+            call_sites_by_owner
+                .entry(owner.clone())
+                .or_default()
+                .push((callee.clone(), *argc, kind.clone()));
+        }
+        self.ctx.checked_call_sites_by_owner = call_sites_by_owner;
         self.ctx.checked_protocols = program
             .protocols()
             .values()
@@ -1066,6 +1076,13 @@ impl Verifier {
 
     pub(crate) fn is_checked_extern_unsafe(&self, name: &str) -> bool {
         self.ctx.checked_extern_unsafe.contains(name)
+    }
+
+    pub(crate) fn checked_call_sites_for_owner(
+        &self,
+        owner: &str,
+    ) -> Option<Vec<(String, usize, String)>> {
+        self.ctx.checked_call_sites_by_owner.get(owner).cloned()
     }
 
     pub(crate) fn has_checked_call_to(&self, callee: &str) -> bool {
