@@ -1630,6 +1630,13 @@ func main() -> i32 { N }
     fn verifier_verify_checked_records_function_names() {
         let file = parse(
             r#"
+flow Door {
+    state Closed
+    state Open
+    transition open(Closed) -> Open { do { return Open {} } }
+}
+session Ping = !i32 . end
+cap Io
 func abs(x: i32) -> i32 {
     requires: x >= 0
     ensures: result >= 0
@@ -1641,10 +1648,11 @@ func main() -> i32 { abs(1) }
         let program = crate::core::check_program(&file).expect("check");
         let mut verifier = crate::verifier::Verifier::new().expect("z3");
         let _ = verifier.verify_checked(&program);
-        // Access through package if available - verify doesn't expose ctx.
-        // Smoke: verify_checked succeeds with checked pipeline.
-        assert!(program.function("abs").is_some());
-        assert!(program.function("main").is_some());
+        assert!(verifier.has_checked_function("abs"));
+        assert!(verifier.has_checked_function("main"));
+        assert!(verifier.has_checked_transition("Door", "open", "Closed"));
+        assert!(verifier.has_checked_session("Ping"));
+        assert!(!verifier.has_checked_transition("Door", "close", "Closed"));
     }
 
     #[test]

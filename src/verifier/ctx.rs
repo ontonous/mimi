@@ -407,6 +407,12 @@ pub struct VerifierCtx {
     pub(crate) let_subst: HashMap<String, Expr>,
     /// Function names materialised from CheckedProgram (qualified).
     pub(crate) checked_function_names: std::collections::HashSet<String>,
+    /// Flow transition keys materialised from CheckedProgram: "flow::event::source".
+    pub(crate) checked_transitions: std::collections::HashSet<String>,
+    /// Capability names materialised from CheckedProgram.
+    pub(crate) checked_capabilities: std::collections::HashSet<String>,
+    /// Session names materialised from CheckedProgram.
+    pub(crate) checked_sessions: std::collections::HashSet<String>,
 }
 
 /// Backward-compatible verifier with its own solver session.
@@ -437,7 +443,36 @@ impl Verifier {
             .values()
             .map(|function| function.qualified_name.clone())
             .collect();
+        self.ctx.checked_transitions = program
+            .transitions()
+            .keys()
+            .map(|id| format!("{}::{}::{}", id.flow.0, id.event, id.source.name))
+            .collect();
+        self.ctx.checked_capabilities = program
+            .capabilities()
+            .values()
+            .map(|capability| capability.qualified_name.clone())
+            .collect();
+        self.ctx.checked_sessions = program
+            .sessions()
+            .values()
+            .map(|session| session.qualified_name.clone())
+            .collect();
         self.verify_file(program.file())
+    }
+
+    pub(crate) fn has_checked_function(&self, name: &str) -> bool {
+        self.ctx.checked_function_names.contains(name)
+    }
+
+    pub(crate) fn has_checked_transition(&self, flow: &str, event: &str, source: &str) -> bool {
+        self.ctx
+            .checked_transitions
+            .contains(&format!("{}::{}::{}", flow, event, source))
+    }
+
+    pub(crate) fn has_checked_session(&self, name: &str) -> bool {
+        self.ctx.checked_sessions.contains(name)
     }
 
     pub(crate) fn verify_file(&mut self, file: &File) -> Vec<VerificationResult> {
