@@ -415,6 +415,10 @@ pub struct VerifierCtx {
     pub(crate) checked_sessions: std::collections::HashSet<String>,
     /// Ownership ledger owners materialised from CheckedProgram.
     pub(crate) checked_ownership_owners: std::collections::HashSet<String>,
+    /// Type definition names materialised from CheckedProgram.
+    pub(crate) checked_type_defs: std::collections::HashSet<String>,
+    /// Extern function names materialised from CheckedProgram.
+    pub(crate) checked_extern_funcs: std::collections::HashSet<String>,
 }
 
 /// Backward-compatible verifier with its own solver session.
@@ -465,6 +469,18 @@ impl Verifier {
             .keys()
             .map(|owner| owner.0.clone())
             .collect();
+        self.ctx.checked_type_defs = program
+            .type_defs()
+            .values()
+            .map(|type_def| type_def.qualified_name.clone())
+            .collect();
+        let mut extern_funcs = std::collections::HashSet::new();
+        for block in program.extern_blocks().values() {
+            for func in &block.funcs {
+                extern_funcs.insert(func.clone());
+            }
+        }
+        self.ctx.checked_extern_funcs = extern_funcs;
         self.verify_file(program.file())
     }
 
@@ -484,6 +500,14 @@ impl Verifier {
 
     pub(crate) fn has_checked_ownership_owner(&self, owner: &str) -> bool {
         self.ctx.checked_ownership_owners.contains(owner)
+    }
+
+    pub(crate) fn has_checked_type_def(&self, name: &str) -> bool {
+        self.ctx.checked_type_defs.contains(name)
+    }
+
+    pub(crate) fn has_checked_extern_func(&self, name: &str) -> bool {
+        self.ctx.checked_extern_funcs.contains(name)
     }
 
     pub(crate) fn verify_file(&mut self, file: &File) -> Vec<VerificationResult> {

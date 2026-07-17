@@ -319,6 +319,10 @@ pub struct CodeGenerator<'ctx> {
     resolved_impls: Option<HashMap<String, Vec<String>>>,
     /// Ownership ledger owners from CheckedProgram.
     resolved_ownership_owners: Option<std::collections::HashSet<String>>,
+    /// Type definition kinds from CheckedProgram.
+    resolved_type_kinds: Option<HashMap<String, String>>,
+    /// Extern function names from CheckedProgram.
+    resolved_extern_funcs: Option<std::collections::HashSet<String>>,
     /// v0.29.24: process spawn quota from first @max_children(N) (None = unlimited).
     max_children: Option<usize>,
 }
@@ -431,6 +435,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_traits: None,
             resolved_impls: None,
             resolved_ownership_owners: None,
+            resolved_type_kinds: None,
+            resolved_extern_funcs: None,
             max_children: None,
         }
     }

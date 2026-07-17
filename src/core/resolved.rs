@@ -1873,6 +1873,28 @@ func main() -> i32 { 0 }
             .any(|block| block.funcs.iter().any(|f| f == "c_abs")));
     }
 
+
+    #[test]
+    fn consumers_install_type_and_extern_directories() {
+        let file = parse(
+            r#"
+type Point { x: i32, y: i32 }
+extern "C" {
+    func c_abs(x: i32) -> i32
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert_eq!(interp.resolved_type_kind("Point"), Some("record"));
+        assert!(interp.has_resolved_extern_func("c_abs"));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert!(verifier.has_checked_type_def("Point"));
+        assert!(verifier.has_checked_extern_func("c_abs"));
+    }
+
     #[test]
     fn interpreter_from_checked_installs_capability_and_constant_directories() {
         let file = parse(
