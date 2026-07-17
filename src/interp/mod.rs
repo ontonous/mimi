@@ -166,6 +166,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_extern_funcs: Option<std::collections::HashSet<String>>,
     /// Extern function -> ABI string from CheckedProgram.
     pub(in crate::interp) resolved_extern_abis: Option<HashMap<String, String>>,
+    /// Extern function signatures: name -> (arity, ret).
+    pub(in crate::interp) resolved_extern_signatures: Option<HashMap<String, (usize, String)>>,
     /// Typed call sites from CheckedProgram: node_id -> (owner, callee, argc, kind).
     pub(in crate::interp) resolved_call_sites: Option<HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>>,
     /// Flow mailbox depth limits materialised from CheckedProgram: flow -> depth.
@@ -361,6 +363,13 @@ impl<'a> Interpreter<'a> {
         }
         interp.resolved_extern_funcs = Some(extern_funcs);
         interp.resolved_extern_abis = Some(extern_abis);
+        let mut extern_signatures = HashMap::new();
+        for block in program.extern_blocks().values() {
+            for sig in &block.signatures {
+                extern_signatures.insert(sig.name.clone(), (sig.params.len(), sig.ret.clone()));
+            }
+        }
+        interp.resolved_extern_signatures = Some(extern_signatures);
         let mut call_sites = HashMap::new();
         for (node_id, site) in program.call_sites() {
             call_sites.insert(
@@ -531,6 +540,12 @@ impl<'a> Interpreter<'a> {
         self.resolved_extern_abis
             .as_ref()
             .and_then(|map| map.get(name).map(String::as_str))
+    }
+
+    pub(crate) fn resolved_extern_signature(&self, name: &str) -> Option<(usize, String)> {
+        self.resolved_extern_signatures
+            .as_ref()
+            .and_then(|map| map.get(name).cloned())
     }
 
     pub(crate) fn resolved_call_sites(
@@ -810,6 +825,7 @@ impl<'a> Interpreter<'a> {
             resolved_type_kinds: None,
             resolved_extern_funcs: None,
             resolved_extern_abis: None,
+            resolved_extern_signatures: None,
             resolved_call_sites: None,
             resolved_mailbox_depths: None,
             resolved_persistent_fields: None,

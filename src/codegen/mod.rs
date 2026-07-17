@@ -332,6 +332,7 @@ pub struct CodeGenerator<'ctx> {
     /// Extern function names from CheckedProgram.
     resolved_extern_funcs: Option<std::collections::HashSet<String>>,
     resolved_extern_abis: Option<HashMap<String, String>>,
+    resolved_extern_signatures: Option<HashMap<String, (usize, String)>>,
     resolved_call_sites: Option<HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>>,
     /// Flow mailbox depths from CheckedProgram.
     resolved_mailbox_depths: Option<HashMap<String, usize>>,
@@ -463,6 +464,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_type_kinds: None,
             resolved_extern_funcs: None,
             resolved_extern_abis: None,
+            resolved_extern_signatures: None,
             resolved_call_sites: None,
             resolved_mailbox_depths: None,
             resolved_persistent_fields: None,
@@ -473,10 +475,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    pub(crate) fn has_resolved_call_to(&self, callee: &str) -> bool {
-        self.resolved_call_sites.as_ref().is_some_and(|map| {
-            map.values().any(|(_, name, _, _, _, _, _)| name == callee)
-        })
+    pub(crate) fn resolved_extern_signature(&self, name: &str) -> Option<(usize, String)> {
+        self.resolved_extern_signatures
+            .as_ref()
+            .and_then(|map| map.get(name).cloned())
     }
 
     pub(crate) fn resolved_call_return_type(&self, callee: &str) -> Option<String> {
@@ -506,6 +508,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .count()
             })
             .unwrap_or(0)
+    }
+
+    pub(crate) fn has_resolved_call_to(&self, callee: &str) -> bool {
+        self.resolved_call_sites.as_ref().is_some_and(|map| {
+            map.values().any(|(_, name, _, _, _, _, _)| name == callee)
+        })
     }
 
     pub(crate) fn resolved_constant_value(

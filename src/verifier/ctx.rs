@@ -425,6 +425,7 @@ pub struct VerifierCtx {
     /// Extern function names materialised from CheckedProgram.
     pub(crate) checked_extern_funcs: std::collections::HashSet<String>,
     pub(crate) checked_extern_abis: std::collections::HashMap<String, String>,
+    pub(crate) checked_extern_signatures: std::collections::HashMap<String, (usize, String)>,
     pub(crate) checked_call_sites: std::collections::HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>,
     /// Protocol names materialised from CheckedProgram.
     pub(crate) checked_protocols: std::collections::HashSet<String>,
@@ -559,6 +560,13 @@ impl Verifier {
         }
         self.ctx.checked_extern_funcs = extern_funcs;
         self.ctx.checked_extern_abis = extern_abis;
+        let mut extern_signatures = std::collections::HashMap::new();
+        for block in program.extern_blocks().values() {
+            for sig in &block.signatures {
+                extern_signatures.insert(sig.name.clone(), (sig.params.len(), sig.ret.clone()));
+            }
+        }
+        self.ctx.checked_extern_signatures = extern_signatures;
         let mut call_sites = std::collections::HashMap::new();
         for (node_id, site) in program.call_sites() {
             call_sites.insert(
@@ -731,6 +739,10 @@ impl Verifier {
 
     pub(crate) fn checked_extern_abi(&self, name: &str) -> Option<&str> {
         self.ctx.checked_extern_abis.get(name).map(String::as_str)
+    }
+
+    pub(crate) fn checked_extern_signature(&self, name: &str) -> Option<(usize, String)> {
+        self.ctx.checked_extern_signatures.get(name).cloned()
     }
 
     pub(crate) fn has_checked_call_to(&self, callee: &str) -> bool {
