@@ -409,6 +409,7 @@ pub struct VerifierCtx {
     pub(crate) checked_function_names: std::collections::HashSet<String>,
     pub(crate) checked_function_effects: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_function_returns: std::collections::HashMap<String, String>,
+    pub(crate) checked_function_params: std::collections::HashMap<String, Vec<(String, String)>>,
     pub(crate) checked_comptime_functions: std::collections::HashSet<String>,
     /// Flow transition keys materialised from CheckedProgram: "flow::event::source".
     pub(crate) checked_transitions: std::collections::HashSet<String>,
@@ -509,6 +510,20 @@ impl Verifier {
                 (
                     function.qualified_name.clone(),
                     crate::core::fmt_type(&function.ret),
+                )
+            })
+            .collect();
+        self.ctx.checked_function_params = program
+            .functions()
+            .values()
+            .map(|function| {
+                (
+                    function.qualified_name.clone(),
+                    function
+                        .params
+                        .iter()
+                        .map(|(name, ty)| (name.clone(), crate::core::fmt_type(ty)))
+                        .collect(),
                 )
             })
             .collect();
@@ -789,6 +804,13 @@ impl Verifier {
 
     pub(crate) fn checked_function_return_type(&self, name: &str) -> Option<&str> {
         self.ctx.checked_function_returns.get(name).map(String::as_str)
+    }
+
+    pub(crate) fn checked_function_params(
+        &self,
+        name: &str,
+    ) -> Option<Vec<(String, String)>> {
+        self.ctx.checked_function_params.get(name).cloned()
     }
 
     pub(crate) fn is_checked_comptime_function(&self, name: &str) -> bool {

@@ -139,6 +139,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_transition_param_arity: Option<HashMap<(String, String, String), usize>>,
     /// Function signatures from CheckedProgram: qualified_name -> (param_count, ret_fmt, effects).
     pub(in crate::interp) resolved_functions: Option<HashMap<String, (usize, String, Vec<String>)>>,
+    /// Function parameter directories: name -> [(param_name, type display)].
+    pub(in crate::interp) resolved_function_params: Option<HashMap<String, Vec<(String, String)>>>,
     pub(in crate::interp) resolved_comptime_functions: Option<std::collections::HashSet<String>>,
     /// Session type names materialised from CheckedProgram.
     pub(in crate::interp) resolved_sessions: Option<HashMap<String, crate::ast::SessionType>>,
@@ -267,6 +269,7 @@ impl<'a> Interpreter<'a> {
         interp.resolved_ffi_pinned_transitions = Some(pinned);
         interp.resolved_transition_param_arity = Some(param_arity);
         let mut functions = HashMap::new();
+        let mut function_params = HashMap::new();
         let mut comptime_functions = std::collections::HashSet::new();
         for function in program.functions().values() {
             functions.insert(
@@ -277,11 +280,20 @@ impl<'a> Interpreter<'a> {
                     function.effects.clone(),
                 ),
             );
+            function_params.insert(
+                function.qualified_name.clone(),
+                function
+                    .params
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), crate::core::fmt_type(ty)))
+                    .collect(),
+            );
             if function.is_comptime {
                 comptime_functions.insert(function.qualified_name.clone());
             }
         }
         interp.resolved_functions = Some(functions);
+        interp.resolved_function_params = Some(function_params);
         interp.resolved_comptime_functions = Some(comptime_functions);
         let mut sessions = HashMap::new();
         let mut session_displays = HashMap::new();
@@ -527,6 +539,15 @@ impl<'a> Interpreter<'a> {
         self.resolved_functions
             .as_ref()
             .and_then(|map| map.get(qualified_name).map(|(_, _, effects)| effects.clone()))
+    }
+
+    pub(crate) fn resolved_function_params(
+        &self,
+        qualified_name: &str,
+    ) -> Option<Vec<(String, String)>> {
+        self.resolved_function_params
+            .as_ref()
+            .and_then(|map| map.get(qualified_name).cloned())
     }
 
     pub(crate) fn is_resolved_comptime_function(&self, qualified_name: &str) -> bool {
@@ -958,6 +979,7 @@ impl<'a> Interpreter<'a> {
             resolved_ffi_pinned_transitions: None,
             resolved_transition_param_arity: None,
             resolved_functions: None,
+            resolved_function_params: None,
             resolved_comptime_functions: None,
             resolved_sessions: None,
             resolved_session_displays: None,

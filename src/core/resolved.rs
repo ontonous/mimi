@@ -2813,6 +2813,18 @@ func main() -> i32 { 0 }
             .is_some_and(|e| e.iter().any(|x| x == "Io")));
         assert_eq!(codegen.resolved_function_return_type("write"), Some("i32"));
         assert_eq!(verifier.checked_function_return_type("write"), Some("i32"));
+        assert_eq!(
+            interp.resolved_function_params("write"),
+            Some(vec![("x".into(), "i32".into())])
+        );
+        assert_eq!(
+            codegen.resolved_function_params("write"),
+            Some(vec![("x".into(), "i32".into())])
+        );
+        assert_eq!(
+            verifier.checked_function_params("write"),
+            Some(vec![("x".into(), "i32".into())])
+        );
     }
 
 
