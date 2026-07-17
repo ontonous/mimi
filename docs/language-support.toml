@@ -412,7 +412,7 @@ verify = "partial"
 fmt = "not_applicable"
 lsp = "unsupported"
 probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test core::resolved::tests -- --test-threads=1"
-evidence = "Production consumers require CheckedProgram; canonical item/Flow/state/transition and function-body NodeMeta tables exist. Interpreter::from_checked and CodeGenerator::compile_checked install the exact (flow,event,source) transition table and fail closed on missing overloads. Verifier backend no longer blocks unrelated contract verification solely because a multi-target Flow is present. Typed call sites, effects, and full raw-AST elimination remain incomplete."
+evidence = "Production consumers require CheckedProgram; canonical item/Flow/state/transition tables, per-function signatures (params/ret/comptime), and function-body NodeMeta exist. Interpreter::from_checked and CodeGenerator::compile_checked install the exact (flow,event,source) transition table and fail closed on missing overloads. Verifier backend no longer blocks unrelated contract verification solely because a multi-target Flow is present. Typed call-site resolution, effects, and full raw-AST elimination remain incomplete."
 
 [[support]]
 requirement = "COMPONENT-RAW-001"

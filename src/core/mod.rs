@@ -24,8 +24,9 @@ pub use ownership::{
     BranchMerge, OwnershipLedger, ResourceAction, ResourceActionKind, ResourceState,
 };
 pub use resolved::{
-    BackendProfile, CheckedProgram, FlowId, NodeId, NodeMeta, Origin, ResolvedFlow, ResolvedItem,
-    ResolvedItemKind, ResolvedState, SpanPrecision, StateId, TransitionId, RESOLVED_IR_VERSION,
+    BackendProfile, CheckedProgram, FlowId, NodeId, NodeMeta, Origin, ResolvedFlow, ResolvedFunction,
+    ResolvedItem, ResolvedItemKind, ResolvedState, SpanPrecision, StateId, TransitionId,
+    RESOLVED_IR_VERSION,
 };
 
 pub fn check(file: &File) -> Result<(), Vec<Diagnostic>> {
