@@ -33,7 +33,7 @@
 - interpreter 从 CheckedProgram 安装函数目录（arity/effects）、session/protocol 名称目录、actor 方法目录、cap/const、trait/impl、ownership owner、type 与 extern 目录供 consumer 使用。
 - codegen `compile_checked` 同步安装 session/protocol/actor/cap/const/trait/impl/ownership/type/extern 目录表，并在 `compile_call` 用 checked arity fail-closed。
 - interpreter 对 CheckedProgram 声明但运行时 FFI 索引缺失的 extern 调用 fail-closed。
-- verifier `verify_checked` 记录 CheckedProgram 函数/transition/session/cap/ownership/protocol/trait/actor/type/extern 目录，供后续 VC 消费。
+- verifier `verify_checked` 记录 CheckedProgram 函数/transition/session/cap/ownership/protocol/trait/actor/type/extern/mailbox/max_children 目录，供后续 VC 消费。
 - 新增 resolved transition exact-key、函数/session/protocol/actor 目录与 verifier capability 回归测试。
 
 ### 审计修复（CG-H16 / CG-H9 / M2 / MEM-C8）

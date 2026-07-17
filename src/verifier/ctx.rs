@@ -425,6 +425,10 @@ pub struct VerifierCtx {
     pub(crate) checked_traits: std::collections::HashSet<String>,
     /// Actor names materialised from CheckedProgram.
     pub(crate) checked_actors: std::collections::HashSet<String>,
+    /// Flow mailbox depths materialised from CheckedProgram.
+    pub(crate) checked_mailbox_depths: std::collections::HashMap<String, usize>,
+    /// Flow max_children materialised from CheckedProgram.
+    pub(crate) checked_max_children: Option<usize>,
 }
 
 /// Backward-compatible verifier with its own solver session.
@@ -502,6 +506,14 @@ impl Verifier {
             .values()
             .map(|actor| actor.qualified_name.clone())
             .collect();
+        let mut mailbox_depths = std::collections::HashMap::new();
+        for flow in program.flows().values() {
+            if let Some(depth) = flow.mailbox_depth {
+                mailbox_depths.insert(flow.id.0.clone(), depth);
+            }
+        }
+        self.ctx.checked_mailbox_depths = mailbox_depths;
+        self.ctx.checked_max_children = program.flows().values().find_map(|flow| flow.max_children);
         self.verify_file(program.file())
     }
 
@@ -541,6 +553,22 @@ impl Verifier {
 
     pub(crate) fn has_checked_actor(&self, name: &str) -> bool {
         self.ctx.checked_actors.contains(name)
+    }
+
+    pub(crate) fn checked_mailbox_depth(&self, flow_name: &str) -> Option<usize> {
+        self.ctx.checked_mailbox_depths.get(flow_name).copied().or_else(|| {
+            self.ctx.checked_mailbox_depths.iter().find_map(|(qualified, depth)| {
+                qualified
+                    .rsplit("::")
+                    .next()
+                    .filter(|bare| *bare == flow_name)
+                    .map(|_| *depth)
+            })
+        })
+    }
+
+    pub(crate) fn checked_max_children(&self) -> Option<usize> {
+        self.ctx.checked_max_children
     }
 
     pub(crate) fn verify_file(&mut self, file: &File) -> Vec<VerificationResult> {
