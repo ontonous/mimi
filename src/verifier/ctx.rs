@@ -425,6 +425,7 @@ pub struct VerifierCtx {
     /// Extern function names materialised from CheckedProgram.
     pub(crate) checked_extern_funcs: std::collections::HashSet<String>,
     pub(crate) checked_extern_abis: std::collections::HashMap<String, String>,
+    pub(crate) checked_call_sites: std::collections::HashMap<String, (String, String, usize, String)>,
     /// Protocol names materialised from CheckedProgram.
     pub(crate) checked_protocols: std::collections::HashSet<String>,
     /// Trait names materialised from CheckedProgram.
@@ -558,6 +559,24 @@ impl Verifier {
         }
         self.ctx.checked_extern_funcs = extern_funcs;
         self.ctx.checked_extern_abis = extern_abis;
+        let mut call_sites = std::collections::HashMap::new();
+        for (node_id, site) in program.call_sites() {
+            call_sites.insert(
+                node_id.0.clone(),
+                (
+                    site.owner.clone(),
+                    site.callee.clone(),
+                    site.argc,
+                    match site.kind {
+                        crate::core::ResolvedCallKind::Function => "function".into(),
+                        crate::core::ResolvedCallKind::Extern => "extern".into(),
+                        crate::core::ResolvedCallKind::Method => "method".into(),
+                        crate::core::ResolvedCallKind::Unknown => "unknown".into(),
+                    },
+                ),
+            );
+        }
+        self.ctx.checked_call_sites = call_sites;
         self.ctx.checked_protocols = program
             .protocols()
             .values()
@@ -709,6 +728,13 @@ impl Verifier {
 
     pub(crate) fn checked_extern_abi(&self, name: &str) -> Option<&str> {
         self.ctx.checked_extern_abis.get(name).map(String::as_str)
+    }
+
+    pub(crate) fn has_checked_call_to(&self, callee: &str) -> bool {
+        self.ctx
+            .checked_call_sites
+            .values()
+            .any(|(_, name, _, _)| name == callee)
     }
 
     pub(crate) fn has_checked_protocol(&self, name: &str) -> bool {

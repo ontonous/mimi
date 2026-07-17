@@ -172,6 +172,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         self.resolved_extern_funcs = Some(extern_funcs);
         self.resolved_extern_abis = Some(extern_abis);
+        let mut call_sites = std::collections::HashMap::new();
+        for (node_id, site) in program.call_sites() {
+            call_sites.insert(
+                node_id.0.clone(),
+                (
+                    site.owner.clone(),
+                    site.callee.clone(),
+                    site.argc,
+                    match site.kind {
+                        crate::core::ResolvedCallKind::Function => "function".into(),
+                        crate::core::ResolvedCallKind::Extern => "extern".into(),
+                        crate::core::ResolvedCallKind::Method => "method".into(),
+                        crate::core::ResolvedCallKind::Unknown => "unknown".into(),
+                    },
+                ),
+            );
+        }
+        self.resolved_call_sites = Some(call_sites);
         if let Some(max_children) = program.flows().values().find_map(|flow| flow.max_children) {
             self.max_children = Some(max_children);
         }
