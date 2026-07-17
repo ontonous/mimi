@@ -2987,6 +2987,21 @@ func main() -> i32 { 0 }
             verifier.checked_ownership_summary("function:close"),
             Some((1, 0, 1, 0, 0, false))
         );
+        assert_eq!(
+            interp.resolved_ownership_resources("function:close"),
+            Some(vec!["f".into()])
+        );
+        assert_eq!(
+            verifier.checked_ownership_resources("function:close"),
+            Some(vec!["f".into()])
+        );
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "own_res");
+        codegen.compile_checked(&program).expect("compile");
+        assert_eq!(
+            codegen.resolved_ownership_resources("function:close"),
+            Some(vec!["f".into()])
+        );
     }
 
 
