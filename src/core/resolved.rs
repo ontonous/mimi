@@ -3935,6 +3935,15 @@ func main() -> i32 { 0 }
             codegen.resolved_flow_state_payload("Counter", "Positive"),
             Some(vec![("count".into(), "i32".into())])
         );
+        let states = interp.resolved_flow_states("Counter").expect("states");
+        assert!(states.iter().any(|s| s == "Zero"));
+        assert!(states.iter().any(|s| s == "Positive"));
+        assert!(verifier
+            .checked_flow_states("Counter")
+            .is_some_and(|ss| ss.iter().any(|s| s == "Positive")));
+        assert!(codegen
+            .resolved_flow_states("Counter")
+            .is_some_and(|ss| ss.iter().any(|s| s == "Zero")));
     }
 
 

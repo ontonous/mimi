@@ -454,6 +454,7 @@ pub struct VerifierCtx {
     /// Flow mailbox depths materialised from CheckedProgram.
     pub(crate) checked_mailbox_depths: std::collections::HashMap<String, usize>,
     pub(crate) checked_flow_state_payloads: std::collections::HashMap<String, Vec<(String, String)>>,
+    pub(crate) checked_flow_states: std::collections::HashMap<String, Vec<String>>,
     /// Flow max_children materialised from CheckedProgram.
     pub(crate) checked_max_children: Option<usize>,
     /// Persistent field sets materialised from CheckedProgram.
@@ -802,6 +803,13 @@ impl Verifier {
             }
         }
         self.ctx.checked_flow_state_payloads = flow_state_payloads;
+        let mut flow_states = std::collections::HashMap::new();
+        for flow in program.flows().values() {
+            let mut names: Vec<String> = flow.states.keys().cloned().collect();
+            names.sort();
+            flow_states.insert(flow.id.0.clone(), names);
+        }
+        self.ctx.checked_flow_states = flow_states;
         self.ctx.checked_max_children = program.flows().values().find_map(|flow| flow.max_children);
         let mut persistent_fields = std::collections::HashMap::new();
         for flow in program.flows().values() {
@@ -1131,6 +1139,10 @@ impl Verifier {
             .checked_flow_state_payloads
             .get(&format!("{flow}.{state}"))
             .cloned()
+    }
+
+    pub(crate) fn checked_flow_states(&self, flow: &str) -> Option<Vec<String>> {
+        self.ctx.checked_flow_states.get(flow).cloned()
     }
 
     pub(crate) fn checked_max_children(&self) -> Option<usize> {
