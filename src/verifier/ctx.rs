@@ -426,7 +426,14 @@ impl Verifier {
         })
     }
 
-    pub fn verify_file(&mut self, file: &File) -> Vec<VerificationResult> {
+    pub fn verify_checked(
+        &mut self,
+        program: &crate::core::CheckedProgram<'_>,
+    ) -> Vec<VerificationResult> {
+        self.verify_file(program.file())
+    }
+
+    pub(crate) fn verify_file(&mut self, file: &File) -> Vec<VerificationResult> {
         let mut results = Vec::new();
         VerifierCtx::verify_items(&mut self.ctx, &mut self.session, &file.items, &mut results);
         results

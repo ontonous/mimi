@@ -36,23 +36,26 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
 
     // V-H8: typecheck before Z3 so ill-typed sources cannot produce
     // meaningless positive verification results.
-    if let Err(diags) = mimi::core::check_program(&merged_file) {
-        let use_color = colors_enabled();
-        let src_ref = Some(source.as_str());
-        let filename = path.display().to_string();
-        for d in &diags {
-            let formatted = format_diagnostic(d, src_ref, &filename);
-            if use_color {
-                eprint!("{}", formatted);
-            } else {
-                eprint!("{}", strip_ansi(&formatted));
+    let checked_program = match mimi::core::check_program(&merged_file) {
+        Ok(program) => program,
+        Err(diags) => {
+            let use_color = colors_enabled();
+            let src_ref = Some(source.as_str());
+            let filename = path.display().to_string();
+            for d in &diags {
+                let formatted = format_diagnostic(d, src_ref, &filename);
+                if use_color {
+                    eprint!("{}", formatted);
+                } else {
+                    eprint!("{}", strip_ansi(&formatted));
+                }
             }
+            return Err(format!(
+                "typecheck failed before verify ({} diagnostic(s))",
+                diags.len()
+            ));
         }
-        return Err(format!(
-            "typecheck failed before verify ({} diagnostic(s))",
-            diags.len()
-        ));
-    }
+    };
 
     let results = if dump_z3 {
         // --dump-z3 needs access to Verifier::dump_smt2 after verification,
@@ -60,7 +63,7 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
         let mut verifier = mimi::verifier::Verifier::new()?;
         eprintln!("; Z3 SMT-LIB2 dump for {}", path.display());
         eprintln!("; (verification will proceed after dump)");
-        let results = verifier.verify_file(&merged_file);
+        let results = verifier.verify_checked(&checked_program);
         if let Some(smt2) = verifier.dump_smt2() {
             eprintln!("{}", smt2);
         } else {
@@ -68,7 +71,7 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
         }
         results
     } else {
-        mimi::verifier::flow_verify_file_or_mock(&merged_file)?
+        mimi::verifier::verify_checked(&checked_program)?
     };
 
     if results.is_empty() {

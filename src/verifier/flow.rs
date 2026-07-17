@@ -246,23 +246,6 @@ pub fn flow_verify_ffi_call_sites_or_mock(file: &File) -> Result<Vec<Verificatio
     }
 }
 
-/// Top-level entry: parse source, run Flow verifier, return results.
-///
-/// Typecheck is intentionally **not** applied here so unit tests can verify
-/// incomplete/contract-focused fragments. Production CLI (`mimi verify`)
-/// typechecks first — see `src/main/verify.rs` (V-H8).
-pub fn flow_verify_source(source: &str) -> Result<Vec<VerificationResult>, String> {
-    let tokens = crate::lexer::Lexer::new(source).tokenize()?;
-    let file = crate::parser::Parser::new(tokens)
-        .parse_file()
-        .map_err(|e| e.message)?;
-    if SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS).is_ok() {
-        flow_verify_file(&file)
-    } else {
-        Ok(helpers::mock_verify_file(&file))
-    }
-}
-
 /// Entry for external callers that already have a file (e.g. build pipeline).
 /// Falls back to mock verification if Z3 is unavailable.
 pub fn flow_verify_file_or_mock(file: &File) -> Result<Vec<VerificationResult>, String> {
@@ -274,10 +257,17 @@ pub fn flow_verify_file_or_mock(file: &File) -> Result<Vec<VerificationResult>, 
 }
 
 #[cfg(test)]
+fn flow_verify_source_unchecked(source: &str) -> Result<Vec<VerificationResult>, String> {
+    let tokens = crate::lexer::Lexer::new(source).tokenize()?;
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .map_err(|error| error.message)?;
+    flow_verify_file_or_mock(&file)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verifier::verify_source;
-
     /// Helper: create a file AST from source (same as verify_source's parsing).
     fn parse_source(source: &str) -> Result<File, String> {
         let tokens = crate::lexer::Lexer::new(source).tokenize()?;
@@ -295,12 +285,12 @@ mod tests {
             return;
         }
         // Run legacy verifier
-        let legacy_results = match verify_source(source) {
+        let legacy_results = match flow_verify_source_unchecked(source) {
             Ok(r) => r,
             Err(e) => panic!("legacy verifier failed: {}", e),
         };
         // Run Flow verifier
-        let flow_results = match flow_verify_source(source) {
+        let flow_results = match flow_verify_source_unchecked(source) {
             Ok(r) => r,
             Err(e) => panic!("flow verifier failed: {}", e),
         };
