@@ -147,17 +147,38 @@ fn dual_map_has_key() {
 
 // ─── v0.28.21 — verify not evaluating comptime blocks ───────────────────
 //
-// The Z3 verifier (mimi verify) works on the raw AST and never evaluates
-// comptime { ... } blocks. These tests confirm that a file containing
-// comptime blocks passes verification when it would fail if the verifier
-// tried to evaluate the comptime code (e.g. referencing a variable that
-// only exists at runtime/interpretation time).
+// Production `mimi verify` parses → check_program → Z3. Comptime blocks are
+// still type-checked (COMPTIME-PURE-001), but the verifier must not evaluate
+// them as runtime obligations when walking contracts.
 
 #[test]
 fn dual_verify_skips_comptime_block() {
-    // mimi verify must not attempt to evaluate comptime { ... },
-    // even when the block contents reference undefined identifiers
-    // (the verifier only walks the AST structure for contracts).
+    // Well-typed pure comptime must not prevent contract verification, and
+    // verify must not treat the comptime body as a Z3 obligation.
+    let src = r#"
+        func abs(x: i32) -> i32 {
+            requires: x >= 0
+            ensures: result >= 0
+            comptime { 1 + 2 }
+            if x < 0 { -x } else { x }
+        }
+        func main() -> i32 { abs(5) }
+    "#;
+    let results = crate::verifier::verify_source(src).expect("verify should check and run");
+    assert!(
+        results.iter().all(|r| matches!(
+            r.status,
+            crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::Unknown
+        )),
+        "expected all results verified/unknown (comptime not evaluated as obligation): {:?}",
+        results
+    );
+}
+
+#[test]
+fn dual_verify_rejects_ill_typed_comptime_block() {
+    // Checked pipeline: undefined names in comptime are checker errors, not
+    // silent skip or false Verified.
     let src = r#"
         func abs(x: i32) -> i32 {
             requires: x >= 0
@@ -167,17 +188,10 @@ fn dual_verify_skips_comptime_block() {
         }
         func main() -> i32 { abs(5) }
     "#;
-    // Directly invoke the Z3 verifier (mimi verify internals).
-    // This must succeed — the verifier traverses the comptime body
-    // for AST identifiers but does NOT evaluate it.
-    let results = crate::verifier::verify_source(src).expect("verify should parse");
+    let err = crate::verifier::verify_source(src).expect_err("ill-typed comptime must fail check");
     assert!(
-        results.iter().all(|r| matches!(
-            r.status,
-            crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::Unknown
-        )),
-        "expected all results verified/unknown (comptime block skipped): {:?}",
-        results
+        err.contains("undefined variable") || err.contains("unknown"),
+        "expected typecheck failure for comptime free vars, got: {err}"
     );
 }
 
