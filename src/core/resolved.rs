@@ -63,6 +63,8 @@ pub struct ResolvedCallSite {
     pub argc: usize,
     /// Expected arity from function/extern directories when known.
     pub expected_argc: Option<usize>,
+    /// Effects from callee function directory when known.
+    pub effects: Vec<String>,
     pub kind: ResolvedCallKind,
     pub origin: Origin,
 }
@@ -1579,9 +1581,12 @@ fn collect_program_call_sites(
     actors: &HashMap<NodeId, ResolvedActor>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
 ) {
-    let mut function_arity: HashMap<String, usize> = HashMap::new();
+    let mut function_info: HashMap<String, (usize, Vec<String>)> = HashMap::new();
     for function in functions.values() {
-        function_arity.insert(function.qualified_name.clone(), function.params.len());
+        function_info.insert(
+            function.qualified_name.clone(),
+            (function.params.len(), function.effects.clone()),
+        );
     }
     let mut extern_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for block in extern_blocks.values() {
@@ -1597,7 +1602,7 @@ fn collect_program_call_sites(
         collect_item_call_sites(
             item,
             "",
-            &function_arity,
+            &function_info,
             &extern_names,
             &method_names,
             out,
@@ -1608,7 +1613,7 @@ fn collect_program_call_sites(
 fn collect_item_call_sites(
     item: &Item,
     module: &str,
-    functions: &HashMap<String, usize>,
+    functions: &HashMap<String, (usize, Vec<String>)>,
     externs: &std::collections::HashSet<String>,
     methods: &std::collections::HashSet<String>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
@@ -1703,7 +1708,7 @@ fn collect_block_call_sites(
     owner: &str,
     path: &str,
     fallback: Span,
-    functions: &HashMap<String, usize>,
+    functions: &HashMap<String, (usize, Vec<String>)>,
     externs: &std::collections::HashSet<String>,
     methods: &std::collections::HashSet<String>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
@@ -1727,7 +1732,7 @@ fn collect_stmt_call_sites(
     owner: &str,
     path: &str,
     fallback: Span,
-    functions: &HashMap<String, usize>,
+    functions: &HashMap<String, (usize, Vec<String>)>,
     externs: &std::collections::HashSet<String>,
     methods: &std::collections::HashSet<String>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
@@ -1823,14 +1828,14 @@ fn collect_expr_call_sites(
     owner: &str,
     path: &str,
     fallback: Span,
-    functions: &HashMap<String, usize>,
+    functions: &HashMap<String, (usize, Vec<String>)>,
     externs: &std::collections::HashSet<String>,
     methods: &std::collections::HashSet<String>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
 ) {
     match expr {
         Expr::Call(callee, args) => {
-            let (callee_name, kind, expected_argc) =
+            let (callee_name, kind, expected_argc, effects) =
                 resolve_call_callee(callee, functions, externs, methods);
             let node_id = NodeId(format!("{path}/call"));
             out.insert(
@@ -1841,6 +1846,7 @@ fn collect_expr_call_sites(
                     callee: callee_name,
                     argc: args.len(),
                     expected_argc,
+                    effects,
                     kind,
                     origin: Origin::User(fallback),
                 },
@@ -1971,21 +1977,26 @@ fn collect_expr_call_sites(
 
 fn resolve_call_callee(
     callee: &Expr,
-    functions: &HashMap<String, usize>,
+    functions: &HashMap<String, (usize, Vec<String>)>,
     externs: &std::collections::HashSet<String>,
     methods: &std::collections::HashSet<String>,
-) -> (String, ResolvedCallKind, Option<usize>) {
+) -> (String, ResolvedCallKind, Option<usize>, Vec<String>) {
     match callee {
         Expr::Ident(name) => {
-            if let Some(arity) = functions.get(name) {
-                (name.clone(), ResolvedCallKind::Function, Some(*arity))
+            if let Some((arity, effects)) = functions.get(name) {
+                (
+                    name.clone(),
+                    ResolvedCallKind::Function,
+                    Some(*arity),
+                    effects.clone(),
+                )
             } else if externs.contains(name) {
                 // Extern parameter lists are not yet materialised; kind only.
-                (name.clone(), ResolvedCallKind::Extern, None)
+                (name.clone(), ResolvedCallKind::Extern, None, Vec::new())
             } else if methods.contains(name) {
-                (name.clone(), ResolvedCallKind::Method, None)
+                (name.clone(), ResolvedCallKind::Method, None, Vec::new())
             } else {
-                (name.clone(), ResolvedCallKind::Unknown, None)
+                (name.clone(), ResolvedCallKind::Unknown, None, Vec::new())
             }
         }
         Expr::Field(obj, field) => {
@@ -1995,12 +2006,12 @@ fn resolve_call_callee(
             };
             let name = format!("{base}.{field}");
             if methods.contains(field) {
-                (name, ResolvedCallKind::Method, None)
+                (name, ResolvedCallKind::Method, None, Vec::new())
             } else {
-                (name, ResolvedCallKind::Unknown, None)
+                (name, ResolvedCallKind::Unknown, None, Vec::new())
             }
         }
-        _ => ("<expr>".into(), ResolvedCallKind::Unknown, None),
+        _ => ("<expr>".into(), ResolvedCallKind::Unknown, None, Vec::new()),
     }
 }
 
@@ -3083,6 +3094,12 @@ func main() -> i32 {
             }),
             "expected c_abs extern call site"
         );
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.callee == "helper" && s.effects.is_empty()),
+            "helper effects should be empty when unannotated"
+        );
         let interp = crate::interp::Interpreter::from_checked(&program);
         assert!(interp.has_resolved_call_to("helper"));
         assert!(interp.has_resolved_call_to("c_abs"));
@@ -3098,6 +3115,39 @@ func main() -> i32 {
         assert_eq!(interp.resolved_call_arity_mismatches(), 0);
         assert_eq!(codegen.resolved_call_arity_mismatches(), 0);
         assert_eq!(verifier.checked_call_arity_mismatches(), 0);
+    }
+
+    #[test]
+    fn call_sites_bind_callee_effects_from_function_directory() {
+        // IR-only materialization: avoid effect-scope runtime checks at call sites.
+        let file = parse(
+            r#"
+cap Io
+func write_it(x: i32) -> i32 with Io { x }
+func main() -> i32 {
+    write_it(1)
+}
+"#,
+        );
+        let program = crate::core::CheckedProgram::from_checked_file(&file).expect("ir");
+        assert!(
+            program.call_sites().values().any(|s| {
+                s.callee == "write_it"
+                    && s.effects.iter().any(|e| e == "Io")
+                    && s.expected_argc == Some(1)
+                    && s.kind == crate::core::ResolvedCallKind::Function
+            }),
+            "expected write_it Io call site"
+        );
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert!(interp.has_resolved_call_with_effect("write_it", "Io"));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert!(verifier.has_checked_call_with_effect("write_it", "Io"));
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "call_fx");
+        codegen.compile_checked(&program).expect("compile");
+        assert!(codegen.has_resolved_call_with_effect("write_it", "Io"));
     }
 
     #[test]

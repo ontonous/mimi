@@ -425,7 +425,7 @@ pub struct VerifierCtx {
     /// Extern function names materialised from CheckedProgram.
     pub(crate) checked_extern_funcs: std::collections::HashSet<String>,
     pub(crate) checked_extern_abis: std::collections::HashMap<String, String>,
-    pub(crate) checked_call_sites: std::collections::HashMap<String, (String, String, usize, Option<usize>, String)>,
+    pub(crate) checked_call_sites: std::collections::HashMap<String, (String, String, usize, Option<usize>, Vec<String>, String)>,
     /// Protocol names materialised from CheckedProgram.
     pub(crate) checked_protocols: std::collections::HashSet<String>,
     /// Trait names materialised from CheckedProgram.
@@ -568,6 +568,7 @@ impl Verifier {
                     site.callee.clone(),
                     site.argc,
                     site.expected_argc,
+                    site.effects.clone(),
                     match site.kind {
                         crate::core::ResolvedCallKind::Function => "function".into(),
                         crate::core::ResolvedCallKind::Extern => "extern".into(),
@@ -735,14 +736,20 @@ impl Verifier {
         self.ctx
             .checked_call_sites
             .values()
-            .any(|(_, name, _, _, _)| name == callee)
+            .any(|(_, name, _, _, _, _)| name == callee)
+    }
+
+    pub(crate) fn has_checked_call_with_effect(&self, callee: &str, effect: &str) -> bool {
+        self.ctx.checked_call_sites.values().any(|(_, name, _, _, effects, _)| {
+            name == callee && effects.iter().any(|e| e == effect)
+        })
     }
 
     pub(crate) fn checked_call_arity_mismatches(&self) -> usize {
         self.ctx
             .checked_call_sites
             .values()
-            .filter(|(_, _, argc, expected, _)| expected.map(|exp| exp != *argc).unwrap_or(false))
+            .filter(|(_, _, argc, expected, _, _)| expected.map(|exp| exp != *argc).unwrap_or(false))
             .count()
     }
 
