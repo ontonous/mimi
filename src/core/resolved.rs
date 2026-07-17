@@ -1798,6 +1798,29 @@ func main() -> i32 { 0 }
     }
 
 
+
+    #[test]
+    fn consumers_install_comptime_function_directory() {
+        let file = parse(
+            r#"
+comptime func answer() -> i32 { 42 }
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        assert!(program.function("answer").is_some_and(|f| f.is_comptime));
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert!(interp.is_resolved_comptime_function("answer"));
+        assert!(!interp.is_resolved_comptime_function("main"));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert!(verifier.is_checked_comptime_function("answer"));
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "ct");
+        codegen.compile_checked(&program).expect("compile");
+        assert!(codegen.is_resolved_comptime_function("answer"));
+    }
+
     #[test]
     fn interpreter_from_checked_installs_session_and_protocol_directories() {
         let file = parse(

@@ -408,6 +408,7 @@ pub struct VerifierCtx {
     /// Function names materialised from CheckedProgram (qualified).
     pub(crate) checked_function_names: std::collections::HashSet<String>,
     pub(crate) checked_function_effects: std::collections::HashMap<String, Vec<String>>,
+    pub(crate) checked_comptime_functions: std::collections::HashSet<String>,
     /// Flow transition keys materialised from CheckedProgram: "flow::event::source".
     pub(crate) checked_transitions: std::collections::HashSet<String>,
     /// Capability names materialised from CheckedProgram.
@@ -475,6 +476,12 @@ impl Verifier {
             .functions()
             .values()
             .map(|function| (function.qualified_name.clone(), function.effects.clone()))
+            .collect();
+        self.ctx.checked_comptime_functions = program
+            .functions()
+            .values()
+            .filter(|function| function.is_comptime)
+            .map(|function| function.qualified_name.clone())
             .collect();
         self.ctx.checked_transitions = program
             .transitions()
@@ -622,6 +629,10 @@ impl Verifier {
 
     pub(crate) fn checked_function_effects(&self, name: &str) -> Option<Vec<String>> {
         self.ctx.checked_function_effects.get(name).cloned()
+    }
+
+    pub(crate) fn is_checked_comptime_function(&self, name: &str) -> bool {
+        self.ctx.checked_comptime_functions.contains(name)
     }
 
     pub(crate) fn has_checked_transition(&self, flow: &str, event: &str, source: &str) -> bool {
