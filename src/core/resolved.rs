@@ -185,11 +185,27 @@ pub struct ResolvedSession {
 }
 
 #[derive(Debug, Clone)]
+pub struct ResolvedProtocolState {
+    pub name: String,
+    pub payload_name: Option<String>,
+    pub payload_type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedProtocolTransition {
+    pub event: String,
+    pub from_state: String,
+    pub to_states: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ResolvedProtocol {
     pub node_id: NodeId,
     pub qualified_name: String,
     pub states: Vec<String>,
+    pub state_payloads: Vec<ResolvedProtocolState>,
     pub transitions: Vec<(String, String, Vec<String>)>, // (event, from, to_states)
+    pub transition_records: Vec<ResolvedProtocolTransition>,
     pub origin: Origin,
 }
 
@@ -472,6 +488,27 @@ impl<'a> CheckedProgram<'a> {
         self.protocols
             .values()
             .find(|protocol| protocol.qualified_name == qualified_name)
+    }
+
+    pub fn protocol_state_payload(
+        &self,
+        protocol_name: &str,
+        state_name: &str,
+    ) -> Option<&ResolvedProtocolState> {
+        self.protocol(protocol_name).and_then(|protocol| {
+            protocol
+                .state_payloads
+                .iter()
+                .find(|state| state.name == state_name)
+        })
+    }
+
+    pub fn protocol_transition_records(
+        &self,
+        protocol_name: &str,
+    ) -> Option<&[ResolvedProtocolTransition]> {
+        self.protocol(protocol_name)
+            .map(|protocol| protocol.transition_records.as_slice())
     }
 
     pub fn actors(&self) -> &HashMap<NodeId, ResolvedActor> {
@@ -1225,11 +1262,34 @@ fn collect_items(
                     errors,
                 );
                 let node_id = NodeId(format!("protocol:{}", qualified));
-                let states = protocol
+                                let states = protocol
                     .states
                     .iter()
                     .map(|state| state.name.clone())
                     .collect::<Vec<_>>();
+                let mut state_payloads = Vec::new();
+                for state in &protocol.states {
+                    if let Some(ty) = &state.payload_type {
+                        if contains_unresolved_type(ty) {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: unresolved payload type in protocol '{}' state '{}'",
+                                    qualified,
+                                    state.name
+                                ),
+                                span,
+                            ));
+                        }
+                    }
+                    state_payloads.push(ResolvedProtocolState {
+                        name: state.name.clone(),
+                        payload_name: state.payload_name.clone(),
+                        payload_type: state
+                            .payload_type
+                            .as_ref()
+                            .map(crate::core::fmt_type),
+                    });
+                }
                 let transitions = protocol
                     .transitions
                     .iter()
@@ -1241,16 +1301,28 @@ fn collect_items(
                         )
                     })
                     .collect::<Vec<_>>();
+                let transition_records = protocol
+                    .transitions
+                    .iter()
+                    .map(|transition| ResolvedProtocolTransition {
+                        event: transition.name.clone(),
+                        from_state: transition.from_state.clone(),
+                        to_states: vec![transition.to_state.clone()],
+                    })
+                    .collect::<Vec<_>>();
                 protocols.insert(
                     node_id.clone(),
                     ResolvedProtocol {
                         node_id,
                         qualified_name: qualified,
                         states,
+                        state_payloads,
                         transitions,
+                        transition_records,
                         origin: resolve_origin(protocol.origin, &NodeId("protocol".into()), span),
                     },
                 );
+
             }
             Item::Session(session) => {
                 let qualified = qualify(module, &session.name);
@@ -3486,6 +3558,53 @@ func main() -> i32 { 0 }
         assert_eq!(
             codegen.resolved_method_signature("Show:for:Number.show"),
             Some((1, "i32".into()))
+        );
+    }
+
+
+    #[test]
+    fn protocol_payloads_and_transition_records_are_materialised() {
+        let file = parse(
+            r#"
+protocol Sensor {
+    state Idle
+    state Active { data: i32 }
+    transition start(Idle) -> Active
+    transition stop(Active) -> Idle
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let active = program
+            .protocol_state_payload("Sensor", "Active")
+            .expect("Active");
+        assert_eq!(active.payload_type.as_deref(), Some("i32"));
+        let records = program
+            .protocol_transition_records("Sensor")
+            .expect("records");
+        assert!(records.iter().any(|t| t.event == "start" && t.from_state == "Idle"));
+        assert!(records.iter().any(|t| t.event == "stop" && t.from_state == "Active"));
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert_eq!(
+            interp.resolved_protocol_payload("Sensor", "Active").as_deref(),
+            Some("i32")
+        );
+        assert!(interp
+            .resolved_protocol_transitions("Sensor")
+            .is_some_and(|trs| trs.iter().any(|(e, f, _)| e == "start" && f == "Idle")));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert_eq!(
+            verifier.checked_protocol_payload("Sensor", "Active").as_deref(),
+            Some("i32")
+        );
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "proto");
+        codegen.compile_checked(&program).expect("compile");
+        assert_eq!(
+            codegen.resolved_protocol_payload("Sensor", "Active").as_deref(),
+            Some("i32")
         );
     }
 

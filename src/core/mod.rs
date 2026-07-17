@@ -32,7 +32,9 @@ pub use resolved::{
     ResolvedCallSite,
     ResolvedConstValue, ResolvedExternBlock,
     ResolvedExternFunc, ResolvedFlow, ResolvedFunction,
-    ResolvedImpl, ResolvedItem, ResolvedItemKind, ResolvedProtocol, ResolvedSession, ResolvedState,
+    ResolvedImpl, ResolvedItem, ResolvedItemKind, ResolvedProtocol,
+    ResolvedProtocolTransition,
+    ResolvedProtocolState, ResolvedSession, ResolvedState,
     ResolvedTrait, ResolvedTypeDef, ResolvedTypeKind, SpanPrecision, StateId, TransitionId,
     RESOLVED_IR_VERSION,
 };
