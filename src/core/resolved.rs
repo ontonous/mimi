@@ -47,6 +47,24 @@ pub struct NodeMeta {
     pub precision: SpanPrecision,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedCallKind {
+    Function,
+    Extern,
+    Method,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedCallSite {
+    pub node_id: NodeId,
+    pub owner: String,
+    pub callee: String,
+    pub argc: usize,
+    pub kind: ResolvedCallKind,
+    pub origin: Origin,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FlowId(pub String);
 
@@ -249,6 +267,7 @@ pub struct CheckedProgram<'a> {
     file: &'a File,
     items: HashMap<NodeId, ResolvedItem>,
     node_meta: HashMap<NodeId, NodeMeta>,
+    call_sites: HashMap<NodeId, ResolvedCallSite>,
     flows: HashMap<FlowId, ResolvedFlow>,
     transitions: HashMap<TransitionId, ResolvedTransition>,
     functions: HashMap<NodeId, ResolvedFunction>,
@@ -279,6 +298,7 @@ impl<'a> CheckedProgram<'a> {
         let mut flows = HashMap::new();
         let mut items = HashMap::new();
         let mut node_meta = HashMap::new();
+        let mut call_sites = HashMap::new();
         let mut functions = HashMap::new();
         let mut sessions = HashMap::new();
         let mut protocols = HashMap::new();
@@ -338,10 +358,18 @@ impl<'a> CheckedProgram<'a> {
         if !errors.is_empty() {
             return Err(errors);
         }
+        collect_program_call_sites(
+            file,
+            &functions,
+            &extern_blocks,
+            &actors,
+            &mut call_sites,
+        );
         Ok(Self {
             file,
             items,
             node_meta,
+            call_sites,
             flows,
             transitions,
             functions,
@@ -475,6 +503,10 @@ impl<'a> CheckedProgram<'a> {
 
     pub fn node_meta(&self) -> &HashMap<NodeId, NodeMeta> {
         &self.node_meta
+    }
+
+    pub fn call_sites(&self) -> &HashMap<NodeId, ResolvedCallSite> {
+        &self.call_sites
     }
 
     pub fn ownership_ledgers(&self) -> &HashMap<NodeId, OwnershipLedger> {
@@ -1529,6 +1561,434 @@ fn resolve_origin(origin: AstOrigin, parent: &NodeId, span: Span) -> Origin {
     }
 }
 
+
+fn collect_program_call_sites(
+    file: &File,
+    functions: &HashMap<NodeId, ResolvedFunction>,
+    extern_blocks: &HashMap<NodeId, ResolvedExternBlock>,
+    actors: &HashMap<NodeId, ResolvedActor>,
+    out: &mut HashMap<NodeId, ResolvedCallSite>,
+) {
+    let function_names: std::collections::HashSet<String> = functions
+        .values()
+        .map(|function| function.qualified_name.clone())
+        .collect();
+    let extern_names: std::collections::HashSet<String> = extern_blocks
+        .values()
+        .flat_map(|block| block.funcs.iter().cloned())
+        .collect();
+    let method_names: std::collections::HashSet<String> = actors
+        .values()
+        .flat_map(|actor| actor.methods.iter().cloned())
+        .collect();
+    for item in &file.items {
+        collect_item_call_sites(
+            item,
+            "",
+            &function_names,
+            &extern_names,
+            &method_names,
+            out,
+        );
+    }
+}
+
+fn collect_item_call_sites(
+    item: &Item,
+    module: &str,
+    functions: &std::collections::HashSet<String>,
+    externs: &std::collections::HashSet<String>,
+    methods: &std::collections::HashSet<String>,
+    out: &mut HashMap<NodeId, ResolvedCallSite>,
+) {
+    match item {
+        Item::Module(module_def) => {
+            let next = if module.is_empty() {
+                module_def.name.clone()
+            } else {
+                format!("{module}::{}", module_def.name)
+            };
+            for inner in &module_def.items {
+                collect_item_call_sites(inner, &next, functions, externs, methods, out);
+            }
+        }
+        Item::Func(function) => {
+            let owner = if module.is_empty() {
+                format!("function:{}", function.name)
+            } else {
+                format!("function:{module}::{}", function.name)
+            };
+            collect_block_call_sites(
+                &function.body,
+                &owner,
+                &format!("{owner}/body"),
+                Span::from(function.pos),
+                functions,
+                externs,
+                methods,
+                out,
+            );
+        }
+        Item::Actor(actor) => {
+            for method in &actor.methods {
+                let owner = format!("function:{}::{}", actor.name, method.name);
+                collect_block_call_sites(
+                    &method.body,
+                    &owner,
+                    &format!("{owner}/body"),
+                    Span::from(method.pos),
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                );
+            }
+        }
+        Item::Impl(impl_def) => {
+            for method in &impl_def.methods {
+                let owner = format!(
+                    "function:{}:for:{}:{}",
+                    impl_def.trait_name, impl_def.type_name, method.name
+                );
+                collect_block_call_sites(
+                    &method.body,
+                    &owner,
+                    &format!("{owner}/body"),
+                    Span::from(method.pos),
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                );
+            }
+        }
+        Item::Flow(flow) => {
+            for transition in &flow.transitions {
+                let owner = format!(
+                    "transition:{}:{}:{}",
+                    flow.name, transition.name, transition.from_state
+                );
+                if let Some(body) = &transition.body {
+                    collect_block_call_sites(
+                        body,
+                        &owner,
+                        &format!("{owner}/body"),
+                        Span::from(transition.pos),
+                        functions,
+                        externs,
+                        methods,
+                        out,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_block_call_sites(
+    block: &[Stmt],
+    owner: &str,
+    path: &str,
+    fallback: Span,
+    functions: &std::collections::HashSet<String>,
+    externs: &std::collections::HashSet<String>,
+    methods: &std::collections::HashSet<String>,
+    out: &mut HashMap<NodeId, ResolvedCallSite>,
+) {
+    for (index, stmt) in block.iter().enumerate() {
+        collect_stmt_call_sites(
+            stmt,
+            owner,
+            &format!("{path}/stmt:{index}"),
+            fallback,
+            functions,
+            externs,
+            methods,
+            out,
+        );
+    }
+}
+
+fn collect_stmt_call_sites(
+    stmt: &Stmt,
+    owner: &str,
+    path: &str,
+    fallback: Span,
+    functions: &std::collections::HashSet<String>,
+    externs: &std::collections::HashSet<String>,
+    methods: &std::collections::HashSet<String>,
+    out: &mut HashMap<NodeId, ResolvedCallSite>,
+) {
+    match stmt {
+        Stmt::Let { init: Some(expr), .. }
+        | Stmt::Return(Some(expr))
+        | Stmt::Break(Some(expr))
+        | Stmt::Expr(expr)
+        | Stmt::Drop(expr)
+        | Stmt::Requires(expr, _)
+        | Stmt::Ensures(expr, _)
+        | Stmt::Invariant(expr, _)
+        | Stmt::SharedLet { init: expr, .. }
+        | Stmt::Delegate { expr, .. } => {
+            collect_expr_call_sites(expr, owner, &format!("{path}/expr"), fallback, functions, externs, methods, out);
+        }
+        Stmt::If { cond, then_, else_ } => {
+            collect_expr_call_sites(cond, owner, &format!("{path}/cond"), fallback, functions, externs, methods, out);
+            collect_block_call_sites(then_, owner, &format!("{path}/then"), fallback, functions, externs, methods, out);
+            if let Some(block) = else_ {
+                collect_block_call_sites(block, owner, &format!("{path}/else"), fallback, functions, externs, methods, out);
+            }
+        }
+        Stmt::While { cond, body } => {
+            collect_expr_call_sites(cond, owner, &format!("{path}/cond"), fallback, functions, externs, methods, out);
+            collect_block_call_sites(body, owner, &format!("{path}/body"), fallback, functions, externs, methods, out);
+        }
+        Stmt::WhileLet { init, body, .. } => {
+            collect_expr_call_sites(init, owner, &format!("{path}/init"), fallback, functions, externs, methods, out);
+            collect_block_call_sites(body, owner, &format!("{path}/body"), fallback, functions, externs, methods, out);
+        }
+        Stmt::Loop(body)
+        | Stmt::Block(body)
+        | Stmt::Arena(body)
+        | Stmt::Unsafe(body)
+        | Stmt::OnFailure(body)
+        | Stmt::Do(body)
+        | Stmt::Parasteps(body) => {
+            collect_block_call_sites(body, owner, &format!("{path}/body"), fallback, functions, externs, methods, out);
+        }
+        Stmt::For { iterable, body, .. } => {
+            collect_expr_call_sites(iterable, owner, &format!("{path}/iterable"), fallback, functions, externs, methods, out);
+            collect_block_call_sites(body, owner, &format!("{path}/body"), fallback, functions, externs, methods, out);
+        }
+        Stmt::Assign { target, value } => {
+            collect_expr_call_sites(target, owner, &format!("{path}/target"), fallback, functions, externs, methods, out);
+            collect_expr_call_sites(value, owner, &format!("{path}/value"), fallback, functions, externs, methods, out);
+        }
+        Stmt::Pinned { expr, timeout, body, .. } => {
+            collect_expr_call_sites(expr, owner, &format!("{path}/expr"), fallback, functions, externs, methods, out);
+            if let Some(timeout) = timeout {
+                collect_expr_call_sites(timeout, owner, &format!("{path}/timeout"), fallback, functions, externs, methods, out);
+            }
+            collect_block_call_sites(body, owner, &format!("{path}/body"), fallback, functions, externs, methods, out);
+        }
+        Stmt::Func(function) => {
+            let nested_owner = format!("{owner}/function:{}", function.name);
+            collect_block_call_sites(
+                &function.body,
+                &nested_owner,
+                &format!("{path}/function:{}", function.name),
+                Span::from(function.pos),
+                functions,
+                externs,
+                methods,
+                out,
+            );
+        }
+        Stmt::Alloc { body, .. } => {
+            collect_block_call_sites(body, owner, &format!("{path}/body"), fallback, functions, externs, methods, out);
+        }
+        Stmt::Math(exprs) => {
+            for (index, expr) in exprs.iter().enumerate() {
+                collect_expr_call_sites(
+                    expr,
+                    owner,
+                    &format!("{path}/math:{index}"),
+                    fallback,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_expr_call_sites(
+    expr: &Expr,
+    owner: &str,
+    path: &str,
+    fallback: Span,
+    functions: &std::collections::HashSet<String>,
+    externs: &std::collections::HashSet<String>,
+    methods: &std::collections::HashSet<String>,
+    out: &mut HashMap<NodeId, ResolvedCallSite>,
+) {
+    match expr {
+        Expr::Call(callee, args) => {
+            let (callee_name, kind) = resolve_call_callee(callee, functions, externs, methods);
+            let node_id = NodeId(format!("{path}/call"));
+            out.insert(
+                node_id.clone(),
+                ResolvedCallSite {
+                    node_id,
+                    owner: owner.to_string(),
+                    callee: callee_name,
+                    argc: args.len(),
+                    kind,
+                    origin: Origin::User(fallback),
+                },
+            );
+            collect_expr_call_sites(callee, owner, &format!("{path}/callee"), fallback, functions, externs, methods, out);
+            for (index, arg) in args.iter().enumerate() {
+                collect_expr_call_sites(
+                    arg,
+                    owner,
+                    &format!("{path}/arg:{index}"),
+                    fallback,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                );
+            }
+        }
+        Expr::Binary(_, left, right) | Expr::Index(left, right) => {
+            collect_expr_call_sites(left, owner, &format!("{path}/left"), fallback, functions, externs, methods, out);
+            collect_expr_call_sites(right, owner, &format!("{path}/right"), fallback, functions, externs, methods, out);
+        }
+        Expr::Unary(_, inner)
+        | Expr::Field(inner, _)
+        | Expr::Try(inner)
+        | Expr::OptionalChain(inner, _)
+        | Expr::Spawn(inner)
+        | Expr::Await(inner)
+        | Expr::QuoteInterpolate(inner)
+        | Expr::TypeOf(inner)
+        | Expr::Old(inner)
+        | Expr::TupleIndex(inner, _)
+        | Expr::NamedArg(_, inner)
+        | Expr::Cast(inner, _) => {
+            collect_expr_call_sites(inner, owner, &format!("{path}/inner"), fallback, functions, externs, methods, out);
+        }
+        Expr::Tuple(items) | Expr::List(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_expr_call_sites(
+                    item,
+                    owner,
+                    &format!("{path}/item:{index}"),
+                    fallback,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                );
+            }
+        }
+        Expr::Match(scrutinee, arms) => {
+            collect_expr_call_sites(scrutinee, owner, &format!("{path}/scrutinee"), fallback, functions, externs, methods, out);
+            for (index, arm) in arms.iter().enumerate() {
+                collect_expr_call_sites(
+                    &arm.body,
+                    owner,
+                    &format!("{path}/arm:{index}"),
+                    fallback,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                );
+            }
+        }
+        Expr::Record { fields, .. } => {
+            for (index, field) in fields.iter().enumerate() {
+                collect_expr_call_sites(
+                    &field.value,
+                    owner,
+                    &format!("{path}/field:{index}"),
+                    fallback,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                );
+            }
+        }
+        Expr::Block(block) | Expr::Comptime(block) | Expr::Quote(block) | Expr::Lambda { body: block, .. } => {
+            collect_block_call_sites(block, owner, &format!("{path}/block"), fallback, functions, externs, methods, out);
+        }
+        Expr::If { cond, then_, else_ } => {
+            collect_expr_call_sites(cond, owner, &format!("{path}/cond"), fallback, functions, externs, methods, out);
+            collect_block_call_sites(then_, owner, &format!("{path}/then"), fallback, functions, externs, methods, out);
+            if let Some(block) = else_ {
+                collect_block_call_sites(block, owner, &format!("{path}/else"), fallback, functions, externs, methods, out);
+            }
+        }
+        Expr::Comprehension { expr, iter, guard, .. } => {
+            collect_expr_call_sites(expr, owner, &format!("{path}/expr"), fallback, functions, externs, methods, out);
+            collect_expr_call_sites(iter, owner, &format!("{path}/iter"), fallback, functions, externs, methods, out);
+            if let Some(guard) = guard {
+                collect_expr_call_sites(guard, owner, &format!("{path}/guard"), fallback, functions, externs, methods, out);
+            }
+        }
+        Expr::SliceExpr { target, start, end } => {
+            collect_expr_call_sites(target, owner, &format!("{path}/target"), fallback, functions, externs, methods, out);
+            if let Some(start) = start {
+                collect_expr_call_sites(start, owner, &format!("{path}/start"), fallback, functions, externs, methods, out);
+            }
+            if let Some(end) = end {
+                collect_expr_call_sites(end, owner, &format!("{path}/end"), fallback, functions, externs, methods, out);
+            }
+        }
+        Expr::Literal(lit) => {
+            if let crate::ast::Lit::FString(parts) = lit {
+                for (index, part) in parts.iter().enumerate() {
+                    if let FStringPart::Interp(expr) = part {
+                        collect_expr_call_sites(
+                            expr,
+                            owner,
+                            &format!("{path}/fstring:{index}"),
+                            fallback,
+                            functions,
+                            externs,
+                            methods,
+                            out,
+                        );
+                    }
+                }
+            }
+        }
+        Expr::Ident(_) | Expr::TypeInfo(_) => {}
+        _ => {}
+    }
+}
+
+fn resolve_call_callee(
+    callee: &Expr,
+    functions: &std::collections::HashSet<String>,
+    externs: &std::collections::HashSet<String>,
+    methods: &std::collections::HashSet<String>,
+) -> (String, ResolvedCallKind) {
+    match callee {
+        Expr::Ident(name) => {
+            if functions.contains(name) {
+                (name.clone(), ResolvedCallKind::Function)
+            } else if externs.contains(name) {
+                (name.clone(), ResolvedCallKind::Extern)
+            } else if methods.contains(name) {
+                (name.clone(), ResolvedCallKind::Method)
+            } else {
+                (name.clone(), ResolvedCallKind::Unknown)
+            }
+        }
+        Expr::Field(obj, field) => {
+            let base = match obj.as_ref() {
+                Expr::Ident(name) => name.clone(),
+                _ => "_".into(),
+            };
+            let name = format!("{base}.{field}");
+            if methods.contains(field) {
+                (name, ResolvedCallKind::Method)
+            } else {
+                (name, ResolvedCallKind::Unknown)
+            }
+        }
+        _ => ("<expr>".into(), ResolvedCallKind::Unknown),
+    }
+}
+
 fn materialize_const_value(expr: &crate::ast::Expr) -> ResolvedConstValue {
     match expr {
         crate::ast::Expr::Literal(lit) => match lit {
@@ -2567,6 +3027,55 @@ func main() -> i32 { MAX }
         );
     }
 
+
+
+    #[test]
+    fn call_sites_resolve_function_and_extern_callees() {
+        let file = parse(
+            r#"
+extern "C" {
+    func c_abs(x: i32) -> i32
+}
+func helper(x: i32) -> i32 { x + 1 }
+func main() -> i32 {
+    let a = helper(1)
+    let b = c_abs(a)
+    b
+}
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let sites: Vec<_> = program.call_sites().values().collect();
+        assert!(
+            sites.iter().any(|s| {
+                s.callee == "helper"
+                    && s.kind == crate::core::ResolvedCallKind::Function
+                    && s.argc == 1
+            }),
+            "expected helper call site, got {:?}",
+            sites.iter().map(|s| (&s.callee, s.kind, s.argc)).collect::<Vec<_>>()
+        );
+        assert!(
+            sites.iter().any(|s| {
+                s.callee == "c_abs"
+                    && s.kind == crate::core::ResolvedCallKind::Extern
+                    && s.argc == 1
+            }),
+            "expected c_abs extern call site"
+        );
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert!(interp.has_resolved_call_to("helper"));
+        assert!(interp.has_resolved_call_to("c_abs"));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert!(verifier.has_checked_call_to("helper"));
+        assert!(verifier.has_checked_call_to("c_abs"));
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "calls");
+        codegen.compile_checked(&program).expect("compile");
+        assert!(codegen.has_resolved_call_to("helper"));
+        assert!(codegen.has_resolved_call_to("c_abs"));
+    }
 
     #[test]
     fn codegen_compile_checked_installs_directories() {

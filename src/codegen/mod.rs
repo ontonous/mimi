@@ -332,6 +332,7 @@ pub struct CodeGenerator<'ctx> {
     /// Extern function names from CheckedProgram.
     resolved_extern_funcs: Option<std::collections::HashSet<String>>,
     resolved_extern_abis: Option<HashMap<String, String>>,
+    resolved_call_sites: Option<HashMap<String, (String, String, usize, String)>>,
     /// Flow mailbox depths from CheckedProgram.
     resolved_mailbox_depths: Option<HashMap<String, usize>>,
     /// Persistent field sets from CheckedProgram.
@@ -462,6 +463,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_type_kinds: None,
             resolved_extern_funcs: None,
             resolved_extern_abis: None,
+            resolved_call_sites: None,
             resolved_mailbox_depths: None,
             resolved_persistent_fields: None,
             resolved_transactional_fields: None,
@@ -469,6 +471,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_flow_protocols: None,
             max_children: None,
         }
+    }
+
+    pub(crate) fn has_resolved_call_to(&self, callee: &str) -> bool {
+        self.resolved_call_sites.as_ref().is_some_and(|map| {
+            map.values().any(|(_, name, _, _)| name == callee)
+        })
     }
 
     pub(crate) fn resolved_constant_value(

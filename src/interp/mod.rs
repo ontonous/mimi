@@ -166,6 +166,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_extern_funcs: Option<std::collections::HashSet<String>>,
     /// Extern function -> ABI string from CheckedProgram.
     pub(in crate::interp) resolved_extern_abis: Option<HashMap<String, String>>,
+    /// Typed call sites from CheckedProgram: node_id -> (owner, callee, argc, kind).
+    pub(in crate::interp) resolved_call_sites: Option<HashMap<String, (String, String, usize, String)>>,
     /// Flow mailbox depth limits materialised from CheckedProgram: flow -> depth.
     pub(in crate::interp) resolved_mailbox_depths: Option<HashMap<String, usize>>,
     /// Persistent field sets materialised from CheckedProgram: flow -> fields.
@@ -359,6 +361,24 @@ impl<'a> Interpreter<'a> {
         }
         interp.resolved_extern_funcs = Some(extern_funcs);
         interp.resolved_extern_abis = Some(extern_abis);
+        let mut call_sites = HashMap::new();
+        for (node_id, site) in program.call_sites() {
+            call_sites.insert(
+                node_id.0.clone(),
+                (
+                    site.owner.clone(),
+                    site.callee.clone(),
+                    site.argc,
+                    match site.kind {
+                        crate::core::ResolvedCallKind::Function => "function".into(),
+                        crate::core::ResolvedCallKind::Extern => "extern".into(),
+                        crate::core::ResolvedCallKind::Method => "method".into(),
+                        crate::core::ResolvedCallKind::Unknown => "unknown".into(),
+                    },
+                ),
+            );
+        }
+        interp.resolved_call_sites = Some(call_sites);
         // Prefer CheckedProgram flow annotations for process spawn quota.
         let checked_max = program.flows().values().find_map(|flow| flow.max_children);
         if checked_max.is_some() {
@@ -508,6 +528,18 @@ impl<'a> Interpreter<'a> {
         self.resolved_extern_abis
             .as_ref()
             .and_then(|map| map.get(name).map(String::as_str))
+    }
+
+    pub(crate) fn resolved_call_sites(
+        &self,
+    ) -> Option<&HashMap<String, (String, String, usize, String)>> {
+        self.resolved_call_sites.as_ref()
+    }
+
+    pub(crate) fn has_resolved_call_to(&self, callee: &str) -> bool {
+        self.resolved_call_sites.as_ref().is_some_and(|map| {
+            map.values().any(|(_, name, _, _)| name == callee)
+        })
     }
 
     pub(crate) fn is_resolved_fallback_transition(
@@ -746,6 +778,7 @@ impl<'a> Interpreter<'a> {
             resolved_type_kinds: None,
             resolved_extern_funcs: None,
             resolved_extern_abis: None,
+            resolved_call_sites: None,
             resolved_mailbox_depths: None,
             resolved_persistent_fields: None,
             resolved_transactional_fields: None,
