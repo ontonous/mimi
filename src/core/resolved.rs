@@ -446,6 +446,16 @@ impl<'a> CheckedProgram<'a> {
         &self.extern_blocks
     }
 
+    pub fn backend_requirements(&self) -> &[CapabilityRequirement] {
+        &self.backend_requirements
+    }
+
+    pub fn requires_capability(&self, capability: &str) -> bool {
+        self.backend_requirements
+            .iter()
+            .any(|requirement| requirement.capability == capability)
+    }
+
     pub fn node_meta(&self) -> &HashMap<NodeId, NodeMeta> {
         &self.node_meta
     }
@@ -2076,6 +2086,28 @@ func main() -> i32 { 0 }
                     .is_some_and(|f| !f.is_empty()));
             }
         }
+    }
+
+
+    #[test]
+    fn checked_program_exposes_backend_requirements() {
+        let file = parse(
+            r#"
+flow Decision {
+    state Pending
+    state Yes
+    state No
+    transition decide(Pending) -> Yes | No { do { return Yes {} } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        assert!(program.requires_capability("flow.multi_target"));
+        assert!(program
+            .backend_requirements()
+            .iter()
+            .any(|r| r.requirement_id == "FLOW-MULTI-001"));
     }
 
     #[test]
