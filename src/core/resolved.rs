@@ -1685,6 +1685,31 @@ func main() -> i32 { 0 }
             .any(|i| i.trait_name == "Close" && i.type_name == "Handle"));
     }
 
+
+    #[test]
+    fn interpreter_from_checked_installs_trait_and_impl_directories() {
+        let file = parse(
+            r#"
+trait Close { func close() -> i32 }
+type Handle { value: i32 }
+impl Close for Handle {
+    func close() -> i32 { 0 }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        let methods = interp
+            .resolved_trait_methods("Close")
+            .expect("Close methods");
+        assert!(methods.iter().any(|m| m == "close"));
+        let impl_methods = interp
+            .resolved_impl_methods("Close", "Handle")
+            .expect("Close for Handle");
+        assert!(impl_methods.iter().any(|m| m == "close"));
+    }
+
     #[test]
     fn interpreter_from_checked_installs_capability_and_constant_directories() {
         let file = parse(

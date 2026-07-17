@@ -143,6 +143,10 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_capabilities: Option<std::collections::HashSet<String>>,
     /// Constant names materialised from CheckedProgram.
     pub(in crate::interp) resolved_constants: Option<std::collections::HashSet<String>>,
+    /// Trait method directories materialised from CheckedProgram.
+    pub(in crate::interp) resolved_traits: Option<HashMap<String, Vec<String>>>,
+    /// Impl directories materialised from CheckedProgram: "Trait:for:Type" -> methods.
+    pub(in crate::interp) resolved_impls: Option<HashMap<String, Vec<String>>>,
     /// v0.29.24: process-wide max children (None = unlimited).
     /// Taken from first `@max_children(N)` flow annotation in the file.
     max_children: Option<usize>,
@@ -243,6 +247,16 @@ impl<'a> Interpreter<'a> {
             .map(|constant| constant.qualified_name.clone())
             .collect();
         interp.resolved_constants = Some(constants);
+        let mut traits = HashMap::new();
+        for trait_def in program.traits().values() {
+            traits.insert(trait_def.qualified_name.clone(), trait_def.methods.clone());
+        }
+        interp.resolved_traits = Some(traits);
+        let mut impls = HashMap::new();
+        for impl_def in program.impls().values() {
+            impls.insert(impl_def.qualified_name.clone(), impl_def.methods.clone());
+        }
+        interp.resolved_impls = Some(impls);
         interp
     }
 
@@ -288,6 +302,23 @@ impl<'a> Interpreter<'a> {
         self.resolved_constants
             .as_ref()
             .is_some_and(|set| set.contains(qualified_name))
+    }
+
+    pub(crate) fn resolved_trait_methods(&self, qualified_name: &str) -> Option<Vec<String>> {
+        self.resolved_traits
+            .as_ref()
+            .and_then(|map| map.get(qualified_name).cloned())
+    }
+
+    pub(crate) fn resolved_impl_methods(
+        &self,
+        trait_name: &str,
+        type_name: &str,
+    ) -> Option<Vec<String>> {
+        let key = format!("{}:for:{}", trait_name, type_name);
+        self.resolved_impls
+            .as_ref()
+            .and_then(|map| map.get(&key).cloned())
     }
 
     pub(crate) fn new(file: &'a File) -> Self {
@@ -393,6 +424,8 @@ impl<'a> Interpreter<'a> {
             resolved_actors: None,
             resolved_capabilities: None,
             resolved_constants: None,
+            resolved_traits: None,
+            resolved_impls: None,
             max_children,
             spawn_count: 0,
             actor_spawn_counts: std::collections::HashMap::new(),
