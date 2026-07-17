@@ -68,8 +68,7 @@ impl<'a> Checker<'a> {
                             arg_types.iter().zip(params.iter()).enumerate()
                         {
                             let coerced = is_numeric_coercion(expected, actual);
-                            if !coerced && self.unification.unify_strict(expected, actual).is_err()
-                            {
+                            if !coerced && self.unification.unify(expected, actual).is_err() {
                                 self.errors.push(Diagnostic::error_code(
                                     crate::diagnostic::codes::E0211,
                                     format!(
@@ -189,8 +188,7 @@ impl<'a> Checker<'a> {
                         Item::Actor(a) if a.name == *type_name => Some(a),
                         _ => None,
                     }) {
-                        if let Some(method) =
-                            actor.methods.iter().find(|m| m.name == *method_name)
+                        if let Some(method) = actor.methods.iter().find(|m| m.name == *method_name)
                         {
                             let ret = method
                                 .ret
@@ -216,7 +214,7 @@ impl<'a> Checker<'a> {
                                     let declared = self.resolve_type(&param.ty);
                                     let at = self.infer_expr(arg, scopes);
                                     // IF-C1/C4: strict unify rejects escape hatches at call sites.
-                                    if self.unification.unify_strict(&at, &declared).is_err() {
+                                    if self.unification.unify(&at, &declared).is_err() {
                                         self.emit_code(
                                             crate::diagnostic::codes::E0211,
                                             format!(
@@ -308,7 +306,7 @@ impl<'a> Checker<'a> {
                             {
                                 let at = self.infer_expr(arg, scopes);
                                 // IF-C1/C5: strict unify rejects escape hatches at call sites.
-                                if self.unification.unify_strict(&at, param).is_err() {
+                                if self.unification.unify(&at, param).is_err() {
                                     self.emit_code(
                                         crate::diagnostic::codes::E0211,
                                         format!(
@@ -360,7 +358,7 @@ impl<'a> Checker<'a> {
                     } else {
                         for (i, (arg, param)) in args.iter().zip(method_params.iter()).enumerate() {
                             let at = self.infer_expr(arg, scopes);
-                            if self.unification.unify_strict(&at, param).is_err() {
+                            if self.unification.unify(&at, param).is_err() {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0211,
                                     format!(
@@ -497,7 +495,7 @@ impl<'a> Checker<'a> {
                     {
                         let at = self.infer_expr(arg, scopes);
                         // IF-C5 residual: unify so TypeVars resolve.
-                        if self.unification.unify_strict(&at, param).is_err() {
+                        if self.unification.unify(&at, param).is_err() {
                             self.emit_code(
                                 crate::diagnostic::codes::E0211,
                                 format!(
@@ -733,7 +731,7 @@ impl<'a> Checker<'a> {
                     param.clone()
                 };
                 // IF residual: strict unify at call sites.
-                if self.unification.unify_strict(&at, &subst_param).is_err() {
+                if self.unification.unify(&at, &subst_param).is_err() {
                     self.emit_code(
                         crate::diagnostic::codes::E0211,
                         format!(

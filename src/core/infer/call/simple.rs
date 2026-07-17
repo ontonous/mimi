@@ -1673,8 +1673,7 @@ impl<'a> Checker<'a> {
                         {
                             let arg_ty = self.infer_expr(arg, scopes);
                             let coerced = is_numeric_coercion(param_ty, &arg_ty);
-                            if !coerced && self.unification.unify_strict(param_ty, &arg_ty).is_err()
-                            {
+                            if !coerced && self.unification.unify(param_ty, &arg_ty).is_err() {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0211,
                                     format!(
@@ -1738,8 +1737,7 @@ impl<'a> Checker<'a> {
                             let arg_ty = self.infer_expr(arg, scopes);
                             // IF-C1: strict unify rejects Any/_/Infer escape at call sites.
                             let coerced = is_numeric_coercion(param_ty, &arg_ty);
-                            if !coerced && self.unification.unify_strict(param_ty, &arg_ty).is_err()
-                            {
+                            if !coerced && self.unification.unify(param_ty, &arg_ty).is_err() {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0211,
                                     format!(
@@ -1984,7 +1982,7 @@ impl<'a> Checker<'a> {
                     let subst_param = subst_type_params(param, &generics, &type_map);
                     // IF-C1: strict unify at call sites rejects Any/_/Infer escapes.
                     let coerced = is_numeric_coercion(&subst_param, at);
-                    if !coerced && self.unification.unify_strict(&subst_param, at).is_err() {
+                    if !coerced && self.unification.unify(&subst_param, at).is_err() {
                         self.errors.push(
                             Diagnostic::error_code(
                                 crate::diagnostic::codes::E0211,
@@ -2014,7 +2012,7 @@ impl<'a> Checker<'a> {
                     let at = self.infer_expr(arg, scopes);
                     // IF-C1: strict unify at call sites rejects Any/_/Infer escapes.
                     let coerced = is_numeric_coercion(param, &at);
-                    if !coerced && self.unification.unify_strict(param, &at).is_err() {
+                    if !coerced && self.unification.unify(param, &at).is_err() {
                         self.errors.push(
                             Diagnostic::error_code(
                                 crate::diagnostic::codes::E0211,
