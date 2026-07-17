@@ -222,6 +222,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .collect(),
         );
         self.resolved_node_meta_count = Some(program.node_meta().len());
+        self.resolved_node_meta_paths = Some(
+            program
+                .node_meta()
+                .keys()
+                .map(|node_id| node_id.0.clone())
+                .collect(),
+        );
         let mut type_kinds = std::collections::HashMap::new();
         let mut type_fields = std::collections::HashMap::new();
         let mut type_variants = std::collections::HashMap::new();

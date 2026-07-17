@@ -4321,6 +4321,16 @@ func main() -> i32 {
                 .precision,
             SpanPrecision::DeclarationFallback
         );
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert!(interp.has_resolved_node_meta_path("function:main/stmt:0"));
+        assert!(interp.has_resolved_node_meta_path("function:main/stmt:1/cond"));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert!(verifier.has_checked_node_meta_path("function:main/stmt:0/init"));
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "node_meta");
+        codegen.compile_checked(&program).expect("compile");
+        assert!(codegen.has_resolved_node_meta_path("function:main/stmt:1/then/stmt:0/value/inner"));
     }
 
     #[test]

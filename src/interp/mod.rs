@@ -182,6 +182,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_backend_requirements: Option<Vec<(String, String)>>,
     /// NodeMeta path presence count from CheckedProgram.
     pub(in crate::interp) resolved_node_meta_count: Option<usize>,
+    /// NodeMeta path ids from CheckedProgram.
+    pub(in crate::interp) resolved_node_meta_paths: Option<std::collections::HashSet<String>>,
     /// Type definition kinds materialised from CheckedProgram.
     pub(in crate::interp) resolved_type_kinds: Option<HashMap<String, String>>,
     pub(in crate::interp) resolved_type_fields: Option<HashMap<String, Vec<(String, String)>>>,
@@ -473,6 +475,13 @@ impl<'a> Interpreter<'a> {
                 .collect(),
         );
         interp.resolved_node_meta_count = Some(program.node_meta().len());
+        interp.resolved_node_meta_paths = Some(
+            program
+                .node_meta()
+                .keys()
+                .map(|node_id| node_id.0.clone())
+                .collect(),
+        );
                 let mut type_kinds = HashMap::new();
         let mut type_fields = HashMap::new();
         let mut type_variants = HashMap::new();
@@ -782,6 +791,12 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn resolved_node_meta_count(&self) -> Option<usize> {
         self.resolved_node_meta_count
+    }
+
+    pub(crate) fn has_resolved_node_meta_path(&self, path: &str) -> bool {
+        self.resolved_node_meta_paths
+            .as_ref()
+            .is_some_and(|set| set.contains(path))
     }
 
     pub(crate) fn requires_resolved_capability(&self, capability: &str) -> bool {
@@ -1158,6 +1173,7 @@ impl<'a> Interpreter<'a> {
             resolved_ownership_resources: None,
             resolved_backend_requirements: None,
             resolved_node_meta_count: None,
+            resolved_node_meta_paths: None,
             resolved_type_kinds: None,
             resolved_type_fields: None,
             resolved_type_variants: None,
