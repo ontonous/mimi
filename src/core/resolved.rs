@@ -161,6 +161,21 @@ pub struct ResolvedActor {
     pub origin: Origin,
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedCapability {
+    pub node_id: NodeId,
+    pub qualified_name: String,
+    pub combined_with: Option<String>,
+    pub origin: Origin,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedConstant {
+    pub node_id: NodeId,
+    pub qualified_name: String,
+    pub origin: Origin,
+}
+
 #[derive(Debug)]
 pub struct CheckedProgram<'a> {
     file: &'a File,
@@ -172,6 +187,8 @@ pub struct CheckedProgram<'a> {
     sessions: HashMap<NodeId, ResolvedSession>,
     protocols: HashMap<NodeId, ResolvedProtocol>,
     actors: HashMap<NodeId, ResolvedActor>,
+    capabilities: HashMap<NodeId, ResolvedCapability>,
+    constants: HashMap<NodeId, ResolvedConstant>,
     backend_requirements: Vec<CapabilityRequirement>,
     ownership_ledgers: HashMap<NodeId, OwnershipLedger>,
 }
@@ -194,6 +211,8 @@ impl<'a> CheckedProgram<'a> {
         let mut sessions = HashMap::new();
         let mut protocols = HashMap::new();
         let mut actors = HashMap::new();
+        let mut capabilities = HashMap::new();
+        let mut constants = HashMap::new();
         let mut backend_requirements = Vec::new();
         let mut errors = Vec::new();
         collect_items(
@@ -205,6 +224,8 @@ impl<'a> CheckedProgram<'a> {
             &mut sessions,
             &mut protocols,
             &mut actors,
+            &mut capabilities,
+            &mut constants,
             &mut flows,
             &mut transitions,
             &mut backend_requirements,
@@ -247,6 +268,8 @@ impl<'a> CheckedProgram<'a> {
             sessions,
             protocols,
             actors,
+            capabilities,
+            constants,
             backend_requirements,
             ownership_ledgers,
         })
@@ -306,6 +329,26 @@ impl<'a> CheckedProgram<'a> {
         self.actors
             .values()
             .find(|actor| actor.qualified_name == qualified_name)
+    }
+
+    pub fn capabilities(&self) -> &HashMap<NodeId, ResolvedCapability> {
+        &self.capabilities
+    }
+
+    pub fn capability(&self, qualified_name: &str) -> Option<&ResolvedCapability> {
+        self.capabilities
+            .values()
+            .find(|capability| capability.qualified_name == qualified_name)
+    }
+
+    pub fn constants(&self) -> &HashMap<NodeId, ResolvedConstant> {
+        &self.constants
+    }
+
+    pub fn constant(&self, qualified_name: &str) -> Option<&ResolvedConstant> {
+        self.constants
+            .values()
+            .find(|constant| constant.qualified_name == qualified_name)
     }
 
     pub fn node_meta(&self) -> &HashMap<NodeId, NodeMeta> {
@@ -400,6 +443,8 @@ fn collect_items(
     sessions: &mut HashMap<NodeId, ResolvedSession>,
     protocols: &mut HashMap<NodeId, ResolvedProtocol>,
     actors: &mut HashMap<NodeId, ResolvedActor>,
+    capabilities: &mut HashMap<NodeId, ResolvedCapability>,
+    constants: &mut HashMap<NodeId, ResolvedConstant>,
     flows: &mut HashMap<FlowId, ResolvedFlow>,
     transitions: &mut HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: &mut Vec<CapabilityRequirement>,
@@ -426,6 +471,8 @@ fn collect_items(
                     sessions,
                     protocols,
                     actors,
+                    capabilities,
+                    constants,
                     flows,
                     transitions,
                     backend_requirements,
@@ -527,22 +574,49 @@ fn collect_items(
                     );
                 }
             }
-            Item::Const { name, pos, .. } => insert_item(
-                resolved_items,
-                ResolvedItemKind::Constant,
-                &qualify(module, name),
-                AstOrigin::User,
-                Span::from(*pos),
-                errors,
-            ),
-            Item::Cap(cap) => insert_item(
-                resolved_items,
-                ResolvedItemKind::Capability,
-                &qualify(module, &cap.name),
-                cap.origin,
-                Span::from(cap.pos),
-                errors,
-            ),
+            Item::Const { name, pos, .. } => {
+                let qualified = qualify(module, name);
+                let span = Span::from(*pos);
+                insert_item(
+                    resolved_items,
+                    ResolvedItemKind::Constant,
+                    &qualified,
+                    AstOrigin::User,
+                    span,
+                    errors,
+                );
+                let node_id = NodeId(format!("constant:{}", qualified));
+                constants.insert(
+                    node_id.clone(),
+                    ResolvedConstant {
+                        node_id,
+                        qualified_name: qualified,
+                        origin: Origin::User(span),
+                    },
+                );
+            }
+            Item::Cap(cap) => {
+                let qualified = qualify(module, &cap.name);
+                let span = Span::from(cap.pos);
+                insert_item(
+                    resolved_items,
+                    ResolvedItemKind::Capability,
+                    &qualified,
+                    cap.origin,
+                    span,
+                    errors,
+                );
+                let node_id = NodeId(format!("capability:{}", qualified));
+                capabilities.insert(
+                    node_id.clone(),
+                    ResolvedCapability {
+                        node_id,
+                        qualified_name: qualified,
+                        combined_with: cap.combined_with.clone(),
+                        origin: resolve_origin(cap.origin, &NodeId("capability".into()), span),
+                    },
+                );
+            }
             Item::Trait(trait_def) => insert_item(
                 resolved_items,
                 ResolvedItemKind::Trait,
@@ -1487,6 +1561,21 @@ func main() -> i32 { 0 }
             .resolved_actor_methods("Counter")
             .expect("Counter methods");
         assert!(methods.iter().any(|m| m == "inc"));
+    }
+
+
+    #[test]
+    fn resolved_capabilities_and_constants_are_indexed() {
+        let file = parse(
+            r#"
+cap Io
+const MAX: i32 = 10
+func main() -> i32 { MAX }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        assert!(program.capability("Io").is_some());
+        assert!(program.constant("MAX").is_some());
     }
 
     #[test]
