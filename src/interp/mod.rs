@@ -193,6 +193,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_extern_abis: Option<HashMap<String, String>>,
     /// Extern function signatures: name -> (arity, ret).
     pub(in crate::interp) resolved_extern_signatures: Option<HashMap<String, (usize, String)>>,
+    pub(in crate::interp) resolved_extern_no_panic: Option<std::collections::HashSet<String>>,
+    pub(in crate::interp) resolved_extern_unsafe: Option<std::collections::HashSet<String>>,
     /// Typed call sites from CheckedProgram: node_id -> (owner, callee, argc, kind).
     pub(in crate::interp) resolved_call_sites: Option<HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>>,
     /// Flow mailbox depth limits materialised from CheckedProgram: flow -> depth.
@@ -516,6 +518,20 @@ impl<'a> Interpreter<'a> {
             }
         }
         interp.resolved_extern_signatures = Some(extern_signatures);
+        let mut extern_no_panic = std::collections::HashSet::new();
+        let mut extern_unsafe = std::collections::HashSet::new();
+        for block in program.extern_blocks().values() {
+            for func in &block.funcs {
+                if block.no_panic {
+                    extern_no_panic.insert(func.clone());
+                }
+                if block.unsafe_ {
+                    extern_unsafe.insert(func.clone());
+                }
+            }
+        }
+        interp.resolved_extern_no_panic = Some(extern_no_panic);
+        interp.resolved_extern_unsafe = Some(extern_unsafe);
         let mut call_sites = HashMap::new();
         for (node_id, site) in program.call_sites() {
             call_sites.insert(
@@ -820,6 +836,18 @@ impl<'a> Interpreter<'a> {
         self.resolved_extern_signatures
             .as_ref()
             .and_then(|map| map.get(name).cloned())
+    }
+
+    pub(crate) fn is_resolved_extern_no_panic(&self, name: &str) -> bool {
+        self.resolved_extern_no_panic
+            .as_ref()
+            .is_some_and(|set| set.contains(name))
+    }
+
+    pub(crate) fn is_resolved_extern_unsafe(&self, name: &str) -> bool {
+        self.resolved_extern_unsafe
+            .as_ref()
+            .is_some_and(|set| set.contains(name))
     }
 
     pub(crate) fn resolved_call_sites(
@@ -1137,6 +1165,8 @@ impl<'a> Interpreter<'a> {
             resolved_extern_funcs: None,
             resolved_extern_abis: None,
             resolved_extern_signatures: None,
+            resolved_extern_no_panic: None,
+            resolved_extern_unsafe: None,
             resolved_call_sites: None,
             resolved_mailbox_depths: None,
             resolved_flow_state_payloads: None,
