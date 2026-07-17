@@ -33,6 +33,7 @@ impl<'a> Checker<'a> {
         if !self.types.contains_key("ExecResult") {
             let td = TypeDef {
                 name: "ExecResult".to_string(),
+                decl_pos: None,
                 pub_: false,
                 kind: TypeDefKind::Record(vec![
                     Field {
@@ -58,6 +59,7 @@ impl<'a> Checker<'a> {
         if !self.types.contains_key("StatResult") {
             let td = TypeDef {
                 name: "StatResult".to_string(),
+                decl_pos: None,
                 pub_: false,
                 kind: TypeDefKind::Record(vec![
                     Field {
@@ -88,6 +90,7 @@ impl<'a> Checker<'a> {
         if !self.types.contains_key("PeerFault") {
             let td = TypeDef {
                 name: "PeerFault".to_string(),
+                decl_pos: None,
                 pub_: false,
                 kind: TypeDefKind::Record(vec![
                     Field {
@@ -112,6 +115,7 @@ impl<'a> Checker<'a> {
         if !self.types.contains_key("SystemTrace") {
             let td = TypeDef {
                 name: "SystemTrace".to_string(),
+                decl_pos: None,
                 pub_: false,
                 kind: TypeDefKind::Record(vec![
                     Field {
@@ -146,6 +150,7 @@ impl<'a> Checker<'a> {
         if !self.types.contains_key("PanicPayload") {
             let td = TypeDef {
                 name: "PanicPayload".to_string(),
+                decl_pos: None,
                 pub_: false,
                 kind: TypeDefKind::Record(vec![
                     Field {
@@ -176,6 +181,7 @@ impl<'a> Checker<'a> {
         if !self.types.contains_key("MemoryDump") {
             let td = TypeDef {
                 name: "MemoryDump".to_string(),
+                decl_pos: None,
                 pub_: false,
                 kind: TypeDefKind::Record(vec![
                     Field {
@@ -504,6 +510,7 @@ impl<'a> Checker<'a> {
                 // Register actor type so it can be used as a type
                 let actor_type_def = TypeDef {
                     name: actor.name.clone(),
+                    decl_pos: None,
                     pub_: actor.pub_,
                     kind: TypeDefKind::Record(
                         actor
@@ -740,6 +747,7 @@ impl<'a> Checker<'a> {
                         let fields = state.payload.clone().unwrap_or_default();
                         TypeDef {
                             name: type_name.clone(),
+                            decl_pos: None,
                             pub_: false,
                             kind: TypeDefKind::Record(fields),
                             generics: vec![],
@@ -792,6 +800,7 @@ impl<'a> Checker<'a> {
                         let fields2 = state.payload.clone().unwrap_or_default();
                         let td2 = TypeDef {
                             name: state.name.clone(),
+                            decl_pos: None,
                             pub_: false,
                             kind: TypeDefKind::Record(fields2),
                             generics: vec![],
@@ -871,6 +880,7 @@ impl<'a> Checker<'a> {
                 if !self.types.contains_key(&qualified) {
                     let marker = TypeDef {
                         name: qualified.clone(),
+                        decl_pos: None,
                         pub_: false,
                         kind: TypeDefKind::Record(vec![]),
                         generics: vec![],
@@ -898,6 +908,7 @@ impl<'a> Checker<'a> {
                         };
                         TypeDef {
                             name: type_name.clone(),
+                            decl_pos: None,
                             pub_: false,
                             kind: TypeDefKind::Record(fields),
                             generics: vec![],
@@ -918,6 +929,7 @@ impl<'a> Checker<'a> {
                 if !self.types.contains_key("SessionChan") {
                     let td = TypeDef {
                         name: "SessionChan".to_string(),
+                        decl_pos: None,
                         pub_: false,
                         kind: TypeDefKind::Record(vec![]),
                         generics: vec![GenericParam {
@@ -1003,7 +1015,12 @@ impl<'a> Checker<'a> {
                     self.var_scopes.pop();
                 }
             }
-            Item::Type(_) | Item::Cap(_) => {}
+            Item::Type(type_def) => {
+                if let Some(pos) = type_def.decl_pos {
+                    self.set_pos(pos.0, pos.1);
+                }
+            }
+            Item::Cap(_) => {}
             Item::Trait(trait_def) => {
                 // Check that all trait method types are well-formed
                 let generic_names: Vec<String> =

@@ -373,6 +373,7 @@ impl Parser {
         derives: Vec<String>,
         attributes: Vec<crate::ast::TypeAttribute>,
     ) -> Result<TypeDef, ParseError> {
+        let decl_pos = Some((self.peek().line, self.peek().col));
         self.expect_keyword(TokenKind::Type)?;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
@@ -413,6 +414,7 @@ impl Parser {
             };
             return Ok(TypeDef {
                 name,
+                decl_pos,
                 pub_: false,
                 kind,
                 generics,
@@ -433,6 +435,7 @@ impl Parser {
                 self.expect(TokenKind::RBrace, "`}`")?;
                 return Ok(TypeDef {
                     name,
+                    decl_pos,
                     pub_: false,
                     kind: TypeDefKind::Union(fields),
                     generics,
@@ -444,6 +447,7 @@ impl Parser {
             self.match_semi();
             return Ok(TypeDef {
                 name,
+                decl_pos,
                 pub_: false,
                 kind: TypeDefKind::Alias(ty),
                 generics,
@@ -464,6 +468,7 @@ impl Parser {
         self.expect(TokenKind::RBrace, "`}`")?;
         Ok(TypeDef {
             name,
+            decl_pos,
             pub_: false,
             kind,
             generics,
@@ -564,6 +569,7 @@ impl Parser {
     }
 
     pub(crate) fn parse_newtype(&mut self) -> Result<TypeDef, ParseError> {
+        let decl_pos = Some((self.peek().line, self.peek().col));
         self.expect_keyword(TokenKind::Newtype)?;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
@@ -572,6 +578,7 @@ impl Parser {
         self.match_semi();
         Ok(TypeDef {
             name,
+            decl_pos,
             pub_: false,
             kind: TypeDefKind::Newtype(ty),
             generics,

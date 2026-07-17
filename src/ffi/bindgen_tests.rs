@@ -17,6 +17,7 @@ mod tests {
             "Point".to_string(),
             TypeDef {
                 name: "Point".to_string(),
+                decl_pos: None,
                 pub_: true,
                 kind: TypeDefKind::Record(vec![
                     Field {

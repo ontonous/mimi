@@ -11,6 +11,7 @@ pub struct NodeId(pub String);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedItemKind {
     Function,
+    Type,
     Module,
     Actor,
     Flow,
@@ -278,6 +279,18 @@ fn collect_items(
                 Span::from(function.pos),
                 errors,
             ),
+            Item::Type(type_def) => {
+                if let Some(pos) = type_def.decl_pos {
+                    insert_item(
+                        resolved_items,
+                        ResolvedItemKind::Type,
+                        &qualify(module, &type_def.name),
+                        AstOrigin::User,
+                        Span::from(pos),
+                        errors,
+                    );
+                }
+            }
             Item::Actor(actor) => insert_item(
                 resolved_items,
                 ResolvedItemKind::Actor,
@@ -317,6 +330,7 @@ fn insert_item(
 ) {
     let kind_name = match kind {
         ResolvedItemKind::Function => "function",
+        ResolvedItemKind::Type => "type",
         ResolvedItemKind::Module => "module",
         ResolvedItemKind::Actor => "actor",
         ResolvedItemKind::Flow => "flow",
@@ -651,6 +665,29 @@ func main() -> i32 { 0 }
             assert_eq!(item.origin.user_span().start_line, line);
         }
         assert_eq!(program.entry_span().expect("entry span").start_line, 9);
+    }
+
+    #[test]
+    fn resolved_types_distinguish_user_declarations_from_synthetic_types() {
+        let file = parse(
+            r#"
+type Point { x: i32 }
+newtype UserId = i64
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        for (node_id, line) in [("type:Point", 2), ("type:UserId", 3)] {
+            let item = program
+                .items()
+                .get(&NodeId(node_id.to_string()))
+                .unwrap_or_else(|| panic!("missing {node_id}"));
+            assert_eq!(item.kind, ResolvedItemKind::Type);
+            assert_eq!(item.origin.user_span().start_line, line);
+        }
+        assert!(!program
+            .items()
+            .contains_key(&NodeId("type:ExecResult".to_string())));
     }
 
     #[test]

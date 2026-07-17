@@ -204,6 +204,7 @@ mod tests {
         let mut file = empty_file();
         file.items.push(Item::Type(TypeDef {
             name: "T".into(),
+            decl_pos: None,
             pub_: false,
             kind: TypeDefKind::Record(vec![]),
             generics: vec![],

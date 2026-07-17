@@ -618,6 +618,7 @@ impl<'a> Interpreter<'a> {
             Item::Actor(actor) => {
                 let actor_type_def = TypeDef {
                     name: actor.name.clone(),
+                    decl_pos: None,
                     pub_: actor.pub_,
                     kind: TypeDefKind::Record(
                         actor
