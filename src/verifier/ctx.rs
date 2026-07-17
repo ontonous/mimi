@@ -416,6 +416,7 @@ pub struct VerifierCtx {
     pub(crate) checked_capabilities: std::collections::HashSet<String>,
     /// Session names materialised from CheckedProgram.
     pub(crate) checked_sessions: std::collections::HashSet<String>,
+    pub(crate) checked_session_displays: std::collections::HashMap<String, String>,
     /// Ownership ledger owners materialised from CheckedProgram.
     pub(crate) checked_ownership_owners: std::collections::HashSet<String>,
     pub(crate) checked_ownership_summaries:
@@ -528,6 +529,11 @@ impl Verifier {
             .sessions()
             .values()
             .map(|session| session.qualified_name.clone())
+            .collect();
+        self.ctx.checked_session_displays = program
+            .sessions()
+            .values()
+            .map(|session| (session.qualified_name.clone(), session.body_display.clone()))
             .collect();
         self.ctx.checked_ownership_owners = program
             .ownership_ledgers()
@@ -776,6 +782,10 @@ impl Verifier {
 
     pub(crate) fn has_checked_session(&self, name: &str) -> bool {
         self.ctx.checked_sessions.contains(name)
+    }
+
+    pub(crate) fn checked_session_display(&self, name: &str) -> Option<&str> {
+        self.ctx.checked_session_displays.get(name).map(String::as_str)
     }
 
     pub(crate) fn has_checked_ownership_owner(&self, owner: &str) -> bool {

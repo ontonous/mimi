@@ -81,6 +81,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map(|session| session.qualified_name.clone())
                 .collect(),
         );
+        let mut session_displays = std::collections::HashMap::new();
+        for session in program.sessions().values() {
+            session_displays.insert(session.qualified_name.clone(), session.body_display.clone());
+        }
+        self.resolved_session_displays = Some(session_displays);
         self.resolved_protocols = Some(
             program
                 .protocols()

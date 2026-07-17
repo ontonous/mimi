@@ -142,6 +142,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_comptime_functions: Option<std::collections::HashSet<String>>,
     /// Session type names materialised from CheckedProgram.
     pub(in crate::interp) resolved_sessions: Option<HashMap<String, crate::ast::SessionType>>,
+    /// Session residual type display strings.
+    pub(in crate::interp) resolved_session_displays: Option<HashMap<String, String>>,
     /// Protocol names materialised from CheckedProgram.
     pub(in crate::interp) resolved_protocols: Option<std::collections::HashSet<String>>,
     /// Protocol transition records: protocol -> [(event, from, to)].
@@ -279,10 +281,13 @@ impl<'a> Interpreter<'a> {
         interp.resolved_functions = Some(functions);
         interp.resolved_comptime_functions = Some(comptime_functions);
         let mut sessions = HashMap::new();
+        let mut session_displays = HashMap::new();
         for session in program.sessions().values() {
             sessions.insert(session.qualified_name.clone(), session.body.clone());
+            session_displays.insert(session.qualified_name.clone(), session.body_display.clone());
         }
         interp.resolved_sessions = Some(sessions);
+        interp.resolved_session_displays = Some(session_displays);
         let protocols = program
             .protocols()
             .values()
@@ -515,6 +520,12 @@ impl<'a> Interpreter<'a> {
         self.resolved_sessions
             .as_ref()
             .is_some_and(|map| map.contains_key(qualified_name))
+    }
+
+    pub(crate) fn resolved_session_display(&self, qualified_name: &str) -> Option<&str> {
+        self.resolved_session_displays
+            .as_ref()
+            .and_then(|map| map.get(qualified_name).map(String::as_str))
     }
 
     pub(crate) fn has_resolved_protocol(&self, qualified_name: &str) -> bool {
@@ -906,6 +917,7 @@ impl<'a> Interpreter<'a> {
             resolved_functions: None,
             resolved_comptime_functions: None,
             resolved_sessions: None,
+            resolved_session_displays: None,
             resolved_protocols: None,
             resolved_protocol_transitions: None,
             resolved_protocol_payloads: None,
