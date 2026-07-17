@@ -2023,6 +2023,33 @@ func main() -> i32 { 0 }
         assert!(flow.states.contains_key("Active"));
     }
 
+
+    #[test]
+    fn consumers_install_persistent_field_directories() {
+        let file = parse(
+            r#"
+flow ResilientService {
+    persistent state Config { max_retries: i32, timeout_ms: i64 }
+    state Active { request_id: i32 }
+    transition run(Active) -> Active { do { return Active { request_id: 1 } } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = CheckedProgram::from_checked_file(&file).expect("ir");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        let fields = interp
+            .resolved_persistent_fields("ResilientService")
+            .expect("persistent fields");
+        assert!(fields.iter().any(|f| f == "max_retries"));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        let vfields = verifier
+            .checked_persistent_fields("ResilientService")
+            .expect("verifier persistent fields");
+        assert!(vfields.iter().any(|f| f == "timeout_ms"));
+    }
+
     #[test]
     fn consumers_install_type_and_extern_directories() {
         let file = parse(

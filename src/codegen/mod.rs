@@ -325,6 +325,8 @@ pub struct CodeGenerator<'ctx> {
     resolved_extern_funcs: Option<std::collections::HashSet<String>>,
     /// Flow mailbox depths from CheckedProgram.
     resolved_mailbox_depths: Option<HashMap<String, usize>>,
+    /// Persistent field sets from CheckedProgram.
+    resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
     /// v0.29.24: process spawn quota from first @max_children(N) (None = unlimited).
     max_children: Option<usize>,
 }
@@ -440,6 +442,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_type_kinds: None,
             resolved_extern_funcs: None,
             resolved_mailbox_depths: None,
+            resolved_persistent_fields: None,
             max_children: None,
         }
     }

@@ -155,6 +155,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_extern_funcs: Option<std::collections::HashSet<String>>,
     /// Flow mailbox depth limits materialised from CheckedProgram: flow -> depth.
     pub(in crate::interp) resolved_mailbox_depths: Option<HashMap<String, usize>>,
+    /// Persistent field sets materialised from CheckedProgram: flow -> fields.
+    pub(in crate::interp) resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
     /// v0.29.24: process-wide max children (None = unlimited).
     /// Taken from first `@max_children(N)` flow annotation in the file.
     max_children: Option<usize>,
@@ -303,6 +305,13 @@ impl<'a> Interpreter<'a> {
             }
         }
         interp.resolved_mailbox_depths = Some(mailbox_depths);
+        let mut persistent_fields = HashMap::new();
+        for flow in program.flows().values() {
+            if !flow.persistent_fields.is_empty() {
+                persistent_fields.insert(flow.id.0.clone(), flow.persistent_fields.clone());
+            }
+        }
+        interp.resolved_persistent_fields = Some(persistent_fields);
         interp
     }
 
@@ -387,6 +396,22 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn resolved_max_children(&self) -> Option<usize> {
         self.max_children
+    }
+
+    pub(crate) fn resolved_persistent_fields(&self, flow_name: &str) -> Option<Vec<String>> {
+        let Some(map) = self.resolved_persistent_fields.as_ref() else {
+            return None;
+        };
+        if let Some(fields) = map.get(flow_name) {
+            return Some(fields.clone());
+        }
+        map.iter().find_map(|(qualified, fields)| {
+            qualified
+                .rsplit("::")
+                .next()
+                .filter(|bare| *bare == flow_name)
+                .map(|_| fields.clone())
+        })
     }
 
     pub(crate) fn resolved_mailbox_depth(&self, flow_name: &str) -> Option<usize> {
@@ -515,6 +540,7 @@ impl<'a> Interpreter<'a> {
             resolved_type_kinds: None,
             resolved_extern_funcs: None,
             resolved_mailbox_depths: None,
+            resolved_persistent_fields: None,
             max_children,
             spawn_count: 0,
             actor_spawn_counts: std::collections::HashMap::new(),

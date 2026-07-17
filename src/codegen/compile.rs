@@ -114,6 +114,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.resolved_mailbox_depths = Some(mailbox_depths);
+        let mut persistent_fields = std::collections::HashMap::new();
+        for flow in program.flows().values() {
+            if !flow.persistent_fields.is_empty() {
+                persistent_fields.insert(flow.id.0.clone(), flow.persistent_fields.clone());
+            }
+        }
+        self.resolved_persistent_fields = Some(persistent_fields);
         self.compile_file(program.file()).map_err(|error| {
             let mut diagnostic = error.to_diagnostic();
             if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {

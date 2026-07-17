@@ -429,6 +429,8 @@ pub struct VerifierCtx {
     pub(crate) checked_mailbox_depths: std::collections::HashMap<String, usize>,
     /// Flow max_children materialised from CheckedProgram.
     pub(crate) checked_max_children: Option<usize>,
+    /// Persistent field sets materialised from CheckedProgram.
+    pub(crate) checked_persistent_fields: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// Backward-compatible verifier with its own solver session.
@@ -514,6 +516,13 @@ impl Verifier {
         }
         self.ctx.checked_mailbox_depths = mailbox_depths;
         self.ctx.checked_max_children = program.flows().values().find_map(|flow| flow.max_children);
+        let mut persistent_fields = std::collections::HashMap::new();
+        for flow in program.flows().values() {
+            if !flow.persistent_fields.is_empty() {
+                persistent_fields.insert(flow.id.0.clone(), flow.persistent_fields.clone());
+            }
+        }
+        self.ctx.checked_persistent_fields = persistent_fields;
         self.verify_file(program.file())
     }
 
@@ -569,6 +578,22 @@ impl Verifier {
 
     pub(crate) fn checked_max_children(&self) -> Option<usize> {
         self.ctx.checked_max_children
+    }
+
+    pub(crate) fn checked_persistent_fields(&self, flow_name: &str) -> Option<Vec<String>> {
+        self.ctx
+            .checked_persistent_fields
+            .get(flow_name)
+            .cloned()
+            .or_else(|| {
+                self.ctx.checked_persistent_fields.iter().find_map(|(qualified, fields)| {
+                    qualified
+                        .rsplit("::")
+                        .next()
+                        .filter(|bare| *bare == flow_name)
+                        .map(|_| fields.clone())
+                })
+            })
     }
 
     pub(crate) fn verify_file(&mut self, file: &File) -> Vec<VerificationResult> {
