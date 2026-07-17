@@ -314,6 +314,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.resolved_mailbox_depths = Some(mailbox_depths);
+        let mut flow_state_payloads = std::collections::HashMap::new();
+        for flow in program.flows().values() {
+            for (state_name, state) in &flow.states {
+                if !state.payload.is_empty() {
+                    flow_state_payloads.insert(
+                        format!("{}.{}", flow.id.0, state_name),
+                        state
+                            .payload
+                            .iter()
+                            .map(|(name, ty)| (name.clone(), crate::core::fmt_type(ty)))
+                            .collect(),
+                    );
+                }
+            }
+        }
+        self.resolved_flow_state_payloads = Some(flow_state_payloads);
         let mut persistent_fields = std::collections::HashMap::new();
         for flow in program.flows().values() {
             if !flow.persistent_fields.is_empty() {
