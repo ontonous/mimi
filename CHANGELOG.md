@@ -54,6 +54,7 @@
 - transition event parameter name/type 目录安装到 consumers。
 - Flow state payload 字段目录安装到 consumers。
 - Actor field 目录（name/type/mut）安装到 consumers。
+- backend_requirements 与 node_meta 计数安装到 consumers。
 - ResolvedFlow 与 consumers 安装 `impl Protocol` 列表。
 - ResolvedTransition 记录 is_fallback/is_ffi_pinned，并安装到 interpreter/codegen/verifier 目录。
 - interpreter 暴露 resolved transition targets 查询。

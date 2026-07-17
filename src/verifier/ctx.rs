@@ -423,6 +423,8 @@ pub struct VerifierCtx {
     pub(crate) checked_ownership_owners: std::collections::HashSet<String>,
     pub(crate) checked_ownership_summaries:
         std::collections::HashMap<String, (usize, usize, usize, usize, usize, bool)>,
+    pub(crate) checked_backend_requirements: Vec<(String, String)>,
+    pub(crate) checked_node_meta_count: usize,
     /// Type definition names materialised from CheckedProgram.
     pub(crate) checked_type_defs: std::collections::HashSet<String>,
     pub(crate) checked_type_fields: std::collections::HashMap<String, Vec<(String, String)>>,
@@ -588,6 +590,13 @@ impl Verifier {
             );
         }
         self.ctx.checked_ownership_summaries = ownership_summaries;
+
+        self.ctx.checked_backend_requirements = program
+            .backend_requirements()
+            .iter()
+            .map(|req| (req.capability.to_string(), req.flow.0.clone()))
+            .collect();
+        self.ctx.checked_node_meta_count = program.node_meta().len();
         self.ctx.checked_type_defs = program
             .type_defs()
             .values()
@@ -904,6 +913,21 @@ impl Verifier {
 
     pub(crate) fn has_checked_ownership_owner(&self, owner: &str) -> bool {
         self.ctx.checked_ownership_owners.contains(owner)
+    }
+
+    pub(crate) fn checked_backend_requirements(&self) -> &[(String, String)] {
+        &self.ctx.checked_backend_requirements
+    }
+
+    pub(crate) fn checked_node_meta_count(&self) -> usize {
+        self.ctx.checked_node_meta_count
+    }
+
+    pub(crate) fn requires_checked_capability(&self, capability: &str) -> bool {
+        self.ctx
+            .checked_backend_requirements
+            .iter()
+            .any(|(cap, _)| cap == capability)
     }
 
     pub(crate) fn checked_ownership_summary(
