@@ -228,6 +228,7 @@ pub fn subst_type_params(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
     // A4: same_type is now a pure structural equality check.
     // Escape hatches (Any, _, unknown, Infer) have been removed from same_type
@@ -331,6 +332,13 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
         (Type::ForAll(p1, b1), Type::ForAll(p2, b2)) => p1 == p2 && same_type(b1, b2),
         _ => false,
     }
+}
+
+/// Side-effect-free compatibility query backed by the canonical checked
+/// unification semantics.
+pub(crate) fn types_compatible(a: &Type, b: &Type) -> bool {
+    let mut table = crate::core::unification::UnificationTable::new();
+    table.unify(a, b).is_ok()
 }
 
 /// Check if a concrete type can be coerced to a dyn Trait type (e.g., Circle → dyn Drawable)
@@ -476,7 +484,7 @@ pub(crate) fn common_numeric_type(a: &Type, b: &Type) -> Option<Type> {
     if !is_numeric(a) || !is_numeric(b) {
         return None;
     }
-    if same_type(a, b) {
+    if types_compatible(a, b) {
         return Some(a.clone());
     }
     if is_float(a) || is_float(b) {

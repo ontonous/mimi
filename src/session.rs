@@ -13,10 +13,7 @@
 use crate::ast::{SessionType, Type};
 use std::collections::HashMap;
 
-// H17-fix: removed incomplete same_type copy — now delegates to the
-// canonical implementation in core::helpers which handles all Type
-// variants including Any, _, unknown, Ref, RefMut, Func, ForAll, etc.
-use crate::core::helpers::same_type;
+use crate::core::helpers::types_compatible;
 
 fn fmt_type(ty: &Type) -> String {
     match ty {
@@ -94,10 +91,10 @@ pub fn session_eq(a: &SessionType, b: &SessionType) -> bool {
     match (a, b) {
         (SessionType::End, SessionType::End) => true,
         (SessionType::Send(ta, ca), SessionType::Send(tb, cb)) => {
-            same_type(ta, tb) && session_eq(ca, cb)
+            types_compatible(ta, tb) && session_eq(ca, cb)
         }
         (SessionType::Recv(ta, ca), SessionType::Recv(tb, cb)) => {
-            same_type(ta, tb) && session_eq(ca, cb)
+            types_compatible(ta, tb) && session_eq(ca, cb)
         }
         (SessionType::Name(a), SessionType::Name(b)) => a == b,
         (SessionType::Dual(a), SessionType::Dual(b)) => session_eq(a, b),
