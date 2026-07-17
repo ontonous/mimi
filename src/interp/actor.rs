@@ -83,8 +83,10 @@ impl<'a> Interpreter<'a> {
             .actor_spawn_counts
             .entry(actor_name.to_string())
             .or_insert(0) += 1;
-        // v0.29.31: auto-apply @mailbox(depth=N) from flow annotations.
-        if let Some(flow) = self.flow_index.get(actor_name) {
+        // Prefer CheckedProgram mailbox depth; fall back to Surface FlowDef annotations.
+        if let Some(depth) = self.resolved_mailbox_depth(actor_name) {
+            handle.set_mailbox_depth_limit(depth);
+        } else if let Some(flow) = self.flow_index.get(actor_name) {
             for ann in &flow.annotations {
                 if let crate::ast::FlowAnnotation::MailboxDepth(d) = ann {
                     handle.set_mailbox_depth_limit(*d);

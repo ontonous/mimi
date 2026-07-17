@@ -107,6 +107,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some(max_children) = program.flows().values().find_map(|flow| flow.max_children) {
             self.max_children = Some(max_children);
         }
+        let mut mailbox_depths = std::collections::HashMap::new();
+        for flow in program.flows().values() {
+            if let Some(depth) = flow.mailbox_depth {
+                mailbox_depths.insert(flow.id.0.clone(), depth);
+            }
+        }
+        self.resolved_mailbox_depths = Some(mailbox_depths);
         self.compile_file(program.file()).map_err(|error| {
             let mut diagnostic = error.to_diagnostic();
             if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {

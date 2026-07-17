@@ -525,24 +525,31 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let handle_val = call_try_basic_value(&handle).unwrap_or(i8_ptr.const_null().into());
 
-        // v0.29.31: auto-apply @mailbox(depth=N) from flow annotations.
-        if let Some(flow) = self.flow_defs.get(&actor.name) {
-            for ann in &flow.annotations {
-                if let crate::ast::FlowAnnotation::MailboxDepth(d) = ann {
-                    if let Ok(set_fn) = self.get_runtime_fn("mimi_actor_set_mailbox_depth") {
-                        let depth_val = self.context.i64_type().const_int(*d as u64, false);
-                        let hv = match handle_val {
-                            BasicValueEnum::PointerValue(pv) => pv,
-                            _ => i8_ptr.const_null(),
-                        };
-                        let _ = self.build_call(
-                            set_fn,
-                            &[hv.into(), depth_val.into()],
-                            "set_mailbox_depth",
-                        );
-                    }
-                    break;
-                }
+        // Prefer CheckedProgram mailbox depth; fall back to Surface FlowDef annotations.
+        let mailbox_depth = self
+            .resolved_mailbox_depths
+            .as_ref()
+            .and_then(|map| map.get(&actor.name).copied())
+            .or_else(|| {
+                self.flow_defs.get(&actor.name).and_then(|flow| {
+                    flow.annotations.iter().find_map(|ann| match ann {
+                        crate::ast::FlowAnnotation::MailboxDepth(d) => Some(*d),
+                        _ => None,
+                    })
+                })
+            });
+        if let Some(d) = mailbox_depth {
+            if let Ok(set_fn) = self.get_runtime_fn("mimi_actor_set_mailbox_depth") {
+                let depth_val = self.context.i64_type().const_int(d as u64, false);
+                let hv = match handle_val {
+                    BasicValueEnum::PointerValue(pv) => pv,
+                    _ => i8_ptr.const_null(),
+                };
+                let _ = self.build_call(
+                    set_fn,
+                    &[hv.into(), depth_val.into()],
+                    "set_mailbox_depth",
+                );
             }
         }
 

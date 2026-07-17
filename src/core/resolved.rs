@@ -1927,6 +1927,25 @@ func main() -> i32 { 0 }
         assert_eq!(interp.resolved_max_children(), Some(4));
     }
 
+
+    #[test]
+    fn interpreter_from_checked_installs_mailbox_depths() {
+        let file = parse(
+            r#"
+flow Worker {
+    @mailbox(depth = 64)
+    state Idle
+    transition tick(Idle) -> Idle { do { return Idle {} } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert_eq!(interp.resolved_mailbox_depth("Worker"), Some(64));
+        assert_eq!(program.flow("Worker").unwrap().mailbox_depth, Some(64));
+    }
+
     #[test]
     fn consumers_install_type_and_extern_directories() {
         let file = parse(
