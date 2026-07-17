@@ -413,6 +413,8 @@ pub struct VerifierCtx {
     pub(crate) checked_capabilities: std::collections::HashSet<String>,
     /// Session names materialised from CheckedProgram.
     pub(crate) checked_sessions: std::collections::HashSet<String>,
+    /// Ownership ledger owners materialised from CheckedProgram.
+    pub(crate) checked_ownership_owners: std::collections::HashSet<String>,
 }
 
 /// Backward-compatible verifier with its own solver session.
@@ -458,6 +460,11 @@ impl Verifier {
             .values()
             .map(|session| session.qualified_name.clone())
             .collect();
+        self.ctx.checked_ownership_owners = program
+            .ownership_ledgers()
+            .keys()
+            .map(|owner| owner.0.clone())
+            .collect();
         self.verify_file(program.file())
     }
 
@@ -473,6 +480,10 @@ impl Verifier {
 
     pub(crate) fn has_checked_session(&self, name: &str) -> bool {
         self.ctx.checked_sessions.contains(name)
+    }
+
+    pub(crate) fn has_checked_ownership_owner(&self, owner: &str) -> bool {
+        self.ctx.checked_ownership_owners.contains(owner)
     }
 
     pub(crate) fn verify_file(&mut self, file: &File) -> Vec<VerificationResult> {

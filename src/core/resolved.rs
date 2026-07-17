@@ -1710,6 +1710,27 @@ func main() -> i32 { 0 }
         assert!(impl_methods.iter().any(|m| m == "close"));
     }
 
+
+    #[test]
+    fn consumers_install_ownership_ledger_owners() {
+        let file = parse(
+            r#"
+cap File
+func close(f: cap File) -> i32 { drop(f); 0 }
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        assert!(program
+            .ownership_ledger(&crate::core::NodeId("function:close".into()))
+            .is_some());
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert!(interp.has_resolved_ownership_owner("function:close"));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert!(verifier.has_checked_ownership_owner("function:close"));
+    }
+
     #[test]
     fn interpreter_from_checked_installs_capability_and_constant_directories() {
         let file = parse(

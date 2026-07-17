@@ -147,6 +147,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_traits: Option<HashMap<String, Vec<String>>>,
     /// Impl directories materialised from CheckedProgram: "Trait:for:Type" -> methods.
     pub(in crate::interp) resolved_impls: Option<HashMap<String, Vec<String>>>,
+    /// Ownership ledger owners materialised from CheckedProgram.
+    pub(in crate::interp) resolved_ownership_owners: Option<std::collections::HashSet<String>>,
     /// v0.29.24: process-wide max children (None = unlimited).
     /// Taken from first `@max_children(N)` flow annotation in the file.
     max_children: Option<usize>,
@@ -257,6 +259,13 @@ impl<'a> Interpreter<'a> {
             impls.insert(impl_def.qualified_name.clone(), impl_def.methods.clone());
         }
         interp.resolved_impls = Some(impls);
+        interp.resolved_ownership_owners = Some(
+            program
+                .ownership_ledgers()
+                .keys()
+                .map(|owner| owner.0.clone())
+                .collect(),
+        );
         interp
     }
 
@@ -319,6 +328,12 @@ impl<'a> Interpreter<'a> {
         self.resolved_impls
             .as_ref()
             .and_then(|map| map.get(&key).cloned())
+    }
+
+    pub(crate) fn has_resolved_ownership_owner(&self, owner: &str) -> bool {
+        self.resolved_ownership_owners
+            .as_ref()
+            .is_some_and(|set| set.contains(owner))
     }
 
     pub(crate) fn new(file: &'a File) -> Self {
@@ -426,6 +441,7 @@ impl<'a> Interpreter<'a> {
             resolved_constants: None,
             resolved_traits: None,
             resolved_impls: None,
+            resolved_ownership_owners: None,
             max_children,
             spawn_count: 0,
             actor_spawn_counts: std::collections::HashMap::new(),

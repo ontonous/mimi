@@ -68,6 +68,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map(|constant| constant.qualified_name.clone())
                 .collect(),
         );
+        let mut traits = std::collections::HashMap::new();
+        for trait_def in program.traits().values() {
+            traits.insert(trait_def.qualified_name.clone(), trait_def.methods.clone());
+        }
+        self.resolved_traits = Some(traits);
+        let mut impls = std::collections::HashMap::new();
+        for impl_def in program.impls().values() {
+            impls.insert(impl_def.qualified_name.clone(), impl_def.methods.clone());
+        }
+        self.resolved_impls = Some(impls);
+        self.resolved_ownership_owners = Some(
+            program
+                .ownership_ledgers()
+                .keys()
+                .map(|owner| owner.0.clone())
+                .collect(),
+        );
         self.compile_file(program.file()).map_err(|error| {
             let mut diagnostic = error.to_diagnostic();
             if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {
