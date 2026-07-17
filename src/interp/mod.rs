@@ -135,6 +135,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_fallback_transitions: Option<std::collections::HashSet<(String, String, String)>>,
     /// FFI-pinned system transitions from CheckedProgram.
     pub(in crate::interp) resolved_ffi_pinned_transitions: Option<std::collections::HashSet<(String, String, String)>>,
+    /// Transition event parameter arity from CheckedProgram.
+    pub(in crate::interp) resolved_transition_param_arity: Option<HashMap<(String, String, String), usize>>,
     /// Function signatures from CheckedProgram: qualified_name -> (param_count, ret_fmt, effects).
     pub(in crate::interp) resolved_functions: Option<HashMap<String, (usize, String, Vec<String>)>>,
     /// Session type names materialised from CheckedProgram.
@@ -215,6 +217,7 @@ impl<'a> Interpreter<'a> {
         let mut resolved = HashMap::new();
         let mut fallbacks = std::collections::HashSet::new();
         let mut pinned = std::collections::HashSet::new();
+        let mut param_arity = HashMap::new();
         for (id, transition) in program.transitions() {
             let key = (
                 id.flow.0.clone(),
@@ -232,11 +235,13 @@ impl<'a> Interpreter<'a> {
             if transition.is_ffi_pinned {
                 pinned.insert(key.clone());
             }
+            param_arity.insert(key.clone(), transition.params.len());
             resolved.insert(key, targets);
         }
         interp.resolved_transitions = Some(resolved);
         interp.resolved_fallback_transitions = Some(fallbacks);
         interp.resolved_ffi_pinned_transitions = Some(pinned);
+        interp.resolved_transition_param_arity = Some(param_arity);
         let mut functions = HashMap::new();
         for function in program.functions().values() {
             functions.insert(
@@ -468,6 +473,18 @@ impl<'a> Interpreter<'a> {
         })
     }
 
+    pub(crate) fn resolved_transition_param_arity(
+        &self,
+        flow: &str,
+        event: &str,
+        source: &str,
+    ) -> Option<usize> {
+        self.resolved_transition_param_arity.as_ref().and_then(|map| {
+            map.get(&(flow.to_string(), event.to_string(), source.to_string()))
+                .copied()
+        })
+    }
+
     pub(crate) fn resolved_max_children(&self) -> Option<usize> {
         self.max_children
     }
@@ -642,6 +659,7 @@ impl<'a> Interpreter<'a> {
             resolved_transitions: None,
             resolved_fallback_transitions: None,
             resolved_ffi_pinned_transitions: None,
+            resolved_transition_param_arity: None,
             resolved_functions: None,
             resolved_sessions: None,
             resolved_protocols: None,

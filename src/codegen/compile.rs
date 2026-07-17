@@ -18,6 +18,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut resolved = std::collections::HashMap::new();
         let mut fallbacks = std::collections::HashSet::new();
         let mut pinned = std::collections::HashSet::new();
+        let mut param_arity = std::collections::HashMap::new();
         for (id, transition) in program.transitions() {
             let key = (
                 id.flow.0.clone(),
@@ -35,11 +36,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             if transition.is_ffi_pinned {
                 pinned.insert(key.clone());
             }
+            param_arity.insert(key.clone(), transition.params.len());
             resolved.insert(key, targets);
         }
         self.resolved_transitions = Some(resolved);
         self.resolved_fallback_transitions = Some(fallbacks);
         self.resolved_ffi_pinned_transitions = Some(pinned);
+        self.resolved_transition_param_arity = Some(param_arity);
         let mut arity = std::collections::HashMap::new();
         for function in program.functions().values() {
             arity.insert(function.qualified_name.clone(), function.params.len());

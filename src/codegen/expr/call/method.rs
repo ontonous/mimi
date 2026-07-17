@@ -351,6 +351,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     flow_name, transition_name, from_type
                 )));
             }
+            if !from_type.is_empty() {
+                if let Some(arity) =
+                    self.resolved_transition_param_arity(flow_name, transition_name, &from_type)
+                {
+                    // args[0] is from-state payload; remaining are event params.
+                    let event_argc = args.len().saturating_sub(1);
+                    if event_argc != arity {
+                        return Err(CompileError::Generic(format!(
+                            "flow transition '{}::{}' expects {} event argument(s), got {} (checked directory)",
+                            flow_name, transition_name, arity, event_argc
+                        )));
+                    }
+                }
+            }
         }
         let candidates: Vec<&TransitionDef> = flow
             .transitions

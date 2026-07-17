@@ -95,6 +95,7 @@ pub struct ResolvedTransition {
     pub node_id: NodeId,
     pub id: TransitionId,
     pub targets: Vec<StateId>,
+    pub params: Vec<(String, Type)>,
     pub is_fallback: bool,
     pub is_ffi_pinned: bool,
     pub origin: Origin,
@@ -1386,6 +1387,29 @@ fn collect_flow(
                     name: name.clone(),
                 })
                 .collect(),
+            params: {
+                let params = transition
+                    .params
+                    .iter()
+                    .map(|param| (param.name.clone(), param.ty.clone()))
+                    .collect::<Vec<_>>();
+                for (name, ty) in &params {
+                    if contains_unresolved_type(ty) {
+                        errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: unresolved or erased type '{}' in transition '{}::{}({})' parameter '{}'",
+                                crate::core::fmt_type(ty),
+                                qualified_name,
+                                transition.name,
+                                transition.from_state,
+                                name
+                            ),
+                            span,
+                        ));
+                    }
+                }
+                params
+            },
             is_fallback: transition.is_fallback,
             is_ffi_pinned: transition.is_ffi_pinned,
             origin: if transition.is_ffi_pinned {
@@ -2260,6 +2284,56 @@ func main() -> i32 { 0 }
             .expect("targets");
         assert_eq!(targets, vec!["Open".to_string()]);
         assert!(!codegen.is_resolved_fallback_transition("Door", "open", "Closed"));
+    }
+
+
+    #[test]
+    fn resolved_transition_records_event_parameters() {
+        let file = parse(
+            r#"
+flow Door {
+    state Closed
+    state Open
+    transition open(Closed, code: i32) -> Open { do { return Open {} } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let open = program
+            .transition("Door", "open", "Closed")
+            .expect("open");
+        assert_eq!(open.params.len(), 1);
+        assert_eq!(open.params[0].0, "code");
+        assert!(matches!(&open.params[0].1, Type::Name(n, _) if n == "i32"));
+    }
+
+
+    #[test]
+    fn consumers_use_resolved_transition_param_arity() {
+        let file = parse(
+            r#"
+flow Door {
+    state Closed
+    state Open
+    transition open(Closed, code: i32) -> Open { do { return Open {} } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert_eq!(
+            interp.resolved_transition_param_arity("Door", "open", "Closed"),
+            Some(1)
+        );
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "arity");
+        codegen.compile_checked(&program).expect("compile");
+        assert_eq!(
+            codegen.resolved_transition_param_arity("Door", "open", "Closed"),
+            Some(1)
+        );
     }
 
     #[test]
