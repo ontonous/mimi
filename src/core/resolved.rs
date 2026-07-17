@@ -2238,6 +2238,30 @@ func main() -> i32 { 0 }
             .is_none());
     }
 
+
+    #[test]
+    fn codegen_exposes_resolved_transition_targets() {
+        let file = parse(
+            r#"
+flow Door {
+    state Closed
+    state Open
+    transition open(Closed) -> Open { do { return Open {} } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "targets");
+        codegen.compile_checked(&program).expect("compile");
+        let targets = codegen
+            .resolved_transition_targets("Door", "open", "Closed")
+            .expect("targets");
+        assert_eq!(targets, vec!["Open".to_string()]);
+        assert!(!codegen.is_resolved_fallback_transition("Door", "open", "Closed"));
+    }
+
     #[test]
     fn consumers_install_type_and_extern_directories() {
         let file = parse(

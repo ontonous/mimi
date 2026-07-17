@@ -457,7 +457,31 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    pub fn gep(&self) -> gep::CheckedGepBuilder<'_, 'ctx> {
+    
+    pub(crate) fn resolved_transition_targets(
+        &self,
+        flow: &str,
+        event: &str,
+        source: &str,
+    ) -> Option<Vec<String>> {
+        self.resolved_transitions.as_ref().and_then(|map| {
+            map.get(&(flow.to_string(), event.to_string(), source.to_string()))
+                .cloned()
+        })
+    }
+
+    pub(crate) fn is_resolved_fallback_transition(
+        &self,
+        flow: &str,
+        event: &str,
+        source: &str,
+    ) -> bool {
+        self.resolved_fallback_transitions.as_ref().is_some_and(|set| {
+            set.contains(&(flow.to_string(), event.to_string(), source.to_string()))
+        })
+    }
+
+pub fn gep(&self) -> gep::CheckedGepBuilder<'_, 'ctx> {
         gep::CheckedGepBuilder::new(&self.builder)
     }
 
