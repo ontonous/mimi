@@ -3667,6 +3667,17 @@ func main() -> i32 {
         assert_eq!(interp.resolved_call_return_type("helper").as_deref(), Some("i32"));
         assert_eq!(codegen.resolved_call_return_type("helper").as_deref(), Some("i32"));
         assert_eq!(verifier.checked_call_return_type("helper").as_deref(), Some("i32"));
+        let main_calls = interp
+            .resolved_call_sites_for_owner("function:main")
+            .expect("main calls");
+        assert!(main_calls.iter().any(|(c, argc, kind)| c == "helper" && *argc == 1 && kind == "function"));
+        assert!(main_calls.iter().any(|(c, argc, kind)| c == "c_abs" && *argc == 1 && kind == "extern"));
+        assert!(verifier
+            .checked_call_sites_for_owner("function:main")
+            .is_some_and(|calls| calls.iter().any(|(c, _, _)| c == "helper")));
+        assert!(codegen
+            .resolved_call_sites_for_owner("function:main")
+            .is_some_and(|calls| calls.iter().any(|(c, _, kind)| c == "c_abs" && kind == "extern")));
     }
 
 
