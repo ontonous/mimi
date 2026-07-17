@@ -256,6 +256,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let ordered = self.reorder_named_args(name, args)?;
+        if let Some(arity_map) = self.resolved_function_arity.as_ref() {
+            if let Some(arity) = arity_map.get(name) {
+                let has_defaults = self
+                    .func_defs
+                    .get(name)
+                    .is_some_and(|f| f.params.iter().any(|p| p.default_value.is_some()));
+                if !has_defaults && ordered.len() != *arity {
+                    return Err(CompileError::Generic(format!(
+                        "function '{}' expects {} arguments, got {} (checked directory)",
+                        name,
+                        arity,
+                        ordered.len()
+                    )));
+                }
+            }
+        }
         let mut compiled_args = self.compile_arg_values(&ordered, vars)?;
         // Use ordered exprs for list-mutation/borrow paths below.
         let args = ordered.as_slice();
