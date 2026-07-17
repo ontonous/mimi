@@ -316,13 +316,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         match ty {
             Type::Name(n, args) if n == "List" => {
                 let list_struct_ty = self.list_struct_type();
-                let alloca = self.build_alloca(BasicTypeEnum::StructType(list_struct_ty), "exp_list")?;
+                let alloca =
+                    self.build_alloca(BasicTypeEnum::StructType(list_struct_ty), "exp_list")?;
                 match internal_val {
                     BasicValueEnum::StructValue(sv) => self.build_store(alloca, sv)?,
                     BasicValueEnum::PointerValue(pv) => {
                         let loaded = self
                             .builder
-                            .build_load(BasicTypeEnum::StructType(list_struct_ty), pv, "exp_list_ld")
+                            .build_load(
+                                BasicTypeEnum::StructType(list_struct_ty),
+                                pv,
+                                "exp_list_ld",
+                            )
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?
                             .into_struct_value();
                         self.build_store(alloca, loaded)?;

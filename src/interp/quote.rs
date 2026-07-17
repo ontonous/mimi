@@ -250,11 +250,7 @@ impl<'a> Interpreter<'a> {
                     .transpose()?;
                 Ok(QuotedAst::If(q_cond, q_then, q_else))
             }
-            Expr::Lambda {
-                params,
-                ret,
-                body,
-            } => {
+            Expr::Lambda { params, ret, body } => {
                 // C1: preserve lambda params and return type in the quoted AST.
                 let quoted_body = self.quote_block(body)?;
                 Ok(QuotedAst::Lambda {

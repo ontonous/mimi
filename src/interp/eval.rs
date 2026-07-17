@@ -620,8 +620,7 @@ impl<'a> Interpreter<'a> {
                 } else {
                     // C3: even without a from-payload, try to restore persistent
                     // data from the tx snapshot so it is not silently lost.
-                    let restored =
-                        self.abort_persistent_tx_restore_or_empty(&flow.name, flow);
+                    let restored = self.abort_persistent_tx_restore_or_empty(&flow.name, flow);
                     if let Value::Record(_, fields) = &restored {
                         for name in &flow.persistent_fields {
                             if let Some(v) = fields.get(name) {
@@ -816,11 +815,7 @@ impl<'a> Interpreter<'a> {
     /// C3: Like `abort_persistent_tx_restore` but when no `from_payload` is
     /// available — constructs an empty record and populates it from the tx
     /// snapshot metadata so persistent data is not silently lost.
-    fn abort_persistent_tx_restore_or_empty(
-        &mut self,
-        flow_name: &str,
-        flow: &FlowDef,
-    ) -> Value {
+    fn abort_persistent_tx_restore_or_empty(&mut self, flow_name: &str, flow: &FlowDef) -> Value {
         let tx = self.flow_tx.remove(flow_name);
         let Some(tx) = tx else {
             return Value::Unit;
@@ -1087,25 +1082,28 @@ fn writeback_delegate_result(
                             break;
                         }
                     }
-                    found.ok_or_else(|| InterpError::new("self not in scope for delegate writeback"))?
+                    found.ok_or_else(|| {
+                        InterpError::new("self not in scope for delegate writeback")
+                    })?
                 } else {
                     interp.eval_expr(cur)?
                 };
                 // Walk nested records, cloning intermediates so we can rebuild.
                 let mut path_values: Vec<Value> = Vec::with_capacity(fields.len());
                 path_values.push(root.clone());
-                for (i, field) in fields.iter().enumerate().take(fields.len().saturating_sub(1)) {
+                for (i, field) in fields
+                    .iter()
+                    .enumerate()
+                    .take(fields.len().saturating_sub(1))
+                {
                     let parent = &path_values[i];
                     let child = match parent {
-                        Value::Record(_, fmap) => fmap
-                            .get(*field)
-                            .cloned()
-                            .ok_or_else(|| {
-                                InterpError::new(format!(
-                                    "delegate writeback: missing field '{}'",
-                                    field
-                                ))
-                            })?,
+                        Value::Record(_, fmap) => fmap.get(*field).cloned().ok_or_else(|| {
+                            InterpError::new(format!(
+                                "delegate writeback: missing field '{}'",
+                                field
+                            ))
+                        })?,
                         _ => {
                             return Err(InterpError::new(format!(
                                 "delegate writeback: '{}' is not a record",

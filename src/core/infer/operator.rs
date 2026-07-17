@@ -1,9 +1,7 @@
 use crate::ast::*;
 use crate::core::borrow::BorrowState;
 use crate::core::checker::Checker;
-use crate::core::helpers::{
-    common_numeric_type, fmt_type, is_bool, is_int, is_numeric, is_string,
-};
+use crate::core::helpers::{common_numeric_type, fmt_type, is_bool, is_int, is_numeric, is_string};
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use std::collections::HashMap;

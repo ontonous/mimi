@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::codegen::{CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
-use inkwell::types::{BasicTypeEnum};
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
 
@@ -212,7 +212,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => Err("list elements must be scalar or struct types for now".into()),
         }
     }
-
 
     pub(in crate::codegen) fn build_list_struct(
         &self,

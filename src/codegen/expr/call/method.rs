@@ -331,8 +331,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get(flow_name)
             .ok_or_else(|| CompileError::Generic(format!("unknown flow '{}'", flow_name)))?;
 
-        // Find matching transition by name. Prefer the one whose from_state
-        // matches the first arg's inferred type when multiple share a name.
+        // The checker requires an exact source-state overload. Codegen must
+        // never recover a failed resolution by selecting another candidate.
         let from_type = args
             .first()
             .map(|a| self.infer_object_type(a, vars))
@@ -352,12 +352,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         let t = candidates
             .iter()
             .find(|t| t.from_state == from_type)
-            .or_else(|| candidates.first())
             .copied()
             .ok_or_else(|| {
-                CompileError::Generic(format!(
-                    "flow '{}' has no transition '{}'",
-                    flow_name, transition_name
+                CompileError::TypeMismatch(format!(
+                    "flow transition '{}::{}' has no overload for source state {}",
+                    flow_name,
+                    transition_name,
+                    if from_type.is_empty() {
+                        "<unknown>"
+                    } else {
+                        &from_type
+                    }
                 ))
             })?;
 
@@ -1341,8 +1346,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let map_val = match &margs[1] {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
-                                            if let crate::ast::TypeDefKind::Alias(inner) =
-                                                &td.kind
+                                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
                                             {
                                                 inner.clone()
                                             } else {
@@ -1425,8 +1429,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let opt_inner = match &oargs[0] {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
-                                            if let crate::ast::TypeDefKind::Alias(inner) =
-                                                &td.kind
+                                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
                                             {
                                                 inner.clone()
                                             } else {
@@ -1480,8 +1483,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let res_ok = match &rargs[0] {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
-                                            if let crate::ast::TypeDefKind::Alias(inner) =
-                                                &td.kind
+                                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
                                             {
                                                 inner.clone()
                                             } else {
@@ -1578,8 +1580,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let map_val = match &margs[1] {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
-                                            if let crate::ast::TypeDefKind::Alias(inner) =
-                                                &td.kind
+                                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
                                             {
                                                 inner.clone()
                                             } else {
@@ -1626,8 +1627,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let set_elem = match &margs[0] {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
-                                            if let crate::ast::TypeDefKind::Alias(inner) =
-                                                &td.kind
+                                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
                                             {
                                                 inner.clone()
                                             } else {
@@ -1845,12 +1845,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Type::Name(n, args) if n == "Map" => {
                         // Full Map from_json (product / Option|Result|List|Set of product).
                         let nested_ty = Type::Name("Map".into(), args.clone());
-                        let nested = self
-                            .compile_from_json_turbofish_with_ptr(&[nested_ty], elem_json)?;
+                        let nested =
+                            self.compile_from_json_turbofish_with_ptr(&[nested_ty], elem_json)?;
                         match nested {
                             BasicValueEnum::IntValue(iv) => iv,
-                            BasicValueEnum::PointerValue(pv) => self
-                                .build_ptr_to_int(pv, i64_ty, "list_map_ptr_i64")?,
+                            BasicValueEnum::PointerValue(pv) => {
+                                self.build_ptr_to_int(pv, i64_ty, "list_map_ptr_i64")?
+                            }
                             other => {
                                 return Err(CompileError::Generic(format!(
                                     "from_json List Map: unexpected {:?}",
@@ -1899,7 +1900,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         match opt_val {
                             BasicValueEnum::StructValue(sv) => {
                                 let sty = sv.get_type();
-                                let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                                let size =
+                                    self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
                                 let heap = self.malloc_or_abort(
                                     i64_ty.const_int(size, false),
                                     "list_opt_heap",
@@ -1927,15 +1929,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     Type::Name(n, args) if n == "Result" && !args.is_empty() => {
                         // List of Result: tagged {"Ok":v}/{"Err":v} or bare → Ok(T).
-                        let res_val = self.compile_from_json_result_value(
-                            &args[0],
-                            args.get(1),
-                            elem_json,
-                        )?;
+                        let res_val =
+                            self.compile_from_json_result_value(&args[0], args.get(1), elem_json)?;
                         match res_val {
                             BasicValueEnum::StructValue(sv) => {
                                 let sty = sv.get_type();
-                                let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                                let size =
+                                    self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
                                 let heap = self.malloc_or_abort(
                                     i64_ty.const_int(size, false),
                                     "list_res_heap",
@@ -1976,7 +1976,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         match opt_val {
                             BasicValueEnum::StructValue(sv) => {
                                 let sty = sv.get_type();
-                                let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                                let size =
+                                    self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
                                 let heap = self.malloc_or_abort(
                                     i64_ty.const_int(size, false),
                                     "list_opt_heap2",
@@ -2087,7 +2088,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         match nested {
                             BasicValueEnum::StructValue(sv) => {
                                 let sty = sv.get_type();
-                                let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                                let size =
+                                    self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
                                 let heap = self.malloc_or_abort(
                                     i64_ty.const_int(size, false),
                                     "list_tup_heap",
@@ -2227,7 +2229,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 // Map<string, List/Set/Map/Option/Result of product>.
                 if let Some(Type::Name(ln, largs)) = resolved_val.as_ref() {
-                    if (ln == "List" || ln == "Set" || ln == "Map" || ln == "Option" || ln == "Result")
+                    if (ln == "List"
+                        || ln == "Set"
+                        || ln == "Map"
+                        || ln == "Option"
+                        || ln == "Result")
                         && !largs.is_empty()
                     {
                         let product_ty = if ln == "Map" && largs.len() == 2 {
@@ -2486,12 +2492,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if let Type::Name(mapn, mapargs) = &margs[0] {
                                             if mapn == "Map" && mapargs.len() == 2 {
                                                 let map_val = match &mapargs[1] {
-                                                    Type::Name(an, aargs)
-                                                        if aargs.is_empty() =>
-                                                    {
-                                                        if let Some(td) =
-                                                            self.type_defs.get(an)
-                                                        {
+                                                    Type::Name(an, aargs) if aargs.is_empty() => {
+                                                        if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
                                                                 inner,
                                                             ) = &td.kind
@@ -2635,9 +2637,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             let result = self.build_call(
                                                 func,
                                                 &[
-                                                    BasicMetadataValueEnum::PointerValue(
-                                                        raw_ptr,
-                                                    ),
+                                                    BasicMetadataValueEnum::PointerValue(raw_ptr),
                                                     BasicMetadataValueEnum::IntValue(
                                                         self.context
                                                             .i64_type()
@@ -2778,9 +2778,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             let result = self.build_call(
                                                 func,
                                                 &[
-                                                    BasicMetadataValueEnum::PointerValue(
-                                                        raw_ptr,
-                                                    ),
+                                                    BasicMetadataValueEnum::PointerValue(raw_ptr),
                                                     BasicMetadataValueEnum::IntValue(
                                                         self.context
                                                             .i64_type()
@@ -2822,9 +2820,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             let result = self.build_call(
                                                 func,
                                                 &[
-                                                    BasicMetadataValueEnum::PointerValue(
-                                                        raw_ptr,
-                                                    ),
+                                                    BasicMetadataValueEnum::PointerValue(raw_ptr),
                                                     BasicMetadataValueEnum::IntValue(
                                                         self.context
                                                             .i64_type()
@@ -2866,9 +2862,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             let result = self.build_call(
                                                 func,
                                                 &[
-                                                    BasicMetadataValueEnum::PointerValue(
-                                                        raw_ptr,
-                                                    ),
+                                                    BasicMetadataValueEnum::PointerValue(raw_ptr),
                                                     BasicMetadataValueEnum::IntValue(
                                                         self.context
                                                             .i64_type()
@@ -2915,9 +2909,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             let result = self.build_call(
                                                 func,
                                                 &[
-                                                    BasicMetadataValueEnum::PointerValue(
-                                                        raw_ptr,
-                                                    ),
+                                                    BasicMetadataValueEnum::PointerValue(raw_ptr),
                                                     BasicMetadataValueEnum::IntValue(
                                                         self.context
                                                             .i64_type()
@@ -2943,12 +2935,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if let Type::Name(mapn, mapargs) = &margs[0] {
                                             if mapn == "Map" && mapargs.len() == 2 {
                                                 let map_val = match &mapargs[1] {
-                                                    Type::Name(an, aargs)
-                                                        if aargs.is_empty() =>
-                                                    {
-                                                        if let Some(td) =
-                                                            self.type_defs.get(an)
-                                                        {
+                                                    Type::Name(an, aargs) if aargs.is_empty() => {
+                                                        if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
                                                                 inner,
                                                             ) = &td.kind
@@ -3092,9 +3080,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             let result = self.build_call(
                                                 func,
                                                 &[
-                                                    BasicMetadataValueEnum::PointerValue(
-                                                        raw_ptr,
-                                                    ),
+                                                    BasicMetadataValueEnum::PointerValue(raw_ptr),
                                                     BasicMetadataValueEnum::IntValue(
                                                         self.context
                                                             .i64_type()
@@ -3566,8 +3552,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         Type::Name(an, aargs)
                                                             if aargs.is_empty() =>
                                                         {
-                                                            if let Some(td) =
-                                                                self.type_defs.get(an)
+                                                            if let Some(td) = self.type_defs.get(an)
                                                             {
                                                                 if let crate::ast::TypeDefKind::Alias(
                                                                     inner,
@@ -3620,8 +3605,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         Type::Name(an, aargs)
                                                             if aargs.is_empty() =>
                                                         {
-                                                            if let Some(td) =
-                                                                self.type_defs.get(an)
+                                                            if let Some(td) = self.type_defs.get(an)
                                                             {
                                                                 if let crate::ast::TypeDefKind::Alias(
                                                                     inner,
@@ -3674,8 +3658,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         Type::Name(an, aargs)
                                                             if aargs.is_empty() =>
                                                         {
-                                                            if let Some(td) =
-                                                                self.type_defs.get(an)
+                                                            if let Some(td) = self.type_defs.get(an)
                                                             {
                                                                 if let crate::ast::TypeDefKind::Alias(
                                                                     inner,
@@ -3728,8 +3711,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         Type::Name(an, aargs)
                                                             if aargs.is_empty() =>
                                                         {
-                                                            if let Some(td) =
-                                                                self.type_defs.get(an)
+                                                            if let Some(td) = self.type_defs.get(an)
                                                             {
                                                                 if let crate::ast::TypeDefKind::Alias(
                                                                     inner,
@@ -4447,8 +4429,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let res_ok = match &rargs[0] {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
-                                            if let crate::ast::TypeDefKind::Alias(inner) =
-                                                &td.kind
+                                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
                                             {
                                                 inner.clone()
                                             } else {
@@ -4470,9 +4451,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         &[
                                             BasicMetadataValueEnum::PointerValue(raw_ptr),
                                             BasicMetadataValueEnum::IntValue(
-                                                self.context
-                                                    .i64_type()
-                                                    .const_int(arity, false),
+                                                self.context.i64_type().const_int(arity, false),
                                             ),
                                         ],
                                         "set_from_json_option_result_product",
@@ -4529,8 +4508,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let opt_inner = match &oargs[0] {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
-                                            if let crate::ast::TypeDefKind::Alias(inner) =
-                                                &td.kind
+                                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
                                             {
                                                 inner.clone()
                                             } else {
@@ -4552,9 +4530,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         &[
                                             BasicMetadataValueEnum::PointerValue(raw_ptr),
                                             BasicMetadataValueEnum::IntValue(
-                                                self.context
-                                                    .i64_type()
-                                                    .const_int(arity, false),
+                                                self.context.i64_type().const_int(arity, false),
                                             ),
                                         ],
                                         "set_from_json_result_option_product",
@@ -4599,8 +4575,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let map_val = match &margs[1] {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
-                                            if let crate::ast::TypeDefKind::Alias(inner) =
-                                                &td.kind
+                                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
                                             {
                                                 inner.clone()
                                             } else {
@@ -4646,8 +4621,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let list_elem = match &largs[0] {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
-                                            if let crate::ast::TypeDefKind::Alias(inner) =
-                                                &td.kind
+                                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
                                             {
                                                 inner.clone()
                                             } else {
@@ -4693,8 +4667,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let map_val = match &margs[1] {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
-                                            if let crate::ast::TypeDefKind::Alias(inner) =
-                                                &td.kind
+                                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
                                             {
                                                 inner.clone()
                                             } else {
@@ -4740,8 +4713,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let map_val = match &margs[1] {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
-                                            if let crate::ast::TypeDefKind::Alias(inner) =
-                                                &td.kind
+                                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
                                             {
                                                 inner.clone()
                                             } else {
@@ -4801,8 +4773,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let set_elem = match &largs[0] {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
-                                            if let crate::ast::TypeDefKind::Alias(inner) =
-                                                &td.kind
+                                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
                                             {
                                                 inner.clone()
                                             } else {
@@ -4816,9 +4787,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 };
                                 if let Type::Tuple(elems) = set_elem {
                                     let arity = elems.len() as u64;
-                                    let func = self.get_runtime_fn(
-                                        "mimi_set_from_json_map_set_product_i64",
-                                    )?;
+                                    let func = self
+                                        .get_runtime_fn("mimi_set_from_json_map_set_product_i64")?;
                                     let result = self.build_call(
                                         func,
                                         &[
@@ -4841,8 +4811,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let list_elem = match &largs[0] {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
-                                            if let crate::ast::TypeDefKind::Alias(inner) =
-                                                &td.kind
+                                            if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
                                             {
                                                 inner.clone()
                                             } else {
@@ -4899,8 +4868,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         };
                         if let Type::Tuple(elems) = map_val {
                             let arity = elems.len() as u64;
-                            let func =
-                                self.get_runtime_fn("mimi_set_from_json_map_product_i64")?;
+                            let func = self.get_runtime_fn("mimi_set_from_json_map_product_i64")?;
                             let result = self.build_call(
                                 func,
                                 &[
@@ -4912,10 +4880,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 "set_from_json_map_product",
                             )?;
                             return Ok(self
-                                .expect_basic_value(
-                                    &result,
-                                    "mimi_set_from_json_map_product_i64",
-                                )?
+                                .expect_basic_value(&result, "mimi_set_from_json_map_product_i64")?
                                 .into());
                         }
                     }
@@ -4959,16 +4924,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             Type::Name(n, args) if n == "Result" && !args.is_empty() => {
                 self.compile_from_json_result_value(&args[0], args.get(1), raw_ptr)
             }
-            Type::Result(ok, err) => {
-                self.compile_from_json_result_value(ok, Some(err), raw_ptr)
-            }
+            Type::Result(ok, err) => self.compile_from_json_result_value(ok, Some(err), raw_ptr),
             Type::Name(type_name, _) => {
                 // Type alias → underlying type; Record → field deserialize.
                 if let Some(td) = self.type_defs.get(type_name) {
                     if let crate::ast::TypeDefKind::Alias(aliased) = &td.kind {
                         let aliased = aliased.clone();
-                        return self
-                            .compile_from_json_turbofish_with_ptr(&[aliased], raw_ptr);
+                        return self.compile_from_json_turbofish_with_ptr(&[aliased], raw_ptr);
                     }
                 }
                 let fields_opt = self.type_defs.get(type_name).and_then(|td| {
@@ -5028,8 +4990,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .try_as_basic_value_opt()
                         .ok_or("json_get_element returned void")?
                         .into_pointer_value();
-                    let is_string =
-                        matches!(e, Type::Name(n, _) if n == "string");
+                    let is_string = matches!(e, Type::Name(n, _) if n == "string");
                     let elem_val = if is_string {
                         self.wrap_raw_string_ptr(elem_json)?
                     } else {
@@ -5049,8 +5010,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     };
                     // Scalar from_json often yields i64 while tuple field is i32 —
                     // coerce to the LLVM field type before insertvalue.
-                    let coerced =
-                        self.coerce_value_to_expected_type(elem_val, field_tys[i])?;
+                    let coerced = self.coerce_value_to_expected_type(elem_val, field_tys[i])?;
                     let agg = self
                         .builder
                         .build_insert_value(struct_val, coerced, i as u32, &format!("tup_f{}", i))
@@ -5142,12 +5102,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
 
         // Shared full Result layout — never phi Ok/Err constructor structs.
-        let err_ty_owned =
-            err_ty.cloned().unwrap_or_else(|| Type::Name("string".into(), vec![]));
-        let result_ty = Type::Name(
-            "Result".into(),
-            vec![ok_ty.clone(), err_ty_owned.clone()],
-        );
+        let err_ty_owned = err_ty
+            .cloned()
+            .unwrap_or_else(|| Type::Name("string".into(), vec![]));
+        let result_ty = Type::Name("Result".into(), vec![ok_ty.clone(), err_ty_owned.clone()]);
         let res_sty = match self.llvm_type_for(&result_ty) {
             Some(BasicTypeEnum::StructType(s)) => s,
             _ => {
@@ -5175,12 +5133,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         {
             let disc_gep = self
                 .gep()
-                .build_struct_gep(BasicTypeEnum::StructType(res_sty), out_slot, 0, "res_ok_disc")
+                .build_struct_gep(
+                    BasicTypeEnum::StructType(res_sty),
+                    out_slot,
+                    0,
+                    "res_ok_disc",
+                )
                 .map_err(|e| CompileError::LlvmError(e.to_string()))?;
             self.build_store(disc_gep, bool_ty.const_int(1, false))?;
             let ok_gep = self
                 .gep()
-                .build_struct_gep(BasicTypeEnum::StructType(res_sty), out_slot, 1, "res_ok_pay")
+                .build_struct_gep(
+                    BasicTypeEnum::StructType(res_sty),
+                    out_slot,
+                    1,
+                    "res_ok_pay",
+                )
                 .map_err(|e| CompileError::LlvmError(e.to_string()))?;
             let expected = res_sty.get_field_types()[1];
             match (ok_val, expected) {
@@ -5190,10 +5158,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.build_store(ok_gep, sv)?;
                 }
                 (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(_)) => {
-                    let tmp = self.build_alloca(
-                        BasicTypeEnum::StructType(sv.get_type()),
-                        "res_ok_tmp",
-                    )?;
+                    let tmp =
+                        self.build_alloca(BasicTypeEnum::StructType(sv.get_type()), "res_ok_tmp")?;
                     self.build_store(tmp, sv)?;
                     let loaded = self.build_load(expected, tmp, "res_ok_coerce")?;
                     self.build_store(ok_gep, loaded)?;
@@ -5232,7 +5198,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             if res_sty.count_fields() >= 3 {
                 let err_gep = self
                     .gep()
-                    .build_struct_gep(BasicTypeEnum::StructType(res_sty), out_slot, 2, "res_ok_errz")
+                    .build_struct_gep(
+                        BasicTypeEnum::StructType(res_sty),
+                        out_slot,
+                        2,
+                        "res_ok_errz",
+                    )
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                 if let BasicTypeEnum::IntType(et) = res_sty.get_field_types()[2] {
                     self.build_store(err_gep, et.const_int(0, false))?;
@@ -5289,7 +5260,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             let err_gep = self
                 .gep()
-                .build_struct_gep(BasicTypeEnum::StructType(res_sty), out_slot, 2, "res_err_pay")
+                .build_struct_gep(
+                    BasicTypeEnum::StructType(res_sty),
+                    out_slot,
+                    2,
+                    "res_err_pay",
+                )
                 .map_err(|e| CompileError::LlvmError(e.to_string()))?;
             let expected = res_sty.get_field_types()[2];
             if err_is_string {
@@ -5326,7 +5302,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let h = self.build_ptr_to_int(heap, et, "res_err_str_h")?;
                     self.build_store(err_gep, h)?;
                 } else {
-                    let loaded = self.build_load(BasicTypeEnum::StructType(str_ty), heap, "res_err_sv")?;
+                    let loaded =
+                        self.build_load(BasicTypeEnum::StructType(str_ty), heap, "res_err_sv")?;
                     self.build_store(err_gep, loaded)?;
                 }
             } else {
@@ -5368,12 +5345,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         {
             let disc_gep = self
                 .gep()
-                .build_struct_gep(BasicTypeEnum::StructType(res_sty), out_slot, 0, "res_bare_disc")
+                .build_struct_gep(
+                    BasicTypeEnum::StructType(res_sty),
+                    out_slot,
+                    0,
+                    "res_bare_disc",
+                )
                 .map_err(|e| CompileError::LlvmError(e.to_string()))?;
             self.build_store(disc_gep, bool_ty.const_int(1, false))?;
             let ok_gep = self
                 .gep()
-                .build_struct_gep(BasicTypeEnum::StructType(res_sty), out_slot, 1, "res_bare_ok")
+                .build_struct_gep(
+                    BasicTypeEnum::StructType(res_sty),
+                    out_slot,
+                    1,
+                    "res_bare_ok",
+                )
                 .map_err(|e| CompileError::LlvmError(e.to_string()))?;
             let expected = res_sty.get_field_types()[1];
             match (bare_ok, expected) {
@@ -5383,10 +5370,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.build_store(ok_gep, sv)?;
                 }
                 (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(_)) => {
-                    let tmp = self.build_alloca(
-                        BasicTypeEnum::StructType(sv.get_type()),
-                        "res_bare_tmp",
-                    )?;
+                    let tmp = self
+                        .build_alloca(BasicTypeEnum::StructType(sv.get_type()), "res_bare_tmp")?;
                     self.build_store(tmp, sv)?;
                     let loaded = self.build_load(expected, tmp, "res_bare_coerce")?;
                     self.build_store(ok_gep, loaded)?;
@@ -5425,7 +5410,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             if res_sty.count_fields() >= 3 {
                 let err_gep = self
                     .gep()
-                    .build_struct_gep(BasicTypeEnum::StructType(res_sty), out_slot, 2, "res_bare_errz")
+                    .build_struct_gep(
+                        BasicTypeEnum::StructType(res_sty),
+                        out_slot,
+                        2,
+                        "res_bare_errz",
+                    )
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                 if let BasicTypeEnum::IntType(et) = res_sty.get_field_types()[2] {
                     self.build_store(err_gep, et.const_int(0, false))?;
@@ -5465,7 +5455,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "json_as_f64",
                 )?;
                 Ok(BasicValueEnum::FloatValue(
-                    self.expect_basic_value(&r, "json_as_f64")?.into_float_value(),
+                    self.expect_basic_value(&r, "json_as_f64")?
+                        .into_float_value(),
                 ))
             }
             Type::Name(tn, _) if tn == "bool" => {
@@ -5622,10 +5613,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )?;
                 Ok(self.expect_basic_value(&result, fn_name)?.into())
             }
-            Type::Tuple(elems) if !elems.is_empty() => self.compile_from_json_turbofish_with_ptr(
-                &[Type::Tuple(elems.clone())],
-                raw_ptr,
-            ),
+            Type::Tuple(elems) if !elems.is_empty() => {
+                self.compile_from_json_turbofish_with_ptr(&[Type::Tuple(elems.clone())], raw_ptr)
+            }
             Type::Name(type_name, _) => {
                 // Type alias or named record Ok payload.
                 if let Some(td) = self.type_defs.get(type_name) {
@@ -5878,16 +5868,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_load(str_ty, str_alloca, "str_val")
             }
             // Option<T> via Name form (common after resolve_type).
-            crate::ast::Type::Name(n, args) if n == "Option" && args.len() == 1 => {
-                self.compile_json_option_field(
+            crate::ast::Type::Name(n, args) if n == "Option" && args.len() == 1 => self
+                .compile_json_option_field(
                     type_name,
                     &args[0],
                     raw_val,
                     json_as_i64_fn,
                     json_as_f64_fn,
                     json_as_bool_fn,
-                )
-            }
+                ),
             crate::ast::Type::Option(inner) => self.compile_json_option_field(
                 type_name,
                 inner,
@@ -5899,18 +5888,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Nested List (e.g. Option<List<i32>>).
             crate::ast::Type::Name(n, args) if n == "List" => {
                 let nested_ty = crate::ast::Type::Name("List".into(), args.clone());
-                let nested =
-                    self.compile_from_json_turbofish_with_ptr(&[nested_ty], raw_val)?;
+                let nested = self.compile_from_json_turbofish_with_ptr(&[nested_ty], raw_val)?;
                 match nested {
                     BasicValueEnum::StructValue(sv) => {
                         let list_ty = self.list_struct_type();
                         let i64_ty = self.context.i64_type();
-                        let size =
-                            self.llvm_type_size_bytes(BasicTypeEnum::StructType(list_ty));
-                        let heap = self.malloc_or_abort(
-                            i64_ty.const_int(size, false),
-                            "opt_list_heap",
-                        )?;
+                        let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(list_ty));
+                        let heap =
+                            self.malloc_or_abort(i64_ty.const_int(size, false), "opt_list_heap")?;
                         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                         let typed = self
                             .build_bit_cast(
@@ -5933,12 +5918,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.compile_from_json_result_value(ok, Some(err), raw_val)
             }
             // Product tuple (e.g. Option<(i32,i32)>).
-            crate::ast::Type::Tuple(elems) if !elems.is_empty() => {
-                self.compile_from_json_turbofish_with_ptr(
+            crate::ast::Type::Tuple(elems) if !elems.is_empty() => self
+                .compile_from_json_turbofish_with_ptr(
                     &[crate::ast::Type::Tuple(elems.clone())],
                     raw_val,
-                )
-            }
+                ),
             // Nested Map (e.g. Option<Map<…>> / Map of Set|List|Map product).
             crate::ast::Type::Name(n, args) if n == "Map" => {
                 let nested_ty = crate::ast::Type::Name("Map".into(), args.clone());
@@ -5968,31 +5952,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                         );
                     }
                 }
-                let fields_opt =
-                    self.type_defs
-                        .get(nested_name.as_str())
-                        .and_then(|td| match &td.kind {
-                            crate::ast::TypeDefKind::Record(fields) => Some(fields.clone()),
-                            _ => None,
-                        });
+                let fields_opt = self
+                    .type_defs
+                    .get(nested_name.as_str())
+                    .and_then(|td| match &td.kind {
+                        crate::ast::TypeDefKind::Record(fields) => Some(fields.clone()),
+                        _ => None,
+                    });
                 if let Some(nested_fields) = fields_opt {
-                    let nested = self.compile_from_json_record(
-                        nested_name,
-                        &nested_fields,
-                        raw_val,
-                    )?;
+                    let nested =
+                        self.compile_from_json_record(nested_name, &nested_fields, raw_val)?;
                     // compile_from_json_record returns an alloca pointer; store
                     // by-value into the parent field slot.
                     match nested {
                         BasicValueEnum::PointerValue(pv) => {
-                            let llvm_ty = *self.type_llvm.get(nested_name.as_str()).ok_or_else(
-                                || {
+                            let llvm_ty =
+                                *self.type_llvm.get(nested_name.as_str()).ok_or_else(|| {
                                     CompileError::Generic(format!(
                                         "type '{}' not registered",
                                         nested_name
                                     ))
-                                },
-                            )?;
+                                })?;
                             self.build_load(llvm_ty, pv, nested_name)
                         }
                         other => Ok(other),
@@ -6153,7 +6133,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } else {
                     // Store then reload through expected type if layouts differ
                     // only by integer widths (i32 vs i64 fields).
-                    let tmp = self.build_alloca(BasicTypeEnum::StructType(sv.get_type()), "opt_tup_tmp")?;
+                    let tmp =
+                        self.build_alloca(BasicTypeEnum::StructType(sv.get_type()), "opt_tup_tmp")?;
                     self.build_store(tmp, *sv)?;
                     self.build_load(expected, tmp, "opt_tup_coerce")?
                         .into_struct_value()
@@ -6199,8 +6180,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // Option payload pointer remains valid after return.
                         let sty = sv.get_type();
                         let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
-                        let heap = self
-                            .malloc_or_abort(i64_ty.const_int(size, false), "opt_nested_heap")?;
+                        let heap =
+                            self.malloc_or_abort(i64_ty.const_int(size, false), "opt_nested_heap")?;
                         let typed = self
                             .build_bit_cast(
                                 heap.into(),

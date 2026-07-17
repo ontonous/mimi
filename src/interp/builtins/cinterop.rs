@@ -69,9 +69,7 @@ impl<'a> Interpreter<'a> {
                     while len < max_scan {
                         if *base.add(len) == 0 {
                             let slice = std::slice::from_raw_parts(base, len);
-                            return Ok(Value::String(
-                                String::from_utf8_lossy(slice).into_owned(),
-                            ));
+                            return Ok(Value::String(String::from_utf8_lossy(slice).into_owned()));
                         }
                         len += 1;
                     }

@@ -484,10 +484,7 @@ impl VerifierCtx {
                 return VerificationResult {
                     func_name: func.name.clone(),
                     status: VerifStatus::Unknown,
-                    message: format!(
-                        "could not encode math obligation: {}",
-                        format_expr(math)
-                    ),
+                    message: format!("could not encode math obligation: {}", format_expr(math)),
                     diagnostic: None,
                     duration_us: start.elapsed().as_micros() as u64,
                     constraint_count: requires_exprs.len() + math_exprs.len(),
@@ -1554,7 +1551,11 @@ impl VerifierCtx {
             Expr::Field(obj, _) => self.assert_callee_ensures_in_expr(session, obj, vars),
             Expr::TupleIndex(obj, _) => self.assert_callee_ensures_in_expr(session, obj, vars),
             Expr::Old(inner) => self.assert_callee_ensures_in_expr(session, inner, vars),
-            Expr::If { cond, then_: _, else_: _ } => {
+            Expr::If {
+                cond,
+                then_: _,
+                else_: _,
+            } => {
                 // V-C5: path-conditional arms — only condition is unconditional.
                 self.assert_callee_ensures_in_expr(session, cond, vars);
             }
@@ -1717,7 +1718,11 @@ impl VerifierCtx {
             Stmt::SharedLet { init, .. } => {
                 self.assert_callee_ensures_in_expr(session, init, vars);
             }
-            Stmt::If { cond, then_: _, else_: _ } => {
+            Stmt::If {
+                cond,
+                then_: _,
+                else_: _,
+            } => {
                 // V-C5: only the condition is always evaluated. Callee ensures
                 // inside then/else are path-conditional; admitting them as
                 // unconditional axioms is unsound. Skip branch bodies until

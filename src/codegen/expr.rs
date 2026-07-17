@@ -510,16 +510,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             };
             // Prefer registered struct type; else use payload's own struct type.
-            let sty = self
-                .expect_struct_type(base)
-                .or_else(|_| match payload {
-                    BasicValueEnum::StructValue(psv) => Ok(psv.get_type()),
-                    BasicValueEnum::PointerValue(_) => self.expect_struct_type(base),
-                    _ => Err(CompileError::Generic(format!(
-                        "optional chain `?.{}`: cannot resolve tuple type `{}`",
-                        field, base_type
-                    ))),
-                })?;
+            let sty = self.expect_struct_type(base).or_else(|_| match payload {
+                BasicValueEnum::StructValue(psv) => Ok(psv.get_type()),
+                BasicValueEnum::PointerValue(_) => self.expect_struct_type(base),
+                _ => Err(CompileError::Generic(format!(
+                    "optional chain `?.{}`: cannot resolve tuple type `{}`",
+                    field, base_type
+                ))),
+            })?;
             let gep = self
                 .gep()
                 .build_struct_gep(sty, field_ptr, idx, field)
@@ -543,12 +541,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )));
             }
         };
-        let idx = fields.iter().position(|f| f.name == *field).ok_or_else(|| {
-            CompileError::Generic(format!(
-                "optional chain: no field `{}` on type `{}`",
-                field, base_type
-            ))
-        })?;
+        let idx = fields
+            .iter()
+            .position(|f| f.name == *field)
+            .ok_or_else(|| {
+                CompileError::Generic(format!(
+                    "optional chain: no field `{}` on type `{}`",
+                    field, base_type
+                ))
+            })?;
 
         let field_ptr = match payload {
             BasicValueEnum::PointerValue(pv) => pv,
@@ -581,7 +582,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
         // i32 fields: load as i32 then sext to i64 (same as compile_field_expr).
         let (load_ty, ext) = match &fields[idx].ty {
-            Type::Name(n, _) if n == "i32" => (BasicTypeEnum::IntType(self.context.i32_type()), true),
+            Type::Name(n, _) if n == "i32" => {
+                (BasicTypeEnum::IntType(self.context.i32_type()), true)
+            }
             _ => (
                 self.llvm_type_for(&fields[idx].ty)
                     .unwrap_or(BasicTypeEnum::IntType(i64_ty)),
@@ -775,8 +778,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if obj_type == "string" {
                         self.infer_string_method_return_type(method)
                     } else if let Expr::Ident(flow_name) = obj.as_ref() {
-                        // Flow::transition(from, ...) → to-state of the matching overload.
-                        // Prefer from_state match so fallbacks (→ Fault) win over earlier defs.
+                        // Flow::transition(from, ...) → to-state of the exact overload.
                         if let Some(flow) = self.flow_defs.get(flow_name) {
                             let from_type = args
                                 .first()
@@ -785,8 +787,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let t = flow
                                 .transitions
                                 .iter()
-                                .find(|t| t.name == *method && t.from_state == from_type)
-                                .or_else(|| flow.transitions.iter().find(|t| t.name == *method));
+                                .find(|t| t.name == *method && t.from_state == from_type);
                             if let Some(t) = t {
                                 return t.to_states.first().cloned().unwrap_or_default();
                             }
@@ -1729,13 +1730,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let i64_ty = self.context.i64_type();
                 let arr = self.build_alloca(i8_ty.array_type(2), "q_while_children")?;
                 for (i, child) in [&cond_v, &body_v].iter().enumerate() {
-                    let gep = self.gep().build_in_bounds_gep(
-                        i8_ty, arr,
-                        &[i64_ty.const_int(i as u64, false)], "q_while_gep",
-                    ).map_err(|e| CompileError::LlvmError(format!("q while gep: {}", e)))?;
+                    let gep = self
+                        .gep()
+                        .build_in_bounds_gep(
+                            i8_ty,
+                            arr,
+                            &[i64_ty.const_int(i as u64, false)],
+                            "q_while_gep",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("q while gep: {}", e)))?;
                     self.build_store(gep, **child)?;
                 }
-                let arr_ptr = self.build_load(i8_ty, arr, "q_while_arr")?.into_pointer_value();
+                let arr_ptr = self
+                    .build_load(i8_ty, arr, "q_while_arr")?
+                    .into_pointer_value();
                 self.call_quote_new_list(20, arr_ptr, 2) // QAST_WHILE
             }
             Stmt::WhileLet { pat: _, init, body } => {
@@ -1748,13 +1756,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let i64_ty = self.context.i64_type();
                 let arr = self.build_alloca(i8_ty.array_type(2), "q_whilelet_children")?;
                 for (i, child) in [&init_v, &body_v].iter().enumerate() {
-                    let gep = self.gep().build_in_bounds_gep(
-                        i8_ty, arr,
-                        &[i64_ty.const_int(i as u64, false)], "q_whilelet_gep",
-                    ).map_err(|e| CompileError::LlvmError(format!("q whilelet gep: {}", e)))?;
+                    let gep = self
+                        .gep()
+                        .build_in_bounds_gep(
+                            i8_ty,
+                            arr,
+                            &[i64_ty.const_int(i as u64, false)],
+                            "q_whilelet_gep",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("q whilelet gep: {}", e)))?;
                     self.build_store(gep, **child)?;
                 }
-                let arr_ptr = self.build_load(i8_ty, arr, "q_whilelet_arr")?.into_pointer_value();
+                let arr_ptr = self
+                    .build_load(i8_ty, arr, "q_whilelet_arr")?
+                    .into_pointer_value();
                 self.call_quote_new_list(22, arr_ptr, 2) // QAST_FOR (reuse For tag for pattern-based iteration)
             }
             _ => Err(CompileError::Generic(format!(
@@ -1777,9 +1792,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Literal(lit) => match lit {
                 Lit::Int(v) => self.call_quote_new_leaf(0, self.i64_const(*v)), // QAST_INT
                 Lit::Float(v) => self.call_quote_new_leaf(1, self.i64_const(v.to_bits() as i64)), // QAST_FLOAT
-                Lit::Bool(v) => {
-                    self.call_quote_new_leaf(2, self.i64_const(if *v { 1 } else { 0 }))
-                } // QAST_BOOL
+                Lit::Bool(v) => self.call_quote_new_leaf(2, self.i64_const(if *v { 1 } else { 0 })), // QAST_BOOL
                 Lit::String(s) => {
                     let global = self
                         .builder
@@ -1839,11 +1852,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let children = self.build_quote_children_list(&all)?;
                 self.call_quote_new_list(8, children, all.len()) // QAST_CALL
             }
-            Expr::If {
-                cond,
-                then_,
-                else_,
-            } => {
+            Expr::If { cond, then_, else_ } => {
                 let cond_v = self.compile_quote_runtime_expr(cond)?;
                 let then_v = self.compile_quote_runtime(then_)?; // Block→QAST_BLOCK node
                 match else_ {
@@ -1854,13 +1863,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let i64_ty = self.context.i64_type();
                         let alloca = self.build_alloca(i8_ty.array_type(3), "q_if_children")?;
                         for (i, child) in [&cond_v, &then_v, &else_v].iter().enumerate() {
-                            let gep = self.gep().build_in_bounds_gep(
-                                i8_ty, alloca,
-                                &[i64_ty.const_int(i as u64, false)], "q_if_gep",
-                            ).map_err(|e| CompileError::LlvmError(format!("q if gep: {}", e)))?;
+                            let gep = self
+                                .gep()
+                                .build_in_bounds_gep(
+                                    i8_ty,
+                                    alloca,
+                                    &[i64_ty.const_int(i as u64, false)],
+                                    "q_if_gep",
+                                )
+                                .map_err(|e| CompileError::LlvmError(format!("q if gep: {}", e)))?;
                             self.build_store(gep, **child)?;
                         }
-                        let arr_ptr = self.build_load(i8_ty, alloca, "q_if_arr")?.into_pointer_value();
+                        let arr_ptr = self
+                            .build_load(i8_ty, alloca, "q_if_arr")?
+                            .into_pointer_value();
                         self.call_quote_new_list(13, arr_ptr, 3) // QAST_IF
                     }
                     None => {
@@ -1868,13 +1884,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let i64_ty = self.context.i64_type();
                         let alloca = self.build_alloca(i8_ty.array_type(2), "q_if_children")?;
                         for (i, child) in [&cond_v, &then_v].iter().enumerate() {
-                            let gep = self.gep().build_in_bounds_gep(
-                                i8_ty, alloca,
-                                &[i64_ty.const_int(i as u64, false)], "q_if_gep",
-                            ).map_err(|e| CompileError::LlvmError(format!("q if gep: {}", e)))?;
+                            let gep = self
+                                .gep()
+                                .build_in_bounds_gep(
+                                    i8_ty,
+                                    alloca,
+                                    &[i64_ty.const_int(i as u64, false)],
+                                    "q_if_gep",
+                                )
+                                .map_err(|e| CompileError::LlvmError(format!("q if gep: {}", e)))?;
                             self.build_store(gep, **child)?;
                         }
-                        let arr_ptr = self.build_load(i8_ty, alloca, "q_if_arr")?.into_pointer_value();
+                        let arr_ptr = self
+                            .build_load(i8_ty, alloca, "q_if_arr")?
+                            .into_pointer_value();
                         self.call_quote_new_list(13, arr_ptr, 2) // QAST_IF
                     }
                 }

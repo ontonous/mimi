@@ -84,22 +84,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // Capturing nested func → closure value in local scope.
-        let closure_val =
-            self.compile_lambda_expr(&f.params, &f.ret, &f.body, vars)?;
+        let closure_val = self.compile_lambda_expr(&f.params, &f.ret, &f.body, vars)?;
         let closure_ty = types::closure_struct_type(self.context);
         let alloca = self.build_alloca(BasicTypeEnum::StructType(closure_ty), &f.name)?;
         self.build_store(alloca, closure_val)?;
-        vars.insert(f.name.clone(), (alloca, BasicTypeEnum::StructType(closure_ty)));
+        vars.insert(
+            f.name.clone(),
+            (alloca, BasicTypeEnum::StructType(closure_ty)),
+        );
 
         let param_tys: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
         let ret_ty = f
             .ret
             .clone()
             .unwrap_or_else(|| Type::Name("i32".into(), vec![]));
-        self.var_types.insert(
-            f.name.clone(),
-            Type::Func(param_tys, Box::new(ret_ty)),
-        );
+        self.var_types
+            .insert(f.name.clone(), Type::Func(param_tys, Box::new(ret_ty)));
         Ok(())
     }
 
