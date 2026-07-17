@@ -44,10 +44,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_ffi_pinned_transitions = Some(pinned);
         self.resolved_transition_param_arity = Some(param_arity);
         let mut arity = std::collections::HashMap::new();
+        let mut effects = std::collections::HashMap::new();
         for function in program.functions().values() {
             arity.insert(function.qualified_name.clone(), function.params.len());
+            effects.insert(function.qualified_name.clone(), function.effects.clone());
         }
         self.resolved_function_arity = Some(arity);
+        self.resolved_function_effects = Some(effects);
         self.resolved_sessions = Some(
             program
                 .sessions()
