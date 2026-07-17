@@ -1,0 +1,240 @@
+# Mimi 1.0 normative requirement index.
+# Authority: docs/language-spec.md. This file indexes the normative text; it
+# does not report current implementation maturity.
+schema_version = 1
+spec_version = "mimi-1.0-draft-1"
+
+# target: stable | experimental | reserved | removed
+# gate: static | trace | verifier | component | tooling | migration
+
+[[requirement]]
+id = "FLOW-IDENTITY-001"
+target = "stable"
+spec = "3.1"
+profile = ["mimi-resolved-ir-1"]
+gate = ["static", "trace"]
+summary = "Flow states are nominal, unforgeable, linear values with generations."
+
+[[requirement]]
+id = "FLOW-TURN-001"
+target = "stable"
+spec = "3.4"
+profile = ["mimi-flow-turn-1", "mimi-semantic-trace-1"]
+gate = ["static", "trace"]
+summary = "A transition atomically ends in become, stay, typed fault, or rollback rejection."
+
+[[requirement]]
+id = "FLOW-SPARSE-001"
+target = "stable"
+spec = "3.5"
+profile = ["mimi-flow-turn-1"]
+gate = ["static", "trace"]
+summary = "Stable Flow graphs contain only declared business edges."
+
+[[requirement]]
+id = "FLOW-MULTI-001"
+target = "experimental"
+spec = "3.7"
+gate = ["static", "trace"]
+summary = "Multi-target transitions require a closed tagged state union and control-flow refinement."
+
+[[requirement]]
+id = "ACTOR-FLOW-001"
+target = "stable"
+spec = "3.8"
+gate = ["static", "trace"]
+summary = "Actors provide isolation and supervision while their mutable business state is owned by Flow."
+
+[[requirement]]
+id = "PROTOCOL-STATIC-001"
+target = "stable"
+spec = "3.9"
+gate = ["static", "component"]
+summary = "A static Protocol is a checker-verified nominal projection of Flow topology."
+
+[[requirement]]
+id = "PROTOCOL-DYN-001"
+target = "experimental"
+spec = "3.9"
+gate = ["static", "trace", "component"]
+summary = "Type-erased Protocol dispatch requires a typed VTable and result ABI."
+
+[[requirement]]
+id = "SESSION-LINEAR-001"
+target = "stable"
+spec = "3.10"
+profile = ["mimi-resolved-ir-1", "mimi-semantic-trace-1"]
+gate = ["static", "trace"]
+summary = "Typed dual endpoints advance residuals linearly and cannot degrade to integers."
+
+[[requirement]]
+id = "RESOURCE-LINEAR-001"
+target = "stable"
+spec = "3.11"
+profile = ["mimi-resolved-ir-1", "mimi-flow-turn-1", "mimi-semantic-trace-1"]
+gate = ["static", "trace"]
+summary = "Every linear resource is moved, returned, transferred, or dropped exactly once."
+
+[[requirement]]
+id = "FLOW-FAULT-001"
+target = "stable"
+spec = "3.12"
+gate = ["static", "trace"]
+summary = "Fault sets are typed per Flow and reset/recover are explicit business transitions."
+
+[[requirement]]
+id = "FLOW-PROGRESSIVE-001"
+target = "stable"
+spec = "3.13"
+gate = ["static", "trace", "tooling"]
+summary = "Progressive Main is a real Flow lowering with diagnostics mapped to user spans."
+
+[[requirement]]
+id = "ERROR-ALGEBRA-001"
+target = "stable"
+spec = "4"
+gate = ["static", "trace"]
+summary = "Result, Option, Fault, PeerFault, panic, and exit are distinct typed channels."
+
+[[requirement]]
+id = "ERROR-PROP-001"
+target = "stable"
+spec = "4.2"
+profile = ["mimi-flow-turn-1"]
+gate = ["static", "trace"]
+summary = "Question-mark propagation is statically resolved for functions and rollback transitions."
+
+[[requirement]]
+id = "OWN-PERMISSION-001"
+target = "stable"
+spec = "6.2"
+gate = ["static", "trace"]
+summary = "view, mutate, and consume are the sole stable safe permission model."
+
+[[requirement]]
+id = "EFFECT-CAP-001"
+target = "experimental"
+spec = "2.7"
+gate = ["static", "component"]
+summary = "Effects describe possible behavior and nominal capabilities authorize it."
+
+[[requirement]]
+id = "VERIFY-CORE-001"
+target = "stable"
+spec = "5"
+profile = ["mimi-verified-core-1"]
+gate = ["verifier"]
+summary = "Only Verified Core 1 typed IR can produce Proven, with fail-closed outcomes."
+
+[[requirement]]
+id = "COMPTIME-PURE-001"
+target = "stable"
+spec = "6.10"
+gate = ["static", "trace"]
+summary = "Stable comptime evaluation is pure, effect-checked, serializable, and fail-closed."
+
+[[requirement]]
+id = "LANG-FUNCTION-001"
+target = "stable"
+spec = "6.1"
+gate = ["static", "tooling", "migration"]
+summary = "Named functions use func while closures and function types use fn."
+
+[[requirement]]
+id = "LANG-CONTRACT-001"
+target = "stable"
+spec = "6.8"
+gate = ["static", "trace", "verifier", "tooling", "migration"]
+summary = "Contracts are declaration-owned pure structures with defined runtime and proof timing."
+
+[[requirement]]
+id = "LANG-ATTRIBUTE-001"
+target = "stable"
+spec = "6.11"
+gate = ["static", "tooling"]
+summary = "Unknown attributes fail closed and injected nodes have explicit origin."
+
+[[requirement]]
+id = "SYNTAX-REMOVED-001"
+target = "removed"
+spec = "6.12"
+gate = ["static", "tooling", "migration"]
+summary = "Removed parallel syntax is rejected by the stable parser and handled only by migration tooling."
+
+[[requirement]]
+id = "COMPONENT-IR-001"
+target = "stable"
+spec = "7.3"
+profile = ["mimi-resolved-ir-1", "mimi-native-abi-1", "mimi-wire-schema-1"]
+gate = ["component", "tooling"]
+summary = "All stable component bindings are generated from one Component IR."
+
+[[requirement]]
+id = "COMPONENT-HANDLE-001"
+target = "stable"
+spec = "7.5"
+profile = ["mimi-native-abi-1"]
+gate = ["component", "trace"]
+summary = "Opaque resources use nominal generational handles with runtime ownership and concurrent leases."
+
+[[requirement]]
+id = "COMPONENT-CALLBACK-001"
+target = "stable"
+spec = "7.7"
+gate = ["component", "trace"]
+summary = "Long-lived callbacks use linear subscriptions, quiesce on close, and reject late delivery."
+
+[[requirement]]
+id = "COMPONENT-ASYNC-001"
+target = "stable"
+spec = "7.8"
+profile = ["mimi-native-abi-1", "mimi-wire-schema-1"]
+gate = ["component", "trace"]
+summary = "Asynchronous cancellation has exactly one terminal outcome and retains resources until acknowledgement."
+
+[[requirement]]
+id = "COMPONENT-WIRE-001"
+target = "stable"
+spec = "7.8.1"
+profile = ["mimi-wire-schema-1"]
+gate = ["component"]
+summary = "Wire transport shares typed contracts but never serializes native pointers, tokens, or allocators."
+
+[[requirement]]
+id = "COMPONENT-RAW-001"
+target = "experimental"
+spec = "7.2"
+profile = ["mimi-native-abi-1"]
+gate = ["static", "component"]
+summary = "Raw extern is restricted to explicit unsafe or experimental adapters and cannot be a stable surface."
+
+[[requirement]]
+id = "TOOL-RESOLUTION-001"
+target = "stable"
+spec = "4.10"
+profile = ["mimi-resolved-ir-1"]
+gate = ["static", "tooling"]
+summary = "Checker resolves stable semantics once and all backends consume typed resolved IR."
+
+[[requirement]]
+id = "TOOL-SUPPORT-001"
+target = "stable"
+spec = "9"
+profile = ["mimi-semantic-trace-1"]
+gate = ["tooling"]
+summary = "Support claims are backed by automated probes and cannot exceed backend capability."
+
+[[requirement]]
+id = "MIGRATION-PRE1-001"
+target = "stable"
+spec = "9"
+gate = ["migration"]
+summary = "Removed pre-1.0 syntax has diagnostics and a bounded mechanical migration path."
+
+[[requirement]]
+id = "MULTILANG-AUTHORITY-001"
+target = "stable"
+spec = "8"
+gate = ["static", "component", "trace", "tooling"]
+profile = ["mimi-semantic-trace-1", "mimi-native-abi-1", "mimi-wire-schema-1"]
+summary = "Business, fact, and view authority remain unique across generated component boundaries."

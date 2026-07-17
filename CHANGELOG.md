@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### v0.31.0-dev — Pre-1.0 语义中枢启动
+
+- 建立 `devdocs/v0.31/` 权威路线：37 个可独立验收的小版本、31 项 requirement 全覆盖、止血/DEBUG/攻击审查/双 RC 周期。
+- 新增 `CheckedProgram` 与 canonical `FlowId/StateId/TransitionId` 首个垂直切片。
+- `mimi check/run/test/build/verify` 生产命令接入 `check_program`；run 使用 checked interpreter 构造，build 使用 checked codegen 入口。
+- Native multi-target 与 transactional 缺失能力 fail-closed；Flow transition 不再使用同名首候选或首目标静默降级。
+- 新增语言规范与 v0.31 路线一致性门禁脚本。
+
+> 当前 `CheckedProgram` 仍持有 Surface AST，consumer 尚未完整迁移到 Typed Resolved IR；`TOOL-RESOLUTION-001` 保持 partial。
+
 ### 审计修复（CG-H16 / CG-H9 / M2 / MEM-C8）
 
 #### CRITICAL 修复

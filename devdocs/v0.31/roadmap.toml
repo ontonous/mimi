@@ -1,0 +1,227 @@
+schema_version = 1
+series = "0.31"
+baseline = "0.30.0"
+first = 0
+last = 36
+
+[[milestone]]
+version = "0.31.0"
+kind = "baseline"
+title = "基线冻结"
+requirements = ["TOOL-SUPPORT-001"]
+
+[[milestone]]
+version = "0.31.1"
+kind = "implementation"
+title = "全 AST Span 与 Origin"
+requirements = ["LANG-ATTRIBUTE-001"]
+
+[[milestone]]
+version = "0.31.2"
+kind = "implementation"
+title = "HM 核心统一"
+requirements = ["TOOL-RESOLUTION-001"]
+
+[[milestone]]
+version = "0.31.3"
+kind = "implementation"
+title = "CFG 与 ownership ledger"
+requirements = ["RESOURCE-LINEAR-001", "OWN-PERMISSION-001"]
+
+[[milestone]]
+version = "0.31.4"
+kind = "implementation"
+title = "真实 CheckedProgram"
+requirements = ["TOOL-RESOLUTION-001"]
+
+[[milestone]]
+version = "0.31.5"
+kind = "implementation"
+title = "后端 consumer 迁移"
+requirements = ["TOOL-RESOLUTION-001"]
+
+[[milestone]]
+version = "0.31.6"
+kind = "stabilization"
+title = "止血 I"
+requirements = []
+
+[[milestone]]
+version = "0.31.7"
+kind = "implementation"
+title = "Flow identity 与 generation"
+requirements = ["FLOW-IDENTITY-001"]
+
+[[milestone]]
+version = "0.31.8"
+kind = "implementation"
+title = "Atomic Transition Turn"
+requirements = ["FLOW-TURN-001", "ERROR-PROP-001"]
+
+[[milestone]]
+version = "0.31.9"
+kind = "implementation"
+title = "稀疏图与 typed Fault"
+requirements = ["FLOW-SPARSE-001", "FLOW-FAULT-001", "FLOW-PROGRESSIVE-001"]
+
+[[milestone]]
+version = "0.31.10"
+kind = "implementation"
+title = "Actor runs Flow"
+requirements = ["ACTOR-FLOW-001"]
+
+[[milestone]]
+version = "0.31.11"
+kind = "implementation"
+title = "Typed Session residual"
+requirements = ["SESSION-LINEAR-001"]
+
+[[milestone]]
+version = "0.31.12"
+kind = "implementation"
+title = "Resource 与 permission 闭环"
+requirements = ["RESOURCE-LINEAR-001", "OWN-PERMISSION-001"]
+
+[[milestone]]
+version = "0.31.13"
+kind = "implementation"
+title = "Protocol 闭环"
+requirements = ["PROTOCOL-STATIC-001", "PROTOCOL-DYN-001"]
+
+[[milestone]]
+version = "0.31.14"
+kind = "evidence"
+title = "Canonical Semantic Trace"
+requirements = []
+
+[[milestone]]
+version = "0.31.15"
+kind = "audit"
+title = "攻击审查 I"
+requirements = []
+
+[[milestone]]
+version = "0.31.16"
+kind = "implementation"
+title = "语言语义收敛"
+requirements = ["ERROR-ALGEBRA-001", "LANG-FUNCTION-001", "LANG-CONTRACT-001", "COMPTIME-PURE-001", "LANG-ATTRIBUTE-001", "SYNTAX-REMOVED-001"]
+
+[[milestone]]
+version = "0.31.17"
+kind = "implementation"
+title = "Verification IR"
+requirements = ["VERIFY-CORE-001"]
+
+[[milestone]]
+version = "0.31.18"
+kind = "implementation"
+title = "VC 与 checked integer"
+requirements = ["VERIFY-CORE-001"]
+
+[[milestone]]
+version = "0.31.19"
+kind = "implementation"
+title = "Verifier artifact 与 fail-closed"
+requirements = ["VERIFY-CORE-001"]
+
+[[milestone]]
+version = "0.31.20"
+kind = "audit"
+title = "Verifier 止血与攻击审查"
+requirements = []
+
+[[milestone]]
+version = "0.31.21"
+kind = "implementation"
+title = "Component IR 与 mimiabi"
+requirements = ["COMPONENT-IR-001", "COMPONENT-RAW-001"]
+
+[[milestone]]
+version = "0.31.22"
+kind = "implementation"
+title = "Native ABI 与 handle lease"
+requirements = ["COMPONENT-HANDLE-001"]
+
+[[milestone]]
+version = "0.31.23"
+kind = "implementation"
+title = "Callback 与 async 生命周期"
+requirements = ["COMPONENT-CALLBACK-001", "COMPONENT-ASYNC-001"]
+
+[[milestone]]
+version = "0.31.24"
+kind = "implementation"
+title = "Wire Schema 1"
+requirements = ["COMPONENT-WIRE-001"]
+
+[[milestone]]
+version = "0.31.25"
+kind = "implementation"
+title = "Rust Safe SDK"
+requirements = []
+
+[[milestone]]
+version = "0.31.26"
+kind = "implementation"
+title = "TypeScript GUI SDK 与 authority"
+requirements = ["MULTILANG-AUTHORITY-001"]
+
+[[milestone]]
+version = "0.31.27"
+kind = "audit"
+title = "Component 攻击审查"
+requirements = []
+
+[[milestone]]
+version = "0.31.28"
+kind = "implementation"
+title = "MimiSpec parser 自举"
+requirements = []
+
+[[milestone]]
+version = "0.31.29"
+kind = "implementation"
+title = "HM 自举闭环"
+requirements = []
+
+[[milestone]]
+version = "0.31.30"
+kind = "implementation"
+title = "Pre-1.0 migration tool"
+requirements = ["MIGRATION-PRE1-001", "SYNTAX-REMOVED-001"]
+
+[[milestone]]
+version = "0.31.31"
+kind = "implementation"
+title = "Tooling 全覆盖"
+requirements = ["TOOL-SUPPORT-001"]
+
+[[milestone]]
+version = "0.31.32"
+kind = "implementation"
+title = "Experimental 隔离"
+requirements = ["FLOW-MULTI-001", "PROTOCOL-DYN-001", "EFFECT-CAP-001", "COMPONENT-RAW-001"]
+
+[[milestone]]
+version = "0.31.33"
+kind = "debug"
+title = "DEBUG 周期"
+requirements = []
+
+[[milestone]]
+version = "0.31.34"
+kind = "audit"
+title = "最终敌对审查"
+requirements = []
+
+[[milestone]]
+version = "0.31.35"
+kind = "rc"
+title = "RC1"
+requirements = []
+
+[[milestone]]
+version = "0.31.36"
+kind = "rc"
+title = "RC2 与 Pre-1.0 退出"
+requirements = []
