@@ -3002,6 +3002,17 @@ func main() -> i32 { 0 }
             codegen.resolved_ownership_resources("function:close"),
             Some(vec!["f".into()])
         );
+        let actions = interp
+            .resolved_ownership_actions("function:close")
+            .expect("actions");
+        assert!(actions.iter().any(|(k, r)| k == "introduce" && r == "f"));
+        assert!(actions.iter().any(|(k, r)| k == "drop" && r == "f"));
+        assert!(verifier
+            .checked_ownership_actions("function:close")
+            .is_some_and(|a| a.iter().any(|(k, r)| k == "drop" && r == "f")));
+        assert!(codegen
+            .resolved_ownership_actions("function:close")
+            .is_some_and(|a| a.iter().any(|(k, r)| k == "introduce" && r == "f")));
     }
 
 
