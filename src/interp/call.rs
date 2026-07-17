@@ -8,6 +8,18 @@ impl<'a> Interpreter<'a> {
         args: Vec<Value>,
     ) -> Result<Value, InterpError> {
         self.last_mutate_writebacks.clear();
+        // Prefer CheckedProgram arity when installed and the function has no defaults.
+        if let Some(map) = self.resolved_functions.as_ref() {
+            if let Some((arity, _, _)) = map.get(&func.name) {
+                let has_defaults = func.params.iter().any(|p| p.default_value.is_some());
+                if !has_defaults && args.len() != *arity {
+                    return Err(InterpError::wrong_arg_count(format!(
+                        "function '{}' expects {} arguments, got {} (checked directory)",
+                        func.name, arity, args.len()
+                    )));
+                }
+            }
+        }
         if args.len() > func.params.len() {
             let expected_types: Vec<String> = func
                 .params

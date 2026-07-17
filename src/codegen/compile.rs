@@ -30,6 +30,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved.insert(key, targets);
         }
         self.resolved_transitions = Some(resolved);
+        let mut arity = std::collections::HashMap::new();
+        for function in program.functions().values() {
+            arity.insert(function.qualified_name.clone(), function.params.len());
+        }
+        self.resolved_function_arity = Some(arity);
         self.compile_file(program.file()).map_err(|error| {
             let mut diagnostic = error.to_diagnostic();
             if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {
