@@ -232,6 +232,56 @@ impl<'a> Checker<'a> {
         false
     }
 
+    /// Conservative: body has no `continue` and every path ends in `break`/`return`.
+    /// Such bodies cannot form a capability-carrying back-edge.
+    pub(crate) fn block_exits_loop_without_backedge(&self, block: &Block) -> bool {
+        if block.iter().any(|stmt| self.stmt_contains_continue(stmt)) {
+            return false;
+        }
+        block
+            .last()
+            .map(|stmt| self.stmt_always_exits_loop(stmt))
+            .unwrap_or(false)
+    }
+
+    fn stmt_contains_continue(&self, stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Continue => true,
+            Stmt::If { then_, else_, .. } => {
+                then_.iter().any(|s| self.stmt_contains_continue(s))
+                    || else_
+                        .as_ref()
+                        .is_some_and(|b| b.iter().any(|s| self.stmt_contains_continue(s)))
+            }
+            Stmt::Block(b)
+            | Stmt::Do(b)
+            | Stmt::Arena(b)
+            | Stmt::Loop(b)
+            | Stmt::While { body: b, .. }
+            | Stmt::WhileLet { body: b, .. }
+            | Stmt::For { body: b, .. }
+            | Stmt::Alloc { body: b, .. } => b.iter().any(|s| self.stmt_contains_continue(s)),
+            _ => false,
+        }
+    }
+
+    fn stmt_always_exits_loop(&self, stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Break(_) | Stmt::Return(_) => true,
+            Stmt::Continue => false,
+            Stmt::If { then_, else_, .. } => {
+                self.block_exits_loop_without_backedge(then_)
+                    && else_
+                        .as_ref()
+                        .is_some_and(|b| self.block_exits_loop_without_backedge(b))
+            }
+            Stmt::Block(b) | Stmt::Do(b) | Stmt::Arena(b) | Stmt::Alloc { body: b, .. } => {
+                self.block_exits_loop_without_backedge(b)
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn check_unconsumed_caps(&mut self) {
         if let Some(scope) = self.cap_vars.last() {
             // v0.29.50: fast path — if all consumed, return immediately.

@@ -16,7 +16,7 @@
 
 - `CheckedProgram` 持久化 per-callable 线性 `cap` 的 Introduce/Move/Drop/Return 动作与 branch merge 状态。
 - 语句/表达式 `if` 与 `match` 路径敏感：单路径消耗 → `MaybeConsumed`/`E0304`；双路径一致 → 合并为 `Consumed`。
-- 潜在循环内消耗外层 capability fail-closed（固定点 CFG 分析仍待后续）。
+- 潜在循环内消耗外层 capability fail-closed；若循环体无 `continue` 且每条路径以 `break`/`return` 结束，则按无回边分支 join（`while` 仍与零次迭代路径合并）。
 - 嵌套函数 / actor / impl / transition 使用独立 ownership owner；禁止隐式捕获外层 `cap`。
 - Codegen 移除 flow transition 同名首候选 fallback；`flow_file_system` 固件避开保留字 `fault` 绑定。
 - `RESOURCE-LINEAR-001` / `OWN-PERMISSION-001` support 证据升为 `partial`。

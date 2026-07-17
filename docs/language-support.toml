@@ -142,7 +142,7 @@ verify = "not_applicable"
 fmt = "partial"
 lsp = "unsupported"
 probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test ownership_ -- --test-threads=1"
-evidence = "CheckedProgram persists per-callable capability Introduce/Move/Drop/Return actions, branch merge states, and control paths. Statement/expression if and match are path-sensitive; potentially repeating loops reject outer-capability consumption until fixed-point CFG analysis exists. General linear resources, field projections, break/continue edge joins, and complete CFG blocks remain incomplete."
+evidence = "CheckedProgram persists per-callable capability Introduce/Move/Drop/Return actions, branch merge states, and control paths. Statement/expression if and match are path-sensitive. Loops reject outer-capability consumption when a back-edge is possible; break/return-only bodies join without treating them as loop-carried. Full fixed-point CFG, field projections, and general linear resources remain incomplete."
 
 [[support]]
 requirement = "ERROR-ALGEBRA-001"

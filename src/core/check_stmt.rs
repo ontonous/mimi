@@ -910,7 +910,13 @@ impl<'a> Checker<'a> {
                 self.check_block(body, ret, scopes);
                 self.loop_depth -= 1;
                 let body_caps = self.cap_vars.clone();
-                self.merge_loop_capabilities(entry_caps, &body_caps);
+                // Zero-iteration path remains entry; body may exit only via break/return.
+                if self.block_exits_loop_without_backedge(body) {
+                    self.cap_vars = entry_caps.clone();
+                    self.merge_capability_branches(&entry_caps, &body_caps);
+                } else {
+                    self.merge_loop_capabilities(entry_caps, &body_caps);
+                }
             }
             Stmt::WhileLet { pat, init, body } => {
                 // CG-H3: Array and Slice (with rest tail view) are supported in codegen.
@@ -922,7 +928,12 @@ impl<'a> Checker<'a> {
                 self.check_block(body, ret, scopes);
                 self.loop_depth -= 1;
                 let body_caps = self.cap_vars.clone();
-                self.merge_loop_capabilities(entry_caps, &body_caps);
+                if self.block_exits_loop_without_backedge(body) {
+                    self.cap_vars = entry_caps.clone();
+                    self.merge_capability_branches(&entry_caps, &body_caps);
+                } else {
+                    self.merge_loop_capabilities(entry_caps, &body_caps);
+                }
                 scopes.pop();
             }
             Stmt::Loop(body) => {
@@ -931,7 +942,12 @@ impl<'a> Checker<'a> {
                 self.check_block(body, ret, scopes);
                 self.loop_depth -= 1;
                 let body_caps = self.cap_vars.clone();
-                self.merge_loop_capabilities(entry_caps, &body_caps);
+                // `loop` always enters the body at least once; no zero-iteration join.
+                if self.block_exits_loop_without_backedge(body) {
+                    self.cap_vars = body_caps;
+                } else {
+                    self.merge_loop_capabilities(entry_caps, &body_caps);
+                }
             }
             Stmt::For {
                 var,
@@ -968,7 +984,12 @@ impl<'a> Checker<'a> {
                 self.check_block(body, ret, scopes);
                 self.loop_depth -= 1;
                 let body_caps = self.cap_vars.clone();
-                self.merge_loop_capabilities(entry_caps, &body_caps);
+                if self.block_exits_loop_without_backedge(body) {
+                    self.cap_vars = entry_caps.clone();
+                    self.merge_capability_branches(&entry_caps, &body_caps);
+                } else {
+                    self.merge_loop_capabilities(entry_caps, &body_caps);
+                }
                 scopes.pop();
             }
             Stmt::Block(block) => {
