@@ -205,6 +205,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_mailbox_depths: Option<HashMap<String, usize>>,
     /// Flow state payloads: "Flow.State" -> [(field, type display)].
     pub(in crate::interp) resolved_flow_state_payloads: Option<HashMap<String, Vec<(String, String)>>>,
+    /// Flow state names: flow -> [state].
+    pub(in crate::interp) resolved_flow_states: Option<HashMap<String, Vec<String>>>,
     /// Persistent field sets materialised from CheckedProgram: flow -> fields.
     pub(in crate::interp) resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
     /// Transactional field sets materialised from CheckedProgram: flow -> fields.
@@ -601,6 +603,13 @@ impl<'a> Interpreter<'a> {
             }
         }
         interp.resolved_flow_state_payloads = Some(flow_state_payloads);
+        let mut flow_states = HashMap::new();
+        for flow in program.flows().values() {
+            let mut names: Vec<String> = flow.states.keys().cloned().collect();
+            names.sort();
+            flow_states.insert(flow.id.0.clone(), names);
+        }
+        interp.resolved_flow_states = Some(flow_states);
         let mut persistent_fields = HashMap::new();
         for flow in program.flows().values() {
             if !flow.persistent_fields.is_empty() {
@@ -1066,6 +1075,12 @@ impl<'a> Interpreter<'a> {
             .and_then(|map| map.get(&format!("{flow}.{state}")).cloned())
     }
 
+    pub(crate) fn resolved_flow_states(&self, flow: &str) -> Option<Vec<String>> {
+        self.resolved_flow_states
+            .as_ref()
+            .and_then(|map| map.get(flow).cloned())
+    }
+
     pub(crate) fn new(file: &'a File) -> Self {
         let mut constructors = HashMap::new();
         let mut newtype_constructors = HashMap::new();
@@ -1204,6 +1219,7 @@ impl<'a> Interpreter<'a> {
             resolved_call_sites: None,
             resolved_mailbox_depths: None,
             resolved_flow_state_payloads: None,
+            resolved_flow_states: None,
             resolved_persistent_fields: None,
             resolved_transactional_fields: None,
             resolved_metadata_shadow_fields: None,

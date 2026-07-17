@@ -386,6 +386,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.resolved_flow_state_payloads = Some(flow_state_payloads);
+        let mut flow_states = std::collections::HashMap::new();
+        for flow in program.flows().values() {
+            let mut names: Vec<String> = flow.states.keys().cloned().collect();
+            names.sort();
+            flow_states.insert(flow.id.0.clone(), names);
+        }
+        self.resolved_flow_states = Some(flow_states);
         let mut persistent_fields = std::collections::HashMap::new();
         for flow in program.flows().values() {
             if !flow.persistent_fields.is_empty() {
