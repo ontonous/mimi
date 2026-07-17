@@ -1578,6 +1578,23 @@ func main() -> i32 { MAX }
         assert!(program.constant("MAX").is_some());
     }
 
+
+    #[test]
+    fn interpreter_from_checked_installs_capability_and_constant_directories() {
+        let file = parse(
+            r#"
+cap Io
+const MAX: i32 = 10
+func main() -> i32 { MAX }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert!(interp.has_resolved_capability("Io"));
+        assert!(interp.has_resolved_constant("MAX"));
+        assert!(!interp.has_resolved_constant("Missing"));
+    }
+
     #[test]
     fn canonical_flow_ids_include_module_path() {
         let file = parse(

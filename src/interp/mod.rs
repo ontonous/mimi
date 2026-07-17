@@ -139,6 +139,10 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_protocols: Option<std::collections::HashSet<String>>,
     /// Actor method directories materialised from CheckedProgram: actor -> methods.
     pub(in crate::interp) resolved_actors: Option<HashMap<String, Vec<String>>>,
+    /// Capability names materialised from CheckedProgram.
+    pub(in crate::interp) resolved_capabilities: Option<std::collections::HashSet<String>>,
+    /// Constant names materialised from CheckedProgram.
+    pub(in crate::interp) resolved_constants: Option<std::collections::HashSet<String>>,
     /// v0.29.24: process-wide max children (None = unlimited).
     /// Taken from first `@max_children(N)` flow annotation in the file.
     max_children: Option<usize>,
@@ -227,6 +231,18 @@ impl<'a> Interpreter<'a> {
             actors.insert(actor.qualified_name.clone(), actor.methods.clone());
         }
         interp.resolved_actors = Some(actors);
+        let capabilities = program
+            .capabilities()
+            .values()
+            .map(|capability| capability.qualified_name.clone())
+            .collect();
+        interp.resolved_capabilities = Some(capabilities);
+        let constants = program
+            .constants()
+            .values()
+            .map(|constant| constant.qualified_name.clone())
+            .collect();
+        interp.resolved_constants = Some(constants);
         interp
     }
 
@@ -260,6 +276,18 @@ impl<'a> Interpreter<'a> {
         self.resolved_actors
             .as_ref()
             .and_then(|map| map.get(qualified_name).cloned())
+    }
+
+    pub(crate) fn has_resolved_capability(&self, qualified_name: &str) -> bool {
+        self.resolved_capabilities
+            .as_ref()
+            .is_some_and(|set| set.contains(qualified_name))
+    }
+
+    pub(crate) fn has_resolved_constant(&self, qualified_name: &str) -> bool {
+        self.resolved_constants
+            .as_ref()
+            .is_some_and(|set| set.contains(qualified_name))
     }
 
     pub(crate) fn new(file: &'a File) -> Self {
@@ -363,6 +391,8 @@ impl<'a> Interpreter<'a> {
             resolved_sessions: None,
             resolved_protocols: None,
             resolved_actors: None,
+            resolved_capabilities: None,
+            resolved_constants: None,
             max_children,
             spawn_count: 0,
             actor_spawn_counts: std::collections::HashMap::new(),
