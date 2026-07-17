@@ -85,6 +85,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map(|owner| owner.0.clone())
                 .collect(),
         );
+        let mut type_kinds = std::collections::HashMap::new();
+        for type_def in program.type_defs().values() {
+            let kind = match type_def.kind {
+                crate::core::ResolvedTypeKind::Alias => "alias",
+                crate::core::ResolvedTypeKind::Newtype => "newtype",
+                crate::core::ResolvedTypeKind::Record => "record",
+                crate::core::ResolvedTypeKind::Enum => "enum",
+                crate::core::ResolvedTypeKind::Union => "union",
+            };
+            type_kinds.insert(type_def.qualified_name.clone(), kind.to_string());
+        }
+        self.resolved_type_kinds = Some(type_kinds);
+        let mut extern_funcs = std::collections::HashSet::new();
+        for block in program.extern_blocks().values() {
+            for func in &block.funcs {
+                extern_funcs.insert(func.clone());
+            }
+        }
+        self.resolved_extern_funcs = Some(extern_funcs);
         self.compile_file(program.file()).map_err(|error| {
             let mut diagnostic = error.to_diagnostic();
             if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {

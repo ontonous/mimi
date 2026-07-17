@@ -149,6 +149,10 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_impls: Option<HashMap<String, Vec<String>>>,
     /// Ownership ledger owners materialised from CheckedProgram.
     pub(in crate::interp) resolved_ownership_owners: Option<std::collections::HashSet<String>>,
+    /// Type definition kinds materialised from CheckedProgram.
+    pub(in crate::interp) resolved_type_kinds: Option<HashMap<String, String>>,
+    /// Extern function names materialised from CheckedProgram.
+    pub(in crate::interp) resolved_extern_funcs: Option<std::collections::HashSet<String>>,
     /// v0.29.24: process-wide max children (None = unlimited).
     /// Taken from first `@max_children(N)` flow annotation in the file.
     max_children: Option<usize>,
@@ -266,6 +270,25 @@ impl<'a> Interpreter<'a> {
                 .map(|owner| owner.0.clone())
                 .collect(),
         );
+        let mut type_kinds = HashMap::new();
+        for type_def in program.type_defs().values() {
+            let kind = match type_def.kind {
+                crate::core::ResolvedTypeKind::Alias => "alias",
+                crate::core::ResolvedTypeKind::Newtype => "newtype",
+                crate::core::ResolvedTypeKind::Record => "record",
+                crate::core::ResolvedTypeKind::Enum => "enum",
+                crate::core::ResolvedTypeKind::Union => "union",
+            };
+            type_kinds.insert(type_def.qualified_name.clone(), kind.to_string());
+        }
+        interp.resolved_type_kinds = Some(type_kinds);
+        let mut extern_funcs = std::collections::HashSet::new();
+        for block in program.extern_blocks().values() {
+            for func in &block.funcs {
+                extern_funcs.insert(func.clone());
+            }
+        }
+        interp.resolved_extern_funcs = Some(extern_funcs);
         interp
     }
 
@@ -334,6 +357,18 @@ impl<'a> Interpreter<'a> {
         self.resolved_ownership_owners
             .as_ref()
             .is_some_and(|set| set.contains(owner))
+    }
+
+    pub(crate) fn resolved_type_kind(&self, qualified_name: &str) -> Option<&str> {
+        self.resolved_type_kinds
+            .as_ref()
+            .and_then(|map| map.get(qualified_name).map(String::as_str))
+    }
+
+    pub(crate) fn has_resolved_extern_func(&self, name: &str) -> bool {
+        self.resolved_extern_funcs
+            .as_ref()
+            .is_some_and(|set| set.contains(name))
     }
 
     pub(crate) fn new(file: &'a File) -> Self {
@@ -442,6 +477,8 @@ impl<'a> Interpreter<'a> {
             resolved_traits: None,
             resolved_impls: None,
             resolved_ownership_owners: None,
+            resolved_type_kinds: None,
+            resolved_extern_funcs: None,
             max_children,
             spawn_count: 0,
             actor_spawn_counts: std::collections::HashMap::new(),
