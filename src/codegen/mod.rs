@@ -307,6 +307,7 @@ pub struct CodeGenerator<'ctx> {
     /// Function directory from CheckedProgram: qualified_name -> arity.
     resolved_function_arity: Option<HashMap<String, usize>>,
     resolved_function_effects: Option<HashMap<String, Vec<String>>>,
+    resolved_function_returns: Option<HashMap<String, String>>,
     resolved_comptime_functions: Option<std::collections::HashSet<String>>,
     /// Session names from CheckedProgram.
     resolved_sessions: Option<std::collections::HashSet<String>>,
@@ -444,6 +445,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_transition_param_arity: None,
             resolved_function_arity: None,
             resolved_function_effects: None,
+            resolved_function_returns: None,
             resolved_comptime_functions: None,
             resolved_sessions: None,
             resolved_protocols: None,
@@ -465,6 +467,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    pub(crate) fn resolved_function_return_type(&self, name: &str) -> Option<&str> {
+        self.resolved_function_returns
+            .as_ref()
+            .and_then(|map| map.get(name).map(String::as_str))
+    }
 
     pub(crate) fn is_resolved_comptime_function(&self, name: &str) -> bool {
         self.resolved_comptime_functions

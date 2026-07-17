@@ -1795,6 +1795,8 @@ func main() -> i32 { 0 }
         assert!(codegen
             .resolved_function_effects("write")
             .is_some_and(|e| e.iter().any(|x| x == "Io")));
+        assert_eq!(codegen.resolved_function_return_type("write"), Some("i32"));
+        assert_eq!(verifier.checked_function_return_type("write"), Some("i32"));
     }
 
 
