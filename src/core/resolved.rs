@@ -105,6 +105,8 @@ pub struct ResolvedFlow {
     pub id: FlowId,
     pub states: HashMap<String, ResolvedState>,
     pub transitions: Vec<TransitionId>,
+    pub max_children: Option<usize>,
+    pub mailbox_depth: Option<usize>,
     pub origin: Origin,
 }
 
@@ -1404,11 +1406,21 @@ fn collect_flow(
             });
         }
     }
+    let mut max_children = None;
+    let mut mailbox_depth = None;
+    for annotation in &flow.annotations {
+        match annotation {
+            crate::ast::FlowAnnotation::MaxChildren(n) => max_children = Some(*n),
+            crate::ast::FlowAnnotation::MailboxDepth(n) => mailbox_depth = Some(*n),
+        }
+    }
     let resolved_flow = ResolvedFlow {
         node_id: flow_node_id.clone(),
         id: flow_id.clone(),
         states,
         transitions: flow_transition_ids,
+        max_children,
+        mailbox_depth,
         origin: resolve_origin(flow.origin, &flow_node_id, flow_span),
     };
     if flows.insert(flow_id.clone(), resolved_flow).is_some() {
@@ -1873,6 +1885,26 @@ func main() -> i32 { 0 }
             .any(|block| block.funcs.iter().any(|f| f == "c_abs")));
     }
 
+
+
+    #[test]
+    fn resolved_flow_records_annotations() {
+        let file = parse(
+            r#"
+flow Worker {
+    @max_children(3)
+    @mailbox(depth = 8)
+    state Idle
+    transition tick(Idle) -> Idle { do { return Idle {} } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let flow = program.flow("Worker").expect("Worker");
+        assert_eq!(flow.max_children, Some(3));
+        assert_eq!(flow.mailbox_depth, Some(8));
+    }
 
     #[test]
     fn consumers_install_type_and_extern_directories() {
