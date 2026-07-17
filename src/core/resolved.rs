@@ -176,6 +176,24 @@ pub struct ResolvedConstant {
     pub origin: Origin,
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedTrait {
+    pub node_id: NodeId,
+    pub qualified_name: String,
+    pub methods: Vec<String>,
+    pub origin: Origin,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedImpl {
+    pub node_id: NodeId,
+    pub qualified_name: String,
+    pub trait_name: String,
+    pub type_name: String,
+    pub methods: Vec<String>,
+    pub origin: Origin,
+}
+
 #[derive(Debug)]
 pub struct CheckedProgram<'a> {
     file: &'a File,
@@ -189,6 +207,8 @@ pub struct CheckedProgram<'a> {
     actors: HashMap<NodeId, ResolvedActor>,
     capabilities: HashMap<NodeId, ResolvedCapability>,
     constants: HashMap<NodeId, ResolvedConstant>,
+    traits: HashMap<NodeId, ResolvedTrait>,
+    impls: HashMap<NodeId, ResolvedImpl>,
     backend_requirements: Vec<CapabilityRequirement>,
     ownership_ledgers: HashMap<NodeId, OwnershipLedger>,
 }
@@ -213,6 +233,8 @@ impl<'a> CheckedProgram<'a> {
         let mut actors = HashMap::new();
         let mut capabilities = HashMap::new();
         let mut constants = HashMap::new();
+        let mut traits = HashMap::new();
+        let mut impls = HashMap::new();
         let mut backend_requirements = Vec::new();
         let mut errors = Vec::new();
         collect_items(
@@ -226,6 +248,8 @@ impl<'a> CheckedProgram<'a> {
             &mut actors,
             &mut capabilities,
             &mut constants,
+            &mut traits,
+            &mut impls,
             &mut flows,
             &mut transitions,
             &mut backend_requirements,
@@ -270,6 +294,8 @@ impl<'a> CheckedProgram<'a> {
             actors,
             capabilities,
             constants,
+            traits,
+            impls,
             backend_requirements,
             ownership_ledgers,
         })
@@ -349,6 +375,20 @@ impl<'a> CheckedProgram<'a> {
         self.constants
             .values()
             .find(|constant| constant.qualified_name == qualified_name)
+    }
+
+    pub fn traits(&self) -> &HashMap<NodeId, ResolvedTrait> {
+        &self.traits
+    }
+
+    pub fn trait_def(&self, qualified_name: &str) -> Option<&ResolvedTrait> {
+        self.traits
+            .values()
+            .find(|trait_def| trait_def.qualified_name == qualified_name)
+    }
+
+    pub fn impls(&self) -> &HashMap<NodeId, ResolvedImpl> {
+        &self.impls
     }
 
     pub fn node_meta(&self) -> &HashMap<NodeId, NodeMeta> {
@@ -445,6 +485,8 @@ fn collect_items(
     actors: &mut HashMap<NodeId, ResolvedActor>,
     capabilities: &mut HashMap<NodeId, ResolvedCapability>,
     constants: &mut HashMap<NodeId, ResolvedConstant>,
+    traits: &mut HashMap<NodeId, ResolvedTrait>,
+    impls: &mut HashMap<NodeId, ResolvedImpl>,
     flows: &mut HashMap<FlowId, ResolvedFlow>,
     transitions: &mut HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: &mut Vec<CapabilityRequirement>,
@@ -473,6 +515,8 @@ fn collect_items(
                     actors,
                     capabilities,
                     constants,
+                    traits,
+                    impls,
                     flows,
                     transitions,
                     backend_requirements,
@@ -617,25 +661,65 @@ fn collect_items(
                     },
                 );
             }
-            Item::Trait(trait_def) => insert_item(
-                resolved_items,
-                ResolvedItemKind::Trait,
-                &qualify(module, &trait_def.name),
-                trait_def.origin,
-                Span::from(trait_def.pos),
-                errors,
-            ),
-            Item::Impl(impl_def) => insert_item(
-                resolved_items,
-                ResolvedItemKind::Impl,
-                &qualify(
+            Item::Trait(trait_def) => {
+                let qualified = qualify(module, &trait_def.name);
+                let span = Span::from(trait_def.pos);
+                insert_item(
+                    resolved_items,
+                    ResolvedItemKind::Trait,
+                    &qualified,
+                    trait_def.origin,
+                    span,
+                    errors,
+                );
+                let node_id = NodeId(format!("trait:{}", qualified));
+                let methods = trait_def
+                    .methods
+                    .iter()
+                    .map(|method| method.name.clone())
+                    .collect();
+                traits.insert(
+                    node_id.clone(),
+                    ResolvedTrait {
+                        node_id,
+                        qualified_name: qualified,
+                        methods,
+                        origin: resolve_origin(trait_def.origin, &NodeId("trait".into()), span),
+                    },
+                );
+            }
+            Item::Impl(impl_def) => {
+                let qualified = qualify(
                     module,
                     &format!("{}:for:{}", impl_def.trait_name, impl_def.type_name),
-                ),
-                impl_def.origin,
-                Span::from(impl_def.pos),
-                errors,
-            ),
+                );
+                let span = Span::from(impl_def.pos);
+                insert_item(
+                    resolved_items,
+                    ResolvedItemKind::Impl,
+                    &qualified,
+                    impl_def.origin,
+                    span,
+                    errors,
+                );
+                let node_id = NodeId(format!("impl:{}", qualified));
+                let methods = impl_def
+                    .methods
+                    .iter()
+                    .map(|method| method.name.clone())
+                    .collect();
+                impls.insert(
+                    node_id.clone(),
+                    ResolvedImpl {
+                        node_id,
+                        qualified_name: qualified,
+                        trait_name: impl_def.trait_name.clone(),
+                        type_name: impl_def.type_name.clone(),
+                        methods,
+                        origin: resolve_origin(impl_def.origin, &NodeId("impl".into()), span),
+                    },
+                );
+            }
             Item::ExternBlock(block) => insert_item(
                 resolved_items,
                 ResolvedItemKind::ExternBlock,
@@ -1578,6 +1662,28 @@ func main() -> i32 { MAX }
         assert!(program.constant("MAX").is_some());
     }
 
+
+
+    #[test]
+    fn resolved_traits_and_impls_are_indexed() {
+        let file = parse(
+            r#"
+trait Close { func close() -> i32 }
+type Handle { value: i32 }
+impl Close for Handle {
+    func close() -> i32 { 0 }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let trait_def = program.trait_def("Close").expect("Close");
+        assert!(trait_def.methods.iter().any(|m| m == "close"));
+        assert!(program
+            .impls()
+            .values()
+            .any(|i| i.trait_name == "Close" && i.type_name == "Handle"));
+    }
 
     #[test]
     fn interpreter_from_checked_installs_capability_and_constant_directories() {

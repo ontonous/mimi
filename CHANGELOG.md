@@ -25,7 +25,7 @@
 
 - `Interpreter::from_checked` / `CodeGenerator::compile_checked` 安装 canonical `(flow,event,source)` transition 表；缺失 overload fail-closed。
 - Verifier backend 不再因 multi-target Flow 单独阻断无关函数合约验证。
-- `CheckedProgram` 索引模块限定函数签名（params/ret/effects/comptime）、session 类型体、protocol 拓扑、actor 字段/方法目录、cap 与 const 目录，未解析类型在 IR 边界 fail-closed。
+- `CheckedProgram` 索引模块限定函数签名（params/ret/effects/comptime）、session 类型体、protocol 拓扑、actor 字段/方法目录、cap/const 与 trait/impl 目录，未解析类型在 IR 边界 fail-closed。
 - ownership ledger 校验 callable `function:`/`transition:` NodeId 与 key/owner 一致性。
 - interpreter 从 CheckedProgram 安装函数目录（arity/effects）、session/protocol 名称目录、actor 方法目录以及 cap/const 目录供 consumer 使用。
 - codegen `compile_checked` 同步安装 session/protocol/actor/cap/const 目录表，并在 `compile_call` 用 checked arity fail-closed。
