@@ -1783,6 +1783,18 @@ func main() -> i32 { 0 }
             .expect("write effects");
         assert!(effects.iter().any(|e| e == "Io"));
         assert!(program.function("write").is_some());
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert!(verifier.has_checked_function("write"));
+        assert!(verifier
+            .checked_function_effects("write")
+            .is_some_and(|e| e.iter().any(|x| x == "Io")));
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "fx");
+        codegen.compile_checked(&program).expect("compile");
+        assert!(codegen
+            .resolved_function_effects("write")
+            .is_some_and(|e| e.iter().any(|x| x == "Io")));
     }
 
 
