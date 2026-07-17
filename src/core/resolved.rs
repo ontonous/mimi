@@ -747,7 +747,18 @@ fn collect_flow(
                 .unwrap_or_default()
                 .iter()
                 .map(|field| (field.name.clone(), field.ty.clone()))
-                .collect();
+                .collect::<Vec<_>>();
+            for (field, ty) in &payload {
+                if contains_unresolved_type(ty) {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: unresolved or erased type '{}' in state '{}::{}' field '{}'",
+                            crate::core::fmt_type(ty), qualified_name, state.name, field
+                        ),
+                        Span::from(state.pos),
+                    ));
+                }
+            }
             let node_id = NodeId(format!("state:{}::{}", qualified_name, state.name));
             let origin = resolve_origin(state.origin, &flow_node_id, Span::from(state.pos));
             (
@@ -865,6 +876,43 @@ fn resolve_origin(origin: AstOrigin, parent: &NodeId, span: Span) -> Origin {
             parent: parent.clone(),
             span,
         },
+    }
+}
+
+fn contains_unresolved_type(ty: &Type) -> bool {
+    match ty {
+        Type::Infer | Type::TypeVar(_) => true,
+        Type::Name(name, args) => {
+            name == "Any" || name == "_" || args.iter().any(contains_unresolved_type)
+        }
+        Type::Ref(_, inner)
+        | Type::RefMut(_, inner)
+        | Type::Option(inner)
+        | Type::Shared(inner)
+        | Type::LocalShared(inner)
+        | Type::Weak(inner)
+        | Type::WeakLocal(inner)
+        | Type::Array(inner, _)
+        | Type::Slice(inner)
+        | Type::Newtype(_, inner)
+        | Type::CBuffer(inner)
+        | Type::RawPtr(inner)
+        | Type::RawPtrMut(inner)
+        | Type::CShared(inner)
+        | Type::CBorrow(inner)
+        | Type::CBorrowMut(inner)
+        | Type::ForAll(_, inner) => contains_unresolved_type(inner),
+        Type::Result(ok, err) => contains_unresolved_type(ok) || contains_unresolved_type(err),
+        Type::Tuple(items) => items.iter().any(contains_unresolved_type),
+        Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
+            args.iter().any(contains_unresolved_type) || contains_unresolved_type(ret)
+        }
+        Type::Cap(_)
+        | Type::DynTrait(_)
+        | Type::ImplTrait(_)
+        | Type::Nothing
+        | Type::Allocator
+        | Type::RawString => false,
     }
 }
 
@@ -1170,6 +1218,25 @@ func main() -> i32 {
                 .precision,
             SpanPrecision::DeclarationFallback
         );
+    }
+
+    #[test]
+    fn resolved_ir_rejects_nested_erased_state_payloads() {
+        let file = parse(
+            r#"
+flow Cache {
+    state Ready { values: List<Any> }
+}
+"#,
+        );
+        let diagnostics = CheckedProgram::from_checked_file(&file).expect_err("IR must reject Any");
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("TOOL-RESOLUTION-001")
+            && diagnostic.message.contains("List<Any>")));
+        assert!(diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.span.start_line > 0));
     }
 }
 
