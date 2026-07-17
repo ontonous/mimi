@@ -313,6 +313,12 @@ pub struct CodeGenerator<'ctx> {
     resolved_capabilities: Option<std::collections::HashSet<String>>,
     /// Constant names from CheckedProgram.
     resolved_constants: Option<std::collections::HashSet<String>>,
+    /// Trait method directories from CheckedProgram.
+    resolved_traits: Option<HashMap<String, Vec<String>>>,
+    /// Impl method directories from CheckedProgram: "Trait:for:Type" -> methods.
+    resolved_impls: Option<HashMap<String, Vec<String>>>,
+    /// Ownership ledger owners from CheckedProgram.
+    resolved_ownership_owners: Option<std::collections::HashSet<String>>,
     /// v0.29.24: process spawn quota from first @max_children(N) (None = unlimited).
     max_children: Option<usize>,
 }
@@ -422,6 +428,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_actors: None,
             resolved_capabilities: None,
             resolved_constants: None,
+            resolved_traits: None,
+            resolved_impls: None,
+            resolved_ownership_owners: None,
             max_children: None,
         }
     }
