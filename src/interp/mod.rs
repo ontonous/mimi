@@ -190,6 +190,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_call_sites: Option<HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>>,
     /// Flow mailbox depth limits materialised from CheckedProgram: flow -> depth.
     pub(in crate::interp) resolved_mailbox_depths: Option<HashMap<String, usize>>,
+    /// Flow state payloads: "Flow.State" -> [(field, type display)].
+    pub(in crate::interp) resolved_flow_state_payloads: Option<HashMap<String, Vec<(String, String)>>>,
     /// Persistent field sets materialised from CheckedProgram: flow -> fields.
     pub(in crate::interp) resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
     /// Transactional field sets materialised from CheckedProgram: flow -> fields.
@@ -517,6 +519,22 @@ impl<'a> Interpreter<'a> {
             }
         }
         interp.resolved_mailbox_depths = Some(mailbox_depths);
+        let mut flow_state_payloads = HashMap::new();
+        for flow in program.flows().values() {
+            for (state_name, state) in &flow.states {
+                if !state.payload.is_empty() {
+                    flow_state_payloads.insert(
+                        format!("{}.{}", flow.id.0, state_name),
+                        state
+                            .payload
+                            .iter()
+                            .map(|(name, ty)| (name.clone(), crate::core::fmt_type(ty)))
+                            .collect(),
+                    );
+                }
+            }
+        }
+        interp.resolved_flow_state_payloads = Some(flow_state_payloads);
         let mut persistent_fields = HashMap::new();
         for flow in program.flows().values() {
             if !flow.persistent_fields.is_empty() {
@@ -919,6 +937,16 @@ impl<'a> Interpreter<'a> {
         })
     }
 
+    pub(crate) fn resolved_flow_state_payload(
+        &self,
+        flow: &str,
+        state: &str,
+    ) -> Option<Vec<(String, String)>> {
+        self.resolved_flow_state_payloads
+            .as_ref()
+            .and_then(|map| map.get(&format!("{flow}.{state}")).cloned())
+    }
+
     pub(crate) fn new(file: &'a File) -> Self {
         let mut constructors = HashMap::new();
         let mut newtype_constructors = HashMap::new();
@@ -1048,6 +1076,7 @@ impl<'a> Interpreter<'a> {
             resolved_extern_signatures: None,
             resolved_call_sites: None,
             resolved_mailbox_depths: None,
+            resolved_flow_state_payloads: None,
             resolved_persistent_fields: None,
             resolved_transactional_fields: None,
             resolved_metadata_shadow_fields: None,

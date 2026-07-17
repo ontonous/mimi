@@ -347,6 +347,7 @@ pub struct CodeGenerator<'ctx> {
     resolved_call_sites: Option<HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>>,
     /// Flow mailbox depths from CheckedProgram.
     resolved_mailbox_depths: Option<HashMap<String, usize>>,
+    resolved_flow_state_payloads: Option<HashMap<String, Vec<(String, String)>>>,
     /// Persistent field sets from CheckedProgram.
     resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
     resolved_transactional_fields: Option<HashMap<String, Vec<String>>>,
@@ -489,6 +490,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_extern_signatures: None,
             resolved_call_sites: None,
             resolved_mailbox_depths: None,
+            resolved_flow_state_payloads: None,
             resolved_persistent_fields: None,
             resolved_transactional_fields: None,
             resolved_metadata_shadow_fields: None,
@@ -696,6 +698,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_capability_combined
             .as_ref()
             .and_then(|map| map.get(name).map(String::as_str))
+    }
+
+    pub(crate) fn resolved_flow_state_payload(
+        &self,
+        flow: &str,
+        state: &str,
+    ) -> Option<Vec<(String, String)>> {
+        self.resolved_flow_state_payloads
+            .as_ref()
+            .and_then(|map| map.get(&format!("{flow}.{state}")).cloned())
     }
 
     pub fn gep(&self) -> gep::CheckedGepBuilder<'_, 'ctx> {

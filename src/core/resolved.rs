@@ -3866,6 +3866,42 @@ func main() -> i32 { 0 }
         );
     }
 
+
+    #[test]
+    fn flow_state_payloads_are_installed() {
+        let file = parse(
+            r#"
+flow Counter {
+    state Zero
+    state Positive { count: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: 1 } }
+    }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert_eq!(
+            interp.resolved_flow_state_payload("Counter", "Positive"),
+            Some(vec![("count".into(), "i32".into())])
+        );
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert_eq!(
+            verifier.checked_flow_state_payload("Counter", "Positive"),
+            Some(vec![("count".into(), "i32".into())])
+        );
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "flow_payload");
+        codegen.compile_checked(&program).expect("compile");
+        assert_eq!(
+            codegen.resolved_flow_state_payload("Counter", "Positive"),
+            Some(vec![("count".into(), "i32".into())])
+        );
+    }
+
     #[test]
     fn call_sites_bind_callee_effects_from_function_directory() {
         // IR-only materialization: avoid effect-scope runtime checks at call sites.

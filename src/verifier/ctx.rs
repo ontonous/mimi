@@ -445,6 +445,7 @@ pub struct VerifierCtx {
     pub(crate) checked_actor_method_signatures: std::collections::HashMap<String, (usize, String)>,
     /// Flow mailbox depths materialised from CheckedProgram.
     pub(crate) checked_mailbox_depths: std::collections::HashMap<String, usize>,
+    pub(crate) checked_flow_state_payloads: std::collections::HashMap<String, Vec<(String, String)>>,
     /// Flow max_children materialised from CheckedProgram.
     pub(crate) checked_max_children: Option<usize>,
     /// Persistent field sets materialised from CheckedProgram.
@@ -725,6 +726,22 @@ impl Verifier {
             }
         }
         self.ctx.checked_mailbox_depths = mailbox_depths;
+        let mut flow_state_payloads = std::collections::HashMap::new();
+        for flow in program.flows().values() {
+            for (state_name, state) in &flow.states {
+                if !state.payload.is_empty() {
+                    flow_state_payloads.insert(
+                        format!("{}.{}", flow.id.0, state_name),
+                        state
+                            .payload
+                            .iter()
+                            .map(|(name, ty)| (name.clone(), crate::core::fmt_type(ty)))
+                            .collect(),
+                    );
+                }
+            }
+        }
+        self.ctx.checked_flow_state_payloads = flow_state_payloads;
         self.ctx.checked_max_children = program.flows().values().find_map(|flow| flow.max_children);
         let mut persistent_fields = std::collections::HashMap::new();
         for flow in program.flows().values() {
@@ -1001,6 +1018,17 @@ impl Verifier {
                     .map(|_| *depth)
             })
         })
+    }
+
+    pub(crate) fn checked_flow_state_payload(
+        &self,
+        flow: &str,
+        state: &str,
+    ) -> Option<Vec<(String, String)>> {
+        self.ctx
+            .checked_flow_state_payloads
+            .get(&format!("{flow}.{state}"))
+            .cloned()
     }
 
     pub(crate) fn checked_max_children(&self) -> Option<usize> {
