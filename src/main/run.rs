@@ -168,7 +168,12 @@ fn run_once(
             let use_color = colors_enabled();
             let src = mimi::path_safety::read_source_capped(path).ok();
             let src_ref = src.as_deref();
-            let diagnostic = interp_err.to_diagnostic();
+            let mut diagnostic = interp_err.to_diagnostic();
+            if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {
+                if let Some(span) = checked_program.entry_span() {
+                    diagnostic = diagnostic.with_span(span);
+                }
+            }
             let formatted = format_diagnostic(&diagnostic, src_ref, &path.display().to_string());
             if use_color {
                 eprintln!("{}", formatted);

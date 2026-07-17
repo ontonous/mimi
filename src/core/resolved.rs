@@ -156,6 +156,19 @@ impl<'a> CheckedProgram<'a> {
         &self.items
     }
 
+    pub fn entry_span(&self) -> Option<Span> {
+        self.items
+            .values()
+            .find(|item| item.kind == ResolvedItemKind::Function && item.qualified_name == "main")
+            .or_else(|| {
+                self.items
+                    .values()
+                    .filter(|item| matches!(item.origin, Origin::User(_)))
+                    .min_by(|left, right| left.node_id.0.cmp(&right.node_id.0))
+            })
+            .map(|item| item.origin.user_span())
+    }
+
     pub fn flow(&self, qualified_name: &str) -> Option<&ResolvedFlow> {
         self.flows.get(&FlowId(qualified_name.to_string()))
     }
@@ -637,6 +650,7 @@ func main() -> i32 { 0 }
                 .unwrap_or_else(|| panic!("missing {node_id}"));
             assert_eq!(item.origin.user_span().start_line, line);
         }
+        assert_eq!(program.entry_span().expect("entry span").start_line, 9);
     }
 
     #[test]
