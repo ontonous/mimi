@@ -1428,6 +1428,26 @@ func main() -> i32 { 0 }
         assert!(actor.methods.iter().any(|m| m == "inc"));
     }
 
+
+    #[test]
+    fn interpreter_from_checked_installs_function_directory() {
+        let file = parse(
+            r#"
+cap Io
+func write(x: i32) -> i32 with Io { x }
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert_eq!(interp.resolved_function_arity("write"), Some(1));
+        let effects = interp
+            .resolved_function_effects("write")
+            .expect("write effects");
+        assert!(effects.iter().any(|e| e == "Io"));
+        assert!(program.function("write").is_some());
+    }
+
     #[test]
     fn canonical_flow_ids_include_module_path() {
         let file = parse(
