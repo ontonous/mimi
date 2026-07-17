@@ -423,6 +423,7 @@ pub struct VerifierCtx {
     pub(crate) checked_ownership_owners: std::collections::HashSet<String>,
     pub(crate) checked_ownership_summaries:
         std::collections::HashMap<String, (usize, usize, usize, usize, usize, bool)>,
+    pub(crate) checked_ownership_resources: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_backend_requirements: Vec<(String, String)>,
     pub(crate) checked_node_meta_count: usize,
     /// Type definition names materialised from CheckedProgram.
@@ -576,6 +577,7 @@ impl Verifier {
             .map(|owner| owner.0.clone())
             .collect();
         let mut ownership_summaries = std::collections::HashMap::new();
+        let mut ownership_resources = std::collections::HashMap::new();
         for (owner, ledger) in program.ownership_ledgers() {
             ownership_summaries.insert(
                 owner.0.clone(),
@@ -588,8 +590,10 @@ impl Verifier {
                     ledger.has_maybe_consumed_merge(),
                 ),
             );
+            ownership_resources.insert(owner.0.clone(), ledger.resources());
         }
         self.ctx.checked_ownership_summaries = ownership_summaries;
+        self.ctx.checked_ownership_resources = ownership_resources;
 
         self.ctx.checked_backend_requirements = program
             .backend_requirements()
@@ -935,6 +939,10 @@ impl Verifier {
         owner: &str,
     ) -> Option<(usize, usize, usize, usize, usize, bool)> {
         self.ctx.checked_ownership_summaries.get(owner).copied()
+    }
+
+    pub(crate) fn checked_ownership_resources(&self, owner: &str) -> Option<Vec<String>> {
+        self.ctx.checked_ownership_resources.get(owner).cloned()
     }
 
     pub(crate) fn has_checked_type_def(&self, name: &str) -> bool {

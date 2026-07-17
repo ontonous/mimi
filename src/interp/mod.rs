@@ -176,6 +176,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_ownership_owners: Option<std::collections::HashSet<String>>,
     /// Ownership action summaries: owner -> (intro, move, drop, return, merges, maybe_consumed).
     pub(in crate::interp) resolved_ownership_summaries: Option<HashMap<String, (usize, usize, usize, usize, usize, bool)>>,
+    /// Ownership resources per owner: owner -> resource names.
+    pub(in crate::interp) resolved_ownership_resources: Option<HashMap<String, Vec<String>>>,
     /// Backend capability requirements: (capability, flow).
     pub(in crate::interp) resolved_backend_requirements: Option<Vec<(String, String)>>,
     /// NodeMeta path presence count from CheckedProgram.
@@ -444,6 +446,7 @@ impl<'a> Interpreter<'a> {
                 .collect(),
         );
         let mut ownership_summaries = HashMap::new();
+        let mut ownership_resources = HashMap::new();
         for (owner, ledger) in program.ownership_ledgers() {
             ownership_summaries.insert(
                 owner.0.clone(),
@@ -456,8 +459,10 @@ impl<'a> Interpreter<'a> {
                     ledger.has_maybe_consumed_merge(),
                 ),
             );
+            ownership_resources.insert(owner.0.clone(), ledger.resources());
         }
         interp.resolved_ownership_summaries = Some(ownership_summaries);
+        interp.resolved_ownership_resources = Some(ownership_resources);
         interp.resolved_backend_requirements = Some(
             program
                 .backend_requirements()
@@ -747,6 +752,12 @@ impl<'a> Interpreter<'a> {
         self.resolved_ownership_summaries
             .as_ref()
             .and_then(|map| map.get(owner).copied())
+    }
+
+    pub(crate) fn resolved_ownership_resources(&self, owner: &str) -> Option<Vec<String>> {
+        self.resolved_ownership_resources
+            .as_ref()
+            .and_then(|map| map.get(owner).cloned())
     }
 
     pub(crate) fn resolved_backend_requirements(&self) -> Option<&[(String, String)]> {
@@ -1116,6 +1127,7 @@ impl<'a> Interpreter<'a> {
             resolved_impls: None,
             resolved_ownership_owners: None,
             resolved_ownership_summaries: None,
+            resolved_ownership_resources: None,
             resolved_backend_requirements: None,
             resolved_node_meta_count: None,
             resolved_type_kinds: None,

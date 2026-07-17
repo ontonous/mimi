@@ -196,6 +196,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .collect(),
         );
         let mut ownership_summaries = std::collections::HashMap::new();
+        let mut ownership_resources = std::collections::HashMap::new();
         for (owner, ledger) in program.ownership_ledgers() {
             ownership_summaries.insert(
                 owner.0.clone(),
@@ -208,8 +209,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ledger.has_maybe_consumed_merge(),
                 ),
             );
+            ownership_resources.insert(owner.0.clone(), ledger.resources());
         }
         self.resolved_ownership_summaries = Some(ownership_summaries);
+        self.resolved_ownership_resources = Some(ownership_resources);
 
         self.resolved_backend_requirements = Some(
             program

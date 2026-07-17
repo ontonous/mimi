@@ -336,6 +336,7 @@ pub struct CodeGenerator<'ctx> {
     /// Ownership ledger owners from CheckedProgram.
     resolved_ownership_owners: Option<std::collections::HashSet<String>>,
     resolved_ownership_summaries: Option<HashMap<String, (usize, usize, usize, usize, usize, bool)>>,
+    resolved_ownership_resources: Option<HashMap<String, Vec<String>>>,
     resolved_backend_requirements: Option<Vec<(String, String)>>,
     resolved_node_meta_count: Option<usize>,
     /// Type definition kinds from CheckedProgram.
@@ -485,6 +486,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_impls: None,
             resolved_ownership_owners: None,
             resolved_ownership_summaries: None,
+            resolved_ownership_resources: None,
             resolved_backend_requirements: None,
             resolved_node_meta_count: None,
             resolved_type_kinds: None,
@@ -737,6 +739,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_backend_requirements.as_ref().is_some_and(|reqs| {
             reqs.iter().any(|(cap, _)| cap == capability)
         })
+    }
+
+    pub(crate) fn resolved_ownership_resources(&self, owner: &str) -> Option<Vec<String>> {
+        self.resolved_ownership_resources
+            .as_ref()
+            .and_then(|map| map.get(owner).cloned())
     }
 
     pub fn gep(&self) -> gep::CheckedGepBuilder<'_, 'ctx> {
