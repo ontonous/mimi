@@ -397,6 +397,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.resolved_call_sites_by_owner = Some(call_sites_by_owner);
+        let mut call_sites_by_callee: std::collections::HashMap<String, Vec<(String, usize, String)>> =
+            std::collections::HashMap::new();
+        if let Some(sites) = self.resolved_call_sites.as_ref() {
+            for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in sites {
+                call_sites_by_callee
+                    .entry(callee.clone())
+                    .or_default()
+                    .push((owner.clone(), *argc, kind.clone()));
+            }
+        }
+        self.resolved_call_sites_by_callee = Some(call_sites_by_callee);
         let mut actor_method_signatures = std::collections::HashMap::new();
         for actor in program.actors().values() {
             for method in &actor.method_signatures {
