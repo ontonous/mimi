@@ -133,6 +133,10 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_transitions: Option<HashMap<(String, String, String), Vec<String>>>,
     /// Function signatures from CheckedProgram: qualified_name -> (param_count, ret_fmt, effects).
     pub(in crate::interp) resolved_functions: Option<HashMap<String, (usize, String, Vec<String>)>>,
+    /// Session type names materialised from CheckedProgram.
+    pub(in crate::interp) resolved_sessions: Option<HashMap<String, crate::ast::SessionType>>,
+    /// Protocol names materialised from CheckedProgram.
+    pub(in crate::interp) resolved_protocols: Option<std::collections::HashSet<String>>,
     /// v0.29.24: process-wide max children (None = unlimited).
     /// Taken from first `@max_children(N)` flow annotation in the file.
     max_children: Option<usize>,
@@ -205,6 +209,17 @@ impl<'a> Interpreter<'a> {
             );
         }
         interp.resolved_functions = Some(functions);
+        let mut sessions = HashMap::new();
+        for session in program.sessions().values() {
+            sessions.insert(session.qualified_name.clone(), session.body.clone());
+        }
+        interp.resolved_sessions = Some(sessions);
+        let protocols = program
+            .protocols()
+            .values()
+            .map(|protocol| protocol.qualified_name.clone())
+            .collect();
+        interp.resolved_protocols = Some(protocols);
         interp
     }
 
@@ -220,6 +235,18 @@ impl<'a> Interpreter<'a> {
         self.resolved_functions
             .as_ref()
             .and_then(|map| map.get(qualified_name).map(|(_, _, effects)| effects.clone()))
+    }
+
+    pub(crate) fn has_resolved_session(&self, qualified_name: &str) -> bool {
+        self.resolved_sessions
+            .as_ref()
+            .is_some_and(|map| map.contains_key(qualified_name))
+    }
+
+    pub(crate) fn has_resolved_protocol(&self, qualified_name: &str) -> bool {
+        self.resolved_protocols
+            .as_ref()
+            .is_some_and(|set| set.contains(qualified_name))
     }
 
     pub(crate) fn new(file: &'a File) -> Self {
@@ -320,6 +347,8 @@ impl<'a> Interpreter<'a> {
             flow_index,
             resolved_transitions: None,
             resolved_functions: None,
+            resolved_sessions: None,
+            resolved_protocols: None,
             max_children,
             spawn_count: 0,
             actor_spawn_counts: std::collections::HashMap::new(),
