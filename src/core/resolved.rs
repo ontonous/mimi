@@ -213,6 +213,30 @@ impl<'a> CheckedProgram<'a> {
         if !errors.is_empty() {
             return Err(errors);
         }
+        for (owner, ledger) in &ownership_ledgers {
+            if ledger.owner != *owner {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: ownership ledger key '{}' disagrees with ledger.owner '{}'",
+                        owner.0, ledger.owner.0
+                    ),
+                    Span::single(1, 1),
+                ));
+            }
+            let ok = owner.0.starts_with("function:") || owner.0.starts_with("transition:");
+            if !ok {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: ownership ledger owner '{}' is not a callable NodeId",
+                        owner.0
+                    ),
+                    Span::single(1, 1),
+                ));
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
         Ok(Self {
             file,
             items,
