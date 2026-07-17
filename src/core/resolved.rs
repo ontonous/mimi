@@ -194,6 +194,34 @@ pub struct ResolvedImpl {
     pub origin: Origin,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedTypeKind {
+    Alias,
+    Newtype,
+    Record,
+    Enum,
+    Union,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedTypeDef {
+    pub node_id: NodeId,
+    pub qualified_name: String,
+    pub kind: ResolvedTypeKind,
+    pub origin: Origin,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedExternBlock {
+    pub node_id: NodeId,
+    pub qualified_name: String,
+    pub abi: String,
+    pub funcs: Vec<String>,
+    pub no_panic: bool,
+    pub unsafe_: bool,
+    pub origin: Origin,
+}
+
 #[derive(Debug)]
 pub struct CheckedProgram<'a> {
     file: &'a File,
@@ -209,6 +237,8 @@ pub struct CheckedProgram<'a> {
     constants: HashMap<NodeId, ResolvedConstant>,
     traits: HashMap<NodeId, ResolvedTrait>,
     impls: HashMap<NodeId, ResolvedImpl>,
+    type_defs: HashMap<NodeId, ResolvedTypeDef>,
+    extern_blocks: HashMap<NodeId, ResolvedExternBlock>,
     backend_requirements: Vec<CapabilityRequirement>,
     ownership_ledgers: HashMap<NodeId, OwnershipLedger>,
 }
@@ -235,6 +265,8 @@ impl<'a> CheckedProgram<'a> {
         let mut constants = HashMap::new();
         let mut traits = HashMap::new();
         let mut impls = HashMap::new();
+        let mut type_defs = HashMap::new();
+        let mut extern_blocks = HashMap::new();
         let mut backend_requirements = Vec::new();
         let mut errors = Vec::new();
         collect_items(
@@ -250,6 +282,8 @@ impl<'a> CheckedProgram<'a> {
             &mut constants,
             &mut traits,
             &mut impls,
+            &mut type_defs,
+            &mut extern_blocks,
             &mut flows,
             &mut transitions,
             &mut backend_requirements,
@@ -296,6 +330,8 @@ impl<'a> CheckedProgram<'a> {
             constants,
             traits,
             impls,
+            type_defs,
+            extern_blocks,
             backend_requirements,
             ownership_ledgers,
         })
@@ -389,6 +425,20 @@ impl<'a> CheckedProgram<'a> {
 
     pub fn impls(&self) -> &HashMap<NodeId, ResolvedImpl> {
         &self.impls
+    }
+
+    pub fn type_defs(&self) -> &HashMap<NodeId, ResolvedTypeDef> {
+        &self.type_defs
+    }
+
+    pub fn type_def(&self, qualified_name: &str) -> Option<&ResolvedTypeDef> {
+        self.type_defs
+            .values()
+            .find(|type_def| type_def.qualified_name == qualified_name)
+    }
+
+    pub fn extern_blocks(&self) -> &HashMap<NodeId, ResolvedExternBlock> {
+        &self.extern_blocks
     }
 
     pub fn node_meta(&self) -> &HashMap<NodeId, NodeMeta> {
@@ -487,6 +537,8 @@ fn collect_items(
     constants: &mut HashMap<NodeId, ResolvedConstant>,
     traits: &mut HashMap<NodeId, ResolvedTrait>,
     impls: &mut HashMap<NodeId, ResolvedImpl>,
+    type_defs: &mut HashMap<NodeId, ResolvedTypeDef>,
+    extern_blocks: &mut HashMap<NodeId, ResolvedExternBlock>,
     flows: &mut HashMap<FlowId, ResolvedFlow>,
     transitions: &mut HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: &mut Vec<CapabilityRequirement>,
@@ -517,6 +569,8 @@ fn collect_items(
                     constants,
                     traits,
                     impls,
+                    type_defs,
+                    extern_blocks,
                     flows,
                     transitions,
                     backend_requirements,
@@ -607,16 +661,38 @@ fn collect_items(
                 );
             }
             Item::Type(type_def) => {
-                if let Some(pos) = type_def.decl_pos {
+                let qualified = qualify(module, &type_def.name);
+                let span = type_def
+                    .decl_pos
+                    .map(Span::from)
+                    .unwrap_or_else(|| Span::single(1, 1));
+                if type_def.decl_pos.is_some() {
                     insert_item(
                         resolved_items,
                         ResolvedItemKind::Type,
-                        &qualify(module, &type_def.name),
+                        &qualified,
                         AstOrigin::User,
-                        Span::from(pos),
+                        span,
                         errors,
                     );
                 }
+                let kind = match &type_def.kind {
+                    crate::ast::TypeDefKind::Alias(_) => ResolvedTypeKind::Alias,
+                    crate::ast::TypeDefKind::Newtype(_) => ResolvedTypeKind::Newtype,
+                    crate::ast::TypeDefKind::Record(_) => ResolvedTypeKind::Record,
+                    crate::ast::TypeDefKind::Enum(_) => ResolvedTypeKind::Enum,
+                    crate::ast::TypeDefKind::Union(_) => ResolvedTypeKind::Union,
+                };
+                let node_id = NodeId(format!("type:{}", qualified));
+                type_defs.insert(
+                    node_id.clone(),
+                    ResolvedTypeDef {
+                        node_id,
+                        qualified_name: qualified,
+                        kind,
+                        origin: Origin::User(span),
+                    },
+                );
             }
             Item::Const { name, pos, .. } => {
                 let qualified = qualify(module, name);
@@ -720,14 +796,59 @@ fn collect_items(
                     },
                 );
             }
-            Item::ExternBlock(block) => insert_item(
-                resolved_items,
-                ResolvedItemKind::ExternBlock,
-                &qualify(module, &format!("{}:at:{}", block.abi, block.pos.0)),
-                block.origin,
-                Span::from(block.pos),
-                errors,
-            ),
+            Item::ExternBlock(block) => {
+                let qualified = qualify(module, &format!("{}:at:{}", block.abi, block.pos.0));
+                let span = Span::from(block.pos);
+                insert_item(
+                    resolved_items,
+                    ResolvedItemKind::ExternBlock,
+                    &qualified,
+                    block.origin,
+                    span,
+                    errors,
+                );
+                let node_id = NodeId(format!("extern:{}", qualified));
+                let funcs = block.funcs.iter().map(|func| func.name.clone()).collect();
+                for func in &block.funcs {
+                    for param in &func.params {
+                        if contains_unresolved_type(&param.ty) {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: unresolved or erased type '{}' in extern function '{}' parameter",
+                                    crate::core::fmt_type(&param.ty),
+                                    func.name
+                                ),
+                                span,
+                            ));
+                        }
+                    }
+                    if let Some(ret) = &func.ret {
+                        if contains_unresolved_type(ret) {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: unresolved or erased return type '{}' in extern function '{}'",
+                                    crate::core::fmt_type(ret),
+                                    func.name
+                                ),
+                                span,
+                            ));
+                        }
+                    }
+                }
+                extern_blocks.insert(
+                    node_id.clone(),
+                    ResolvedExternBlock {
+                        node_id,
+                        qualified_name: qualified,
+                        abi: block.abi.clone(),
+                        funcs,
+                        no_panic: block.no_panic,
+                        unsafe_: block.unsafe_,
+                        origin: resolve_origin(block.origin, &NodeId("extern".into()), span),
+                    },
+                );
+            }
+
             Item::Actor(actor) => {
                 let qualified = qualify(module, &actor.name);
                 let span = Span::from(actor.pos);
@@ -1729,6 +1850,27 @@ func main() -> i32 { 0 }
         let mut verifier = crate::verifier::Verifier::new().expect("z3");
         let _ = verifier.verify_checked(&program);
         assert!(verifier.has_checked_ownership_owner("function:close"));
+    }
+
+
+    #[test]
+    fn resolved_types_and_extern_blocks_are_indexed() {
+        let file = parse(
+            r#"
+type Point { x: i32, y: i32 }
+extern "C" {
+    func c_abs(x: i32) -> i32
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let point = program.type_def("Point").expect("Point");
+        assert_eq!(point.kind, ResolvedTypeKind::Record);
+        assert!(program
+            .extern_blocks()
+            .values()
+            .any(|block| block.funcs.iter().any(|f| f == "c_abs")));
     }
 
     #[test]
