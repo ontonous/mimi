@@ -176,6 +176,10 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_ownership_owners: Option<std::collections::HashSet<String>>,
     /// Ownership action summaries: owner -> (intro, move, drop, return, merges, maybe_consumed).
     pub(in crate::interp) resolved_ownership_summaries: Option<HashMap<String, (usize, usize, usize, usize, usize, bool)>>,
+    /// Backend capability requirements: (capability, flow).
+    pub(in crate::interp) resolved_backend_requirements: Option<Vec<(String, String)>>,
+    /// NodeMeta path presence count from CheckedProgram.
+    pub(in crate::interp) resolved_node_meta_count: Option<usize>,
     /// Type definition kinds materialised from CheckedProgram.
     pub(in crate::interp) resolved_type_kinds: Option<HashMap<String, String>>,
     pub(in crate::interp) resolved_type_fields: Option<HashMap<String, Vec<(String, String)>>>,
@@ -454,6 +458,14 @@ impl<'a> Interpreter<'a> {
             );
         }
         interp.resolved_ownership_summaries = Some(ownership_summaries);
+        interp.resolved_backend_requirements = Some(
+            program
+                .backend_requirements()
+                .iter()
+                .map(|req| (req.capability.to_string(), req.flow.0.clone()))
+                .collect(),
+        );
+        interp.resolved_node_meta_count = Some(program.node_meta().len());
                 let mut type_kinds = HashMap::new();
         let mut type_fields = HashMap::new();
         let mut type_variants = HashMap::new();
@@ -735,6 +747,20 @@ impl<'a> Interpreter<'a> {
         self.resolved_ownership_summaries
             .as_ref()
             .and_then(|map| map.get(owner).copied())
+    }
+
+    pub(crate) fn resolved_backend_requirements(&self) -> Option<&[(String, String)]> {
+        self.resolved_backend_requirements.as_ref().map(Vec::as_slice)
+    }
+
+    pub(crate) fn resolved_node_meta_count(&self) -> Option<usize> {
+        self.resolved_node_meta_count
+    }
+
+    pub(crate) fn requires_resolved_capability(&self, capability: &str) -> bool {
+        self.resolved_backend_requirements.as_ref().is_some_and(|reqs| {
+            reqs.iter().any(|(cap, _)| cap == capability)
+        })
     }
 
     pub(crate) fn resolved_type_kind(&self, qualified_name: &str) -> Option<&str> {
@@ -1090,6 +1116,8 @@ impl<'a> Interpreter<'a> {
             resolved_impls: None,
             resolved_ownership_owners: None,
             resolved_ownership_summaries: None,
+            resolved_backend_requirements: None,
+            resolved_node_meta_count: None,
             resolved_type_kinds: None,
             resolved_type_fields: None,
             resolved_type_variants: None,

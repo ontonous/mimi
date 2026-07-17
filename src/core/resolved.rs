@@ -3249,6 +3249,26 @@ func main() -> i32 { 0 }
             .backend_requirements()
             .iter()
             .any(|r| r.requirement_id == "FLOW-MULTI-001"));
+        assert!(program.node_meta().len() > 0);
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert!(interp.requires_resolved_capability("flow.multi_target"));
+        assert!(interp.resolved_node_meta_count().is_some_and(|n| n > 0));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert!(verifier.requires_checked_capability("flow.multi_target"));
+        assert!(verifier.checked_node_meta_count() > 0);
+        // Native codegen fail-closes multi-target; use a simple program for codegen install.
+        let simple = parse(
+            r#"
+func main() -> i32 { 0 }
+"#,
+        );
+        let simple_program = crate::core::check_program(&simple).expect("check simple");
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "backend_req");
+        codegen.compile_checked(&simple_program).expect("compile");
+        assert!(codegen.resolved_node_meta_count().is_some_and(|n| n > 0));
+        assert!(!codegen.requires_resolved_capability("flow.multi_target"));
     }
 
 

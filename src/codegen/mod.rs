@@ -336,6 +336,8 @@ pub struct CodeGenerator<'ctx> {
     /// Ownership ledger owners from CheckedProgram.
     resolved_ownership_owners: Option<std::collections::HashSet<String>>,
     resolved_ownership_summaries: Option<HashMap<String, (usize, usize, usize, usize, usize, bool)>>,
+    resolved_backend_requirements: Option<Vec<(String, String)>>,
+    resolved_node_meta_count: Option<usize>,
     /// Type definition kinds from CheckedProgram.
     resolved_type_kinds: Option<HashMap<String, String>>,
     resolved_type_fields: Option<HashMap<String, Vec<(String, String)>>>,
@@ -483,6 +485,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_impls: None,
             resolved_ownership_owners: None,
             resolved_ownership_summaries: None,
+            resolved_backend_requirements: None,
+            resolved_node_meta_count: None,
             resolved_type_kinds: None,
             resolved_type_fields: None,
             resolved_type_variants: None,
@@ -719,6 +723,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_actor_fields
             .as_ref()
             .and_then(|map| map.get(actor).cloned())
+    }
+
+    pub(crate) fn resolved_backend_requirements(&self) -> Option<&[(String, String)]> {
+        self.resolved_backend_requirements.as_ref().map(Vec::as_slice)
+    }
+
+    pub(crate) fn resolved_node_meta_count(&self) -> Option<usize> {
+        self.resolved_node_meta_count
+    }
+
+    pub(crate) fn requires_resolved_capability(&self, capability: &str) -> bool {
+        self.resolved_backend_requirements.as_ref().is_some_and(|reqs| {
+            reqs.iter().any(|(cap, _)| cap == capability)
+        })
     }
 
     pub fn gep(&self) -> gep::CheckedGepBuilder<'_, 'ctx> {

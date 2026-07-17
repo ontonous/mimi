@@ -210,6 +210,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             );
         }
         self.resolved_ownership_summaries = Some(ownership_summaries);
+
+        self.resolved_backend_requirements = Some(
+            program
+                .backend_requirements()
+                .iter()
+                .map(|req| (req.capability.to_string(), req.flow.0.clone()))
+                .collect(),
+        );
+        self.resolved_node_meta_count = Some(program.node_meta().len());
         let mut type_kinds = std::collections::HashMap::new();
         let mut type_fields = std::collections::HashMap::new();
         let mut type_variants = std::collections::HashMap::new();
