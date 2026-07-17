@@ -229,6 +229,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map(|node_id| node_id.0.clone())
                 .collect(),
         );
+        let mut node_meta_precision = std::collections::HashMap::new();
+        for (node_id, meta) in program.node_meta() {
+            let precision = match meta.precision {
+                crate::core::SpanPrecision::Exact => "exact",
+                crate::core::SpanPrecision::DeclarationFallback => "declaration_fallback",
+            };
+            node_meta_precision.insert(node_id.0.clone(), precision.to_string());
+        }
+        self.resolved_node_meta_precision = Some(node_meta_precision);
         let mut type_kinds = std::collections::HashMap::new();
         let mut type_fields = std::collections::HashMap::new();
         let mut type_variants = std::collections::HashMap::new();
