@@ -104,6 +104,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.resolved_extern_funcs = Some(extern_funcs);
+        if let Some(max_children) = program.flows().values().find_map(|flow| flow.max_children) {
+            self.max_children = Some(max_children);
+        }
         self.compile_file(program.file()).map_err(|error| {
             let mut diagnostic = error.to_diagnostic();
             if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {

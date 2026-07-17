@@ -289,6 +289,11 @@ impl<'a> Interpreter<'a> {
             }
         }
         interp.resolved_extern_funcs = Some(extern_funcs);
+        // Prefer CheckedProgram flow annotations for process spawn quota.
+        let checked_max = program.flows().values().find_map(|flow| flow.max_children);
+        if checked_max.is_some() {
+            interp.max_children = checked_max;
+        }
         interp
     }
 
@@ -369,6 +374,10 @@ impl<'a> Interpreter<'a> {
         self.resolved_extern_funcs
             .as_ref()
             .is_some_and(|set| set.contains(name))
+    }
+
+    pub(crate) fn resolved_max_children(&self) -> Option<usize> {
+        self.max_children
     }
 
     pub(crate) fn new(file: &'a File) -> Self {

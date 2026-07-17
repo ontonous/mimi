@@ -1906,6 +1906,27 @@ func main() -> i32 { 0 }
         assert_eq!(flow.mailbox_depth, Some(8));
     }
 
+
+    #[test]
+    fn interpreter_from_checked_prefers_resolved_max_children() {
+        let file = parse(
+            r#"
+flow Worker {
+    @max_children(4)
+    state Idle
+    transition tick(Idle) -> Idle { do { return Idle {} } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        // max_children is private; use public API if any.
+        // spawn_count / max via builtins would need runtime; assert via program IR.
+        assert_eq!(program.flow("Worker").unwrap().max_children, Some(4));
+        assert_eq!(interp.resolved_max_children(), Some(4));
+    }
+
     #[test]
     fn consumers_install_type_and_extern_directories() {
         let file = parse(
