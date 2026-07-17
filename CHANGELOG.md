@@ -60,6 +60,7 @@
 - NodeMeta path 集合安装到 consumers。
 - NodeMeta precision 目录安装到 consumers。
 - Flow state name 列表目录安装到 consumers。
+- Flow event name 与 ResolvedItem kind 目录安装到 consumers。
 - ResolvedFlow 与 consumers 安装 `impl Protocol` 列表。
 - ResolvedTransition 记录 is_fallback/is_ffi_pinned，并安装到 interpreter/codegen/verifier 目录。
 - interpreter 暴露 resolved transition targets 查询。

@@ -207,6 +207,10 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_flow_state_payloads: Option<HashMap<String, Vec<(String, String)>>>,
     /// Flow state names: flow -> [state].
     pub(in crate::interp) resolved_flow_states: Option<HashMap<String, Vec<String>>>,
+    /// Flow event names: flow -> [event].
+    pub(in crate::interp) resolved_flow_events: Option<HashMap<String, Vec<String>>>,
+    /// Resolved item kinds: qualified_name -> kind.
+    pub(in crate::interp) resolved_item_kinds: Option<HashMap<String, String>>,
     /// Persistent field sets materialised from CheckedProgram: flow -> fields.
     pub(in crate::interp) resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
     /// Transactional field sets materialised from CheckedProgram: flow -> fields.
@@ -610,6 +614,37 @@ impl<'a> Interpreter<'a> {
             flow_states.insert(flow.id.0.clone(), names);
         }
         interp.resolved_flow_states = Some(flow_states);
+        let mut flow_events = HashMap::new();
+        for flow in program.flows().values() {
+            let mut events: Vec<String> = flow
+                .transitions
+                .iter()
+                .map(|tid| tid.event.clone())
+                .collect();
+            events.sort();
+            events.dedup();
+            flow_events.insert(flow.id.0.clone(), events);
+        }
+        interp.resolved_flow_events = Some(flow_events);
+        let mut item_kinds = HashMap::new();
+        for item in program.items().values() {
+            let kind = match item.kind {
+                crate::core::ResolvedItemKind::Function => "function",
+                crate::core::ResolvedItemKind::Type => "type",
+                crate::core::ResolvedItemKind::Constant => "const",
+                crate::core::ResolvedItemKind::Capability => "capability",
+                crate::core::ResolvedItemKind::Trait => "trait",
+                crate::core::ResolvedItemKind::Impl => "impl",
+                crate::core::ResolvedItemKind::ExternBlock => "extern",
+                crate::core::ResolvedItemKind::Module => "module",
+                crate::core::ResolvedItemKind::Actor => "actor",
+                crate::core::ResolvedItemKind::Flow => "flow",
+                crate::core::ResolvedItemKind::Protocol => "protocol",
+                crate::core::ResolvedItemKind::Session => "session",
+            };
+            item_kinds.insert(item.qualified_name.clone(), kind.to_string());
+        }
+        interp.resolved_item_kinds = Some(item_kinds);
         let mut persistent_fields = HashMap::new();
         for flow in program.flows().values() {
             if !flow.persistent_fields.is_empty() {
@@ -1081,6 +1116,18 @@ impl<'a> Interpreter<'a> {
             .and_then(|map| map.get(flow).cloned())
     }
 
+    pub(crate) fn resolved_flow_events(&self, flow: &str) -> Option<Vec<String>> {
+        self.resolved_flow_events
+            .as_ref()
+            .and_then(|map| map.get(flow).cloned())
+    }
+
+    pub(crate) fn resolved_item_kind(&self, qualified_name: &str) -> Option<&str> {
+        self.resolved_item_kinds
+            .as_ref()
+            .and_then(|map| map.get(qualified_name).map(String::as_str))
+    }
+
     pub(crate) fn new(file: &'a File) -> Self {
         let mut constructors = HashMap::new();
         let mut newtype_constructors = HashMap::new();
@@ -1220,6 +1267,8 @@ impl<'a> Interpreter<'a> {
             resolved_mailbox_depths: None,
             resolved_flow_state_payloads: None,
             resolved_flow_states: None,
+            resolved_flow_events: None,
+            resolved_item_kinds: None,
             resolved_persistent_fields: None,
             resolved_transactional_fields: None,
             resolved_metadata_shadow_fields: None,

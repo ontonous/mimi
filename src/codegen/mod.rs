@@ -357,6 +357,8 @@ pub struct CodeGenerator<'ctx> {
     resolved_mailbox_depths: Option<HashMap<String, usize>>,
     resolved_flow_state_payloads: Option<HashMap<String, Vec<(String, String)>>>,
     resolved_flow_states: Option<HashMap<String, Vec<String>>>,
+    resolved_flow_events: Option<HashMap<String, Vec<String>>>,
+    resolved_item_kinds: Option<HashMap<String, String>>,
     /// Persistent field sets from CheckedProgram.
     resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
     resolved_transactional_fields: Option<HashMap<String, Vec<String>>>,
@@ -509,6 +511,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_mailbox_depths: None,
             resolved_flow_state_payloads: None,
             resolved_flow_states: None,
+            resolved_flow_events: None,
+            resolved_item_kinds: None,
             resolved_persistent_fields: None,
             resolved_transactional_fields: None,
             resolved_metadata_shadow_fields: None,
@@ -785,6 +789,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_flow_states
             .as_ref()
             .and_then(|map| map.get(flow).cloned())
+    }
+
+    pub(crate) fn resolved_flow_events(&self, flow: &str) -> Option<Vec<String>> {
+        self.resolved_flow_events
+            .as_ref()
+            .and_then(|map| map.get(flow).cloned())
+    }
+
+    pub(crate) fn resolved_item_kind(&self, name: &str) -> Option<&str> {
+        self.resolved_item_kinds
+            .as_ref()
+            .and_then(|map| map.get(name).map(String::as_str))
     }
 
     pub fn gep(&self) -> gep::CheckedGepBuilder<'_, 'ctx> {
