@@ -198,6 +198,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut ownership_summaries = std::collections::HashMap::new();
         let mut ownership_resources = std::collections::HashMap::new();
         let mut ownership_actions = std::collections::HashMap::new();
+        let mut ownership_merges = std::collections::HashMap::new();
         for (owner, ledger) in program.ownership_ledgers() {
             ownership_summaries.insert(
                 owner.0.clone(),
@@ -227,10 +228,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                     })
                     .collect(),
             );
+            ownership_merges.insert(
+                owner.0.clone(),
+                ledger
+                    .branch_merges
+                    .iter()
+                    .map(|merge| {
+                        let encode = |s: crate::core::ResourceState| match s {
+                            crate::core::ResourceState::Available => "available",
+                            crate::core::ResourceState::Consumed => "consumed",
+                            crate::core::ResourceState::MaybeConsumed => "maybe_consumed",
+                        };
+                        (
+                            merge.resource.clone(),
+                            encode(merge.then_state).to_string(),
+                            encode(merge.else_state).to_string(),
+                            encode(merge.merged_state).to_string(),
+                        )
+                    })
+                    .collect(),
+            );
         }
         self.resolved_ownership_summaries = Some(ownership_summaries);
         self.resolved_ownership_resources = Some(ownership_resources);
         self.resolved_ownership_actions = Some(ownership_actions);
+        self.resolved_ownership_merges = Some(ownership_merges);
 
         self.resolved_backend_requirements = Some(
             program

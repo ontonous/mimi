@@ -3013,6 +3013,53 @@ func main() -> i32 { 0 }
         assert!(codegen
             .resolved_ownership_actions("function:close")
             .is_some_and(|a| a.iter().any(|(k, r)| k == "introduce" && r == "f")));
+        assert_eq!(
+            interp.resolved_ownership_merges("function:close"),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn ownership_merges_are_installed_for_branchy_cap_function() {
+        // Native codegen still treats this pattern as unconsumed after join; exercise
+        // install paths via from_checked/verify_checked only.
+        let file = parse(
+            r#"
+cap File
+func both(flag: bool, f: cap File) -> i32 {
+    if flag {
+        drop(f)
+    } else {
+        drop(f)
+    }
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert!(interp.resolved_ownership_merges("function:both").is_some());
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert!(verifier.checked_ownership_merges("function:both").is_some());
+        // Codegen directory install without running full object emission of this fixture:
+        // compile_checked fail-closes on residual linear join for this pattern, so only
+        // query install via a simple program that still has empty merges map present.
+        let simple = parse(
+            r#"
+cap File
+func close(f: cap File) -> i32 { drop(f); 0 }
+func main() -> i32 { 0 }
+"#,
+        );
+        let simple_program = crate::core::check_program(&simple).expect("check simple");
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "own_merge");
+        codegen.compile_checked(&simple_program).expect("compile");
+        assert!(codegen
+            .resolved_ownership_merges("function:close")
+            .is_some_and(|m| m.is_empty()));
     }
 
 

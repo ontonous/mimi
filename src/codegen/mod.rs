@@ -338,6 +338,7 @@ pub struct CodeGenerator<'ctx> {
     resolved_ownership_summaries: Option<HashMap<String, (usize, usize, usize, usize, usize, bool)>>,
     resolved_ownership_resources: Option<HashMap<String, Vec<String>>>,
     resolved_ownership_actions: Option<HashMap<String, Vec<(String, String)>>>,
+    resolved_ownership_merges: Option<HashMap<String, Vec<(String, String, String, String)>>>,
     resolved_backend_requirements: Option<Vec<(String, String)>>,
     resolved_node_meta_count: Option<usize>,
     resolved_node_meta_paths: Option<std::collections::HashSet<String>>,
@@ -497,6 +498,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_ownership_summaries: None,
             resolved_ownership_resources: None,
             resolved_ownership_actions: None,
+            resolved_ownership_merges: None,
             resolved_backend_requirements: None,
             resolved_node_meta_count: None,
             resolved_node_meta_paths: None,
@@ -821,6 +823,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         owner: &str,
     ) -> Option<Vec<(String, String)>> {
         self.resolved_ownership_actions
+            .as_ref()
+            .and_then(|map| map.get(owner).cloned())
+    }
+
+    pub(crate) fn resolved_ownership_merges(
+        &self,
+        owner: &str,
+    ) -> Option<Vec<(String, String, String, String)>> {
+        self.resolved_ownership_merges
             .as_ref()
             .and_then(|map| map.get(owner).cloned())
     }

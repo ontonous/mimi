@@ -180,6 +180,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_ownership_resources: Option<HashMap<String, Vec<String>>>,
     /// Ownership actions: owner -> [(kind, resource)].
     pub(in crate::interp) resolved_ownership_actions: Option<HashMap<String, Vec<(String, String)>>>,
+    /// Ownership branch merges: owner -> [(resource, then, else, merged)].
+    pub(in crate::interp) resolved_ownership_merges: Option<HashMap<String, Vec<(String, String, String, String)>>>,
     /// Backend capability requirements: (capability, flow).
     pub(in crate::interp) resolved_backend_requirements: Option<Vec<(String, String)>>,
     /// NodeMeta path presence count from CheckedProgram.
@@ -464,6 +466,7 @@ impl<'a> Interpreter<'a> {
         let mut ownership_summaries = HashMap::new();
         let mut ownership_resources = HashMap::new();
         let mut ownership_actions = HashMap::new();
+        let mut ownership_merges = HashMap::new();
         for (owner, ledger) in program.ownership_ledgers() {
             ownership_summaries.insert(
                 owner.0.clone(),
@@ -493,10 +496,31 @@ impl<'a> Interpreter<'a> {
                     })
                     .collect(),
             );
+            ownership_merges.insert(
+                owner.0.clone(),
+                ledger
+                    .branch_merges
+                    .iter()
+                    .map(|merge| {
+                        let encode = |s: crate::core::ResourceState| match s {
+                            crate::core::ResourceState::Available => "available",
+                            crate::core::ResourceState::Consumed => "consumed",
+                            crate::core::ResourceState::MaybeConsumed => "maybe_consumed",
+                        };
+                        (
+                            merge.resource.clone(),
+                            encode(merge.then_state).to_string(),
+                            encode(merge.else_state).to_string(),
+                            encode(merge.merged_state).to_string(),
+                        )
+                    })
+                    .collect(),
+            );
         }
         interp.resolved_ownership_summaries = Some(ownership_summaries);
         interp.resolved_ownership_resources = Some(ownership_resources);
         interp.resolved_ownership_actions = Some(ownership_actions);
+        interp.resolved_ownership_merges = Some(ownership_merges);
         interp.resolved_backend_requirements = Some(
             program
                 .backend_requirements()
@@ -877,6 +901,15 @@ impl<'a> Interpreter<'a> {
         owner: &str,
     ) -> Option<Vec<(String, String)>> {
         self.resolved_ownership_actions
+            .as_ref()
+            .and_then(|map| map.get(owner).cloned())
+    }
+
+    pub(crate) fn resolved_ownership_merges(
+        &self,
+        owner: &str,
+    ) -> Option<Vec<(String, String, String, String)>> {
+        self.resolved_ownership_merges
             .as_ref()
             .and_then(|map| map.get(owner).cloned())
     }
@@ -1301,6 +1334,7 @@ impl<'a> Interpreter<'a> {
             resolved_ownership_summaries: None,
             resolved_ownership_resources: None,
             resolved_ownership_actions: None,
+            resolved_ownership_merges: None,
             resolved_backend_requirements: None,
             resolved_node_meta_count: None,
             resolved_node_meta_paths: None,
