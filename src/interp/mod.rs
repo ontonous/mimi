@@ -156,6 +156,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_constant_values: Option<HashMap<String, (Option<String>, String)>>,
     /// Trait method directories materialised from CheckedProgram.
     pub(in crate::interp) resolved_traits: Option<HashMap<String, Vec<String>>>,
+    /// Trait/impl method signatures: "Show.show" / "Show:for:Number.show" -> (arity, ret).
+    pub(in crate::interp) resolved_method_signatures: Option<HashMap<String, (usize, String)>>,
     /// Impl directories materialised from CheckedProgram: "Trait:for:Type" -> methods.
     pub(in crate::interp) resolved_impls: Option<HashMap<String, Vec<String>>>,
     /// Ownership ledger owners materialised from CheckedProgram.
@@ -320,15 +322,29 @@ impl<'a> Interpreter<'a> {
         }
         interp.resolved_constant_values = Some(constant_values);
         let mut traits = HashMap::new();
+        let mut method_signatures = HashMap::new();
         for trait_def in program.traits().values() {
             traits.insert(trait_def.qualified_name.clone(), trait_def.methods.clone());
+            for method in &trait_def.method_signatures {
+                method_signatures.insert(
+                    format!("{}.{}", trait_def.qualified_name, method.name),
+                    (method.params.len(), method.ret.clone()),
+                );
+            }
         }
         interp.resolved_traits = Some(traits);
         let mut impls = HashMap::new();
         for impl_def in program.impls().values() {
             impls.insert(impl_def.qualified_name.clone(), impl_def.methods.clone());
+            for method in &impl_def.method_signatures {
+                method_signatures.insert(
+                    format!("{}.{}", impl_def.qualified_name, method.name),
+                    (method.params.len(), method.ret.clone()),
+                );
+            }
         }
         interp.resolved_impls = Some(impls);
+        interp.resolved_method_signatures = Some(method_signatures);
         interp.resolved_ownership_owners = Some(
             program
                 .ownership_ledgers()
@@ -516,6 +532,12 @@ impl<'a> Interpreter<'a> {
         self.resolved_traits
             .as_ref()
             .and_then(|map| map.get(qualified_name).cloned())
+    }
+
+    pub(crate) fn resolved_method_signature(&self, key: &str) -> Option<(usize, String)> {
+        self.resolved_method_signatures
+            .as_ref()
+            .and_then(|map| map.get(key).cloned())
     }
 
     pub(crate) fn resolved_impl_methods(
@@ -840,6 +862,7 @@ impl<'a> Interpreter<'a> {
             resolved_constants: None,
             resolved_constant_values: None,
             resolved_traits: None,
+            resolved_method_signatures: None,
             resolved_impls: None,
             resolved_ownership_owners: None,
             resolved_ownership_summaries: None,

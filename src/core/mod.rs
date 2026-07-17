@@ -26,6 +26,7 @@ pub use ownership::{
 pub use resolved::{
     BackendProfile, CheckedProgram, FlowId, NodeId, NodeMeta, Origin, ResolvedActor,
     ResolvedActorMethod,
+    ResolvedMethodSig,
     ResolvedCapability, ResolvedConstant,
     ResolvedCallKind,
     ResolvedCallSite,
