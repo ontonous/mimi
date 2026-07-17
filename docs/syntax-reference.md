@@ -1,8 +1,15 @@
-# Mimi 语法参考
+# Mimi 语法参考 (EBNF)
 
-> 本文档描述 Mimi 语言的完整语法，可作为自举实现的语法底本。
-> 版本: v0.28.30-dev
-> 数据来源: `src/lexer/`, `src/parser/`, `src/ast.rs`
+> **Authority**: This document provides per-token EBNF for Mimi syntax.
+> **Semantic authority**: `docs/language-spec.md` (extracted from `devdocs/pre-1.0/`).
+> When this file and `language-spec.md` conflict on semantics, `language-spec.md` prevails.
+>
+> **Status tags**: Each production is tagged `[stable]`, `[experimental]`, `[removed]`, or `[not-yet-implemented]`.
+> See `docs/language-support.toml` for 9-dimension capability matrix.
+>
+> Version: v1.0-spec-draft (2026-07-17)
+> Implementation: v0.30.0
+> Data sources: `src/lexer/`, `src/parser/`, `src/ast.rs`, `devdocs/pre-1.0/`
 
 ## 1. 词法
 
@@ -657,15 +664,18 @@ import  ::= "use" path ";"                    // 路径： ident "::" ident ...
 item    ::= attr* vis? func_def
           | attr* vis? type_def
           | attr* vis? newtype_def
-          | attr* vis? actor_def
-          | "const" ident "=" expr ";"           // 顶层常量
-          | cap_def
+          | attr* vis? actor_def             // [experimental]
+          | attr* vis? flow_def              // [stable]
+          | attr* vis? protocol_def          // [stable]
+          | session_def                      // [experimental]
+          | "const" ident "=" expr ";"       // 顶层常量
+          | cap_def                          // [experimental]
           | trait_def
           | impl_def
           | extern_block
-          | "comptime" func_def               // comptime 函数
-          | "async" func_def                  // 异步函数
-          | "unsafe" extern_block             // 免 passport 类型检查
+          | "comptime" func_def              // comptime 函数
+          | "async" func_def                 // 异步函数
+          | "unsafe" extern_block            // 免 passport 类型检查
 
 vis     ::= "pub"
 attr    ::= "#" "[" Ident ( "(" attr_args ")" )? "]"
@@ -689,7 +699,7 @@ func main() -> i64 {
 }
 ```
 
-### 7.2 函数定义
+### 7.2 函数定义 `[stable]`
 
 ```
 func_def ::= "func" ident generic_params?
@@ -697,13 +707,27 @@ func_def ::= "func" ident generic_params?
              ("->" type)?
              ("where" ident ":" bound ("+" bound)*)?
              ("with" ident ("," ident)*)?
+             ("effects" "=" "[" ident ("," ident)* "]")?   // [experimental]
+             ("fails" ident)?                                // [not-yet-implemented] transition only
+             contract_clause*                                // [not-yet-implemented] signature contracts
              block
 
-params ::= param ("," param)*
-param  ::= "mut"? ident ":" type
+params         ::= param ("," param)*
+param          ::= "mut"? ident ":" type
+                  | "view" ident ":" type    // [stable] read-only borrow
+                  | "mutate" ident ":" type  // [stable] in-place mutable borrow
+contract_clause ::= "requires" expr
+                  | "ensures" expr
+                  | "invariant" expr
 ```
 
-### 7.2 类型定义
+**Permission model** `[stable]`:
+- `view T`: read-only borrow for call duration
+- `mutate T`: constrained in-place modification
+- `T` (by value): ownership transfer (consume)
+- `&T` / `&mut T`: `[experimental]` — low-level, not in stable safe API
+
+### 7.3 类型定义
 
 ```
 type_def      ::= "type" ident generic_params? ("=" type | block)
@@ -736,6 +760,209 @@ cap_def ::= "cap" ident (
             | "=" ident ("+" ident)* ";"
             )
 ```
+
+### 7.5 Flow 定义 `[stable]`
+
+*[source: src/parser/top_level.rs:706 `parse_flow_def`, src/ast.rs:616 `FlowDef`]*
+
+Flow 是 Mimi 中跨时间业务状态变化的唯一语言主语。
+
+```
+flow_def  ::= flow_attr* "pub"? "flow" ident generic_params?
+             ("impl" ident ("," ident)*)?
+             "{" state_decl* transition_decl* fault_decl? "}"
+
+flow_attr ::= "@" (
+               "mailbox" "(" "depth" "=" int ")"
+             | "max_children" "(" "=" int ")"
+             | "transactional"
+             )
+
+state_decl      ::= "state" ident ("{" field_decl* "}")?
+                    ("invariant" ":" expr)?
+
+field_decl      ::= "persistent"? ident ":" type
+
+transition_decl ::= "transition" ident
+                    "(" from_state ("," param)* ")"
+                    "->" target_state
+                    ("fails" ident)?
+                    transition_body
+
+from_state      ::= state_pattern ("{" field_binding* "}")?
+state_pattern   ::= ident              // state name
+field_binding   ::= ident (":" type)?
+
+target_state    ::= ident               // single target `[stable]`
+                  | ident ("|" ident)+  // multi-target `[experimental]`
+
+transition_body ::= "{" "do" "{" stmt* "}" "}"     // `[removed]` — old do wrapper
+                  | "{" stmt* "}"                 // `[stable]` — direct body
+```
+
+**Status notes**:
+- `do { }` wrapper: `[removed]` — target is bare `{ }` body (04-language-coherence.md §9)
+- Multi-target `A | B`: `[experimental]` — codegen uses first target only (01-flow-first-model.md §5)
+- `fails E` error type declaration: `[not-yet-implemented]` — transition rollback path
+- State unforgeability: `[not-yet-implemented]` — external code cannot construct state payload
+
+**Example**:
+```mimi
+flow Order {
+    state Pending
+    state Paid { receipt: string }
+    state Shipped { tracking: Tracking }
+
+    transition pay(Pending, payment: Payment) -> Paid {
+        become Paid { receipt: payment.receipt }
+    }
+
+    transition ship(Paid) -> Shipped {
+        let tracking = allocate_tracking()
+        become Shipped { tracking }
+    }
+}
+```
+
+### 7.6 Actor 定义 `[experimental]`
+
+*[source: src/parser/top_level.rs:436 `parse_actor_def`, src/ast.rs:118 `ActorDef`]*
+
+Actor 是 Flow 的并发运行容器。
+
+```
+actor_def ::= "pub"? "actor" ident "{" actor_member* "}"
+
+actor_member ::= actor_field
+               | actor_method
+               | actor_mailbox
+               | actor_children
+
+actor_field   ::= "mut"? ident ":" type ";"
+actor_method  ::= func_def
+actor_mailbox ::= "mailbox" "depth" "=" int ";"
+actor_children ::= "children" "max" "=" int ";"
+```
+
+**Status notes**:
+- Mutable business fields (`mut`): `[removed]` — target is Actor runs Flow (04 §5)
+- `actor runs Flow` syntax: `[not-yet-implemented]` — target semantics:
+  ```mimi
+  actor OrderWorker runs Order {
+      mailbox depth = 128
+      children max = 8
+  }
+  ```
+- Actor helper (stateless computation): `[stable]`
+
+### 7.7 Protocol 定义 `[stable]`
+
+*[source: src/parser/top_level.rs `parse_protocol_def`, src/ast.rs:670 `ProtocolDef`]*
+
+Protocol 是 Flow 的静态拓扑投影。
+
+```
+protocol_def ::= "pub"? "protocol" ident
+                "{" proto_state* proto_transition* "}"
+
+proto_state      ::= "state" ident ("{" field_decl* "}")?
+
+proto_transition ::= "transition" ident
+                     "(" from_state ("," param)* ")"
+                     "->" target_state
+                     (";" | "{" "}")     // signature only, no body
+```
+
+**Rules**:
+- Protocol transition signature has no body (unlike Flow transition)
+- Flow implementing Protocol: checker verifies states/edges exist, payload variance, effect constraints
+- String-based `protocol_methods("Name")`: `[removed]` (04 §6.2)
+- Dynamic `dyn Protocol` with typed VTable: `[experimental]`
+
+### 7.8 Session 定义 `[experimental]`
+
+*[source: src/parser/top_level.rs:1190 `parse_session_def`, src/ast.rs:679 `SessionDef`]*
+
+Session 描述两个线性端点之间的通信顺序。
+
+```
+session_def  ::= "session" ident "=" session_type ";"
+
+session_type ::= "!" type "." session_type     // send T, then continue
+              | "?" type "." session_type     // receive T, then continue
+              | "dual" "(" session_type ")"   // dual of a protocol
+              | "end"                          // terminated
+              | ident                          // reference to named session
+```
+
+**Status notes**:
+- `session_pair::<P>()` returns `SessionChan<P>` and `SessionChan<dual P>`: `[partial]`
+- send/recv/close advance residual: `[partial]` — checker has residual map, runtime not fully lowered
+- Endpoint as linear value: `[partial]` — no runtime linear handle enforcement
+- Bare `i64` handle user API: `[removed]` — prohibited
+- Recursive protocols, dynamic participants, multiparty: `[experimental]`
+
+**Example**:
+```mimi
+session PingPong = !Ping . ?Pong . end
+
+// Usage:
+let (client, server) = session_pair::<PingPong>()
+let client1 = send(client, Ping)
+let (reply, client2) = recv(client1)
+close(client2)
+```
+
+### 7.9 Transition Terminal Actions `[stable]`
+
+*[source: src/ast.rs `TransitionDef`, src/codegen/compile.rs:279]*
+
+Transition body ends with exactly one terminal action:
+
+```
+terminal ::= "become" target_state "{" field_init* "}"    // commit new state
+           | "stay" "{" field_init* "}"                    // same state, new gen `[not-yet-implemented]`
+           | "fault" ident ("(" args ")")?                 // commit typed Fault `[partial]`
+           // rollback failure: implicit via `?` + `fails E` `[not-yet-implemented]`
+
+field_init ::= ident ":" expr ("," ident ":" expr)*
+```
+
+### 7.10 Delegate `[stable]`
+
+*[source: src/ast.rs:334 `Stmt::Delegate`]*
+
+```
+delegate_stmt ::= "delegate" delegate_kind "(" expr ")" "to" ident
+
+delegate_kind ::= "view" | "mutate" | "consume"
+```
+
+### 7.11 Pinned `[stable]`
+
+*[source: src/ast.rs:340 `Stmt::Pinned`]*
+
+```
+pinned_stmt ::= "pinned" "(" expr ("," "timeout" "=" expr)? ")"
+                "|" ident "|" block
+```
+
+### 7.12 Effect and Capability Annotations `[experimental]`
+
+*[source: src/ast.rs:148 `FuncDef.effects`, src/ast.rs:111 `CapDef`]*
+
+```
+func_with_effects ::= "func" ident "(" params? ")" ("->" type)?
+                      "effects" "=" "[" ident ("," ident)* "]"
+                      block
+
+cap_type  ::= "cap" ident
+```
+
+**Status notes**:
+- Raw string list; no resolved effect set (05 §Phase 2): `[not-yet-implemented]`
+- Nominal, unforgeable, scope/audience-restrictable: `[experimental]`
+- Higher-order effect polymorphism: `[experimental]`
 
 ## 8. 内置函数
 
