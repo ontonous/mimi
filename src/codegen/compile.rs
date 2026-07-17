@@ -143,6 +143,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map(|capability| capability.qualified_name.clone())
                 .collect(),
         );
+        let mut capability_combined = std::collections::HashMap::new();
+        for capability in program.capabilities().values() {
+            if let Some(combined) = &capability.combined_with {
+                capability_combined.insert(capability.qualified_name.clone(), combined.clone());
+            }
+        }
+        self.resolved_capability_combined = Some(capability_combined);
         self.resolved_constants = Some(
             program
                 .constants()

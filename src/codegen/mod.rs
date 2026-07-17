@@ -323,6 +323,7 @@ pub struct CodeGenerator<'ctx> {
     resolved_method_signatures: Option<HashMap<String, (usize, String)>>,
     /// Capability names from CheckedProgram.
     resolved_capabilities: Option<std::collections::HashSet<String>>,
+    resolved_capability_combined: Option<HashMap<String, String>>,
     /// Constant names from CheckedProgram.
     resolved_constants: Option<std::collections::HashSet<String>>,
     resolved_constant_values: Option<HashMap<String, (Option<String>, String)>>,
@@ -470,6 +471,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_actor_method_signatures: None,
             resolved_method_signatures: None,
             resolved_capabilities: None,
+            resolved_capability_combined: None,
             resolved_constants: None,
             resolved_constant_values: None,
             resolved_traits: None,
@@ -672,6 +674,12 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     pub(crate) fn resolved_session_display(&self, name: &str) -> Option<&str> {
         self.resolved_session_displays
+            .as_ref()
+            .and_then(|map| map.get(name).map(String::as_str))
+    }
+
+    pub(crate) fn resolved_capability_combined_with(&self, name: &str) -> Option<&str> {
+        self.resolved_capability_combined
             .as_ref()
             .and_then(|map| map.get(name).map(String::as_str))
     }

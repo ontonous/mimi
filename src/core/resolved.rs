@@ -3820,6 +3820,40 @@ func main() -> i32 { 0 }
             .is_some_and(|fields| fields.iter().any(|(n, _)| n == "y")));
     }
 
+
+    #[test]
+    fn capability_combined_with_is_installed() {
+        let file = parse(
+            r#"
+cap A
+cap B
+cap Combined = A + B
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let cap = program.capability("Combined").expect("Combined");
+        assert_eq!(cap.combined_with.as_deref(), Some("A + B"));
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert_eq!(
+            interp.resolved_capability_combined_with("Combined"),
+            Some("A + B")
+        );
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert_eq!(
+            verifier.checked_capability_combined_with("Combined"),
+            Some("A + B")
+        );
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "cap");
+        codegen.compile_checked(&program).expect("compile");
+        assert_eq!(
+            codegen.resolved_capability_combined_with("Combined"),
+            Some("A + B")
+        );
+    }
+
     #[test]
     fn call_sites_bind_callee_effects_from_function_directory() {
         // IR-only materialization: avoid effect-scope runtime checks at call sites.

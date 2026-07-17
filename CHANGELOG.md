@@ -50,6 +50,7 @@
 - Session body_display 物化并安装到 consumers。
 - TypeDef fields/variants/alias 物化并安装到 consumers。
 - function parameter directories 安装到 consumers。
+- capability combined_with 目录安装到 consumers。
 - ResolvedFlow 与 consumers 安装 `impl Protocol` 列表。
 - ResolvedTransition 记录 is_fallback/is_ffi_pinned，并安装到 interpreter/codegen/verifier 目录。
 - interpreter 暴露 resolved transition targets 查询。
