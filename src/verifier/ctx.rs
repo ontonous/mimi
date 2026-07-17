@@ -435,6 +435,7 @@ pub struct VerifierCtx {
     pub(crate) checked_metadata_shadow_fields: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_constants: std::collections::HashSet<String>,
     pub(crate) checked_flow_protocols: std::collections::HashMap<String, Vec<String>>,
+    pub(crate) checked_fallback_transitions: std::collections::HashSet<String>,
 }
 
 /// Backward-compatible verifier with its own solver session.
@@ -552,6 +553,17 @@ impl Verifier {
             }
         }
         self.ctx.checked_flow_protocols = flow_protocols;
+        self.ctx.checked_fallback_transitions = program
+            .transitions()
+            .values()
+            .filter(|transition| transition.is_fallback)
+            .map(|transition| {
+                format!(
+                    "{}::{}::{}",
+                    transition.id.flow.0, transition.id.event, transition.id.source.name
+                )
+            })
+            .collect();
         self.verify_file(program.file())
     }
 
@@ -627,6 +639,17 @@ impl Verifier {
 
     pub(crate) fn checked_flow_protocols(&self, flow_name: &str) -> Option<Vec<String>> {
         self.lookup_checked_field_set(&self.ctx.checked_flow_protocols, flow_name)
+    }
+
+    pub(crate) fn is_checked_fallback_transition(
+        &self,
+        flow: &str,
+        event: &str,
+        source: &str,
+    ) -> bool {
+        self.ctx
+            .checked_fallback_transitions
+            .contains(&format!("{}::{}::{}", flow, event, source))
     }
 
     fn lookup_checked_field_set(
