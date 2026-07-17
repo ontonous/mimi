@@ -167,7 +167,7 @@ pub struct Interpreter<'a> {
     /// Extern function -> ABI string from CheckedProgram.
     pub(in crate::interp) resolved_extern_abis: Option<HashMap<String, String>>,
     /// Typed call sites from CheckedProgram: node_id -> (owner, callee, argc, kind).
-    pub(in crate::interp) resolved_call_sites: Option<HashMap<String, (String, String, usize, String)>>,
+    pub(in crate::interp) resolved_call_sites: Option<HashMap<String, (String, String, usize, Option<usize>, String)>>,
     /// Flow mailbox depth limits materialised from CheckedProgram: flow -> depth.
     pub(in crate::interp) resolved_mailbox_depths: Option<HashMap<String, usize>>,
     /// Persistent field sets materialised from CheckedProgram: flow -> fields.
@@ -369,6 +369,7 @@ impl<'a> Interpreter<'a> {
                     site.owner.clone(),
                     site.callee.clone(),
                     site.argc,
+                    site.expected_argc,
                     match site.kind {
                         crate::core::ResolvedCallKind::Function => "function".into(),
                         crate::core::ResolvedCallKind::Extern => "extern".into(),
@@ -532,14 +533,27 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn resolved_call_sites(
         &self,
-    ) -> Option<&HashMap<String, (String, String, usize, String)>> {
+    ) -> Option<&HashMap<String, (String, String, usize, Option<usize>, String)>> {
         self.resolved_call_sites.as_ref()
     }
 
     pub(crate) fn has_resolved_call_to(&self, callee: &str) -> bool {
         self.resolved_call_sites.as_ref().is_some_and(|map| {
-            map.values().any(|(_, name, _, _)| name == callee)
+            map.values().any(|(_, name, _, _, _)| name == callee)
         })
+    }
+
+    pub(crate) fn resolved_call_arity_mismatches(&self) -> usize {
+        self.resolved_call_sites
+            .as_ref()
+            .map(|map| {
+                map.values()
+                    .filter(|(_, _, argc, expected, _)| {
+                        expected.map(|exp| exp != *argc).unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     pub(crate) fn is_resolved_fallback_transition(
