@@ -209,6 +209,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_call_sites: Option<HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>>,
     /// Call sites grouped by owner: owner -> [(callee, argc, kind)].
     pub(in crate::interp) resolved_call_sites_by_owner: Option<HashMap<String, Vec<(String, usize, String)>>>,
+    /// Call sites grouped by callee: callee -> [(owner, argc, kind)].
+    pub(in crate::interp) resolved_call_sites_by_callee: Option<HashMap<String, Vec<(String, usize, String)>>>,
     /// Flow mailbox depth limits materialised from CheckedProgram: flow -> depth.
     pub(in crate::interp) resolved_mailbox_depths: Option<HashMap<String, usize>>,
     /// Flow state payloads: "Flow.State" -> [(field, type display)].
@@ -662,6 +664,16 @@ impl<'a> Interpreter<'a> {
             }
         }
         interp.resolved_call_sites_by_owner = Some(call_sites_by_owner);
+        let mut call_sites_by_callee: HashMap<String, Vec<(String, usize, String)>> = HashMap::new();
+        if let Some(sites) = interp.resolved_call_sites.as_ref() {
+            for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in sites {
+                call_sites_by_callee
+                    .entry(callee.clone())
+                    .or_default()
+                    .push((owner.clone(), *argc, kind.clone()));
+            }
+        }
+        interp.resolved_call_sites_by_callee = Some(call_sites_by_callee);
         // Prefer CheckedProgram flow annotations for process spawn quota.
         let checked_max = program.flows().values().find_map(|flow| flow.max_children);
         if checked_max.is_some() {
@@ -1042,6 +1054,15 @@ impl<'a> Interpreter<'a> {
             .and_then(|map| map.get(owner).cloned())
     }
 
+    pub(crate) fn resolved_call_sites_for_callee(
+        &self,
+        callee: &str,
+    ) -> Option<Vec<(String, usize, String)>> {
+        self.resolved_call_sites_by_callee
+            .as_ref()
+            .and_then(|map| map.get(callee).cloned())
+    }
+
     pub(crate) fn has_resolved_call_to(&self, callee: &str) -> bool {
         self.resolved_call_sites.as_ref().is_some_and(|map| {
             map.values().any(|(_, name, _, _, _, _, _)| name == callee)
@@ -1387,6 +1408,7 @@ impl<'a> Interpreter<'a> {
             resolved_extern_unsafe: None,
             resolved_call_sites: None,
             resolved_call_sites_by_owner: None,
+            resolved_call_sites_by_callee: None,
             resolved_mailbox_depths: None,
             resolved_flow_state_payloads: None,
             resolved_flow_states: None,

@@ -3754,6 +3754,18 @@ func main() -> i32 {
         assert!(codegen
             .resolved_call_sites_for_owner("function:main")
             .is_some_and(|calls| calls.iter().any(|(c, _, kind)| c == "c_abs" && kind == "extern")));
+        let helper_callers = interp
+            .resolved_call_sites_for_callee("helper")
+            .expect("helper callers");
+        assert!(helper_callers
+            .iter()
+            .any(|(owner, argc, kind)| owner == "function:main" && *argc == 1 && kind == "function"));
+        assert!(verifier
+            .checked_call_sites_for_callee("c_abs")
+            .is_some_and(|cs| cs.iter().any(|(owner, _, kind)| owner == "function:main" && kind == "extern")));
+        assert!(codegen
+            .resolved_call_sites_for_callee("helper")
+            .is_some_and(|cs| cs.iter().any(|(owner, _, _)| owner == "function:main")));
     }
 
 

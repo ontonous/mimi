@@ -357,6 +357,7 @@ pub struct CodeGenerator<'ctx> {
     resolved_extern_unsafe: Option<std::collections::HashSet<String>>,
     resolved_call_sites: Option<HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>>,
     resolved_call_sites_by_owner: Option<HashMap<String, Vec<(String, usize, String)>>>,
+    resolved_call_sites_by_callee: Option<HashMap<String, Vec<(String, usize, String)>>>,
     /// Flow mailbox depths from CheckedProgram.
     resolved_mailbox_depths: Option<HashMap<String, usize>>,
     resolved_flow_state_payloads: Option<HashMap<String, Vec<(String, String)>>>,
@@ -516,6 +517,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_extern_unsafe: None,
             resolved_call_sites: None,
             resolved_call_sites_by_owner: None,
+            resolved_call_sites_by_callee: None,
             resolved_mailbox_depths: None,
             resolved_flow_state_payloads: None,
             resolved_flow_states: None,
@@ -845,6 +847,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_transitions_by_flow
             .as_ref()
             .and_then(|map| map.get(flow).cloned())
+    }
+
+    pub(crate) fn resolved_call_sites_for_callee(
+        &self,
+        callee: &str,
+    ) -> Option<Vec<(String, usize, String)>> {
+        self.resolved_call_sites_by_callee
+            .as_ref()
+            .and_then(|map| map.get(callee).cloned())
     }
 
     pub fn gep(&self) -> gep::CheckedGepBuilder<'_, 'ctx> {
