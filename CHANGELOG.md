@@ -29,7 +29,7 @@
 - ownership ledger 校验 callable `function:`/`transition:` NodeId 与 key/owner 一致性。
 - interpreter 从 CheckedProgram 安装函数目录（arity/effects）、session/protocol 名称目录、actor 方法目录以及 cap/const 目录供 consumer 使用。
 - codegen `compile_checked` 同步安装 session/protocol/actor/cap/const 目录表，并在 `compile_call` 用 checked arity fail-closed。
-- verifier `verify_checked` 记录 CheckedProgram 函数名目录，供后续 VC 消费。
+- verifier `verify_checked` 记录 CheckedProgram 函数/transition/session/cap 目录，供后续 VC 消费。
 - 新增 resolved transition exact-key、函数/session/protocol/actor 目录与 verifier capability 回归测试。
 
 ### 审计修复（CG-H16 / CG-H9 / M2 / MEM-C8）
