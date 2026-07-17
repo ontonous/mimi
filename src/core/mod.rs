@@ -19,7 +19,10 @@ pub use helpers::{fmt_type, is_type_param, subst_type_params};
 pub(crate) use helpers::{is_bool, is_numeric_coercion, is_trait_coercion};
 #[cfg(test)]
 pub(crate) use helpers::{is_int, is_numeric, is_string, same_type};
-pub use resolved::{BackendProfile, CheckedProgram, RESOLVED_IR_VERSION};
+pub use resolved::{
+    BackendProfile, CheckedProgram, FlowId, ResolvedFlow, ResolvedState, StateId, TransitionId,
+    RESOLVED_IR_VERSION,
+};
 
 pub fn check(file: &File) -> Result<(), Vec<Diagnostic>> {
     check_program(file).map(|_| ())

@@ -1,4 +1,4 @@
-use crate::ast::{File, FlowDef, Item};
+use crate::ast::{File, FlowDef, Item, Type};
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use std::collections::HashMap;
@@ -12,6 +12,12 @@ pub struct FlowId(pub String);
 pub struct StateId {
     pub flow: FlowId,
     pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedState {
+    pub id: StateId,
+    pub payload: Vec<(String, Type)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -36,6 +42,13 @@ pub struct ResolvedTransition {
     pub span: Span,
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedFlow {
+    pub id: FlowId,
+    pub states: HashMap<String, ResolvedState>,
+    pub transitions: Vec<TransitionId>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendProfile {
     Interpreter,
@@ -55,6 +68,7 @@ pub struct CapabilityRequirement {
 #[derive(Debug)]
 pub struct CheckedProgram<'a> {
     file: &'a File,
+    flows: HashMap<FlowId, ResolvedFlow>,
     transitions: HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: Vec<CapabilityRequirement>,
 }
@@ -62,11 +76,13 @@ pub struct CheckedProgram<'a> {
 impl<'a> CheckedProgram<'a> {
     pub(crate) fn from_checked_file(file: &'a File) -> Result<Self, Vec<Diagnostic>> {
         let mut transitions = HashMap::new();
+        let mut flows = HashMap::new();
         let mut backend_requirements = Vec::new();
         let mut errors = Vec::new();
         collect_items(
             &file.items,
             "",
+            &mut flows,
             &mut transitions,
             &mut backend_requirements,
             &mut errors,
@@ -76,6 +92,7 @@ impl<'a> CheckedProgram<'a> {
         }
         Ok(Self {
             file,
+            flows,
             transitions,
             backend_requirements,
         })
@@ -87,6 +104,14 @@ impl<'a> CheckedProgram<'a> {
 
     pub fn transitions(&self) -> &HashMap<TransitionId, ResolvedTransition> {
         &self.transitions
+    }
+
+    pub fn flows(&self) -> &HashMap<FlowId, ResolvedFlow> {
+        &self.flows
+    }
+
+    pub fn flow(&self, qualified_name: &str) -> Option<&ResolvedFlow> {
+        self.flows.get(&FlowId(qualified_name.to_string()))
     }
 
     pub fn transition(&self, flow: &str, event: &str, source: &str) -> Option<&ResolvedTransition> {
@@ -139,6 +164,7 @@ fn backend_supports(backend: BackendProfile, capability: &str) -> bool {
 fn collect_items(
     items: &[Item],
     module: &str,
+    flows: &mut HashMap<FlowId, ResolvedFlow>,
     transitions: &mut HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: &mut Vec<CapabilityRequirement>,
     errors: &mut Vec<Diagnostic>,
@@ -150,6 +176,7 @@ fn collect_items(
                 collect_items(
                     &def.items,
                     &qualified,
+                    flows,
                     transitions,
                     backend_requirements,
                     errors,
@@ -158,6 +185,7 @@ fn collect_items(
             Item::Flow(flow) => collect_flow(
                 flow,
                 &qualify(module, &flow.name),
+                flows,
                 transitions,
                 backend_requirements,
                 errors,
@@ -170,11 +198,31 @@ fn collect_items(
 fn collect_flow(
     flow: &FlowDef,
     qualified_name: &str,
+    flows: &mut HashMap<FlowId, ResolvedFlow>,
     transitions: &mut HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: &mut Vec<CapabilityRequirement>,
     errors: &mut Vec<Diagnostic>,
 ) {
     let flow_id = FlowId(qualified_name.to_string());
+    let states = flow
+        .states
+        .iter()
+        .map(|state| {
+            let id = StateId {
+                flow: flow_id.clone(),
+                name: state.name.clone(),
+            };
+            let payload = state
+                .payload
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|field| (field.name.clone(), field.ty.clone()))
+                .collect();
+            (state.name.clone(), ResolvedState { id, payload })
+        })
+        .collect();
+    let mut flow_transition_ids = Vec::with_capacity(flow.transitions.len());
     if !flow.transactional_fields.is_empty() {
         backend_requirements.push(CapabilityRequirement {
             requirement_id: "FLOW-TURN-001",
@@ -217,6 +265,7 @@ fn collect_flow(
             },
             span,
         };
+        flow_transition_ids.push(id.clone());
         if transitions.insert(id.clone(), resolved).is_some() {
             errors.push(Diagnostic::error(
                 format!(
@@ -236,6 +285,23 @@ fn collect_flow(
                 span,
             });
         }
+    }
+    let resolved_flow = ResolvedFlow {
+        id: flow_id.clone(),
+        states,
+        transitions: flow_transition_ids,
+    };
+    if flows.insert(flow_id.clone(), resolved_flow).is_some() {
+        errors.push(Diagnostic::error(
+            format!(
+                "TOOL-RESOLUTION-001: duplicate canonical flow '{}'",
+                flow_id.0
+            ),
+            flow.transitions
+                .first()
+                .map(|transition| Span::from(transition.pos))
+                .unwrap_or_else(|| Span::single(0, 0)),
+        ));
     }
 }
 
@@ -360,6 +426,11 @@ module beta {
                 .count(),
             2
         );
+        let alpha = program.flow("alpha::Worker").expect("alpha flow");
+        let idle = alpha.states.get("Idle").expect("Idle state");
+        assert_eq!(idle.id.flow.0, "alpha::Worker");
+        assert!(idle.payload.is_empty());
+        assert!(program.flow("Worker").is_none());
     }
 }
 
