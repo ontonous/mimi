@@ -15,8 +15,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &crate::core::CheckedProgram<'_>,
     ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
-        self.compile_file(program.file())
-            .map_err(|error| vec![error.to_diagnostic()])
+        self.compile_file(program.file()).map_err(|error| {
+            let mut diagnostic = error.to_diagnostic();
+            if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {
+                if let Some(span) = program.entry_span() {
+                    diagnostic = diagnostic.with_span(span);
+                }
+            }
+            vec![diagnostic]
+        })
     }
 
     pub(super) fn mangle_name(base: &str, type_map: &HashMap<String, crate::ast::Type>) -> String {
