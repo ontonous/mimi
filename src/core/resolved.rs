@@ -2334,6 +2334,12 @@ func main() -> i32 { 0 }
             codegen.resolved_transition_param_arity("Door", "open", "Closed"),
             Some(1)
         );
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert_eq!(
+            verifier.checked_transition_param_arity("Door", "open", "Closed"),
+            Some(1)
+        );
     }
 
     #[test]

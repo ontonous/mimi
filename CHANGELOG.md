@@ -37,7 +37,7 @@
 - ResolvedTransition 记录 is_fallback/is_ffi_pinned，并安装到 interpreter/codegen/verifier 目录。
 - interpreter 暴露 resolved transition targets 查询。
 - codegen 暴露 resolved transition targets / fallback 查询。
-- ResolvedTransition 记录 event 参数签名；interp/codegen 用 checked arity fail-closed。
+- ResolvedTransition 记录 event 参数签名；interp/codegen/verifier 用 checked arity fail-closed。
 - interpreter/codegen 从 CheckedProgram 读取 `@max_children` 配额与 `@mailbox(depth=...)` 深度。
 - 模块限定 Flow 的 mailbox depth 可通过 bare actor/flow 名解析。
 - ownership ledger 校验 callable `function:`/`transition:` NodeId 与 key/owner 一致性。
