@@ -780,7 +780,7 @@ impl<'a> Checker<'a> {
                                     && current_fields.iter().zip(existing_fields.iter()).all(
                                         |(a, b)| {
                                             a.name == b.name
-                                                && same_type(
+                                                && types_compatible(
                                                     &self.resolve_type(&a.ty),
                                                     &self.resolve_type(&b.ty),
                                                 )
@@ -1506,8 +1506,8 @@ impl<'a> Checker<'a> {
                                 );
                                 continue;
                             };
-                            // CK-H8: do not call unify inside any() — failed unifies can
-                            // leave partial substitutions. same_type is side-effect free.
+                            // Use an isolated checked-unification query so failed
+                            // candidates cannot mutate the checker's constraint table.
                             let expected_ty = self.resolve_type(proto_payload_ty);
                             let has_field = flow_state
                                 .payload
@@ -1516,7 +1516,7 @@ impl<'a> Checker<'a> {
                                     fields.iter().any(|field| {
                                         let field_ty = self.resolve_type(&field.ty);
                                         field.name == *proto_payload_name
-                                            && same_type(&field_ty, &expected_ty)
+                                            && types_compatible(&field_ty, &expected_ty)
                                     })
                                 })
                                 .unwrap_or(false);
