@@ -565,6 +565,11 @@ impl<'a> Interpreter<'a> {
         let prev_flow_state = self.current_flow_state.take();
         self.current_flow_state = Some(t.from_state.clone());
 
+        // Prefer CheckedProgram persistent field directory when installed.
+        let persistent_fields = self
+            .resolved_persistent_fields(&flow.name)
+            .unwrap_or_else(|| flow.persistent_fields.clone());
+
         // v0.29.14: snapshot persistent fields at turn entry (WAL + dirty check).
         if let Some(from_payload) = vals.first() {
             self.begin_persistent_tx(&flow.name, flow, from_payload);
@@ -615,14 +620,14 @@ impl<'a> Interpreter<'a> {
                 // Shadow persistent fields for recover (WAL-restored first).
                 if let Some(from_payload) = vals.first() {
                     let restored = self.abort_persistent_tx_restore(&flow.name, from_payload, flow);
-                    shadow_persistent_into_fault(&mut fault, &restored, &flow.persistent_fields);
-                    drop_fault_payload_except(&restored, &flow.persistent_fields);
+                    shadow_persistent_into_fault(&mut fault, &restored, &persistent_fields);
+                    drop_fault_payload_except(&restored, &persistent_fields);
                 } else {
                     // C3: even without a from-payload, try to restore persistent
                     // data from the tx snapshot so it is not silently lost.
                     let restored = self.abort_persistent_tx_restore_or_empty(&flow.name, flow);
                     if let Value::Record(_, fields) = &restored {
-                        for name in &flow.persistent_fields {
+                        for name in &persistent_fields {
                             if let Some(v) = fields.get(name) {
                                 if let Value::Record(Some(ref n), ref mut f) = fault {
                                     f.insert(name.clone(), v.clone());
@@ -651,10 +656,10 @@ impl<'a> Interpreter<'a> {
                     shadow_persistent_into_fault(
                         &mut out_fault,
                         &restored,
-                        &flow.persistent_fields,
+                        &persistent_fields,
                     );
                 }
-                drop_fault_payload_except(&restored, &flow.persistent_fields);
+                drop_fault_payload_except(&restored, &persistent_fields);
                 self.current_flow_state = prev_flow_state;
                 return Ok(out_fault);
             }
@@ -667,7 +672,7 @@ impl<'a> Interpreter<'a> {
                     shadow_persistent_into_fault(
                         &mut out_fault,
                         &restored,
-                        &flow.persistent_fields,
+                        &persistent_fields,
                     );
                 }
             }
@@ -710,13 +715,14 @@ impl<'a> Interpreter<'a> {
     /// C4: metadata_shadow fields also store the full value in `snapshot` for
     /// content-aware dirty checking (the WAL restore is still length-only).
     fn begin_persistent_tx(&mut self, flow_name: &str, flow: &FlowDef, self_val: &Value) {
-        if flow.persistent_fields.is_empty() {
+        let persistent_fields = self.effective_persistent_fields(flow);
+        if persistent_fields.is_empty() {
             return;
         }
         let mut snap = HashMap::new();
         let mut meta_snap = HashMap::new();
         if let Value::Record(_, fields) = self_val {
-            for name in &flow.persistent_fields {
+            for name in &persistent_fields {
                 if let Some(v) = fields.get(name) {
                     // v0.29.45: metadata_shadow fields snapshot only length.
                     if flow.metadata_shadow_fields.contains(name) {
@@ -769,6 +775,7 @@ impl<'a> Interpreter<'a> {
         from_payload: &Value,
         flow: &FlowDef,
     ) -> Value {
+        let _persistent_fields = self.effective_persistent_fields(flow);
         let tx = self.flow_tx.remove(flow_name);
         let mut restored = from_payload.clone();
         let Some(tx) = tx else {
@@ -816,6 +823,7 @@ impl<'a> Interpreter<'a> {
     /// available — constructs an empty record and populates it from the tx
     /// snapshot metadata so persistent data is not silently lost.
     fn abort_persistent_tx_restore_or_empty(&mut self, flow_name: &str, flow: &FlowDef) -> Value {
+        let _persistent_fields = self.effective_persistent_fields(flow);
         let tx = self.flow_tx.remove(flow_name);
         let Some(tx) = tx else {
             return Value::Unit;
@@ -848,11 +856,12 @@ impl<'a> Interpreter<'a> {
     /// the snapshot from the *faulting* turn is already consumed; we store a
     /// "last good" snapshot on commit for this check.
     fn persistent_dirty_for_recover(&self, flow: &FlowDef, fault_payload: &Value) -> bool {
+        let persistent_fields = self.effective_persistent_fields(flow);
         // Prefer last-good snapshot if still present.
         if let Some(tx) = self.flow_tx.get(&flow.name) {
             if !tx.snapshot.is_empty() {
                 if let Value::Record(_, fields) = fault_payload {
-                    for name in &flow.persistent_fields {
+                    for name in &persistent_fields {
                         if flow.transactional_fields.iter().any(|t| t == name) {
                             continue; // WAL-restored, always clean
                         }
