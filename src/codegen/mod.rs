@@ -303,6 +303,7 @@ pub struct CodeGenerator<'ctx> {
     resolved_transitions: Option<HashMap<(String, String, String), Vec<String>>>,
     resolved_fallback_transitions: Option<std::collections::HashSet<(String, String, String)>>,
     resolved_ffi_pinned_transitions: Option<std::collections::HashSet<(String, String, String)>>,
+    resolved_transition_param_arity: Option<HashMap<(String, String, String), usize>>,
     /// Function directory from CheckedProgram: qualified_name -> arity.
     resolved_function_arity: Option<HashMap<String, usize>>,
     /// Session names from CheckedProgram.
@@ -437,6 +438,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_transitions: None,
             resolved_fallback_transitions: None,
             resolved_ffi_pinned_transitions: None,
+            resolved_transition_param_arity: None,
             resolved_function_arity: None,
             resolved_sessions: None,
             resolved_protocols: None,
@@ -478,6 +480,18 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> bool {
         self.resolved_fallback_transitions.as_ref().is_some_and(|set| {
             set.contains(&(flow.to_string(), event.to_string(), source.to_string()))
+        })
+    }
+
+    pub(crate) fn resolved_transition_param_arity(
+        &self,
+        flow: &str,
+        event: &str,
+        source: &str,
+    ) -> Option<usize> {
+        self.resolved_transition_param_arity.as_ref().and_then(|map| {
+            map.get(&(flow.to_string(), event.to_string(), source.to_string()))
+                .copied()
         })
     }
 
