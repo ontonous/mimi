@@ -158,6 +158,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_actor_method_signatures: Option<HashMap<String, (usize, String)>>,
     /// Capability names materialised from CheckedProgram.
     pub(in crate::interp) resolved_capabilities: Option<std::collections::HashSet<String>>,
+    /// Capability combinations: name -> combined_with (if any).
+    pub(in crate::interp) resolved_capability_combined: Option<HashMap<String, String>>,
     /// Constant names materialised from CheckedProgram.
     pub(in crate::interp) resolved_constants: Option<std::collections::HashSet<String>>,
     /// Constant directory: name -> (type display, encoded value).
@@ -356,6 +358,13 @@ impl<'a> Interpreter<'a> {
             .map(|capability| capability.qualified_name.clone())
             .collect();
         interp.resolved_capabilities = Some(capabilities);
+        let mut capability_combined = HashMap::new();
+        for capability in program.capabilities().values() {
+            if let Some(combined) = &capability.combined_with {
+                capability_combined.insert(capability.qualified_name.clone(), combined.clone());
+            }
+        }
+        interp.resolved_capability_combined = Some(capability_combined);
         let constants = program
             .constants()
             .values()
@@ -613,6 +622,15 @@ impl<'a> Interpreter<'a> {
         self.resolved_capabilities
             .as_ref()
             .is_some_and(|set| set.contains(qualified_name))
+    }
+
+    pub(crate) fn resolved_capability_combined_with(
+        &self,
+        qualified_name: &str,
+    ) -> Option<&str> {
+        self.resolved_capability_combined
+            .as_ref()
+            .and_then(|map| map.get(qualified_name).map(String::as_str))
     }
 
     pub(crate) fn has_resolved_constant(&self, qualified_name: &str) -> bool {
@@ -989,6 +1007,7 @@ impl<'a> Interpreter<'a> {
             resolved_actors: None,
             resolved_actor_method_signatures: None,
             resolved_capabilities: None,
+            resolved_capability_combined: None,
             resolved_constants: None,
             resolved_constant_values: None,
             resolved_traits: None,

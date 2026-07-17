@@ -415,6 +415,7 @@ pub struct VerifierCtx {
     pub(crate) checked_transitions: std::collections::HashSet<String>,
     /// Capability names materialised from CheckedProgram.
     pub(crate) checked_capabilities: std::collections::HashSet<String>,
+    pub(crate) checked_capability_combined: std::collections::HashMap<String, String>,
     /// Session names materialised from CheckedProgram.
     pub(crate) checked_sessions: std::collections::HashSet<String>,
     pub(crate) checked_session_displays: std::collections::HashMap<String, String>,
@@ -543,6 +544,17 @@ impl Verifier {
             .values()
             .map(|capability| capability.qualified_name.clone())
             .collect();
+        self.ctx.checked_capability_combined = program
+            .capabilities()
+            .values()
+            .filter_map(|capability| {
+                capability
+                    .combined_with
+                    .as_ref()
+                    .map(|combined| (capability.qualified_name.clone(), combined.clone()))
+            })
+            .collect();
+
         self.ctx.checked_sessions = program
             .sessions()
             .values()
@@ -821,6 +833,14 @@ impl Verifier {
         self.ctx
             .checked_transitions
             .contains(&format!("{}::{}::{}", flow, event, source))
+    }
+
+    pub(crate) fn has_checked_capability(&self, name: &str) -> bool {
+        self.ctx.checked_capabilities.contains(name)
+    }
+
+    pub(crate) fn checked_capability_combined_with(&self, name: &str) -> Option<&str> {
+        self.ctx.checked_capability_combined.get(name).map(String::as_str)
     }
 
     pub(crate) fn has_checked_session(&self, name: &str) -> bool {
