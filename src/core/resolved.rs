@@ -1393,9 +1393,7 @@ cap File
 func bad(run: bool, f: cap File) -> i32 {
     while run {
         drop(f)
-        break
     }
-    drop(f)
     0
 }
 func main() -> i32 { 0 }
@@ -1406,6 +1404,65 @@ func main() -> i32 { 0 }
             diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0304)
                 && diagnostic.message.contains("potentially repeating loop")
         }));
+    }
+
+    #[test]
+    fn ownership_checker_allows_break_only_loop_body_consumption() {
+        // Body always exits via break → no back-edge; still join with zero-iteration path.
+        let file = parse(
+            r#"
+cap File
+func ok(run: bool, f: cap File) -> i32 {
+    while run {
+        drop(f)
+        break
+    }
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let diagnostics = crate::core::check_program(&file).expect_err("zero-iteration leak");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0304)
+                && diagnostic.message.contains("some control-flow paths")
+        }));
+    }
+
+    #[test]
+    fn ownership_checker_accepts_loop_with_break_and_post_drop() {
+        let file = parse(
+            r#"
+cap File
+func ok(run: bool, f: cap File) -> i32 {
+    while run {
+        break
+    }
+    drop(f)
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        crate::core::check_program(&file).expect("break-only body does not consume f");
+    }
+
+    #[test]
+    fn ownership_checker_accepts_infinite_loop_break_after_drop() {
+        let file = parse(
+            r#"
+cap File
+func ok(f: cap File) -> i32 {
+    loop {
+        drop(f)
+        break
+    }
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        crate::core::check_program(&file).expect("loop body always exits after drop");
     }
 
     #[test]
