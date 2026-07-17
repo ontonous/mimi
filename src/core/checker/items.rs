@@ -570,6 +570,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Cap(c) => {
+                self.set_pos(c.pos.0, c.pos.1);
                 if !self.declared_caps.insert(c.name.clone()) {
                     self.emit_code(
                         crate::diagnostic::codes::E0402,
@@ -578,6 +579,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Trait(trait_def) => {
+                self.set_pos(trait_def.pos.0, trait_def.pos.1);
                 let method_names: Vec<String> =
                     trait_def.methods.iter().map(|m| m.name.clone()).collect();
                 self.traits
@@ -607,6 +609,7 @@ impl<'a> Checker<'a> {
                     .truncate(self.generic_scope.len() - generic_names.len());
             }
             Item::Impl(impl_def) => {
+                self.set_pos(impl_def.pos.0, impl_def.pos.1);
                 let method_names: Vec<String> =
                     impl_def.methods.iter().map(|m| m.name.clone()).collect();
                 self.impls.insert(
@@ -669,6 +672,7 @@ impl<'a> Checker<'a> {
                     .truncate(self.generic_scope.len() - impl_generic_names.len());
             }
             Item::ExternBlock(block) => {
+                self.set_pos(block.pos.0, block.pos.1);
                 // Register extern functions for type checking
                 for func in &block.funcs {
                     for param in &func.params {
@@ -710,8 +714,13 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Const {
-                name, ty, value, ..
+                name,
+                pos,
+                ty,
+                value,
+                ..
             } => {
+                self.set_pos(pos.0, pos.1);
                 // Infer the type of the constant value
                 let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
                 let value_ty = self.infer_expr(value, &mut scopes);
@@ -1020,8 +1029,9 @@ impl<'a> Checker<'a> {
                     self.set_pos(pos.0, pos.1);
                 }
             }
-            Item::Cap(_) => {}
+            Item::Cap(cap) => self.set_pos(cap.pos.0, cap.pos.1),
             Item::Trait(trait_def) => {
+                self.set_pos(trait_def.pos.0, trait_def.pos.1);
                 // Check that all trait method types are well-formed
                 let generic_names: Vec<String> =
                     trait_def.generics.iter().map(|g| g.name.clone()).collect();
@@ -1052,6 +1062,7 @@ impl<'a> Checker<'a> {
                     .truncate(self.generic_scope.len() - generic_names.len());
             }
             Item::Impl(impl_def) => {
+                self.set_pos(impl_def.pos.0, impl_def.pos.1);
                 // Check that the trait exists
                 if !self.traits.contains_key(&impl_def.trait_name) {
                     self.emit_code(
@@ -1203,6 +1214,7 @@ impl<'a> Checker<'a> {
                     .truncate(self.generic_scope.len() - impl_generic_names.len());
             }
             Item::ExternBlock(block) => {
+                self.set_pos(block.pos.0, block.pos.1);
                 // CK-H4: validate return types in the check pass (params already
                 // validated during collect). Skip body (extern has no body).
                 if !block.unsafe_ {
@@ -1224,8 +1236,13 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Const {
-                name, ty, value, ..
+                name,
+                pos,
+                ty,
+                value,
+                ..
             } => {
+                self.set_pos(pos.0, pos.1);
                 let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
                 let value_ty = self.infer_expr(value, &mut scopes);
                 let const_ty = if let Some(declared_ty) = ty {

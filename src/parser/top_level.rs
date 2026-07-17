@@ -104,6 +104,7 @@ impl Parser {
                 Ok(Item::Actor(a))
             }
             TokenKind::Const => {
+                let pos = (self.peek().line, self.peek().col);
                 self.advance(); // consume `const`
                 let name = self.expect_ident()?;
                 let ty = if self.at(&TokenKind::Colon) {
@@ -117,6 +118,7 @@ impl Parser {
                 self.match_semi();
                 Ok(Item::Const {
                     name,
+                    pos,
                     ty,
                     value,
                     pub_,
@@ -188,6 +190,7 @@ impl Parser {
     }
 
     fn parse_cap_def(&mut self) -> Result<CapDef, ParseError> {
+        let pos = (self.peek().line, self.peek().col);
         self.expect_keyword(TokenKind::Cap)?;
         let name = self.expect_ident()?;
         let combined_with = if self.at(&TokenKind::Plus) {
@@ -213,11 +216,14 @@ impl Parser {
         self.match_semi();
         Ok(CapDef {
             name,
+            pos,
+            origin: AstOrigin::User,
             combined_with,
         })
     }
 
     fn parse_trait_def(&mut self) -> Result<TraitDef, ParseError> {
+        let pos = (self.peek().line, self.peek().col);
         self.expect_keyword(TokenKind::Trait)?;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
@@ -254,12 +260,15 @@ impl Parser {
         self.expect(TokenKind::RBrace, "`}`")?;
         Ok(TraitDef {
             name,
+            pos,
+            origin: AstOrigin::User,
             methods,
             generics,
         })
     }
 
     fn parse_impl_def(&mut self) -> Result<ImplDef, ParseError> {
+        let pos = (self.peek().line, self.peek().col);
         self.expect(TokenKind::Impl, "`impl`")?;
         let generics = self.parse_generic_params()?;
         let trait_name = self.expect_ident()?;
@@ -307,6 +316,8 @@ impl Parser {
         }
         self.expect(TokenKind::RBrace, "`}`")?;
         Ok(ImplDef {
+            pos,
+            origin: AstOrigin::User,
             generics,
             trait_name,
             trait_args,
@@ -320,6 +331,7 @@ impl Parser {
         &mut self,
         no_panic: bool,
     ) -> Result<ExternBlock, ParseError> {
+        let pos = (self.peek().line, self.peek().col);
         self.expect(TokenKind::Extern, "`extern`")?;
         // Parse optional ABI string: extern "C" { ... }
         let abi = if matches!(self.peek_kind(), TokenKind::String(_)) {
@@ -426,6 +438,8 @@ impl Parser {
         }
         self.expect(TokenKind::RBrace, "`}`")?;
         Ok(ExternBlock {
+            pos,
+            origin: AstOrigin::User,
             abi,
             funcs,
             no_panic,
