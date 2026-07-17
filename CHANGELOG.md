@@ -21,12 +21,14 @@
 - Codegen 移除 flow transition 同名首候选 fallback；`flow_file_system` 固件避开保留字 `fault` 绑定。
 - `RESOURCE-LINEAR-001` / `OWN-PERMISSION-001` support 证据升为 `partial`。
 
-### v0.31.4-dev — CheckedProgram consumer 硬化（transition 表 + 函数签名）
+### v0.31.4-dev — CheckedProgram consumer 硬化（transition 表 + 目录扩展）
 
 - `Interpreter::from_checked` / `CodeGenerator::compile_checked` 安装 canonical `(flow,event,source)` transition 表；缺失 overload fail-closed。
 - Verifier backend 不再因 multi-target Flow 单独阻断无关函数合约验证。
 - `CheckedProgram` 索引模块限定函数签名（params/ret/effects/comptime）、session 类型体、protocol 拓扑与 actor 字段/方法目录，未解析类型在 IR 边界 fail-closed。
-- 新增 resolved transition exact-key、函数签名与 verifier capability 回归测试。
+- ownership ledger 校验 callable `function:`/`transition:` NodeId 与 key/owner 一致性。
+- interpreter 从 CheckedProgram 安装函数目录（arity/effects）供 consumer 使用。
+- 新增 resolved transition exact-key、函数/session/protocol/actor 目录与 verifier capability 回归测试。
 
 ### 审计修复（CG-H16 / CG-H9 / M2 / MEM-C8）
 

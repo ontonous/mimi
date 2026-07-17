@@ -130,7 +130,9 @@ pub struct Interpreter<'a> {
     flow_index: HashMap<String, FlowDef>,
     /// Canonical transitions from CheckedProgram: (flow, event, source) -> targets.
     /// When present, transition dispatch prefers this table over re-scanning FlowDef.
-    resolved_transitions: Option<HashMap<(String, String, String), Vec<String>>>,
+    pub(in crate::interp) resolved_transitions: Option<HashMap<(String, String, String), Vec<String>>>,
+    /// Function signatures from CheckedProgram: qualified_name -> (param_count, ret_fmt, effects).
+    pub(in crate::interp) resolved_functions: Option<HashMap<String, (usize, String, Vec<String>)>>,
     /// v0.29.24: process-wide max children (None = unlimited).
     /// Taken from first `@max_children(N)` flow annotation in the file.
     max_children: Option<usize>,
@@ -191,7 +193,33 @@ impl<'a> Interpreter<'a> {
             resolved.insert(key, targets);
         }
         interp.resolved_transitions = Some(resolved);
+        let mut functions = HashMap::new();
+        for function in program.functions().values() {
+            functions.insert(
+                function.qualified_name.clone(),
+                (
+                    function.params.len(),
+                    crate::core::fmt_type(&function.ret),
+                    function.effects.clone(),
+                ),
+            );
+        }
+        interp.resolved_functions = Some(functions);
         interp
+    }
+
+    /// Test/diagnostic access to CheckedProgram function directory.
+    pub(crate) fn resolved_function_arity(&self, qualified_name: &str) -> Option<usize> {
+        self.resolved_functions
+            .as_ref()
+            .and_then(|map| map.get(qualified_name).map(|(arity, _, _)| *arity))
+    }
+
+    /// Test/diagnostic access to CheckedProgram function effects.
+    pub(crate) fn resolved_function_effects(&self, qualified_name: &str) -> Option<Vec<String>> {
+        self.resolved_functions
+            .as_ref()
+            .and_then(|map| map.get(qualified_name).map(|(_, _, effects)| effects.clone()))
     }
 
     pub(crate) fn new(file: &'a File) -> Self {
@@ -291,6 +319,7 @@ impl<'a> Interpreter<'a> {
             actor_index,
             flow_index,
             resolved_transitions: None,
+            resolved_functions: None,
             max_children,
             spawn_count: 0,
             actor_spawn_counts: std::collections::HashMap::new(),
