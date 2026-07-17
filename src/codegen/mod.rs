@@ -334,6 +334,9 @@ pub struct CodeGenerator<'ctx> {
     resolved_ownership_summaries: Option<HashMap<String, (usize, usize, usize, usize, usize, bool)>>,
     /// Type definition kinds from CheckedProgram.
     resolved_type_kinds: Option<HashMap<String, String>>,
+    resolved_type_fields: Option<HashMap<String, Vec<(String, String)>>>,
+    resolved_type_variants: Option<HashMap<String, Vec<(String, Option<String>)>>>,
+    resolved_type_aliases: Option<HashMap<String, String>>,
     /// Extern function names from CheckedProgram.
     resolved_extern_funcs: Option<std::collections::HashSet<String>>,
     resolved_extern_abis: Option<HashMap<String, String>>,
@@ -472,6 +475,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_ownership_owners: None,
             resolved_ownership_summaries: None,
             resolved_type_kinds: None,
+            resolved_type_fields: None,
+            resolved_type_variants: None,
+            resolved_type_aliases: None,
             resolved_extern_funcs: None,
             resolved_extern_abis: None,
             resolved_extern_signatures: None,
@@ -627,6 +633,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             map.get(&(flow.to_string(), event.to_string(), source.to_string()))
                 .copied()
         })
+    }
+
+    pub(crate) fn resolved_type_fields(
+        &self,
+        name: &str,
+    ) -> Option<Vec<(String, String)>> {
+        self.resolved_type_fields
+            .as_ref()
+            .and_then(|map| map.get(name).cloned())
+    }
+
+    pub(crate) fn resolved_type_variants(
+        &self,
+        name: &str,
+    ) -> Option<Vec<(String, Option<String>)>> {
+        self.resolved_type_variants
+            .as_ref()
+            .and_then(|map| map.get(name).cloned())
+    }
+
+    pub(crate) fn resolved_type_alias_of(&self, name: &str) -> Option<&str> {
+        self.resolved_type_aliases
+            .as_ref()
+            .and_then(|map| map.get(name).map(String::as_str))
     }
 
     pub(crate) fn resolved_session_display(&self, name: &str) -> Option<&str> {

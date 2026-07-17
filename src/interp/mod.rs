@@ -172,6 +172,9 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_ownership_summaries: Option<HashMap<String, (usize, usize, usize, usize, usize, bool)>>,
     /// Type definition kinds materialised from CheckedProgram.
     pub(in crate::interp) resolved_type_kinds: Option<HashMap<String, String>>,
+    pub(in crate::interp) resolved_type_fields: Option<HashMap<String, Vec<(String, String)>>>,
+    pub(in crate::interp) resolved_type_variants: Option<HashMap<String, Vec<(String, Option<String>)>>>,
+    pub(in crate::interp) resolved_type_aliases: Option<HashMap<String, String>>,
     /// Extern function names materialised from CheckedProgram.
     pub(in crate::interp) resolved_extern_funcs: Option<std::collections::HashSet<String>>,
     /// Extern function -> ABI string from CheckedProgram.
@@ -404,7 +407,10 @@ impl<'a> Interpreter<'a> {
             );
         }
         interp.resolved_ownership_summaries = Some(ownership_summaries);
-        let mut type_kinds = HashMap::new();
+                let mut type_kinds = HashMap::new();
+        let mut type_fields = HashMap::new();
+        let mut type_variants = HashMap::new();
+        let mut type_aliases = HashMap::new();
         for type_def in program.type_defs().values() {
             let kind = match type_def.kind {
                 crate::core::ResolvedTypeKind::Alias => "alias",
@@ -414,8 +420,21 @@ impl<'a> Interpreter<'a> {
                 crate::core::ResolvedTypeKind::Union => "union",
             };
             type_kinds.insert(type_def.qualified_name.clone(), kind.to_string());
+            if !type_def.fields.is_empty() {
+                type_fields.insert(type_def.qualified_name.clone(), type_def.fields.clone());
+            }
+            if !type_def.variants.is_empty() {
+                type_variants.insert(type_def.qualified_name.clone(), type_def.variants.clone());
+            }
+            if let Some(alias) = &type_def.alias_of {
+                type_aliases.insert(type_def.qualified_name.clone(), alias.clone());
+            }
         }
         interp.resolved_type_kinds = Some(type_kinds);
+        interp.resolved_type_fields = Some(type_fields);
+        interp.resolved_type_variants = Some(type_variants);
+        interp.resolved_type_aliases = Some(type_aliases);
+
         let mut extern_funcs = std::collections::HashSet::new();
         let mut extern_abis = HashMap::new();
         for block in program.extern_blocks().values() {
@@ -630,6 +649,30 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn resolved_type_kind(&self, qualified_name: &str) -> Option<&str> {
         self.resolved_type_kinds
+            .as_ref()
+            .and_then(|map| map.get(qualified_name).map(String::as_str))
+    }
+
+    pub(crate) fn resolved_type_fields(
+        &self,
+        qualified_name: &str,
+    ) -> Option<Vec<(String, String)>> {
+        self.resolved_type_fields
+            .as_ref()
+            .and_then(|map| map.get(qualified_name).cloned())
+    }
+
+    pub(crate) fn resolved_type_variants(
+        &self,
+        qualified_name: &str,
+    ) -> Option<Vec<(String, Option<String>)>> {
+        self.resolved_type_variants
+            .as_ref()
+            .and_then(|map| map.get(qualified_name).cloned())
+    }
+
+    pub(crate) fn resolved_type_alias_of(&self, qualified_name: &str) -> Option<&str> {
+        self.resolved_type_aliases
             .as_ref()
             .and_then(|map| map.get(qualified_name).map(String::as_str))
     }
@@ -932,6 +975,9 @@ impl<'a> Interpreter<'a> {
             resolved_ownership_owners: None,
             resolved_ownership_summaries: None,
             resolved_type_kinds: None,
+            resolved_type_fields: None,
+            resolved_type_variants: None,
+            resolved_type_aliases: None,
             resolved_extern_funcs: None,
             resolved_extern_abis: None,
             resolved_extern_signatures: None,
