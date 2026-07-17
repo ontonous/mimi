@@ -194,11 +194,20 @@ pub struct ResolvedProtocol {
 }
 
 #[derive(Debug, Clone)]
+pub struct ResolvedActorMethod {
+    pub name: String,
+    pub params: Vec<(String, String)>,
+    pub ret: String,
+    pub effects: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ResolvedActor {
     pub node_id: NodeId,
     pub qualified_name: String,
     pub fields: Vec<(String, Type, bool)>,
     pub methods: Vec<String>,
+    pub method_signatures: Vec<ResolvedActorMethod>,
     pub origin: Origin,
 }
 
@@ -463,6 +472,19 @@ impl<'a> CheckedProgram<'a> {
         self.actors
             .values()
             .find(|actor| actor.qualified_name == qualified_name)
+    }
+
+    pub fn actor_method_signature(
+        &self,
+        actor_name: &str,
+        method_name: &str,
+    ) -> Option<&ResolvedActorMethod> {
+        self.actor(actor_name).and_then(|actor| {
+            actor
+                .method_signatures
+                .iter()
+                .find(|method| method.name == method_name)
+        })
     }
 
     pub fn capabilities(&self) -> &HashMap<NodeId, ResolvedCapability> {
@@ -1011,6 +1033,49 @@ fn collect_items(
                     .iter()
                     .map(|method| method.name.clone())
                     .collect::<Vec<_>>();
+                let mut method_signatures = Vec::new();
+                for method in &actor.methods {
+                    for param in &method.params {
+                        if contains_unresolved_type(&param.ty) {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: unresolved or erased type '{}' in actor '{}' method '{}' parameter",
+                                    crate::core::fmt_type(&param.ty),
+                                    qualified,
+                                    method.name
+                                ),
+                                span,
+                            ));
+                        }
+                    }
+                    if let Some(ret) = &method.ret {
+                        if contains_unresolved_type(ret) {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: unresolved or erased return type '{}' in actor '{}' method '{}'",
+                                    crate::core::fmt_type(ret),
+                                    qualified,
+                                    method.name
+                                ),
+                                span,
+                            ));
+                        }
+                    }
+                    method_signatures.push(ResolvedActorMethod {
+                        name: method.name.clone(),
+                        params: method
+                            .params
+                            .iter()
+                            .map(|param| (param.name.clone(), crate::core::fmt_type(&param.ty)))
+                            .collect(),
+                        ret: method
+                            .ret
+                            .as_ref()
+                            .map(crate::core::fmt_type)
+                            .unwrap_or_else(|| "unit".into()),
+                        effects: method.effects.clone(),
+                    });
+                }
                 actors.insert(
                     node_id.clone(),
                     ResolvedActor {
@@ -1018,6 +1083,7 @@ fn collect_items(
                         qualified_name: qualified,
                         fields,
                         methods,
+                        method_signatures,
                         origin: resolve_origin(actor.origin, &NodeId("actor".into()), span),
                     },
                 );
@@ -1635,17 +1701,35 @@ fn collect_program_call_sites(
             extern_info.entry(func.clone()).or_insert((0, "unit".into()));
         }
     }
-    let method_names: std::collections::HashSet<String> = actors
-        .values()
-        .flat_map(|actor| actor.methods.iter().cloned())
-        .collect();
+    let mut method_info: HashMap<String, (usize, Vec<String>, String)> = HashMap::new();
+    for actor in actors.values() {
+        for method in &actor.method_signatures {
+            // Prefer bare method name; qualified actor.method also recorded.
+            method_info.insert(
+                method.name.clone(),
+                (
+                    method.params.len(),
+                    method.effects.clone(),
+                    method.ret.clone(),
+                ),
+            );
+            method_info.insert(
+                format!("{}.{}", actor.qualified_name, method.name),
+                (
+                    method.params.len(),
+                    method.effects.clone(),
+                    method.ret.clone(),
+                ),
+            );
+        }
+    }
     for item in &file.items {
         collect_item_call_sites(
             item,
             "",
             &function_info,
             &extern_info,
-            &method_names,
+            &method_info,
             out,
         );
     }
@@ -1656,7 +1740,7 @@ fn collect_item_call_sites(
     module: &str,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &HashMap<String, (usize, String)>,
-    methods: &std::collections::HashSet<String>,
+    methods: &HashMap<String, (usize, Vec<String>, String)>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
 ) {
     match item {
@@ -1751,7 +1835,7 @@ fn collect_block_call_sites(
     fallback: Span,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &HashMap<String, (usize, String)>,
-    methods: &std::collections::HashSet<String>,
+    methods: &HashMap<String, (usize, Vec<String>, String)>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
 ) {
     for (index, stmt) in block.iter().enumerate() {
@@ -1775,7 +1859,7 @@ fn collect_stmt_call_sites(
     fallback: Span,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &HashMap<String, (usize, String)>,
-    methods: &std::collections::HashSet<String>,
+    methods: &HashMap<String, (usize, Vec<String>, String)>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
 ) {
     match stmt {
@@ -1871,7 +1955,7 @@ fn collect_expr_call_sites(
     fallback: Span,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &HashMap<String, (usize, String)>,
-    methods: &std::collections::HashSet<String>,
+    methods: &HashMap<String, (usize, Vec<String>, String)>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
 ) {
     match expr {
@@ -2021,7 +2105,7 @@ fn resolve_call_callee(
     callee: &Expr,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &HashMap<String, (usize, String)>,
-    methods: &std::collections::HashSet<String>,
+    methods: &HashMap<String, (usize, Vec<String>, String)>,
 ) -> (String, ResolvedCallKind, Option<usize>, Vec<String>, Option<String>) {
     match callee {
         Expr::Ident(name) => {
@@ -2041,8 +2125,14 @@ fn resolve_call_callee(
                     Vec::new(),
                     Some(ret.clone()),
                 )
-            } else if methods.contains(name) {
-                (name.clone(), ResolvedCallKind::Method, None, Vec::new(), None)
+            } else if let Some((arity, effects, ret)) = methods.get(name) {
+                (
+                    name.clone(),
+                    ResolvedCallKind::Method,
+                    Some(*arity),
+                    effects.clone(),
+                    Some(ret.clone()),
+                )
             } else {
                 (name.clone(), ResolvedCallKind::Unknown, None, Vec::new(), None)
             }
@@ -2052,11 +2142,20 @@ fn resolve_call_callee(
                 Expr::Ident(name) => name.clone(),
                 _ => "_".into(),
             };
-            let name = format!("{base}.{field}");
-            if methods.contains(field) {
-                (name, ResolvedCallKind::Method, None, Vec::new(), None)
+            let qualified = format!("{base}.{field}");
+            if let Some((arity, effects, ret)) = methods
+                .get(&qualified)
+                .or_else(|| methods.get(field))
+            {
+                (
+                    qualified,
+                    ResolvedCallKind::Method,
+                    Some(*arity),
+                    effects.clone(),
+                    Some(ret.clone()),
+                )
             } else {
-                (name, ResolvedCallKind::Unknown, None, Vec::new(), None)
+                (qualified, ResolvedCallKind::Unknown, None, Vec::new(), None)
             }
         }
         _ => ("<expr>".into(), ResolvedCallKind::Unknown, None, Vec::new(), None),
@@ -3176,6 +3275,44 @@ func main() -> i32 {
         assert_eq!(interp.resolved_call_return_type("helper").as_deref(), Some("i32"));
         assert_eq!(codegen.resolved_call_return_type("helper").as_deref(), Some("i32"));
         assert_eq!(verifier.checked_call_return_type("helper").as_deref(), Some("i32"));
+    }
+
+
+    #[test]
+    fn actor_method_signatures_are_materialised() {
+        let file = parse(
+            r#"
+actor Worker {
+    func run(x: i32) -> i32 { x }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let sig = program
+            .actor_method_signature("Worker", "run")
+            .expect("run");
+        assert_eq!(sig.params.len(), 1);
+        assert_eq!(sig.ret, "i32");
+        assert!(program.actor("Worker").is_some_and(|a| a.methods.iter().any(|m| m == "run")));
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert_eq!(
+            interp.resolved_actor_method_signature("Worker", "run"),
+            Some((1, "i32".into()))
+        );
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert_eq!(
+            verifier.checked_actor_method_signature("Worker", "run"),
+            Some((1, "i32".into()))
+        );
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "actor_sig");
+        codegen.compile_checked(&program).expect("compile");
+        assert_eq!(
+            codegen.resolved_actor_method_signature("Worker", "run"),
+            Some((1, "i32".into()))
+        );
     }
 
     #[test]

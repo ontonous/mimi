@@ -200,6 +200,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             );
         }
         self.resolved_call_sites = Some(call_sites);
+        let mut actor_method_signatures = std::collections::HashMap::new();
+        for actor in program.actors().values() {
+            for method in &actor.method_signatures {
+                actor_method_signatures.insert(
+                    format!("{}.{}", actor.qualified_name, method.name),
+                    (method.params.len(), method.ret.clone()),
+                );
+            }
+        }
+        self.resolved_actor_method_signatures = Some(actor_method_signatures);
         if let Some(max_children) = program.flows().values().find_map(|flow| flow.max_children) {
             self.max_children = Some(max_children);
         }
