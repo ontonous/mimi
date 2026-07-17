@@ -1969,6 +1969,12 @@ flow Door {
     state Open
     transition open(Closed) -> Open { do { return Open {} } }
 }
+protocol Sensor {
+    state Idle
+    transition tick(Idle) -> Idle
+}
+trait Close { func close() -> i32 }
+actor Sink { func ping() -> i32 { 0 } }
 session Ping = !i32 . end
 cap Io
 func abs(x: i32) -> i32 {
@@ -1987,6 +1993,9 @@ func main() -> i32 { abs(1) }
         assert!(verifier.has_checked_transition("Door", "open", "Closed"));
         assert!(verifier.has_checked_session("Ping"));
         assert!(!verifier.has_checked_transition("Door", "close", "Closed"));
+        assert!(verifier.has_checked_protocol("Sensor"));
+        assert!(verifier.has_checked_trait("Close"));
+        assert!(verifier.has_checked_actor("Sink"));
     }
 
     #[test]
