@@ -313,6 +313,8 @@ pub struct CodeGenerator<'ctx> {
     resolved_sessions: Option<std::collections::HashSet<String>>,
     /// Protocol names from CheckedProgram.
     resolved_protocols: Option<std::collections::HashSet<String>>,
+    resolved_protocol_transitions: Option<HashMap<String, Vec<(String, String, String)>>>,
+    resolved_protocol_payloads: Option<HashMap<String, String>>,
     /// Actor method directory from CheckedProgram.
     resolved_actors: Option<HashMap<String, Vec<String>>>,
     resolved_actor_method_signatures: Option<HashMap<String, (usize, String)>>,
@@ -455,6 +457,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_comptime_functions: None,
             resolved_sessions: None,
             resolved_protocols: None,
+            resolved_protocol_transitions: None,
+            resolved_protocol_payloads: None,
             resolved_actors: None,
             resolved_actor_method_signatures: None,
             resolved_method_signatures: None,
@@ -477,6 +481,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_flow_protocols: None,
             max_children: None,
         }
+    }
+
+    pub(crate) fn resolved_protocol_transitions(
+        &self,
+        protocol: &str,
+    ) -> Option<Vec<(String, String, String)>> {
+        self.resolved_protocol_transitions
+            .as_ref()
+            .and_then(|map| map.get(protocol).cloned())
+    }
+
+    pub(crate) fn resolved_protocol_payload(
+        &self,
+        protocol: &str,
+        state: &str,
+    ) -> Option<String> {
+        self.resolved_protocol_payloads
+            .as_ref()
+            .and_then(|map| map.get(&format!("{protocol}.{state}")).cloned())
     }
 
     pub(crate) fn resolved_method_signature(&self, key: &str) -> Option<(usize, String)> {

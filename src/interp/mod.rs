@@ -144,6 +144,10 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_sessions: Option<HashMap<String, crate::ast::SessionType>>,
     /// Protocol names materialised from CheckedProgram.
     pub(in crate::interp) resolved_protocols: Option<std::collections::HashSet<String>>,
+    /// Protocol transition records: protocol -> [(event, from, to)].
+    pub(in crate::interp) resolved_protocol_transitions: Option<HashMap<String, Vec<(String, String, String)>>>,
+    /// Protocol state payloads: "Protocol.State" -> payload type display.
+    pub(in crate::interp) resolved_protocol_payloads: Option<HashMap<String, String>>,
     /// Actor method directories materialised from CheckedProgram: actor -> methods.
     pub(in crate::interp) resolved_actors: Option<HashMap<String, Vec<String>>>,
     /// Actor method signatures: "Actor.method" -> (arity, ret).
@@ -285,6 +289,34 @@ impl<'a> Interpreter<'a> {
             .map(|protocol| protocol.qualified_name.clone())
             .collect();
         interp.resolved_protocols = Some(protocols);
+        let mut protocol_transitions = HashMap::new();
+        let mut protocol_payloads = HashMap::new();
+        for protocol in program.protocols().values() {
+            protocol_transitions.insert(
+                protocol.qualified_name.clone(),
+                protocol
+                    .transition_records
+                    .iter()
+                    .map(|tr| {
+                        (
+                            tr.event.clone(),
+                            tr.from_state.clone(),
+                            tr.to_states.first().cloned().unwrap_or_default(),
+                        )
+                    })
+                    .collect(),
+            );
+            for state in &protocol.state_payloads {
+                if let Some(ty) = &state.payload_type {
+                    protocol_payloads.insert(
+                        format!("{}.{}", protocol.qualified_name, state.name),
+                        ty.clone(),
+                    );
+                }
+            }
+        }
+        interp.resolved_protocol_transitions = Some(protocol_transitions);
+        interp.resolved_protocol_payloads = Some(protocol_payloads);
         let mut actors = HashMap::new();
         let mut actor_method_signatures = HashMap::new();
         for actor in program.actors().values() {
@@ -489,6 +521,25 @@ impl<'a> Interpreter<'a> {
         self.resolved_protocols
             .as_ref()
             .is_some_and(|set| set.contains(qualified_name))
+    }
+
+    pub(crate) fn resolved_protocol_transitions(
+        &self,
+        protocol: &str,
+    ) -> Option<Vec<(String, String, String)>> {
+        self.resolved_protocol_transitions
+            .as_ref()
+            .and_then(|map| map.get(protocol).cloned())
+    }
+
+    pub(crate) fn resolved_protocol_payload(
+        &self,
+        protocol: &str,
+        state: &str,
+    ) -> Option<String> {
+        self.resolved_protocol_payloads
+            .as_ref()
+            .and_then(|map| map.get(&format!("{protocol}.{state}")).cloned())
     }
 
     pub(crate) fn resolved_actor_methods(&self, qualified_name: &str) -> Option<Vec<String>> {
@@ -856,6 +907,8 @@ impl<'a> Interpreter<'a> {
             resolved_comptime_functions: None,
             resolved_sessions: None,
             resolved_protocols: None,
+            resolved_protocol_transitions: None,
+            resolved_protocol_payloads: None,
             resolved_actors: None,
             resolved_actor_method_signatures: None,
             resolved_capabilities: None,

@@ -88,6 +88,34 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map(|protocol| protocol.qualified_name.clone())
                 .collect(),
         );
+        let mut protocol_transitions = std::collections::HashMap::new();
+        let mut protocol_payloads = std::collections::HashMap::new();
+        for protocol in program.protocols().values() {
+            protocol_transitions.insert(
+                protocol.qualified_name.clone(),
+                protocol
+                    .transition_records
+                    .iter()
+                    .map(|tr| {
+                        (
+                            tr.event.clone(),
+                            tr.from_state.clone(),
+                            tr.to_states.first().cloned().unwrap_or_default(),
+                        )
+                    })
+                    .collect(),
+            );
+            for state in &protocol.state_payloads {
+                if let Some(ty) = &state.payload_type {
+                    protocol_payloads.insert(
+                        format!("{}.{}", protocol.qualified_name, state.name),
+                        ty.clone(),
+                    );
+                }
+            }
+        }
+        self.resolved_protocol_transitions = Some(protocol_transitions);
+        self.resolved_protocol_payloads = Some(protocol_payloads);
         let mut actors = std::collections::HashMap::new();
         for actor in program.actors().values() {
             actors.insert(actor.qualified_name.clone(), actor.methods.clone());
