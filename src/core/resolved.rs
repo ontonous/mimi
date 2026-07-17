@@ -95,6 +95,8 @@ pub struct ResolvedTransition {
     pub node_id: NodeId,
     pub id: TransitionId,
     pub targets: Vec<StateId>,
+    pub is_fallback: bool,
+    pub is_ffi_pinned: bool,
     pub origin: Origin,
     pub span: Span,
 }
@@ -1384,6 +1386,8 @@ fn collect_flow(
                     name: name.clone(),
                 })
                 .collect(),
+            is_fallback: transition.is_fallback,
+            is_ffi_pinned: transition.is_ffi_pinned,
             origin: if transition.is_ffi_pinned {
                 Origin::RuntimeSystem {
                     parent: flow_node_id.clone(),
@@ -2162,6 +2166,39 @@ func main() -> i32 { 0 }
         assert!(verifier
             .checked_flow_protocols("Lidar")
             .is_some_and(|p| p.iter().any(|n| n == "Sensor")));
+    }
+
+
+    #[test]
+    fn resolved_transition_records_fallback_and_pinned_flags() {
+        let file = parse(
+            r#"
+flow Door {
+    state Closed
+    state Open
+    transition open(Closed) -> Open { do { return Open {} } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        // Matrix injects fallback edges; user open is not fallback.
+        let program = crate::core::check_program(&file).expect("check");
+        let open = program
+            .transition("Door", "open", "Closed")
+            .expect("open");
+        assert!(!open.is_fallback);
+        // Matrix injects fallback edges for undefined combinations.
+        assert!(program.transitions().values().any(|t| t.is_fallback));
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert!(!interp.is_resolved_fallback_transition("Door", "open", "Closed"));
+        assert!(program
+            .transitions()
+            .values()
+            .any(|t| t.is_fallback && interp.is_resolved_fallback_transition(
+                &t.id.flow.0,
+                &t.id.event,
+                &t.id.source.name
+            )));
     }
 
     #[test]

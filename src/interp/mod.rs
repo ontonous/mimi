@@ -131,6 +131,8 @@ pub struct Interpreter<'a> {
     /// Canonical transitions from CheckedProgram: (flow, event, source) -> targets.
     /// When present, transition dispatch prefers this table over re-scanning FlowDef.
     pub(in crate::interp) resolved_transitions: Option<HashMap<(String, String, String), Vec<String>>>,
+    /// Fallback/matrix-injected transitions from CheckedProgram.
+    pub(in crate::interp) resolved_fallback_transitions: Option<std::collections::HashSet<(String, String, String)>>,
     /// Function signatures from CheckedProgram: qualified_name -> (param_count, ret_fmt, effects).
     pub(in crate::interp) resolved_functions: Option<HashMap<String, (usize, String, Vec<String>)>>,
     /// Session type names materialised from CheckedProgram.
@@ -209,6 +211,7 @@ impl<'a> Interpreter<'a> {
     pub fn from_checked(program: &crate::core::CheckedProgram<'a>) -> Self {
         let mut interp = Self::new(program.file());
         let mut resolved = HashMap::new();
+        let mut fallbacks = std::collections::HashSet::new();
         for (id, transition) in program.transitions() {
             let key = (
                 id.flow.0.clone(),
@@ -220,9 +223,13 @@ impl<'a> Interpreter<'a> {
                 .iter()
                 .map(|state| state.name.clone())
                 .collect();
+            if transition.is_fallback {
+                fallbacks.insert(key.clone());
+            }
             resolved.insert(key, targets);
         }
         interp.resolved_transitions = Some(resolved);
+        interp.resolved_fallback_transitions = Some(fallbacks);
         let mut functions = HashMap::new();
         for function in program.functions().values() {
             functions.insert(
@@ -420,6 +427,17 @@ impl<'a> Interpreter<'a> {
             .is_some_and(|set| set.contains(name))
     }
 
+    pub(crate) fn is_resolved_fallback_transition(
+        &self,
+        flow: &str,
+        event: &str,
+        source: &str,
+    ) -> bool {
+        self.resolved_fallback_transitions.as_ref().is_some_and(|set| {
+            set.contains(&(flow.to_string(), event.to_string(), source.to_string()))
+        })
+    }
+
     pub(crate) fn resolved_max_children(&self) -> Option<usize> {
         self.max_children
     }
@@ -592,6 +610,7 @@ impl<'a> Interpreter<'a> {
             actor_index,
             flow_index,
             resolved_transitions: None,
+            resolved_fallback_transitions: None,
             resolved_functions: None,
             resolved_sessions: None,
             resolved_protocols: None,
