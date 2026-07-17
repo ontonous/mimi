@@ -12,6 +12,15 @@
 
 > 当前 `CheckedProgram` 仍持有 Surface AST，consumer 尚未完整迁移到 Typed Resolved IR；`TOOL-RESOLUTION-001` 保持 partial。
 
+### v0.31.3-dev — CFG / ownership ledger（首个垂直切片）
+
+- `CheckedProgram` 持久化 per-callable 线性 `cap` 的 Introduce/Move/Drop/Return 动作与 branch merge 状态。
+- 语句/表达式 `if` 与 `match` 路径敏感：单路径消耗 → `MaybeConsumed`/`E0304`；双路径一致 → 合并为 `Consumed`。
+- 潜在循环内消耗外层 capability fail-closed（固定点 CFG 分析仍待后续）。
+- 嵌套函数 / actor / impl / transition 使用独立 ownership owner；禁止隐式捕获外层 `cap`。
+- Codegen 移除 flow transition 同名首候选 fallback；`flow_file_system` 固件避开保留字 `fault` 绑定。
+- `RESOURCE-LINEAR-001` / `OWN-PERMISSION-001` support 证据升为 `partial`。
+
 ### 审计修复（CG-H16 / CG-H9 / M2 / MEM-C8）
 
 #### CRITICAL 修复
