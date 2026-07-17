@@ -434,6 +434,7 @@ impl Parser {
     }
 
     fn parse_actor_def(&mut self) -> Result<ActorDef, ParseError> {
+        let pos = (self.peek().line, self.peek().col);
         self.expect_keyword(TokenKind::Actor)?;
         let name = self.expect_ident()?;
         self.skip_newlines();
@@ -498,6 +499,8 @@ impl Parser {
         self.expect(TokenKind::RBrace, "`}`")?;
         Ok(ActorDef {
             name,
+            pos,
+            origin: AstOrigin::User,
             pub_: false,
             fields,
             methods,
@@ -505,6 +508,7 @@ impl Parser {
     }
 
     fn parse_module(&mut self) -> Result<ModuleDef, ParseError> {
+        let pos = (self.peek().line, self.peek().col);
         self.expect_keyword(TokenKind::Module)?;
         let name = self.expect_ident()?;
         self.skip_newlines();
@@ -523,6 +527,8 @@ impl Parser {
         let items = self.parse_item_block()?;
         Ok(ModuleDef {
             name,
+            pos,
+            origin: AstOrigin::User,
             imports,
             items,
         })
@@ -1116,6 +1122,7 @@ impl Parser {
     }
 
     fn parse_protocol_def(&mut self) -> Result<ProtocolDef, ParseError> {
+        let pos = (self.peek().line, self.peek().col);
         self.expect_keyword(TokenKind::Protocol)?;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
@@ -1184,6 +1191,8 @@ impl Parser {
         self.expect(TokenKind::RBrace, "`}`")?;
         Ok(ProtocolDef {
             name,
+            pos,
+            origin: AstOrigin::User,
             generics,
             states,
             transitions,
@@ -1197,6 +1206,7 @@ impl Parser {
     /// S ::= ! Type . S | ? Type . S | dual ( S ) | end | Name
     /// ```
     fn parse_session_def(&mut self) -> Result<SessionDef, ParseError> {
+        let pos = (self.peek().line, self.peek().col);
         self.expect_keyword(TokenKind::Session)?;
         let name = self.expect_ident()?;
         self.expect(TokenKind::Eq, "`=` after session name")?;
@@ -1205,6 +1215,8 @@ impl Parser {
         self.match_semi();
         Ok(SessionDef {
             name,
+            pos,
+            origin: AstOrigin::User,
             pub_: false,
             body,
         })

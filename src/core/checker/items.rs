@@ -939,11 +939,13 @@ impl<'a> Checker<'a> {
                 self.check_func(f)
             }
             Item::Module(m) => {
+                self.set_pos(m.pos.0, m.pos.1);
                 for inner in &m.items {
                     self.check_item(inner);
                 }
             }
             Item::Actor(actor) => {
+                self.set_pos(actor.pos.0, actor.pos.1);
                 // Check actor fields
                 for field in &actor.fields {
                     let field_ty = self.resolve_type(&field.ty);
@@ -1684,6 +1686,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Protocol(p) => {
+                self.set_pos(p.pos.0, p.pos.1);
                 // Check state name uniqueness
                 let mut seen_states: std::collections::HashSet<&str> =
                     std::collections::HashSet::new();
@@ -1749,6 +1752,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Session(s) => {
+                self.set_pos(s.pos.0, s.pos.1);
                 // Duplicate session names
                 let count = self
                     .file

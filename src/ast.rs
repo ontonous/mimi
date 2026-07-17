@@ -125,6 +125,8 @@ pub struct CapDef {
 #[derive(Debug, Clone)]
 pub struct ActorDef {
     pub name: String,
+    pub pos: (usize, usize),
+    pub origin: AstOrigin,
     pub pub_: bool,
     pub fields: Vec<ActorField>,
     pub methods: Vec<FuncDef>,
@@ -193,6 +195,8 @@ pub enum ParamBorrow {
 #[derive(Debug, Clone)]
 pub struct ModuleDef {
     pub name: String,
+    pub pos: (usize, usize),
+    pub origin: AstOrigin,
     pub imports: Vec<Import>,
     pub items: Vec<Item>,
 }
@@ -685,6 +689,8 @@ pub struct TransitionDef {
 #[derive(Debug, Clone)]
 pub struct ProtocolDef {
     pub name: String,
+    pub pos: (usize, usize),
+    pub origin: AstOrigin,
     pub generics: Vec<GenericParam>,
     pub states: Vec<ProtocolStateDef>,
     pub transitions: Vec<ProtocolTransitionDef>,
@@ -694,6 +700,8 @@ pub struct ProtocolDef {
 #[derive(Debug, Clone)]
 pub struct SessionDef {
     pub name: String,
+    pub pos: (usize, usize),
+    pub origin: AstOrigin,
     pub pub_: bool,
     pub body: SessionType,
 }

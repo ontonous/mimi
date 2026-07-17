@@ -20,8 +20,8 @@ pub(crate) use helpers::{is_bool, is_numeric_coercion, is_trait_coercion};
 #[cfg(test)]
 pub(crate) use helpers::{is_int, is_numeric, is_string, same_type};
 pub use resolved::{
-    BackendProfile, CheckedProgram, FlowId, NodeId, Origin, ResolvedFlow, ResolvedState, StateId,
-    TransitionId, RESOLVED_IR_VERSION,
+    BackendProfile, CheckedProgram, FlowId, NodeId, Origin, ResolvedFlow, ResolvedItem,
+    ResolvedItemKind, ResolvedState, StateId, TransitionId, RESOLVED_IR_VERSION,
 };
 
 pub fn check(file: &File) -> Result<(), Vec<Diagnostic>> {

@@ -8,6 +8,24 @@ pub const RESOLVED_IR_VERSION: &str = "mimi-resolved-ir-1";
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NodeId(pub String);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedItemKind {
+    Function,
+    Module,
+    Actor,
+    Flow,
+    Protocol,
+    Session,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedItem {
+    pub node_id: NodeId,
+    pub qualified_name: String,
+    pub kind: ResolvedItemKind,
+    pub origin: Origin,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FlowId(pub String);
 
@@ -88,6 +106,7 @@ pub struct CapabilityRequirement {
 #[derive(Debug)]
 pub struct CheckedProgram<'a> {
     file: &'a File,
+    items: HashMap<NodeId, ResolvedItem>,
     flows: HashMap<FlowId, ResolvedFlow>,
     transitions: HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: Vec<CapabilityRequirement>,
@@ -97,11 +116,13 @@ impl<'a> CheckedProgram<'a> {
     pub(crate) fn from_checked_file(file: &'a File) -> Result<Self, Vec<Diagnostic>> {
         let mut transitions = HashMap::new();
         let mut flows = HashMap::new();
+        let mut items = HashMap::new();
         let mut backend_requirements = Vec::new();
         let mut errors = Vec::new();
         collect_items(
             &file.items,
             "",
+            &mut items,
             &mut flows,
             &mut transitions,
             &mut backend_requirements,
@@ -112,6 +133,7 @@ impl<'a> CheckedProgram<'a> {
         }
         Ok(Self {
             file,
+            items,
             flows,
             transitions,
             backend_requirements,
@@ -128,6 +150,10 @@ impl<'a> CheckedProgram<'a> {
 
     pub fn flows(&self) -> &HashMap<FlowId, ResolvedFlow> {
         &self.flows
+    }
+
+    pub fn items(&self) -> &HashMap<NodeId, ResolvedItem> {
+        &self.items
     }
 
     pub fn flow(&self, qualified_name: &str) -> Option<&ResolvedFlow> {
@@ -184,6 +210,7 @@ fn backend_supports(backend: BackendProfile, capability: &str) -> bool {
 fn collect_items(
     items: &[Item],
     module: &str,
+    resolved_items: &mut HashMap<NodeId, ResolvedItem>,
     flows: &mut HashMap<FlowId, ResolvedFlow>,
     transitions: &mut HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: &mut Vec<CapabilityRequirement>,
@@ -193,8 +220,36 @@ fn collect_items(
         match item {
             Item::Module(def) => {
                 let qualified = qualify(module, &def.name);
+                insert_item(
+                    resolved_items,
+                    ResolvedItemKind::Module,
+                    &qualified,
+                    def.origin,
+                    Span::from(def.pos),
+                    errors,
+                );
                 collect_items(
                     &def.items,
+                    &qualified,
+                    resolved_items,
+                    flows,
+                    transitions,
+                    backend_requirements,
+                    errors,
+                );
+            }
+            Item::Flow(flow) => {
+                let qualified = qualify(module, &flow.name);
+                insert_item(
+                    resolved_items,
+                    ResolvedItemKind::Flow,
+                    &qualified,
+                    flow.origin,
+                    Span::from(flow.pos),
+                    errors,
+                );
+                collect_flow(
+                    flow,
                     &qualified,
                     flows,
                     transitions,
@@ -202,16 +257,74 @@ fn collect_items(
                     errors,
                 );
             }
-            Item::Flow(flow) => collect_flow(
-                flow,
-                &qualify(module, &flow.name),
-                flows,
-                transitions,
-                backend_requirements,
+            Item::Func(function) => insert_item(
+                resolved_items,
+                ResolvedItemKind::Function,
+                &qualify(module, &function.name),
+                AstOrigin::User,
+                Span::from(function.pos),
+                errors,
+            ),
+            Item::Actor(actor) => insert_item(
+                resolved_items,
+                ResolvedItemKind::Actor,
+                &qualify(module, &actor.name),
+                actor.origin,
+                Span::from(actor.pos),
+                errors,
+            ),
+            Item::Protocol(protocol) => insert_item(
+                resolved_items,
+                ResolvedItemKind::Protocol,
+                &qualify(module, &protocol.name),
+                protocol.origin,
+                Span::from(protocol.pos),
+                errors,
+            ),
+            Item::Session(session) => insert_item(
+                resolved_items,
+                ResolvedItemKind::Session,
+                &qualify(module, &session.name),
+                session.origin,
+                Span::from(session.pos),
                 errors,
             ),
             _ => {}
         }
+    }
+}
+
+fn insert_item(
+    items: &mut HashMap<NodeId, ResolvedItem>,
+    kind: ResolvedItemKind,
+    qualified_name: &str,
+    origin: AstOrigin,
+    span: Span,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let kind_name = match kind {
+        ResolvedItemKind::Function => "function",
+        ResolvedItemKind::Module => "module",
+        ResolvedItemKind::Actor => "actor",
+        ResolvedItemKind::Flow => "flow",
+        ResolvedItemKind::Protocol => "protocol",
+        ResolvedItemKind::Session => "session",
+    };
+    let node_id = NodeId(format!("{}:{}", kind_name, qualified_name));
+    let item = ResolvedItem {
+        node_id: node_id.clone(),
+        qualified_name: qualified_name.to_string(),
+        kind,
+        origin: resolve_origin(origin, &node_id, span),
+    };
+    if items.insert(node_id, item).is_some() {
+        errors.push(Diagnostic::error(
+            format!(
+                "TOOL-RESOLUTION-001: duplicate canonical {} '{}'",
+                kind_name, qualified_name
+            ),
+            span,
+        ));
     }
 }
 
@@ -489,6 +602,41 @@ module beta {
         assert_eq!(idle.origin.user_span().start_line, 4);
         assert!(idle.payload.is_empty());
         assert!(program.flow("Worker").is_none());
+        assert!(program
+            .items()
+            .contains_key(&NodeId("module:alpha".to_string())));
+        assert!(program
+            .items()
+            .contains_key(&NodeId("flow:alpha::Worker".to_string())));
+    }
+
+    #[test]
+    fn resolved_item_directory_records_declaration_spans() {
+        let file = parse(
+            r#"
+actor Worker {
+    func run() -> i32 { 0 }
+}
+protocol Service {
+    state Ready
+}
+session Request = !i32 . end
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        for (node_id, line) in [
+            ("actor:Worker", 2),
+            ("protocol:Service", 5),
+            ("session:Request", 8),
+            ("function:main", 9),
+        ] {
+            let item = program
+                .items()
+                .get(&NodeId(node_id.to_string()))
+                .unwrap_or_else(|| panic!("missing {node_id}"));
+            assert_eq!(item.origin.user_span().start_line, line);
+        }
     }
 
     #[test]
