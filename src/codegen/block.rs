@@ -307,8 +307,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if let Some(parsed) =
                                         crate::codegen::extract_list_elem_type(&full)
                                     {
-                                        let list_ast =
-                                            Type::Name("List".into(), vec![parsed]);
+                                        let list_ast = Type::Name("List".into(), vec![parsed]);
                                         self.var_types.insert(name.clone(), list_ast.clone());
                                         self.register_list_elem_type(name, &list_ast);
                                     } else {
@@ -365,18 +364,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 .first()
                                                 .map(|a| self.infer_object_type(a, vars))
                                                 .unwrap_or_default();
-                                            let t = flow
-                                                .transitions
-                                                .iter()
-                                                .find(|t| {
-                                                    t.name == *method_name
-                                                        && t.from_state == from_type
-                                                })
-                                                .or_else(|| {
-                                                    flow.transitions
-                                                        .iter()
-                                                        .find(|t| t.name == *method_name)
-                                                });
+                                            let t = flow.transitions.iter().find(|t| {
+                                                t.name == *method_name && t.from_state == from_type
+                                            });
                                             if let Some(t) = t {
                                                 if let Some(to) = t.to_states.first() {
                                                     self.var_type_names
@@ -403,18 +393,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 .first()
                                                 .map(|a| self.infer_object_type(a, vars))
                                                 .unwrap_or_default();
-                                            let t = flow
-                                                .transitions
-                                                .iter()
-                                                .find(|t| {
-                                                    t.name == *method_name
-                                                        && t.from_state == from_type
-                                                })
-                                                .or_else(|| {
-                                                    flow.transitions
-                                                        .iter()
-                                                        .find(|t| t.name == *method_name)
-                                                });
+                                            let t = flow.transitions.iter().find(|t| {
+                                                t.name == *method_name && t.from_state == from_type
+                                            });
                                             if let Some(t) = t {
                                                 if let Some(to) = t.to_states.first() {
                                                     self.var_type_names
@@ -445,11 +426,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             .get(name)
                                             .is_some_and(|t| t.starts_with("Option"))
                                         {
-                                            let inferred =
-                                                self.infer_object_type(init, vars);
+                                            let inferred = self.infer_object_type(init, vars);
                                             if inferred.starts_with("Option<") {
-                                                self.var_type_names
-                                                    .insert(name.clone(), inferred);
+                                                self.var_type_names.insert(name.clone(), inferred);
                                             } else {
                                                 self.var_type_names
                                                     .insert(name.clone(), "Option".to_string());
@@ -523,10 +502,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                             {
                                                                 self.var_type_names.insert(
                                                                     name.clone(),
-                                                                    format!(
-                                                                        "Map<string, {}>",
-                                                                        vt
-                                                                    ),
+                                                                    format!("Map<string, {}>", vt),
                                                                 );
                                                             } else {
                                                                 self.var_type_names.insert(
@@ -541,8 +517,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                             );
                                                         }
                                                     } else {
-                                                        self.var_type_names
-                                                            .insert(name.clone(), "Map".to_string());
+                                                        self.var_type_names.insert(
+                                                            name.clone(),
+                                                            "Map".to_string(),
+                                                        );
                                                     }
                                                 }
                                                 "set_new" | "set_insert" | "set_remove" => {
@@ -694,8 +672,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             self.var_types.insert(name.clone(), ta.clone());
                                             self.register_list_elem_type(name, ta);
-                                        } else if (tn == "Map" || tn == "Set") && !args.is_empty()
-                                        {
+                                        } else if (tn == "Map" || tn == "Set") && !args.is_empty() {
                                             if let Some(full) = self.get_full_type_name(ta) {
                                                 self.var_type_names.insert(name.clone(), full);
                                             } else {
@@ -1292,17 +1269,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 })?;
                 BasicValueEnum::IntValue(
                     self.builder
-                        .build_int_s_extend(
-                            tv.into_int_value(),
-                            target_ty,
-                            "if_then_sext",
-                        )
+                        .build_int_s_extend(tv.into_int_value(), target_ty, "if_then_sext")
                         .map_err(|e| CompileError::LlvmError(format!("if then s_ext: {}", e)))?,
                 )
             } else {
-                then_val.ok_or_else(|| {
-                    CompileError::LlvmError("if-then: missing then value".into())
-                })?
+                then_val
+                    .ok_or_else(|| CompileError::LlvmError("if-then: missing then value".into()))?
             };
             // Extend else_val if needed (in else_bb_end block, before terminator)
             let else_val = if else_bw < then_bw && else_reaches {
@@ -1315,17 +1287,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 })?;
                 BasicValueEnum::IntValue(
                     self.builder
-                        .build_int_s_extend(
-                            ev.into_int_value(),
-                            target_ty,
-                            "if_else_sext",
-                        )
+                        .build_int_s_extend(ev.into_int_value(), target_ty, "if_else_sext")
                         .map_err(|e| CompileError::LlvmError(format!("if else s_ext: {}", e)))?,
                 )
             } else {
-                else_val.ok_or_else(|| {
-                    CompileError::LlvmError("if-else: missing else value".into())
-                })?
+                else_val
+                    .ok_or_else(|| CompileError::LlvmError("if-else: missing else value".into()))?
             };
             (then_val, else_val)
         } else {
@@ -1584,8 +1551,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         );
                                     }
                                     "map_new" => {
-                                        self.var_type_names
-                                            .insert(name.clone(), "Map".to_string());
+                                        self.var_type_names.insert(name.clone(), "Map".to_string());
                                     }
                                     "map_set" | "map_remove" => {
                                         if let Some(val_arg) = args.get(2) {
@@ -1593,20 +1559,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             if vt.starts_with('(')
                                                 || self.is_product_tuple_alias(&vt)
                                             {
-                                                let resolved =
-                                                    if self.is_product_tuple_alias(&vt) {
-                                                        self.resolve_alias_type_name(&vt)
-                                                    } else {
-                                                        vt
-                                                    };
+                                                let resolved = if self.is_product_tuple_alias(&vt) {
+                                                    self.resolve_alias_type_name(&vt)
+                                                } else {
+                                                    vt
+                                                };
                                                 self.var_type_names.insert(
                                                     name.clone(),
                                                     format!("Map<string, {}>", resolved),
                                                 );
-                                            } else if !vt.is_empty()
-                                                && vt != "i64"
-                                                && vt != "int"
-                                            {
+                                            } else if !vt.is_empty() && vt != "i64" && vt != "int" {
                                                 self.var_type_names.insert(
                                                     name.clone(),
                                                     format!("Map<string, {}>", vt),
@@ -1621,8 +1583,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                     }
                                     "set_new" | "set_insert" | "set_remove" => {
-                                        self.var_type_names
-                                            .insert(name.clone(), "Set".to_string());
+                                        self.var_type_names.insert(name.clone(), "Set".to_string());
                                     }
                                     _ => {}
                                 }

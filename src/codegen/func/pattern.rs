@@ -297,12 +297,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let zero = i64_ty.const_int(0, false);
                     let is_empty = self
                         .builder
-                        .build_int_compare(
-                            inkwell::IntPredicate::EQ,
-                            rest_len,
-                            zero,
-                            "rest_empty",
-                        )
+                        .build_int_compare(inkwell::IntPredicate::EQ, rest_len, zero, "rest_empty")
                         .map_err(|e| CompileError::LlvmError(format!("cmp: {}", e)))?;
                     let function = self.current_function().ok_or_else(|| {
                         CompileError::LlvmError("no function for slice rest".into())

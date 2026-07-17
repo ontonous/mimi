@@ -115,9 +115,7 @@ impl<'a> Interpreter<'a> {
                         InterpError::lock_error(format!("shared read lock failed: {}", e))
                     })?
                     .clone()),
-                Value::LocalShared(rc) => {
-                    Ok(rc.lock().unwrap_or_else(|e| e.into_inner()).clone())
-                }
+                Value::LocalShared(rc) => Ok(rc.lock().unwrap_or_else(|e| e.into_inner()).clone()),
                 Value::IndexRef { owner, index } | Value::IndexRefMut { owner, index } => {
                     let owner_val = self.lookup(&owner).ok_or_else(|| {
                         InterpError::new(format!(
@@ -675,17 +673,19 @@ impl<'a> Interpreter<'a> {
                             Value::Record(Some(n), _) => Some(n.as_str()),
                             _ => None,
                         });
-                        let t = flow
-                            .transitions
-                            .iter()
-                            .find(|t| {
-                                t.name == *method
-                                    && from_name.map(|n| n == t.from_state).unwrap_or(false)
-                            })
-                            .or_else(|| flow.transitions.iter().find(|t| t.name == *method));
+                        let t = flow.transitions.iter().find(|t| {
+                            t.name == *method
+                                && from_name.map(|n| n == t.from_state).unwrap_or(false)
+                        });
                         if let Some(t) = t {
                             return self.eval_flow_transition(&flow, t, &vals);
                         }
+                        return Err(InterpError::new(format!(
+                            "flow transition '{}::{}' has no overload for source state {}",
+                            flow_name,
+                            method,
+                            from_name.unwrap_or("<unknown>")
+                        )));
                     }
                 }
                 // If the object is a variable in scope, dispatch as a method call on
@@ -1635,8 +1635,8 @@ impl<'a> Interpreter<'a> {
                             let err_val = self.coerce_value_to_type(v.clone(), &type_args[1])?;
                             Ok(Value::Variant("Err".into(), vec![err_val]))
                         } else {
-                            let ok_val =
-                                self.coerce_value_to_type(Value::Record(None, fields), &type_args[0])?;
+                            let ok_val = self
+                                .coerce_value_to_type(Value::Record(None, fields), &type_args[0])?;
                             Ok(Value::Variant("Ok".into(), vec![ok_val]))
                         }
                     }
@@ -1651,7 +1651,10 @@ impl<'a> Interpreter<'a> {
                         let mut out = Vec::new();
                         for item in items {
                             let v = self.coerce_value_to_type(item, &type_args[0])?;
-                            if !out.iter().any(|e| crate::interp::value::values_equal(e, &v)) {
+                            if !out
+                                .iter()
+                                .any(|e| crate::interp::value::values_equal(e, &v))
+                            {
                                 out.push(v);
                             }
                         }

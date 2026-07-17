@@ -229,12 +229,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if is_list {
                     // Heap-pack list and store as i64 handle (matches Option
                     // heap-pack ABI for List payloads).
-                    let size =
-                        self.llvm_type_size_bytes(BasicTypeEnum::StructType(sv.get_type()));
-                    let heap = self.malloc_or_abort(
-                        i64_ty.const_int(size, false),
-                        "some_list_heap",
-                    )?;
+                    let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sv.get_type()));
+                    let heap =
+                        self.malloc_or_abort(i64_ty.const_int(size, false), "some_list_heap")?;
                     let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                     let typed = self
                         .build_bit_cast(
@@ -321,7 +318,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.builder
                                     .build_int_truncate(iv, i64_ty, "err_trunc")
                                     .map_err(|e| {
-                                        CompileError::LlvmError(format!("int truncate error: {}", e))
+                                        CompileError::LlvmError(format!(
+                                            "int truncate error: {}",
+                                            e
+                                        ))
                                     })?
                                     .into()
                             } else {
@@ -1540,11 +1540,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if et.get_bit_width() == 64 =>
                 {
                     // Option {i1, ptr} → {i1, i64}: ptrtoint list/record handle.
-                    let h = self.build_ptr_to_int(
-                        pv,
-                        self.context.i64_type(),
-                        "opt_pay_ptr_i64",
-                    )?;
+                    let h =
+                        self.build_ptr_to_int(pv, self.context.i64_type(), "opt_pay_ptr_i64")?;
                     self.build_store(pay_gep, h)?;
                 }
                 (BasicValueEnum::PointerValue(pv), BasicTypeEnum::PointerType(_)) => {

@@ -171,7 +171,7 @@ impl<'a> Interpreter<'a> {
                 registry.remove(&id);
             }
         } // registry lock dropped here
-        // Kill each child (no TOCTOU window — we hold strong references).
+          // Kill each child (no TOCTOU window — we hold strong references).
         for child in children {
             // Mark as faulted (short-circuit mailbox)
             if let Ok(mut instance) = child.inner.write() {

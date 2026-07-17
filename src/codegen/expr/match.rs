@@ -253,12 +253,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     });
                     for (_, inner_pat) in inner_patterns {
                         if let Pattern::Variable(bind_name) = inner_pat {
-                            self.bind_pattern_var(
-                                &mut local_vars,
-                                bind_name,
-                                payload,
-                                payload_ty,
-                            )?;
+                            self.bind_pattern_var(&mut local_vars, bind_name, payload, payload_ty)?;
                             if let Some(ref ast_ty) = payload_ast {
                                 self.var_types.insert(bind_name.clone(), ast_ty.clone());
                                 if let Some(full) = self.get_full_type_name(ast_ty) {

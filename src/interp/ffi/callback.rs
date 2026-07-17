@@ -290,9 +290,7 @@ unsafe fn callback_trampoline_inner(
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         if strict {
-            eprintln!(
-                "[mimi] FFI STRICT (IP-C5): refusing nested FFI callback reentrancy"
-            );
+            eprintln!("[mimi] FFI STRICT (IP-C5): refusing nested FFI callback reentrancy");
             *result = 0;
             return;
         }
