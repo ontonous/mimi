@@ -134,6 +134,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         self.resolved_transactional_fields = Some(transactional_fields);
         self.resolved_metadata_shadow_fields = Some(metadata_shadow_fields);
+        let mut flow_protocols = std::collections::HashMap::new();
+        for flow in program.flows().values() {
+            if !flow.impl_protocols.is_empty() {
+                flow_protocols.insert(flow.id.0.clone(), flow.impl_protocols.clone());
+            }
+        }
+        self.resolved_flow_protocols = Some(flow_protocols);
         self.compile_file(program.file()).map_err(|error| {
             let mut diagnostic = error.to_diagnostic();
             if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {
