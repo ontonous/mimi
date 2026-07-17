@@ -2214,6 +2214,30 @@ func main() -> i32 { 0 }
         assert!(!interp.is_resolved_ffi_pinned_transition("Door", "open", "Closed"));
     }
 
+
+    #[test]
+    fn interpreter_exposes_resolved_transition_targets() {
+        let file = parse(
+            r#"
+flow Door {
+    state Closed
+    state Open
+    transition open(Closed) -> Open { do { return Open {} } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        let targets = interp
+            .resolved_transition_targets("Door", "open", "Closed")
+            .expect("targets");
+        assert_eq!(targets, vec!["Open".to_string()]);
+        assert!(interp
+            .resolved_transition_targets("Door", "missing", "Closed")
+            .is_none());
+    }
+
     #[test]
     fn consumers_install_type_and_extern_directories() {
         let file = parse(

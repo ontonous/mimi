@@ -456,6 +456,18 @@ impl<'a> Interpreter<'a> {
         })
     }
 
+    pub(crate) fn resolved_transition_targets(
+        &self,
+        flow: &str,
+        event: &str,
+        source: &str,
+    ) -> Option<Vec<String>> {
+        self.resolved_transitions.as_ref().and_then(|map| {
+            map.get(&(flow.to_string(), event.to_string(), source.to_string()))
+                .cloned()
+        })
+    }
+
     pub(crate) fn resolved_max_children(&self) -> Option<usize> {
         self.max_children
     }
