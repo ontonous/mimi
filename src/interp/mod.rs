@@ -146,6 +146,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_protocols: Option<std::collections::HashSet<String>>,
     /// Actor method directories materialised from CheckedProgram: actor -> methods.
     pub(in crate::interp) resolved_actors: Option<HashMap<String, Vec<String>>>,
+    /// Actor method signatures: "Actor.method" -> (arity, ret).
+    pub(in crate::interp) resolved_actor_method_signatures: Option<HashMap<String, (usize, String)>>,
     /// Capability names materialised from CheckedProgram.
     pub(in crate::interp) resolved_capabilities: Option<std::collections::HashSet<String>>,
     /// Constant names materialised from CheckedProgram.
@@ -282,10 +284,18 @@ impl<'a> Interpreter<'a> {
             .collect();
         interp.resolved_protocols = Some(protocols);
         let mut actors = HashMap::new();
+        let mut actor_method_signatures = HashMap::new();
         for actor in program.actors().values() {
             actors.insert(actor.qualified_name.clone(), actor.methods.clone());
+            for method in &actor.method_signatures {
+                actor_method_signatures.insert(
+                    format!("{}.{}", actor.qualified_name, method.name),
+                    (method.params.len(), method.ret.clone()),
+                );
+            }
         }
         interp.resolved_actors = Some(actors);
+        interp.resolved_actor_method_signatures = Some(actor_method_signatures);
         let capabilities = program
             .capabilities()
             .values()
@@ -469,6 +479,16 @@ impl<'a> Interpreter<'a> {
         self.resolved_actors
             .as_ref()
             .and_then(|map| map.get(qualified_name).cloned())
+    }
+
+    pub(crate) fn resolved_actor_method_signature(
+        &self,
+        actor: &str,
+        method: &str,
+    ) -> Option<(usize, String)> {
+        self.resolved_actor_method_signatures
+            .as_ref()
+            .and_then(|map| map.get(&format!("{actor}.{method}")).cloned())
     }
 
     pub(crate) fn has_resolved_capability(&self, qualified_name: &str) -> bool {
@@ -815,6 +835,7 @@ impl<'a> Interpreter<'a> {
             resolved_sessions: None,
             resolved_protocols: None,
             resolved_actors: None,
+            resolved_actor_method_signatures: None,
             resolved_capabilities: None,
             resolved_constants: None,
             resolved_constant_values: None,

@@ -433,6 +433,7 @@ pub struct VerifierCtx {
     pub(crate) checked_traits: std::collections::HashSet<String>,
     /// Actor names materialised from CheckedProgram.
     pub(crate) checked_actors: std::collections::HashSet<String>,
+    pub(crate) checked_actor_method_signatures: std::collections::HashMap<String, (usize, String)>,
     /// Flow mailbox depths materialised from CheckedProgram.
     pub(crate) checked_mailbox_depths: std::collections::HashMap<String, usize>,
     /// Flow max_children materialised from CheckedProgram.
@@ -603,6 +604,16 @@ impl Verifier {
             .values()
             .map(|actor| actor.qualified_name.clone())
             .collect();
+        let mut actor_method_signatures = std::collections::HashMap::new();
+        for actor in program.actors().values() {
+            for method in &actor.method_signatures {
+                actor_method_signatures.insert(
+                    format!("{}.{}", actor.qualified_name, method.name),
+                    (method.params.len(), method.ret.clone()),
+                );
+            }
+        }
+        self.ctx.checked_actor_method_signatures = actor_method_signatures;
         let mut mailbox_depths = std::collections::HashMap::new();
         for flow in program.flows().values() {
             if let Some(depth) = flow.mailbox_depth {
@@ -786,6 +797,17 @@ impl Verifier {
 
     pub(crate) fn has_checked_actor(&self, name: &str) -> bool {
         self.ctx.checked_actors.contains(name)
+    }
+
+    pub(crate) fn checked_actor_method_signature(
+        &self,
+        actor: &str,
+        method: &str,
+    ) -> Option<(usize, String)> {
+        self.ctx
+            .checked_actor_method_signatures
+            .get(&format!("{actor}.{method}"))
+            .cloned()
     }
 
     pub(crate) fn checked_mailbox_depth(&self, flow_name: &str) -> Option<usize> {
