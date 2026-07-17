@@ -67,9 +67,9 @@ pub(crate) fn check(path: Option<&Path>, strict: bool, verify_rules: bool) -> Re
     mimi::loader::merge_prelude_into(&mut file);
 
     let check_result = if strict {
-        mimi::core::check_strict(&file)
+        mimi::core::check_program_strict(&file).map(|_| ())
     } else {
-        mimi::core::check(&file)
+        mimi::core::check_program(&file).map(|_| ())
     };
     if let Err(diagnostics) = check_result {
         eprintln!(

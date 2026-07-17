@@ -10,6 +10,15 @@ use inkwell::targets::{InitializationConfig, Target, TargetMachine};
 use inkwell::OptimizationLevel;
 
 impl<'ctx> CodeGenerator<'ctx> {
+    pub fn compile_checked(
+        &mut self,
+        program: &crate::core::CheckedProgram<'_>,
+    ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
+        program.validate_backend(crate::core::BackendProfile::Native)?;
+        self.compile_file(program.file())
+            .map_err(|error| vec![error.to_diagnostic()])
+    }
+
     pub(super) fn mangle_name(base: &str, type_map: &HashMap<String, crate::ast::Type>) -> String {
         if type_map.is_empty() {
             return base.to_string();
@@ -55,7 +64,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    pub fn compile_file(&mut self, file: &File) -> MimiResult<()> {
+    pub(crate) fn compile_file(&mut self, file: &File) -> MimiResult<()> {
         // Register built-in Record types used by builtins
         self.register_builtin_record_types()?;
 
@@ -271,10 +280,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Convert a flow transition into a synthetic FuncDef for codegen.
     ///
     /// Parameters: `self` (from-state payload) + event params.
-    /// Return type: first declared to-state as nominal LLVM layout (M6).
-    /// Multi-target `-> A | B` uses the first target for the function
-    /// signature. The checker requires layout-compatible targets (E0419) and
-    /// callers must `match` exhaustively before field access (E0420).
+    /// Return type: the single declared target state's nominal LLVM layout.
+    /// Multi-target transitions are rejected by `compile_flow` until codegen
+    /// has a closed tagged-state-union ABI.
     /// Body: the transition body with outer `do { }` unwrapped (if present).
     pub(super) fn transition_to_func(flow: &FlowDef, t: &TransitionDef) -> FuncDef {
         let mut params = Vec::new();
@@ -287,18 +295,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         });
         params.extend(t.params.iter().cloned());
 
-        // M6: multi-target uses first as nominal; see module docs above.
-        // C6: warn when a transition has multiple target states — codegen only
-        // uses the first as the return type (multi-target dispatch unsupported).
-        if t.to_states.len() > 1 {
-            eprintln!(
-                "[mimi] warning: transition '{}.{}({})' has {} target states; \
-                 codegen only uses the first ('{}') as the return type. \
-                 Multi-target dispatch is not supported in codegen.",
-                flow.name, t.name, t.from_state, t.to_states.len(),
-                t.to_states.first().cloned().unwrap_or_default()
-            );
-        }
         // H2: recover bodies already keep persistent shadows when
         // `flow.persistent_fields` is non-empty (inject_system_verbs keep=true).
         let _ = &flow.persistent_fields;
@@ -351,17 +347,21 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Compile all transitions of a flow as ordinary LLVM functions.
     pub(super) fn compile_flow(&mut self, flow: &FlowDef) -> MimiResult<()> {
         if !flow.transactional_fields.is_empty() {
-            // C1: downgraded from hard error to warning — codegen skips WAL
-            // but produces a working binary (without transactional rollback).
-            eprintln!(
-                "[mimi] warning: transactional recovery for flow '{}' is not implemented \
-                 in codegen; @transactional fields will behave as ordinary persistent fields.",
+            return Err(CompileError::Unsupported(format!(
+                "transactional recovery for flow '{}' requires native WAL codegen",
                 flow.name
-            );
+            )));
         }
         for t in &flow.transitions {
             if t.body.is_none() {
                 continue; // abstract / protocol-style transition — no body
+            }
+            if t.to_states.len() != 1 {
+                return Err(CompileError::Unsupported(format!(
+                    "multi-target transition '{}::{}({})' requires a tagged-state-union ABI",
+                    flow.name, t.name, t.from_state
+                ))
+                .at(Span::from(t.pos)));
             }
             let func = Self::transition_to_func(flow, t);
             self.compile_func(&func)

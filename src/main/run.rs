@@ -118,31 +118,34 @@ fn run_once(
     // Auto-merge standard library prelude (identity, clamp, is_even, etc.)
     loader::merge_prelude_into(&mut merged_file);
 
-    let check_result = if strict {
-        mimi::core::check_strict(&merged_file)
+    let checked_program = if strict {
+        mimi::core::check_program_strict(&merged_file)
     } else {
-        mimi::core::check(&merged_file)
+        mimi::core::check_program(&merged_file)
     };
-    if let Err(diagnostics) = check_result {
-        eprintln!(
-            "{} has {} type error(s):",
-            path.display(),
-            diagnostics.len()
-        );
-        let use_color = colors_enabled();
-        let src = mimi::path_safety::read_source_capped(path).ok();
-        let src_ref = src.as_deref();
-        for d in &diagnostics {
-            let formatted = format_diagnostic(d, src_ref, &path.display().to_string());
-            if use_color {
-                eprint!("{}", formatted);
-            } else {
-                eprint!("{}", strip_ansi(&formatted));
+    let checked_program = match checked_program {
+        Ok(program) => program,
+        Err(diagnostics) => {
+            eprintln!(
+                "{} has {} type error(s):",
+                path.display(),
+                diagnostics.len()
+            );
+            let use_color = colors_enabled();
+            let src = mimi::path_safety::read_source_capped(path).ok();
+            let src_ref = src.as_deref();
+            for d in &diagnostics {
+                let formatted = format_diagnostic(d, src_ref, &path.display().to_string());
+                if use_color {
+                    eprint!("{}", formatted);
+                } else {
+                    eprint!("{}", strip_ansi(&formatted));
+                }
             }
+            return Err("type checking failed".into());
         }
-        return Err("type checking failed".into());
-    }
-    let mut interp = interp::Interpreter::new(&merged_file);
+    };
+    let mut interp = interp::Interpreter::from_checked(&checked_program);
     interp.verify_contracts = verify_contracts;
     interp.verify_ffi = verify_ffi;
     interp.default_allocator = match allocator {

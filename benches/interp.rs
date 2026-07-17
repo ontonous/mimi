@@ -8,8 +8,8 @@ fn interp_simple(c: &mut Criterion) {
         b.iter(|| {
             let tokens = lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
             let file = parser::Parser::new(tokens).parse_file().unwrap();
-            core::check(&file).unwrap();
-            let mut vm = interp::Interpreter::new(&file);
+            let program = core::check_program(&file).unwrap();
+            let mut vm = interp::Interpreter::from_checked(&program);
             vm.run().unwrap();
         })
     });
@@ -27,8 +27,8 @@ func main() -> i32 { fib(30) }
         b.iter(|| {
             let tokens = lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
             let file = parser::Parser::new(tokens).parse_file().unwrap();
-            core::check(&file).unwrap();
-            let mut vm = interp::Interpreter::new(&file);
+            let program = core::check_program(&file).unwrap();
+            let mut vm = interp::Interpreter::from_checked(&program);
             vm.run().unwrap();
         })
     });
@@ -52,8 +52,8 @@ func main() -> bool { is_prime(9973) }
         b.iter(|| {
             let tokens = lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
             let file = parser::Parser::new(tokens).parse_file().unwrap();
-            core::check(&file).unwrap();
-            let mut vm = interp::Interpreter::new(&file);
+            let program = core::check_program(&file).unwrap();
+            let mut vm = interp::Interpreter::from_checked(&program);
             vm.run().unwrap();
         })
     });
@@ -73,8 +73,8 @@ func main() -> i32 { sum([1,2,3,4,5,6,7,8,9,10]) }
         b.iter(|| {
             let tokens = lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
             let file = parser::Parser::new(tokens).parse_file().unwrap();
-            core::check(&file).unwrap();
-            let mut vm = interp::Interpreter::new(&file);
+            let program = core::check_program(&file).unwrap();
+            let mut vm = interp::Interpreter::from_checked(&program);
             vm.run().unwrap();
         })
     });
@@ -98,8 +98,8 @@ func main() -> f64 {
         b.iter(|| {
             let tokens = lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
             let file = parser::Parser::new(tokens).parse_file().unwrap();
-            core::check(&file).unwrap();
-            let mut vm = interp::Interpreter::new(&file);
+            let program = core::check_program(&file).unwrap();
+            let mut vm = interp::Interpreter::from_checked(&program);
             vm.run().unwrap();
         })
     });
@@ -119,8 +119,8 @@ func main() -> i32 { factorial(10) }
         b.iter(|| {
             let tokens = lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
             let file = parser::Parser::new(tokens).parse_file().unwrap();
-            core::check(&file).unwrap();
-            let mut vm = interp::Interpreter::new(&file);
+            let program = core::check_program(&file).unwrap();
+            let mut vm = interp::Interpreter::from_checked(&program);
             vm.verify_contracts = true;
             vm.run().unwrap();
         })
