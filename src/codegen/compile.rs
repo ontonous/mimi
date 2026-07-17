@@ -267,6 +267,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.resolved_extern_signatures = Some(extern_signatures);
+        let mut extern_no_panic = std::collections::HashSet::new();
+        let mut extern_unsafe = std::collections::HashSet::new();
+        for block in program.extern_blocks().values() {
+            for func in &block.funcs {
+                if block.no_panic {
+                    extern_no_panic.insert(func.clone());
+                }
+                if block.unsafe_ {
+                    extern_unsafe.insert(func.clone());
+                }
+            }
+        }
+        self.resolved_extern_no_panic = Some(extern_no_panic);
+        self.resolved_extern_unsafe = Some(extern_unsafe);
         let mut call_sites = std::collections::HashMap::new();
         for (node_id, site) in program.call_sites() {
             call_sites.insert(

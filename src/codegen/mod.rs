@@ -348,6 +348,8 @@ pub struct CodeGenerator<'ctx> {
     resolved_extern_funcs: Option<std::collections::HashSet<String>>,
     resolved_extern_abis: Option<HashMap<String, String>>,
     resolved_extern_signatures: Option<HashMap<String, (usize, String)>>,
+    resolved_extern_no_panic: Option<std::collections::HashSet<String>>,
+    resolved_extern_unsafe: Option<std::collections::HashSet<String>>,
     resolved_call_sites: Option<HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>>,
     /// Flow mailbox depths from CheckedProgram.
     resolved_mailbox_depths: Option<HashMap<String, usize>>,
@@ -496,6 +498,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_extern_funcs: None,
             resolved_extern_abis: None,
             resolved_extern_signatures: None,
+            resolved_extern_no_panic: None,
+            resolved_extern_unsafe: None,
             resolved_call_sites: None,
             resolved_mailbox_depths: None,
             resolved_flow_state_payloads: None,
@@ -745,6 +749,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_ownership_resources
             .as_ref()
             .and_then(|map| map.get(owner).cloned())
+    }
+
+    pub(crate) fn is_resolved_extern_no_panic(&self, name: &str) -> bool {
+        self.resolved_extern_no_panic
+            .as_ref()
+            .is_some_and(|set| set.contains(name))
+    }
+
+    pub(crate) fn is_resolved_extern_unsafe(&self, name: &str) -> bool {
+        self.resolved_extern_unsafe
+            .as_ref()
+            .is_some_and(|set| set.contains(name))
     }
 
     pub fn gep(&self) -> gep::CheckedGepBuilder<'_, 'ctx> {

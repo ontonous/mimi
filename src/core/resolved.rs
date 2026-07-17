@@ -3971,6 +3971,38 @@ func main() -> i32 { 0 }
             .is_some_and(|fs| fs.iter().any(|(n, ty, _)| n == "count" && ty == "i32")));
     }
 
+
+    #[test]
+    fn extern_block_flags_are_installed() {
+        let file = parse(
+            r#"
+#[no_panic]
+extern "C" {
+    func safe_abs(x: i32) -> i32
+}
+unsafe extern "C" {
+    func raw_abs(x: i32) -> i32
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert!(interp.is_resolved_extern_no_panic("safe_abs"));
+        assert!(!interp.is_resolved_extern_no_panic("raw_abs"));
+        assert!(interp.is_resolved_extern_unsafe("raw_abs"));
+        assert!(!interp.is_resolved_extern_unsafe("safe_abs"));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert!(verifier.is_checked_extern_no_panic("safe_abs"));
+        assert!(verifier.is_checked_extern_unsafe("raw_abs"));
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "extern_flags");
+        codegen.compile_checked(&program).expect("compile");
+        assert!(codegen.is_resolved_extern_no_panic("safe_abs"));
+        assert!(codegen.is_resolved_extern_unsafe("raw_abs"));
+    }
+
     #[test]
     fn call_sites_bind_callee_effects_from_function_directory() {
         // IR-only materialization: avoid effect-scope runtime checks at call sites.

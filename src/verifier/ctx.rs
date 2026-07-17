@@ -435,6 +435,8 @@ pub struct VerifierCtx {
     pub(crate) checked_extern_funcs: std::collections::HashSet<String>,
     pub(crate) checked_extern_abis: std::collections::HashMap<String, String>,
     pub(crate) checked_extern_signatures: std::collections::HashMap<String, (usize, String)>,
+    pub(crate) checked_extern_no_panic: std::collections::HashSet<String>,
+    pub(crate) checked_extern_unsafe: std::collections::HashSet<String>,
     pub(crate) checked_call_sites: std::collections::HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>,
     /// Protocol names materialised from CheckedProgram.
     pub(crate) checked_protocols: std::collections::HashSet<String>,
@@ -641,6 +643,20 @@ impl Verifier {
             }
         }
         self.ctx.checked_extern_signatures = extern_signatures;
+        let mut extern_no_panic = std::collections::HashSet::new();
+        let mut extern_unsafe = std::collections::HashSet::new();
+        for block in program.extern_blocks().values() {
+            for func in &block.funcs {
+                if block.no_panic {
+                    extern_no_panic.insert(func.clone());
+                }
+                if block.unsafe_ {
+                    extern_unsafe.insert(func.clone());
+                }
+            }
+        }
+        self.ctx.checked_extern_no_panic = extern_no_panic;
+        self.ctx.checked_extern_unsafe = extern_unsafe;
         let mut call_sites = std::collections::HashMap::new();
         for (node_id, site) in program.call_sites() {
             call_sites.insert(
@@ -977,6 +993,14 @@ impl Verifier {
 
     pub(crate) fn checked_extern_signature(&self, name: &str) -> Option<(usize, String)> {
         self.ctx.checked_extern_signatures.get(name).cloned()
+    }
+
+    pub(crate) fn is_checked_extern_no_panic(&self, name: &str) -> bool {
+        self.ctx.checked_extern_no_panic.contains(name)
+    }
+
+    pub(crate) fn is_checked_extern_unsafe(&self, name: &str) -> bool {
+        self.ctx.checked_extern_unsafe.contains(name)
     }
 
     pub(crate) fn has_checked_call_to(&self, callee: &str) -> bool {
