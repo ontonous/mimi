@@ -1,4 +1,4 @@
-use crate::ast::{AstOrigin, File, FlowDef, Item, Type};
+use crate::ast::{AstOrigin, Expr, FStringPart, File, FlowDef, Item, Pattern, Stmt, Type};
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use std::collections::HashMap;
@@ -30,6 +30,19 @@ pub struct ResolvedItem {
     pub qualified_name: String,
     pub kind: ResolvedItemKind,
     pub origin: Origin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpanPrecision {
+    Exact,
+    DeclarationFallback,
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeMeta {
+    pub node_id: NodeId,
+    pub origin: Origin,
+    pub precision: SpanPrecision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -113,6 +126,7 @@ pub struct CapabilityRequirement {
 pub struct CheckedProgram<'a> {
     file: &'a File,
     items: HashMap<NodeId, ResolvedItem>,
+    node_meta: HashMap<NodeId, NodeMeta>,
     flows: HashMap<FlowId, ResolvedFlow>,
     transitions: HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: Vec<CapabilityRequirement>,
@@ -123,12 +137,14 @@ impl<'a> CheckedProgram<'a> {
         let mut transitions = HashMap::new();
         let mut flows = HashMap::new();
         let mut items = HashMap::new();
+        let mut node_meta = HashMap::new();
         let mut backend_requirements = Vec::new();
         let mut errors = Vec::new();
         collect_items(
             &file.items,
             "",
             &mut items,
+            &mut node_meta,
             &mut flows,
             &mut transitions,
             &mut backend_requirements,
@@ -140,6 +156,7 @@ impl<'a> CheckedProgram<'a> {
         Ok(Self {
             file,
             items,
+            node_meta,
             flows,
             transitions,
             backend_requirements,
@@ -160,6 +177,10 @@ impl<'a> CheckedProgram<'a> {
 
     pub fn items(&self) -> &HashMap<NodeId, ResolvedItem> {
         &self.items
+    }
+
+    pub fn node_meta(&self) -> &HashMap<NodeId, NodeMeta> {
+        &self.node_meta
     }
 
     pub fn entry_span(&self) -> Option<Span> {
@@ -230,6 +251,7 @@ fn collect_items(
     items: &[Item],
     module: &str,
     resolved_items: &mut HashMap<NodeId, ResolvedItem>,
+    node_meta: &mut HashMap<NodeId, NodeMeta>,
     flows: &mut HashMap<FlowId, ResolvedFlow>,
     transitions: &mut HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: &mut Vec<CapabilityRequirement>,
@@ -251,6 +273,7 @@ fn collect_items(
                     &def.items,
                     &qualified,
                     resolved_items,
+                    node_meta,
                     flows,
                     transitions,
                     backend_requirements,
@@ -276,14 +299,23 @@ fn collect_items(
                     errors,
                 );
             }
-            Item::Func(function) => insert_item(
-                resolved_items,
-                ResolvedItemKind::Function,
-                &qualify(module, &function.name),
-                AstOrigin::User,
-                Span::from(function.pos),
-                errors,
-            ),
+            Item::Func(function) => {
+                let qualified = qualify(module, &function.name);
+                insert_item(
+                    resolved_items,
+                    ResolvedItemKind::Function,
+                    &qualified,
+                    AstOrigin::User,
+                    Span::from(function.pos),
+                    errors,
+                );
+                collect_block_meta(
+                    &function.body,
+                    &format!("function:{}", qualified),
+                    Span::from(function.pos),
+                    node_meta,
+                );
+            }
             Item::Type(type_def) => {
                 if let Some(pos) = type_def.decl_pos {
                     insert_item(
@@ -405,6 +437,289 @@ fn insert_item(
             span,
         ));
     }
+}
+
+fn collect_block_meta(
+    block: &[Stmt],
+    parent: &str,
+    fallback: Span,
+    out: &mut HashMap<NodeId, NodeMeta>,
+) {
+    for (index, stmt) in block.iter().enumerate() {
+        collect_stmt_meta(stmt, &format!("{parent}/stmt:{index}"), fallback, out);
+    }
+}
+
+fn collect_stmt_meta(stmt: &Stmt, path: &str, fallback: Span, out: &mut HashMap<NodeId, NodeMeta>) {
+    let exact = match stmt {
+        Stmt::Let { pos, .. } => Some(Span::from(*pos)),
+        Stmt::Desc(_, span)
+        | Stmt::Rule(_, span)
+        | Stmt::Requires(_, span)
+        | Stmt::Ensures(_, span)
+        | Stmt::Invariant(_, span)
+        | Stmt::MmsBlock { span, .. } => Some(*span),
+        _ => None,
+    };
+    insert_node_meta(path, exact, fallback, out);
+    match stmt {
+        Stmt::Let { pat, init, .. } => {
+            collect_pattern_meta(pat, &format!("{path}/pattern"), fallback, out);
+            if let Some(expr) = init {
+                collect_expr_meta(expr, &format!("{path}/init"), fallback, out);
+            }
+        }
+        Stmt::Return(expr) | Stmt::Break(expr) => {
+            if let Some(expr) = expr {
+                collect_expr_meta(expr, &format!("{path}/value"), fallback, out);
+            }
+        }
+        Stmt::Continue | Stmt::Ellipsis | Stmt::Desc(_, _) | Stmt::Rule(_, _) => {}
+        Stmt::Expr(expr)
+        | Stmt::Drop(expr)
+        | Stmt::Requires(expr, _)
+        | Stmt::Ensures(expr, _)
+        | Stmt::Invariant(expr, _) => {
+            collect_expr_meta(expr, &format!("{path}/expr"), fallback, out);
+        }
+        Stmt::If { cond, then_, else_ } => {
+            collect_expr_meta(cond, &format!("{path}/cond"), fallback, out);
+            collect_block_meta(then_, &format!("{path}/then"), fallback, out);
+            if let Some(block) = else_ {
+                collect_block_meta(block, &format!("{path}/else"), fallback, out);
+            }
+        }
+        Stmt::While { cond, body } => {
+            collect_expr_meta(cond, &format!("{path}/cond"), fallback, out);
+            collect_block_meta(body, &format!("{path}/body"), fallback, out);
+        }
+        Stmt::WhileLet { pat, init, body } => {
+            collect_pattern_meta(pat, &format!("{path}/pattern"), fallback, out);
+            collect_expr_meta(init, &format!("{path}/init"), fallback, out);
+            collect_block_meta(body, &format!("{path}/body"), fallback, out);
+        }
+        Stmt::Loop(body)
+        | Stmt::Block(body)
+        | Stmt::Arena(body)
+        | Stmt::Unsafe(body)
+        | Stmt::OnFailure(body)
+        | Stmt::Do(body)
+        | Stmt::Parasteps(body) => {
+            collect_block_meta(body, &format!("{path}/body"), fallback, out);
+        }
+        Stmt::For { iterable, body, .. } => {
+            collect_expr_meta(iterable, &format!("{path}/iterable"), fallback, out);
+            collect_block_meta(body, &format!("{path}/body"), fallback, out);
+        }
+        Stmt::Math(exprs) => {
+            for (index, expr) in exprs.iter().enumerate() {
+                collect_expr_meta(expr, &format!("{path}/math:{index}"), fallback, out);
+            }
+        }
+        Stmt::Assign { target, value } => {
+            collect_expr_meta(target, &format!("{path}/target"), fallback, out);
+            collect_expr_meta(value, &format!("{path}/value"), fallback, out);
+        }
+        Stmt::SharedLet { init, .. } => {
+            collect_expr_meta(init, &format!("{path}/init"), fallback, out);
+        }
+        Stmt::Delegate { expr, .. } => {
+            collect_expr_meta(expr, &format!("{path}/expr"), fallback, out);
+        }
+        Stmt::Pinned {
+            expr,
+            timeout,
+            body,
+            ..
+        } => {
+            collect_expr_meta(expr, &format!("{path}/expr"), fallback, out);
+            if let Some(timeout) = timeout {
+                collect_expr_meta(timeout, &format!("{path}/timeout"), fallback, out);
+            }
+            collect_block_meta(body, &format!("{path}/body"), fallback, out);
+        }
+        Stmt::MmsBlock { .. } => {}
+        Stmt::Func(function) => collect_block_meta(
+            &function.body,
+            &format!("{path}/function:{}", function.name),
+            Span::from(function.pos),
+            out,
+        ),
+        Stmt::Alloc { body, .. } => {
+            collect_block_meta(body, &format!("{path}/body"), fallback, out);
+        }
+    }
+}
+
+fn collect_expr_meta(expr: &Expr, path: &str, fallback: Span, out: &mut HashMap<NodeId, NodeMeta>) {
+    insert_node_meta(path, None, fallback, out);
+    match expr {
+        Expr::Literal(lit) => {
+            if let crate::ast::Lit::FString(parts) = lit {
+                for (index, part) in parts.iter().enumerate() {
+                    if let FStringPart::Interp(expr) = part {
+                        collect_expr_meta(expr, &format!("{path}/fstring:{index}"), fallback, out);
+                    }
+                }
+            }
+        }
+        Expr::Ident(_) | Expr::TypeInfo(_) => {}
+        Expr::Binary(_, left, right) | Expr::Index(left, right) => {
+            collect_expr_meta(left, &format!("{path}/left"), fallback, out);
+            collect_expr_meta(right, &format!("{path}/right"), fallback, out);
+        }
+        Expr::Unary(_, inner)
+        | Expr::Field(inner, _)
+        | Expr::Try(inner)
+        | Expr::OptionalChain(inner, _)
+        | Expr::Spawn(inner)
+        | Expr::Await(inner)
+        | Expr::QuoteInterpolate(inner)
+        | Expr::TypeOf(inner)
+        | Expr::Old(inner)
+        | Expr::TupleIndex(inner, _)
+        | Expr::NamedArg(_, inner)
+        | Expr::Cast(inner, _) => {
+            collect_expr_meta(inner, &format!("{path}/inner"), fallback, out);
+        }
+        Expr::Call(callee, args) => {
+            collect_expr_meta(callee, &format!("{path}/callee"), fallback, out);
+            for (index, arg) in args.iter().enumerate() {
+                collect_expr_meta(arg, &format!("{path}/arg:{index}"), fallback, out);
+            }
+        }
+        Expr::Tuple(items) | Expr::List(items) | Expr::SetLiteral(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_expr_meta(item, &format!("{path}/item:{index}"), fallback, out);
+            }
+        }
+        Expr::Comprehension {
+            expr, iter, guard, ..
+        } => {
+            collect_expr_meta(expr, &format!("{path}/value"), fallback, out);
+            collect_expr_meta(iter, &format!("{path}/iter"), fallback, out);
+            if let Some(guard) = guard {
+                collect_expr_meta(guard, &format!("{path}/guard"), fallback, out);
+            }
+        }
+        Expr::Match(scrutinee, arms) => {
+            collect_expr_meta(scrutinee, &format!("{path}/scrutinee"), fallback, out);
+            for (index, arm) in arms.iter().enumerate() {
+                collect_pattern_meta(
+                    &arm.pat,
+                    &format!("{path}/arm:{index}/pattern"),
+                    fallback,
+                    out,
+                );
+                if let Some(guard) = &arm.guard {
+                    collect_expr_meta(guard, &format!("{path}/arm:{index}/guard"), fallback, out);
+                }
+                collect_expr_meta(
+                    &arm.body,
+                    &format!("{path}/arm:{index}/body"),
+                    fallback,
+                    out,
+                );
+            }
+        }
+        Expr::Record { fields, .. } => {
+            for (index, field) in fields.iter().enumerate() {
+                collect_expr_meta(
+                    &field.value,
+                    &format!("{path}/field:{index}"),
+                    fallback,
+                    out,
+                );
+            }
+        }
+        Expr::Block(block) | Expr::Quote(block) | Expr::Comptime(block) | Expr::Arena(block) => {
+            collect_block_meta(block, &format!("{path}/block"), fallback, out);
+        }
+        Expr::If { cond, then_, else_ } => {
+            collect_expr_meta(cond, &format!("{path}/cond"), fallback, out);
+            collect_block_meta(then_, &format!("{path}/then"), fallback, out);
+            if let Some(block) = else_ {
+                collect_block_meta(block, &format!("{path}/else"), fallback, out);
+            }
+        }
+        Expr::Lambda { body, .. } => {
+            collect_block_meta(body, &format!("{path}/body"), fallback, out);
+        }
+        Expr::SliceExpr { target, start, end } => {
+            collect_expr_meta(target, &format!("{path}/target"), fallback, out);
+            if let Some(start) = start {
+                collect_expr_meta(start, &format!("{path}/start"), fallback, out);
+            }
+            if let Some(end) = end {
+                collect_expr_meta(end, &format!("{path}/end"), fallback, out);
+            }
+        }
+        Expr::Range { start, end } => {
+            collect_expr_meta(start, &format!("{path}/start"), fallback, out);
+            collect_expr_meta(end, &format!("{path}/end"), fallback, out);
+        }
+        Expr::Turbofish(_, _, args) => {
+            for (index, arg) in args.iter().enumerate() {
+                collect_expr_meta(arg, &format!("{path}/arg:{index}"), fallback, out);
+            }
+        }
+        Expr::MapLiteral { entries } => {
+            for (index, (key, value)) in entries.iter().enumerate() {
+                collect_expr_meta(key, &format!("{path}/entry:{index}/key"), fallback, out);
+                collect_expr_meta(value, &format!("{path}/entry:{index}/value"), fallback, out);
+            }
+        }
+    }
+}
+
+fn collect_pattern_meta(
+    pattern: &Pattern,
+    path: &str,
+    fallback: Span,
+    out: &mut HashMap<NodeId, NodeMeta>,
+) {
+    insert_node_meta(path, None, fallback, out);
+    match pattern {
+        Pattern::Wildcard | Pattern::Variable(_) | Pattern::Literal(_) => {}
+        Pattern::Constructor(_, fields) => {
+            for (index, (_, pattern)) in fields.iter().enumerate() {
+                collect_pattern_meta(pattern, &format!("{path}/field:{index}"), fallback, out);
+            }
+        }
+        Pattern::Tuple(items) | Pattern::Array(items) => {
+            for (index, pattern) in items.iter().enumerate() {
+                collect_pattern_meta(pattern, &format!("{path}/item:{index}"), fallback, out);
+            }
+        }
+        Pattern::Slice(items, rest) => {
+            for (index, pattern) in items.iter().enumerate() {
+                collect_pattern_meta(pattern, &format!("{path}/item:{index}"), fallback, out);
+            }
+            if let Some(rest) = rest {
+                collect_pattern_meta(rest, &format!("{path}/rest"), fallback, out);
+            }
+        }
+    }
+}
+
+fn insert_node_meta(
+    path: &str,
+    exact: Option<Span>,
+    fallback: Span,
+    out: &mut HashMap<NodeId, NodeMeta>,
+) {
+    let node_id = NodeId(path.to_string());
+    let (span, precision) = exact
+        .map(|span| (span, SpanPrecision::Exact))
+        .unwrap_or((fallback, SpanPrecision::DeclarationFallback));
+    out.insert(
+        node_id.clone(),
+        NodeMeta {
+            node_id,
+            origin: Origin::User(span),
+            precision,
+        },
+    );
 }
 
 fn collect_flow(
@@ -812,6 +1127,49 @@ func main() -> i32 { 0 }
                 );
             }
         }
+    }
+
+    #[test]
+    fn node_meta_covers_nested_stmt_expr_and_pattern_paths() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let pair = (1, 2)
+    if true { return pair.0 } else { return 0 }
+}
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        for node_id in [
+            "function:main/stmt:0",
+            "function:main/stmt:0/pattern",
+            "function:main/stmt:0/init",
+            "function:main/stmt:0/init/item:0",
+            "function:main/stmt:1/cond",
+            "function:main/stmt:1/then/stmt:0/value/inner",
+        ] {
+            let meta = program
+                .node_meta()
+                .get(&NodeId(node_id.to_string()))
+                .unwrap_or_else(|| panic!("missing {node_id}"));
+            assert!(meta.origin.user_span().start_line > 0);
+        }
+        assert_eq!(
+            program
+                .node_meta()
+                .get(&NodeId("function:main/stmt:0".to_string()))
+                .expect("let metadata")
+                .precision,
+            SpanPrecision::Exact
+        );
+        assert_eq!(
+            program
+                .node_meta()
+                .get(&NodeId("function:main/stmt:1/cond".to_string()))
+                .expect("condition metadata")
+                .precision,
+            SpanPrecision::DeclarationFallback
+        );
     }
 }
 
