@@ -1895,6 +1895,24 @@ func main() -> i32 { 0 }
         assert!(verifier.has_checked_extern_func("c_abs"));
     }
 
+
+    #[test]
+    fn interpreter_resolved_extern_directory_matches_runtime_index() {
+        let file = parse(
+            r#"
+extern "C" {
+    func c_abs(x: i32) -> i32
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert!(interp.has_resolved_extern_func("c_abs"));
+        // Directory install is consistent with a successful from_checked construction.
+        assert!(!interp.has_resolved_extern_func("missing_c_fn"));
+    }
+
     #[test]
     fn interpreter_from_checked_installs_capability_and_constant_directories() {
         let file = parse(
