@@ -54,10 +54,11 @@ func main() -> i32 {
     let f9 = FileHandle::close(f8)
     
     // Test 3: Fault on seek(Closed) — undefined transition
+    // Note: `fault` is a reserved keyword; use a non-keyword binding.
     let f10 = Closed { }
-    let fault = FileHandle::seek(f10)
-    println(fault.last_state)
-    println(fault.unexpected_event)
+    let seek_fault = FileHandle::seek(f10)
+    println(seek_fault.last_state)
+    println(seek_fault.unexpected_event)
     
     // Test 4: Lock → close_locked → Closed (alternate path)
     let f11 = Closed { }
