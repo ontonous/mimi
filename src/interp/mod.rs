@@ -390,9 +390,20 @@ impl<'a> Interpreter<'a> {
     }
 
     pub(crate) fn resolved_mailbox_depth(&self, flow_name: &str) -> Option<usize> {
-        self.resolved_mailbox_depths
-            .as_ref()
-            .and_then(|map| map.get(flow_name).copied())
+        let Some(map) = self.resolved_mailbox_depths.as_ref() else {
+            return None;
+        };
+        if let Some(depth) = map.get(flow_name) {
+            return Some(*depth);
+        }
+        // Module-qualified flows: "pkg::Worker" should match actor/flow name "Worker".
+        map.iter().find_map(|(qualified, depth)| {
+            qualified
+                .rsplit("::")
+                .next()
+                .filter(|bare| *bare == flow_name)
+                .map(|_| *depth)
+        })
     }
 
     pub(crate) fn new(file: &'a File) -> Self {

@@ -529,7 +529,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mailbox_depth = self
             .resolved_mailbox_depths
             .as_ref()
-            .and_then(|map| map.get(&actor.name).copied())
+            .and_then(|map| {
+                map.get(&actor.name).copied().or_else(|| {
+                    map.iter().find_map(|(qualified, depth)| {
+                        qualified
+                            .rsplit("::")
+                            .next()
+                            .filter(|bare| *bare == actor.name)
+                            .map(|_| *depth)
+                    })
+                })
+            })
             .or_else(|| {
                 self.flow_defs.get(&actor.name).and_then(|flow| {
                     flow.annotations.iter().find_map(|ann| match ann {
