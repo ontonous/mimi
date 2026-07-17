@@ -121,6 +121,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.resolved_persistent_fields = Some(persistent_fields);
+        let mut transactional_fields = std::collections::HashMap::new();
+        let mut metadata_shadow_fields = std::collections::HashMap::new();
+        for flow in program.flows().values() {
+            if !flow.transactional_fields.is_empty() {
+                transactional_fields.insert(flow.id.0.clone(), flow.transactional_fields.clone());
+            }
+            if !flow.metadata_shadow_fields.is_empty() {
+                metadata_shadow_fields
+                    .insert(flow.id.0.clone(), flow.metadata_shadow_fields.clone());
+            }
+        }
+        self.resolved_transactional_fields = Some(transactional_fields);
+        self.resolved_metadata_shadow_fields = Some(metadata_shadow_fields);
         self.compile_file(program.file()).map_err(|error| {
             let mut diagnostic = error.to_diagnostic();
             if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {

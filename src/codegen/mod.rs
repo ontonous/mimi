@@ -327,6 +327,8 @@ pub struct CodeGenerator<'ctx> {
     resolved_mailbox_depths: Option<HashMap<String, usize>>,
     /// Persistent field sets from CheckedProgram.
     resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
+    resolved_transactional_fields: Option<HashMap<String, Vec<String>>>,
+    resolved_metadata_shadow_fields: Option<HashMap<String, Vec<String>>>,
     /// v0.29.24: process spawn quota from first @max_children(N) (None = unlimited).
     max_children: Option<usize>,
 }
@@ -443,6 +445,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_extern_funcs: None,
             resolved_mailbox_depths: None,
             resolved_persistent_fields: None,
+            resolved_transactional_fields: None,
+            resolved_metadata_shadow_fields: None,
             max_children: None,
         }
     }
