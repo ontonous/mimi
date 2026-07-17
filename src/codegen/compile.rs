@@ -172,6 +172,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         self.resolved_extern_funcs = Some(extern_funcs);
         self.resolved_extern_abis = Some(extern_abis);
+        let mut extern_signatures = std::collections::HashMap::new();
+        for block in program.extern_blocks().values() {
+            for sig in &block.signatures {
+                extern_signatures.insert(sig.name.clone(), (sig.params.len(), sig.ret.clone()));
+            }
+        }
+        self.resolved_extern_signatures = Some(extern_signatures);
         let mut call_sites = std::collections::HashMap::new();
         for (node_id, site) in program.call_sites() {
             call_sites.insert(

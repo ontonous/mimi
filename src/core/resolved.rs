@@ -266,11 +266,19 @@ pub struct ResolvedTypeDef {
 }
 
 #[derive(Debug, Clone)]
+pub struct ResolvedExternFunc {
+    pub name: String,
+    pub params: Vec<(String, String)>,
+    pub ret: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ResolvedExternBlock {
     pub node_id: NodeId,
     pub qualified_name: String,
     pub abi: String,
     pub funcs: Vec<String>,
+    pub signatures: Vec<ResolvedExternFunc>,
     pub no_panic: bool,
     pub unsafe_: bool,
     pub origin: Origin,
@@ -521,6 +529,13 @@ impl<'a> CheckedProgram<'a> {
 
     pub fn call_sites(&self) -> &HashMap<NodeId, ResolvedCallSite> {
         &self.call_sites
+    }
+
+    pub fn extern_func_signature(&self, name: &str) -> Option<&ResolvedExternFunc> {
+        self.extern_blocks
+            .values()
+            .flat_map(|block| block.signatures.iter())
+            .find(|sig| sig.name == name)
     }
 
     pub fn ownership_ledgers(&self) -> &HashMap<NodeId, OwnershipLedger> {
@@ -904,7 +919,8 @@ fn collect_items(
                     errors,
                 );
                 let node_id = NodeId(format!("extern:{}", qualified));
-                let funcs = block.funcs.iter().map(|func| func.name.clone()).collect();
+                                let funcs = block.funcs.iter().map(|func| func.name.clone()).collect();
+                let mut signatures = Vec::new();
                 for func in &block.funcs {
                     for param in &func.params {
                         if contains_unresolved_type(&param.ty) {
@@ -930,6 +946,19 @@ fn collect_items(
                             ));
                         }
                     }
+                    signatures.push(ResolvedExternFunc {
+                        name: func.name.clone(),
+                        params: func
+                            .params
+                            .iter()
+                            .map(|param| (param.name.clone(), crate::core::fmt_type(&param.ty)))
+                            .collect(),
+                        ret: func
+                            .ret
+                            .as_ref()
+                            .map(crate::core::fmt_type)
+                            .unwrap_or_else(|| "unit".into()),
+                    });
                 }
                 extern_blocks.insert(
                     node_id.clone(),
@@ -938,11 +967,13 @@ fn collect_items(
                         qualified_name: qualified,
                         abi: block.abi.clone(),
                         funcs,
+                        signatures,
                         no_panic: block.no_panic,
                         unsafe_: block.unsafe_,
                         origin: resolve_origin(block.origin, &NodeId("extern".into()), span),
                     },
                 );
+
             }
 
             Item::Actor(actor) => {
@@ -1594,10 +1625,14 @@ fn collect_program_call_sites(
             ),
         );
     }
-    let mut extern_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut extern_info: HashMap<String, (usize, String)> = HashMap::new();
     for block in extern_blocks.values() {
+        for sig in &block.signatures {
+            extern_info.insert(sig.name.clone(), (sig.params.len(), sig.ret.clone()));
+        }
+        // Keep names even if signature missing (defensive).
         for func in &block.funcs {
-            extern_names.insert(func.clone());
+            extern_info.entry(func.clone()).or_insert((0, "unit".into()));
         }
     }
     let method_names: std::collections::HashSet<String> = actors
@@ -1609,7 +1644,7 @@ fn collect_program_call_sites(
             item,
             "",
             &function_info,
-            &extern_names,
+            &extern_info,
             &method_names,
             out,
         );
@@ -1620,7 +1655,7 @@ fn collect_item_call_sites(
     item: &Item,
     module: &str,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
-    externs: &std::collections::HashSet<String>,
+    externs: &HashMap<String, (usize, String)>,
     methods: &std::collections::HashSet<String>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
 ) {
@@ -1715,7 +1750,7 @@ fn collect_block_call_sites(
     path: &str,
     fallback: Span,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
-    externs: &std::collections::HashSet<String>,
+    externs: &HashMap<String, (usize, String)>,
     methods: &std::collections::HashSet<String>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
 ) {
@@ -1739,7 +1774,7 @@ fn collect_stmt_call_sites(
     path: &str,
     fallback: Span,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
-    externs: &std::collections::HashSet<String>,
+    externs: &HashMap<String, (usize, String)>,
     methods: &std::collections::HashSet<String>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
 ) {
@@ -1835,7 +1870,7 @@ fn collect_expr_call_sites(
     path: &str,
     fallback: Span,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
-    externs: &std::collections::HashSet<String>,
+    externs: &HashMap<String, (usize, String)>,
     methods: &std::collections::HashSet<String>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
 ) {
@@ -1985,7 +2020,7 @@ fn collect_expr_call_sites(
 fn resolve_call_callee(
     callee: &Expr,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
-    externs: &std::collections::HashSet<String>,
+    externs: &HashMap<String, (usize, String)>,
     methods: &std::collections::HashSet<String>,
 ) -> (String, ResolvedCallKind, Option<usize>, Vec<String>, Option<String>) {
     match callee {
@@ -1998,9 +2033,14 @@ fn resolve_call_callee(
                     effects.clone(),
                     Some(ret.clone()),
                 )
-            } else if externs.contains(name) {
-                // Extern parameter lists are not yet materialised; kind only.
-                (name.clone(), ResolvedCallKind::Extern, None, Vec::new(), None)
+            } else if let Some((arity, ret)) = externs.get(name) {
+                (
+                    name.clone(),
+                    ResolvedCallKind::Extern,
+                    Some(*arity),
+                    Vec::new(),
+                    Some(ret.clone()),
+                )
             } else if methods.contains(name) {
                 (name.clone(), ResolvedCallKind::Method, None, Vec::new(), None)
             } else {
@@ -2985,15 +3025,18 @@ func main() -> i32 { 0 }
         assert_eq!(interp.resolved_type_kind("Point"), Some("record"));
         assert!(interp.has_resolved_extern_func("c_abs"));
         assert_eq!(interp.resolved_extern_abi("c_abs"), Some("C"));
+        assert_eq!(interp.resolved_extern_signature("c_abs"), Some((1, "i32".into())));
         let mut verifier = crate::verifier::Verifier::new().expect("z3");
         let _ = verifier.verify_checked(&program);
         assert!(verifier.has_checked_type_def("Point"));
         assert!(verifier.has_checked_extern_func("c_abs"));
         assert_eq!(verifier.checked_extern_abi("c_abs"), Some("C"));
+        assert_eq!(verifier.checked_extern_signature("c_abs"), Some((1, "i32".into())));
         let context = inkwell::context::Context::create();
         let mut codegen = crate::codegen::CodeGenerator::new(&context, "abi");
         codegen.compile_checked(&program).expect("compile");
         assert_eq!(codegen.resolved_extern_abi("c_abs"), Some("C"));
+        assert_eq!(codegen.resolved_extern_signature("c_abs"), Some((1, "i32".into())));
     }
 
 
@@ -3100,9 +3143,15 @@ func main() -> i32 {
                 s.callee == "c_abs"
                     && s.kind == crate::core::ResolvedCallKind::Extern
                     && s.argc == 1
+                    && s.expected_argc == Some(1)
+                    && s.ret.as_deref() == Some("i32")
+                    && s.arity_matches()
             }),
             "expected c_abs extern call site"
         );
+        let c_abs = program.extern_func_signature("c_abs").expect("c_abs sig");
+        assert_eq!(c_abs.params.len(), 1);
+        assert_eq!(c_abs.ret, "i32");
         assert!(
             sites
                 .iter()
