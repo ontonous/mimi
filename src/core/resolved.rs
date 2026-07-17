@@ -1971,6 +1971,27 @@ func main() -> i32 { 0 }
         assert_eq!(interp.resolved_mailbox_depth("net::Conn"), Some(32));
     }
 
+
+    #[test]
+    fn verifier_records_flow_annotation_directories() {
+        let file = parse(
+            r#"
+flow Worker {
+    @max_children(5)
+    @mailbox(depth = 16)
+    state Idle
+    transition tick(Idle) -> Idle { do { return Idle {} } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert_eq!(verifier.checked_max_children(), Some(5));
+        assert_eq!(verifier.checked_mailbox_depth("Worker"), Some(16));
+    }
+
     #[test]
     fn consumers_install_type_and_extern_directories() {
         let file = parse(
