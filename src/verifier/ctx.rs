@@ -431,6 +431,7 @@ pub struct VerifierCtx {
     pub(crate) checked_protocols: std::collections::HashSet<String>,
     /// Trait names materialised from CheckedProgram.
     pub(crate) checked_traits: std::collections::HashSet<String>,
+    pub(crate) checked_method_signatures: std::collections::HashMap<String, (usize, String)>,
     /// Actor names materialised from CheckedProgram.
     pub(crate) checked_actors: std::collections::HashSet<String>,
     pub(crate) checked_actor_method_signatures: std::collections::HashMap<String, (usize, String)>,
@@ -599,6 +600,24 @@ impl Verifier {
             .values()
             .map(|trait_def| trait_def.qualified_name.clone())
             .collect();
+        let mut method_signatures = std::collections::HashMap::new();
+        for trait_def in program.traits().values() {
+            for method in &trait_def.method_signatures {
+                method_signatures.insert(
+                    format!("{}.{}", trait_def.qualified_name, method.name),
+                    (method.params.len(), method.ret.clone()),
+                );
+            }
+        }
+        for impl_def in program.impls().values() {
+            for method in &impl_def.method_signatures {
+                method_signatures.insert(
+                    format!("{}.{}", impl_def.qualified_name, method.name),
+                    (method.params.len(), method.ret.clone()),
+                );
+            }
+        }
+        self.ctx.checked_method_signatures = method_signatures;
         self.ctx.checked_actors = program
             .actors()
             .values()
@@ -793,6 +812,10 @@ impl Verifier {
 
     pub(crate) fn has_checked_trait(&self, name: &str) -> bool {
         self.ctx.checked_traits.contains(name)
+    }
+
+    pub(crate) fn checked_method_signature(&self, key: &str) -> Option<(usize, String)> {
+        self.ctx.checked_method_signatures.get(key).cloned()
     }
 
     pub(crate) fn has_checked_actor(&self, name: &str) -> bool {

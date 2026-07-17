@@ -210,6 +210,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.resolved_actor_method_signatures = Some(actor_method_signatures);
+        let mut method_signatures = std::collections::HashMap::new();
+        for trait_def in program.traits().values() {
+            for method in &trait_def.method_signatures {
+                method_signatures.insert(
+                    format!("{}.{}", trait_def.qualified_name, method.name),
+                    (method.params.len(), method.ret.clone()),
+                );
+            }
+        }
+        for impl_def in program.impls().values() {
+            for method in &impl_def.method_signatures {
+                method_signatures.insert(
+                    format!("{}.{}", impl_def.qualified_name, method.name),
+                    (method.params.len(), method.ret.clone()),
+                );
+            }
+        }
+        self.resolved_method_signatures = Some(method_signatures);
         if let Some(max_children) = program.flows().values().find_map(|flow| flow.max_children) {
             self.max_children = Some(max_children);
         }

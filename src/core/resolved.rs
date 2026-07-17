@@ -240,10 +240,19 @@ pub struct ResolvedConstant {
 }
 
 #[derive(Debug, Clone)]
+pub struct ResolvedMethodSig {
+    pub name: String,
+    pub params: Vec<(String, String)>,
+    pub ret: String,
+    pub effects: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ResolvedTrait {
     pub node_id: NodeId,
     pub qualified_name: String,
     pub methods: Vec<String>,
+    pub method_signatures: Vec<ResolvedMethodSig>,
     pub origin: Origin,
 }
 
@@ -254,6 +263,7 @@ pub struct ResolvedImpl {
     pub trait_name: String,
     pub type_name: String,
     pub methods: Vec<String>,
+    pub method_signatures: Vec<ResolvedMethodSig>,
     pub origin: Origin,
 }
 
@@ -487,6 +497,24 @@ impl<'a> CheckedProgram<'a> {
         })
     }
 
+    pub fn impl_method_signature(
+        &self,
+        trait_name: &str,
+        type_name: &str,
+        method_name: &str,
+    ) -> Option<&ResolvedMethodSig> {
+        self.impls.values().find_map(|impl_def| {
+            if impl_def.trait_name == trait_name && impl_def.type_name == type_name {
+                impl_def
+                    .method_signatures
+                    .iter()
+                    .find(|method| method.name == method_name)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn capabilities(&self) -> &HashMap<NodeId, ResolvedCapability> {
         &self.capabilities
     }
@@ -515,6 +543,19 @@ impl<'a> CheckedProgram<'a> {
         self.traits
             .values()
             .find(|trait_def| trait_def.qualified_name == qualified_name)
+    }
+
+    pub fn trait_method_signature(
+        &self,
+        trait_name: &str,
+        method_name: &str,
+    ) -> Option<&ResolvedMethodSig> {
+        self.trait_def(trait_name).and_then(|trait_def| {
+            trait_def
+                .method_signatures
+                .iter()
+                .find(|method| method.name == method_name)
+        })
     }
 
     pub fn impls(&self) -> &HashMap<NodeId, ResolvedImpl> {
@@ -887,12 +928,54 @@ fn collect_items(
                     .iter()
                     .map(|method| method.name.clone())
                     .collect();
+                let mut method_signatures = Vec::new();
+                for method in &trait_def.methods {
+                    for param in &method.params {
+                        if contains_unresolved_type(&param.ty) {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: unresolved type in trait '{}' method '{}' parameter",
+                                    qualified,
+                                    method.name
+                                ),
+                                span,
+                            ));
+                        }
+                    }
+                    if let Some(ret) = &method.ret {
+                        if contains_unresolved_type(ret) {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: unresolved return type in trait '{}' method '{}'",
+                                    qualified,
+                                    method.name
+                                ),
+                                span,
+                            ));
+                        }
+                    }
+                    method_signatures.push(ResolvedMethodSig {
+                        name: method.name.clone(),
+                        params: method
+                            .params
+                            .iter()
+                            .map(|param| (param.name.clone(), crate::core::fmt_type(&param.ty)))
+                            .collect(),
+                        ret: method
+                            .ret
+                            .as_ref()
+                            .map(crate::core::fmt_type)
+                            .unwrap_or_else(|| "unit".into()),
+                        effects: Vec::new(),
+                    });
+                }
                 traits.insert(
                     node_id.clone(),
                     ResolvedTrait {
                         node_id,
                         qualified_name: qualified,
                         methods,
+                        method_signatures,
                         origin: resolve_origin(trait_def.origin, &NodeId("trait".into()), span),
                     },
                 );
@@ -917,6 +1000,47 @@ fn collect_items(
                     .iter()
                     .map(|method| method.name.clone())
                     .collect();
+                let mut method_signatures = Vec::new();
+                for method in &impl_def.methods {
+                    for param in &method.params {
+                        if contains_unresolved_type(&param.ty) {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: unresolved type in impl '{}' method '{}' parameter",
+                                    qualified,
+                                    method.name
+                                ),
+                                span,
+                            ));
+                        }
+                    }
+                    if let Some(ret) = &method.ret {
+                        if contains_unresolved_type(ret) {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: unresolved return type in impl '{}' method '{}'",
+                                    qualified,
+                                    method.name
+                                ),
+                                span,
+                            ));
+                        }
+                    }
+                    method_signatures.push(ResolvedMethodSig {
+                        name: method.name.clone(),
+                        params: method
+                            .params
+                            .iter()
+                            .map(|param| (param.name.clone(), crate::core::fmt_type(&param.ty)))
+                            .collect(),
+                        ret: method
+                            .ret
+                            .as_ref()
+                            .map(crate::core::fmt_type)
+                            .unwrap_or_else(|| "unit".into()),
+                        effects: method.effects.clone(),
+                    });
+                }
                 impls.insert(
                     node_id.clone(),
                     ResolvedImpl {
@@ -925,6 +1049,7 @@ fn collect_items(
                         trait_name: impl_def.trait_name.clone(),
                         type_name: impl_def.type_name.clone(),
                         methods,
+                        method_signatures,
                         origin: resolve_origin(impl_def.origin, &NodeId("impl".into()), span),
                     },
                 );
@@ -3311,6 +3436,55 @@ func main() -> i32 { 0 }
         codegen.compile_checked(&program).expect("compile");
         assert_eq!(
             codegen.resolved_actor_method_signature("Worker", "run"),
+            Some((1, "i32".into()))
+        );
+    }
+
+
+    #[test]
+    fn trait_and_impl_method_signatures_are_materialised() {
+        let file = parse(
+            r#"
+trait Show {
+    func show(self: i32) -> i32
+}
+type Number = i32
+impl Show for Number {
+    func show(self: Number) -> i32 { 0 }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let trait_sig = program
+            .trait_method_signature("Show", "show")
+            .expect("trait show");
+        assert_eq!(trait_sig.ret, "i32");
+        let impl_sig = program
+            .impl_method_signature("Show", "Number", "show")
+            .expect("impl show");
+        assert_eq!(impl_sig.ret, "i32");
+        assert_eq!(impl_sig.params.len(), 1);
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert_eq!(
+            interp.resolved_method_signature("Show.show"),
+            Some((1, "i32".into()))
+        );
+        assert_eq!(
+            interp.resolved_method_signature("Show:for:Number.show"),
+            Some((1, "i32".into()))
+        );
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert_eq!(
+            verifier.checked_method_signature("Show.show"),
+            Some((1, "i32".into()))
+        );
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "trait_sig");
+        codegen.compile_checked(&program).expect("compile");
+        assert_eq!(
+            codegen.resolved_method_signature("Show:for:Number.show"),
             Some((1, "i32".into()))
         );
     }

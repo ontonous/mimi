@@ -316,6 +316,7 @@ pub struct CodeGenerator<'ctx> {
     /// Actor method directory from CheckedProgram.
     resolved_actors: Option<HashMap<String, Vec<String>>>,
     resolved_actor_method_signatures: Option<HashMap<String, (usize, String)>>,
+    resolved_method_signatures: Option<HashMap<String, (usize, String)>>,
     /// Capability names from CheckedProgram.
     resolved_capabilities: Option<std::collections::HashSet<String>>,
     /// Constant names from CheckedProgram.
@@ -456,6 +457,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_protocols: None,
             resolved_actors: None,
             resolved_actor_method_signatures: None,
+            resolved_method_signatures: None,
             resolved_capabilities: None,
             resolved_constants: None,
             resolved_constant_values: None,
@@ -475,6 +477,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_flow_protocols: None,
             max_children: None,
         }
+    }
+
+    pub(crate) fn resolved_method_signature(&self, key: &str) -> Option<(usize, String)> {
+        self.resolved_method_signatures
+            .as_ref()
+            .and_then(|map| map.get(key).cloned())
     }
 
     pub(crate) fn resolved_actor_method_signature(
