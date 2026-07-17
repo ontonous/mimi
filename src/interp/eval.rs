@@ -716,6 +716,7 @@ impl<'a> Interpreter<'a> {
     /// content-aware dirty checking (the WAL restore is still length-only).
     fn begin_persistent_tx(&mut self, flow_name: &str, flow: &FlowDef, self_val: &Value) {
         let persistent_fields = self.effective_persistent_fields(flow);
+        let metadata_shadow_fields = self.effective_metadata_shadow_fields(flow);
         if persistent_fields.is_empty() {
             return;
         }
@@ -725,7 +726,7 @@ impl<'a> Interpreter<'a> {
             for name in &persistent_fields {
                 if let Some(v) = fields.get(name) {
                     // v0.29.45: metadata_shadow fields snapshot only length.
-                    if flow.metadata_shadow_fields.contains(name) {
+                    if metadata_shadow_fields.iter().any(|f| f == name) {
                         let len = match v {
                             Value::List(items) => items.len(),
                             Value::Set(items) => items.len(),
@@ -776,6 +777,7 @@ impl<'a> Interpreter<'a> {
         flow: &FlowDef,
     ) -> Value {
         let _persistent_fields = self.effective_persistent_fields(flow);
+        let transactional_fields = self.effective_transactional_fields(flow);
         let tx = self.flow_tx.remove(flow_name);
         let mut restored = from_payload.clone();
         let Some(tx) = tx else {
@@ -783,7 +785,7 @@ impl<'a> Interpreter<'a> {
         };
         if let Value::Record(_, fields) = &mut restored {
             // Restore @transactional fields (full WAL).
-            for name in &flow.transactional_fields {
+            for name in &transactional_fields {
                 if let Some(v) = tx.snapshot.get(name) {
                     fields.insert(name.clone(), v.clone());
                 }
@@ -857,12 +859,13 @@ impl<'a> Interpreter<'a> {
     /// "last good" snapshot on commit for this check.
     fn persistent_dirty_for_recover(&self, flow: &FlowDef, fault_payload: &Value) -> bool {
         let persistent_fields = self.effective_persistent_fields(flow);
+        let transactional_fields = self.effective_transactional_fields(flow);
         // Prefer last-good snapshot if still present.
         if let Some(tx) = self.flow_tx.get(&flow.name) {
             if !tx.snapshot.is_empty() {
                 if let Value::Record(_, fields) = fault_payload {
                     for name in &persistent_fields {
-                        if flow.transactional_fields.iter().any(|t| t == name) {
+                        if transactional_fields.iter().any(|t| t == name) {
                             continue; // WAL-restored, always clean
                         }
                         // v0.29.45 + C4: metadata_shadow fields now also have

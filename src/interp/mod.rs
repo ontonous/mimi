@@ -157,6 +157,10 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_mailbox_depths: Option<HashMap<String, usize>>,
     /// Persistent field sets materialised from CheckedProgram: flow -> fields.
     pub(in crate::interp) resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
+    /// Transactional field sets materialised from CheckedProgram: flow -> fields.
+    pub(in crate::interp) resolved_transactional_fields: Option<HashMap<String, Vec<String>>>,
+    /// Metadata-shadow field sets materialised from CheckedProgram: flow -> fields.
+    pub(in crate::interp) resolved_metadata_shadow_fields: Option<HashMap<String, Vec<String>>>,
     /// v0.29.24: process-wide max children (None = unlimited).
     /// Taken from first `@max_children(N)` flow annotation in the file.
     max_children: Option<usize>,
@@ -312,6 +316,19 @@ impl<'a> Interpreter<'a> {
             }
         }
         interp.resolved_persistent_fields = Some(persistent_fields);
+        let mut transactional_fields = HashMap::new();
+        let mut metadata_shadow_fields = HashMap::new();
+        for flow in program.flows().values() {
+            if !flow.transactional_fields.is_empty() {
+                transactional_fields.insert(flow.id.0.clone(), flow.transactional_fields.clone());
+            }
+            if !flow.metadata_shadow_fields.is_empty() {
+                metadata_shadow_fields
+                    .insert(flow.id.0.clone(), flow.metadata_shadow_fields.clone());
+            }
+        }
+        interp.resolved_transactional_fields = Some(transactional_fields);
+        interp.resolved_metadata_shadow_fields = Some(metadata_shadow_fields);
         interp
     }
 
@@ -417,6 +434,35 @@ impl<'a> Interpreter<'a> {
     pub(in crate::interp) fn effective_persistent_fields(&self, flow: &FlowDef) -> Vec<String> {
         self.resolved_persistent_fields(&flow.name)
             .unwrap_or_else(|| flow.persistent_fields.clone())
+    }
+
+    fn resolved_field_set(
+        map: &Option<HashMap<String, Vec<String>>>,
+        flow_name: &str,
+    ) -> Option<Vec<String>> {
+        let Some(map) = map.as_ref() else {
+            return None;
+        };
+        if let Some(fields) = map.get(flow_name) {
+            return Some(fields.clone());
+        }
+        map.iter().find_map(|(qualified, fields)| {
+            qualified
+                .rsplit("::")
+                .next()
+                .filter(|bare| *bare == flow_name)
+                .map(|_| fields.clone())
+        })
+    }
+
+    pub(in crate::interp) fn effective_transactional_fields(&self, flow: &FlowDef) -> Vec<String> {
+        Self::resolved_field_set(&self.resolved_transactional_fields, &flow.name)
+            .unwrap_or_else(|| flow.transactional_fields.clone())
+    }
+
+    pub(in crate::interp) fn effective_metadata_shadow_fields(&self, flow: &FlowDef) -> Vec<String> {
+        Self::resolved_field_set(&self.resolved_metadata_shadow_fields, &flow.name)
+            .unwrap_or_else(|| flow.metadata_shadow_fields.clone())
     }
 
     pub(crate) fn resolved_mailbox_depth(&self, flow_name: &str) -> Option<usize> {
@@ -546,6 +592,8 @@ impl<'a> Interpreter<'a> {
             resolved_extern_funcs: None,
             resolved_mailbox_depths: None,
             resolved_persistent_fields: None,
+            resolved_transactional_fields: None,
+            resolved_metadata_shadow_fields: None,
             max_children,
             spawn_count: 0,
             actor_spawn_counts: std::collections::HashMap::new(),

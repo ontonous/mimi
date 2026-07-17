@@ -30,6 +30,7 @@
 - ResolvedFlow 记录 persistent/transactional/metadata_shadow 字段集。
 - interpreter/codegen/verifier 安装 persistent 字段目录。
 - interpreter recover/WAL 路径优先使用 CheckedProgram persistent 字段目录。
+- interpreter/codegen 安装并优先使用 transactional 与 metadata_shadow 字段目录。
 - interpreter/codegen 从 CheckedProgram 读取 `@max_children` 配额与 `@mailbox(depth=...)` 深度。
 - 模块限定 Flow 的 mailbox depth 可通过 bare actor/flow 名解析。
 - ownership ledger 校验 callable `function:`/`transition:` NodeId 与 key/owner 一致性。
