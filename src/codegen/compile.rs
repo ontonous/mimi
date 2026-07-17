@@ -135,6 +135,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let fields = s.payload.clone().unwrap_or_default();
                         let td = TypeDef {
                             name: type_name.clone(),
+                            decl_pos: None,
                             pub_: false,
                             kind: TypeDefKind::Record(fields),
                             generics: vec![],
@@ -148,6 +149,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         {
                             let td = TypeDef {
                                 name: s.name.clone(),
+                                decl_pos: None,
                                 pub_: false,
                                 kind: TypeDefKind::Record(s.payload.clone().unwrap_or_default()),
                                 generics: vec![],
@@ -395,6 +397,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !self.type_defs.contains_key("ExecResult") {
             let exec_ty = crate::ast::TypeDef {
                 name: "ExecResult".to_string(),
+                decl_pos: None,
                 pub_: false,
                 kind: crate::ast::TypeDefKind::Record(vec![
                     crate::ast::Field {
@@ -425,6 +428,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !self.type_defs.contains_key("StatResult") {
             let stat_ty = crate::ast::TypeDef {
                 name: "StatResult".to_string(),
+                decl_pos: None,
                 pub_: false,
                 kind: crate::ast::TypeDefKind::Record(vec![
                     crate::ast::Field {
@@ -459,6 +463,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !self.type_defs.contains_key("PeerFault") {
             let pf_ty = crate::ast::TypeDef {
                 name: "PeerFault".to_string(),
+                decl_pos: None,
                 pub_: false,
                 kind: crate::ast::TypeDefKind::Record(vec![
                     crate::ast::Field {
@@ -484,6 +489,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !self.type_defs.contains_key("SystemTrace") {
             let st_ty = crate::ast::TypeDef {
                 name: "SystemTrace".to_string(),
+                decl_pos: None,
                 pub_: false,
                 kind: crate::ast::TypeDefKind::Record(vec![
                     crate::ast::Field {
@@ -544,6 +550,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !self.type_defs.contains_key("PanicPayload") {
             let pp_ty = crate::ast::TypeDef {
                 name: "PanicPayload".to_string(),
+                decl_pos: None,
                 pub_: false,
                 kind: crate::ast::TypeDefKind::Record(vec![
                     crate::ast::Field {
@@ -578,6 +585,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !self.type_defs.contains_key("MemoryDump") {
             let md_ty = crate::ast::TypeDef {
                 name: "MemoryDump".to_string(),
+                decl_pos: None,
                 pub_: false,
                 kind: crate::ast::TypeDefKind::Record(vec![
                     crate::ast::Field {

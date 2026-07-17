@@ -204,6 +204,9 @@ pub struct ModuleDef {
 #[derive(Debug, Clone)]
 pub struct TypeDef {
     pub name: String,
+    /// Present only for user declarations parsed from source. Synthetic
+    /// builtin and lowering-only types deliberately carry no user span.
+    pub decl_pos: Option<(usize, usize)>,
     pub pub_: bool,
     pub kind: TypeDefKind,
     pub generics: Vec<GenericParam>,
