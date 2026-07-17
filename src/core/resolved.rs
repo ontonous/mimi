@@ -65,6 +65,8 @@ pub struct ResolvedCallSite {
     pub expected_argc: Option<usize>,
     /// Effects from callee function directory when known.
     pub effects: Vec<String>,
+    /// Return type display from callee function directory when known.
+    pub ret: Option<String>,
     pub kind: ResolvedCallKind,
     pub origin: Origin,
 }
@@ -1581,11 +1583,15 @@ fn collect_program_call_sites(
     actors: &HashMap<NodeId, ResolvedActor>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
 ) {
-    let mut function_info: HashMap<String, (usize, Vec<String>)> = HashMap::new();
+    let mut function_info: HashMap<String, (usize, Vec<String>, String)> = HashMap::new();
     for function in functions.values() {
         function_info.insert(
             function.qualified_name.clone(),
-            (function.params.len(), function.effects.clone()),
+            (
+                function.params.len(),
+                function.effects.clone(),
+                crate::core::fmt_type(&function.ret),
+            ),
         );
     }
     let mut extern_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1613,7 +1619,7 @@ fn collect_program_call_sites(
 fn collect_item_call_sites(
     item: &Item,
     module: &str,
-    functions: &HashMap<String, (usize, Vec<String>)>,
+    functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &std::collections::HashSet<String>,
     methods: &std::collections::HashSet<String>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
@@ -1708,7 +1714,7 @@ fn collect_block_call_sites(
     owner: &str,
     path: &str,
     fallback: Span,
-    functions: &HashMap<String, (usize, Vec<String>)>,
+    functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &std::collections::HashSet<String>,
     methods: &std::collections::HashSet<String>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
@@ -1732,7 +1738,7 @@ fn collect_stmt_call_sites(
     owner: &str,
     path: &str,
     fallback: Span,
-    functions: &HashMap<String, (usize, Vec<String>)>,
+    functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &std::collections::HashSet<String>,
     methods: &std::collections::HashSet<String>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
@@ -1828,14 +1834,14 @@ fn collect_expr_call_sites(
     owner: &str,
     path: &str,
     fallback: Span,
-    functions: &HashMap<String, (usize, Vec<String>)>,
+    functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &std::collections::HashSet<String>,
     methods: &std::collections::HashSet<String>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
 ) {
     match expr {
         Expr::Call(callee, args) => {
-            let (callee_name, kind, expected_argc, effects) =
+            let (callee_name, kind, expected_argc, effects, ret) =
                 resolve_call_callee(callee, functions, externs, methods);
             let node_id = NodeId(format!("{path}/call"));
             out.insert(
@@ -1847,6 +1853,7 @@ fn collect_expr_call_sites(
                     argc: args.len(),
                     expected_argc,
                     effects,
+                    ret,
                     kind,
                     origin: Origin::User(fallback),
                 },
@@ -1977,26 +1984,27 @@ fn collect_expr_call_sites(
 
 fn resolve_call_callee(
     callee: &Expr,
-    functions: &HashMap<String, (usize, Vec<String>)>,
+    functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &std::collections::HashSet<String>,
     methods: &std::collections::HashSet<String>,
-) -> (String, ResolvedCallKind, Option<usize>, Vec<String>) {
+) -> (String, ResolvedCallKind, Option<usize>, Vec<String>, Option<String>) {
     match callee {
         Expr::Ident(name) => {
-            if let Some((arity, effects)) = functions.get(name) {
+            if let Some((arity, effects, ret)) = functions.get(name) {
                 (
                     name.clone(),
                     ResolvedCallKind::Function,
                     Some(*arity),
                     effects.clone(),
+                    Some(ret.clone()),
                 )
             } else if externs.contains(name) {
                 // Extern parameter lists are not yet materialised; kind only.
-                (name.clone(), ResolvedCallKind::Extern, None, Vec::new())
+                (name.clone(), ResolvedCallKind::Extern, None, Vec::new(), None)
             } else if methods.contains(name) {
-                (name.clone(), ResolvedCallKind::Method, None, Vec::new())
+                (name.clone(), ResolvedCallKind::Method, None, Vec::new(), None)
             } else {
-                (name.clone(), ResolvedCallKind::Unknown, None, Vec::new())
+                (name.clone(), ResolvedCallKind::Unknown, None, Vec::new(), None)
             }
         }
         Expr::Field(obj, field) => {
@@ -2006,12 +2014,12 @@ fn resolve_call_callee(
             };
             let name = format!("{base}.{field}");
             if methods.contains(field) {
-                (name, ResolvedCallKind::Method, None, Vec::new())
+                (name, ResolvedCallKind::Method, None, Vec::new(), None)
             } else {
-                (name, ResolvedCallKind::Unknown, None, Vec::new())
+                (name, ResolvedCallKind::Unknown, None, Vec::new(), None)
             }
         }
-        _ => ("<expr>".into(), ResolvedCallKind::Unknown, None, Vec::new()),
+        _ => ("<expr>".into(), ResolvedCallKind::Unknown, None, Vec::new(), None),
     }
 }
 
@@ -3079,6 +3087,7 @@ func main() -> i32 {
                     && s.argc == 1
                     && s.expected_argc == Some(1)
                     && s.arity_matches()
+                    && s.ret.as_deref() == Some("i32")
             }),
             "expected helper call site, got {:?}",
             sites
@@ -3115,6 +3124,9 @@ func main() -> i32 {
         assert_eq!(interp.resolved_call_arity_mismatches(), 0);
         assert_eq!(codegen.resolved_call_arity_mismatches(), 0);
         assert_eq!(verifier.checked_call_arity_mismatches(), 0);
+        assert_eq!(interp.resolved_call_return_type("helper").as_deref(), Some("i32"));
+        assert_eq!(codegen.resolved_call_return_type("helper").as_deref(), Some("i32"));
+        assert_eq!(verifier.checked_call_return_type("helper").as_deref(), Some("i32"));
     }
 
     #[test]
@@ -3136,6 +3148,7 @@ func main() -> i32 {
                     && s.effects.iter().any(|e| e == "Io")
                     && s.expected_argc == Some(1)
                     && s.kind == crate::core::ResolvedCallKind::Function
+                    && s.ret.as_deref() == Some("i32")
             }),
             "expected write_it Io call site"
         );

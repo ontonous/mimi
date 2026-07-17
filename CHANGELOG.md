@@ -42,6 +42,7 @@
 - CheckedProgram 物化 typed call-site 目录（callee/argc/kind）；consumers 安装查询。
 - call-site 绑定 expected_argc，并提供 arity mismatch 查询。
 - call-site 绑定 callee effects，consumers 提供 effect 查询。
+- call-site 绑定 callee 返回类型，consumers 提供 ret 查询。
 - ResolvedFlow 与 consumers 安装 `impl Protocol` 列表。
 - ResolvedTransition 记录 is_fallback/is_ffi_pinned，并安装到 interpreter/codegen/verifier 目录。
 - interpreter 暴露 resolved transition targets 查询。
