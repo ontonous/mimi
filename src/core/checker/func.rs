@@ -9,6 +9,16 @@ use super::Checker;
 
 impl<'a> Checker<'a> {
     pub(crate) fn check_func(&mut self, func: &FuncDef) {
+        let owner_name = if self.module_path.is_empty() {
+            func.name.clone()
+        } else {
+            format!("{}::{}", self.module_path.join("::"), func.name)
+        };
+        let owner = crate::core::NodeId(format!("function:{}", owner_name));
+        self.current_ownership_owner = Some(owner.clone());
+        self.ownership_ledgers
+            .entry(owner.clone())
+            .or_insert_with(|| crate::core::OwnershipLedger::new(owner));
         // C2: reset unification table for each function
         self.unification.reset();
         // v0.29.19: session residual tracking is per-function.
@@ -43,8 +53,15 @@ impl<'a> Checker<'a> {
             // If param is a cap type, track it
             if matches!(&ty, Type::Cap(_)) {
                 if let Some(s) = self.cap_vars.last_mut() {
-                    s.insert(p.name.clone(), super::CapVarInfo { consumed: false });
+                    s.insert(
+                        p.name.clone(),
+                        super::CapVarInfo {
+                            consumed: false,
+                            maybe_consumed: false,
+                        },
+                    );
                 }
+                self.record_resource_action(crate::core::ResourceActionKind::Introduce, &p.name);
             }
             // SessionChan<S> params: seed residual from declared session body.
             if let Type::Name(n, args) = &ty {
@@ -138,12 +155,18 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        if let Some(Stmt::Expr(Expr::Ident(name))) = func.body.last() {
+            if matches!(self.cap_info(name), Some(info) if !info.consumed) {
+                self.consume_capability(name, crate::core::ResourceActionKind::Return);
+            }
+        }
         // Check for unconsumed caps before popping
         self.check_unconsumed_caps();
         self.available_effects.pop();
         self.var_scopes.pop();
         self.cap_vars.pop();
         self.current_ret = None;
+        self.current_ownership_owner = None;
     }
 
     /// Check if a block returns on all paths
@@ -213,14 +236,17 @@ impl<'a> Checker<'a> {
         if let Some(scope) = self.cap_vars.last() {
             // v0.29.50: fast path — if all consumed, return immediately.
             let total = scope.len();
-            let consumed_count = scope.values().filter(|info| info.consumed).count();
+            let consumed_count = scope
+                .values()
+                .filter(|info| info.consumed && !info.maybe_consumed)
+                .count();
             if consumed_count == total {
                 return; // O(1) fast path via count comparison
             }
             // Slow path: find unconsumed vars
             let unconsumed: Vec<String> = scope
                 .iter()
-                .filter(|(_, info)| !info.consumed)
+                .filter(|(_, info)| !info.consumed || info.maybe_consumed)
                 .map(|(name, _)| name.clone())
                 .collect();
             for name in unconsumed {

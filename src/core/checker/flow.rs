@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 use super::Checker;
@@ -19,6 +20,7 @@ pub struct FlowAcc {
     /// Warnings accumulated during type checking (reserved for future use).
     #[allow(dead_code)]
     pub warnings: Vec<Diagnostic>,
+    pub ownership_ledgers: HashMap<crate::core::NodeId, crate::core::OwnershipLedger>,
 }
 
 /// Checker state machine — 宽松 Flow.
@@ -119,6 +121,7 @@ fn extract_acc(checker: &mut Checker) -> FlowAcc {
     FlowAcc {
         errors: deduped,
         warnings: std::mem::take(&mut checker.warnings),
+        ownership_ledgers: std::mem::take(&mut checker.ownership_ledgers),
     }
 }
 
@@ -135,7 +138,14 @@ fn run_to_done<'a>(mut state: CheckerState<'a>) -> Result<CheckerState<'a>, Stri
 
 /// Run the Flow checker on a file. Returns Ok(()) or Err(diagnostics) — same
 /// interface as `core::check`.
+#[cfg(test)]
 pub fn flow_check(file: &File) -> Result<(), Vec<Diagnostic>> {
+    flow_check_with_artifacts(file).map(|_| ())
+}
+
+pub(crate) fn flow_check_with_artifacts(
+    file: &File,
+) -> Result<HashMap<crate::core::NodeId, crate::core::OwnershipLedger>, Vec<Diagnostic>> {
     let state = CheckerState::new(file);
     let state = match run_to_done(state) {
         Ok(s) => s,
@@ -143,14 +153,22 @@ pub fn flow_check(file: &File) -> Result<(), Vec<Diagnostic>> {
     };
     let acc = state.into_output();
     if acc.errors.is_empty() {
-        Ok(())
+        Ok(acc.ownership_ledgers)
     } else {
         Err(acc.errors)
     }
 }
 
 /// Run the Flow checker in strict mode. Same interface as `core::check_strict`.
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn flow_check_strict(file: &File) -> Result<(), Vec<Diagnostic>> {
+    flow_check_strict_with_artifacts(file).map(|_| ())
+}
+
+pub(crate) fn flow_check_strict_with_artifacts(
+    file: &File,
+) -> Result<HashMap<crate::core::NodeId, crate::core::OwnershipLedger>, Vec<Diagnostic>> {
     let state = CheckerState::new_strict(file);
     let state = match run_to_done(state) {
         Ok(s) => s,
@@ -158,7 +176,7 @@ pub fn flow_check_strict(file: &File) -> Result<(), Vec<Diagnostic>> {
     };
     let acc = state.into_output();
     if acc.errors.is_empty() {
-        Ok(())
+        Ok(acc.ownership_ledgers)
     } else {
         Err(acc.errors)
     }

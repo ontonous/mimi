@@ -12,6 +12,7 @@ pub mod unification;
 mod check_stmt;
 mod infer;
 mod infer_expr;
+mod ownership;
 pub mod resolved;
 
 pub(crate) use checker::Checker;
@@ -19,6 +20,9 @@ pub use helpers::{fmt_type, is_type_param, subst_type_params};
 pub(crate) use helpers::{is_bool, is_numeric_coercion, is_trait_coercion};
 #[cfg(test)]
 pub(crate) use helpers::{is_int, is_numeric, is_string, same_type};
+pub use ownership::{
+    BranchMerge, OwnershipLedger, ResourceAction, ResourceActionKind, ResourceState,
+};
 pub use resolved::{
     BackendProfile, CheckedProgram, FlowId, NodeId, NodeMeta, Origin, ResolvedFlow, ResolvedItem,
     ResolvedItemKind, ResolvedState, SpanPrecision, StateId, TransitionId, RESOLVED_IR_VERSION,
@@ -33,13 +37,13 @@ pub fn check_strict(file: &File) -> Result<(), Vec<Diagnostic>> {
 }
 
 pub fn check_program(file: &File) -> Result<CheckedProgram<'_>, Vec<Diagnostic>> {
-    checker::flow::flow_check(file)?;
-    CheckedProgram::from_checked_file(file)
+    let ownership = checker::flow::flow_check_with_artifacts(file)?;
+    CheckedProgram::from_checked_file_with_ownership(file, ownership)
 }
 
 pub fn check_program_strict(file: &File) -> Result<CheckedProgram<'_>, Vec<Diagnostic>> {
-    checker::flow::flow_check_strict(file)?;
-    CheckedProgram::from_checked_file(file)
+    let ownership = checker::flow::flow_check_strict_with_artifacts(file)?;
+    CheckedProgram::from_checked_file_with_ownership(file, ownership)
 }
 
 /// Verify that MMS rule attachments are consistent.

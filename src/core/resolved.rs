@@ -3,6 +3,8 @@ use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use std::collections::HashMap;
 
+use super::OwnershipLedger;
+
 pub const RESOLVED_IR_VERSION: &str = "mimi-resolved-ir-1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -130,10 +132,19 @@ pub struct CheckedProgram<'a> {
     flows: HashMap<FlowId, ResolvedFlow>,
     transitions: HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: Vec<CapabilityRequirement>,
+    ownership_ledgers: HashMap<NodeId, OwnershipLedger>,
 }
 
 impl<'a> CheckedProgram<'a> {
+    #[cfg(test)]
     pub(crate) fn from_checked_file(file: &'a File) -> Result<Self, Vec<Diagnostic>> {
+        Self::from_checked_file_with_ownership(file, HashMap::new())
+    }
+
+    pub(crate) fn from_checked_file_with_ownership(
+        file: &'a File,
+        ownership_ledgers: HashMap<NodeId, OwnershipLedger>,
+    ) -> Result<Self, Vec<Diagnostic>> {
         let mut transitions = HashMap::new();
         let mut flows = HashMap::new();
         let mut items = HashMap::new();
@@ -160,6 +171,7 @@ impl<'a> CheckedProgram<'a> {
             flows,
             transitions,
             backend_requirements,
+            ownership_ledgers,
         })
     }
 
@@ -181,6 +193,14 @@ impl<'a> CheckedProgram<'a> {
 
     pub fn node_meta(&self) -> &HashMap<NodeId, NodeMeta> {
         &self.node_meta
+    }
+
+    pub fn ownership_ledgers(&self) -> &HashMap<NodeId, OwnershipLedger> {
+        &self.ownership_ledgers
+    }
+
+    pub fn ownership_ledger(&self, owner: &NodeId) -> Option<&OwnershipLedger> {
+        self.ownership_ledgers.get(owner)
     }
 
     pub fn entry_span(&self) -> Option<Span> {
@@ -1237,6 +1257,345 @@ flow Cache {
         assert!(diagnostics
             .iter()
             .all(|diagnostic| diagnostic.span.start_line > 0));
+    }
+
+    #[test]
+    fn ownership_ledger_persists_capability_actions_and_branch_merges() {
+        let file = parse(
+            r#"
+cap File
+func pass(flag: bool, f: cap File) -> i32 {
+    if flag { drop(f) } else { drop(f) }
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let ledger = program
+            .ownership_ledger(&NodeId("function:pass".to_string()))
+            .expect("pass ownership ledger");
+        assert!(ledger.actions.iter().any(|action| {
+            action.kind == crate::core::ResourceActionKind::Introduce && action.resource == "f"
+        }));
+        assert_eq!(
+            ledger
+                .actions
+                .iter()
+                .filter(|action| {
+                    action.kind == crate::core::ResourceActionKind::Drop && action.resource == "f"
+                })
+                .count(),
+            2
+        );
+        let merge = ledger
+            .branch_merges
+            .iter()
+            .find(|merge| merge.resource == "f")
+            .expect("f branch merge");
+        assert_eq!(merge.then_state, crate::core::ResourceState::Consumed);
+        assert_eq!(merge.else_state, crate::core::ResourceState::Consumed);
+        assert_eq!(merge.merged_state, crate::core::ResourceState::Consumed);
+    }
+
+    #[test]
+    fn ownership_ledger_records_return_transfer() {
+        let file = parse(
+            r#"
+cap File
+func identity(f: cap File) -> cap File { return f }
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let ledger = program
+            .ownership_ledger(&NodeId("function:identity".to_string()))
+            .expect("identity ownership ledger");
+        assert!(ledger.actions.iter().any(|action| {
+            action.kind == crate::core::ResourceActionKind::Return && action.resource == "f"
+        }));
+    }
+
+    #[test]
+    fn ownership_checker_rejects_one_branch_consumption() {
+        let file = parse(
+            r#"
+cap File
+func bad(flag: bool, f: cap File) -> i32 {
+    if flag { drop(f) }
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let diagnostics = crate::core::check_program(&file).expect_err("branch mismatch");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0304)
+                && diagnostic.message.contains("some control-flow paths")
+        }));
+    }
+
+    #[test]
+    fn ownership_checker_consumes_outer_capability_in_nested_block() {
+        let file = parse(
+            r#"
+cap File
+func close(f: cap File) -> i32 {
+    { drop(f) }
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        crate::core::check_program(&file).expect("nested block consumes outer cap");
+    }
+
+    #[test]
+    fn ownership_checker_rejects_return_path_leak() {
+        let file = parse(
+            r#"
+cap File
+func bad(flag: bool, f: cap File) -> i32 {
+    if flag { return 0 }
+    drop(f)
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let diagnostics = crate::core::check_program(&file).expect_err("return path leak");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0256)
+                && diagnostic.message.contains("return path")
+        }));
+    }
+
+    #[test]
+    fn ownership_checker_accepts_return_transfer_on_both_paths() {
+        let file = parse(
+            r#"
+cap File
+func choose(flag: bool, f: cap File) -> cap File {
+    if flag { return f }
+    return f
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        crate::core::check_program(&file).expect("both return paths transfer f");
+    }
+
+    #[test]
+    fn ownership_checker_rejects_loop_carried_consumption() {
+        let file = parse(
+            r#"
+cap File
+func bad(run: bool, f: cap File) -> i32 {
+    while run {
+        drop(f)
+        break
+    }
+    drop(f)
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let diagnostics = crate::core::check_program(&file).expect_err("loop consumption");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0304)
+                && diagnostic.message.contains("potentially repeating loop")
+        }));
+    }
+
+    #[test]
+    fn ownership_checker_moves_by_value_cap_arguments() {
+        let file = parse(
+            r#"
+cap File
+func consume(f: cap File) -> i32 { drop(f); 0 }
+func bad(f: cap File) -> i32 {
+    consume(f)
+    drop(f)
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let diagnostics = crate::core::check_program(&file).expect_err("double consume");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0304)
+                && diagnostic.message.contains("already been consumed")
+        }));
+    }
+
+    #[test]
+    fn ownership_checker_joins_expression_if_branches() {
+        let file = parse(
+            r#"
+cap File
+func use_cap(flag: bool, f: cap File) -> i32 {
+    let result = if flag { drop(f); 1 } else { drop(f); 2 }
+    result
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        crate::core::check_program(&file).expect("expression if consumes both paths");
+    }
+
+    #[test]
+    fn ownership_checker_joins_match_arms() {
+        let file = parse(
+            r#"
+cap File
+func use_cap(flag: bool, f: cap File) -> i32 {
+    match flag { true => { drop(f); 1 }, false => { drop(f); 2 } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        crate::core::check_program(&file).expect("match consumes both paths");
+    }
+
+    #[test]
+    fn ownership_checker_accepts_implicit_capability_return() {
+        let file = parse(
+            r#"
+cap File
+func identity(f: cap File) -> cap File { f }
+func main() -> i32 { 0 }
+"#,
+        );
+        crate::core::check_program(&file).expect("implicit return transfers f");
+    }
+
+    #[test]
+    fn ownership_ledgers_use_module_qualified_owner_ids() {
+        let file = parse(
+            r#"
+cap File
+module A { func close(f: cap File) -> i32 { drop(f); 0 } }
+module B { func close(f: cap File) -> i32 { drop(f); 0 } }
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check modules");
+        assert!(program
+            .ownership_ledger(&NodeId("function:A::close".to_string()))
+            .is_some());
+        assert!(program
+            .ownership_ledger(&NodeId("function:B::close".to_string()))
+            .is_some());
+        assert!(program
+            .ownership_ledger(&NodeId("function:close".to_string()))
+            .is_none());
+    }
+
+    #[test]
+    fn ownership_ledger_ignores_non_linear_drop() {
+        let file = parse("func main() -> i32 { let x = 1; drop(x); 0 }");
+        let program = crate::core::check_program(&file).expect("check");
+        let ledger = program
+            .ownership_ledger(&NodeId("function:main".to_string()))
+            .expect("main ledger");
+        assert!(ledger.actions.iter().all(|action| action.resource != "x"));
+    }
+
+    #[test]
+    fn ownership_checker_nested_function_does_not_consume_outer_capability() {
+        let file = parse(
+            r#"
+cap File
+func outer(f: cap File) -> i32 {
+    func inner() -> i32 { 0 }
+    drop(f)
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        crate::core::check_program(&file).expect("nested function preserves outer ownership");
+    }
+
+    #[test]
+    fn ownership_checker_rejects_implicit_nested_capability_capture() {
+        let file = parse(
+            r#"
+cap File
+func outer(f: cap File) -> i32 {
+    func inner() -> i32 { drop(f); 0 }
+    drop(f)
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let diagnostics = crate::core::check_program(&file).expect_err("implicit cap capture");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0304)
+                && diagnostic
+                    .message
+                    .contains("not owned by the current callable")
+        }));
+    }
+
+    #[test]
+    fn ownership_checker_tracks_actor_method_capabilities() {
+        let file = parse(
+            r#"
+cap File
+actor Sink {
+    func leak(f: cap File) -> i32 { 0 }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let diagnostics = crate::core::check_program(&file).expect_err("actor method leak");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0256)
+                && diagnostic.message.contains("f")
+        }));
+    }
+
+    #[test]
+    fn ownership_checker_tracks_impl_method_capabilities() {
+        let file = parse(
+            r#"
+cap File
+trait Close { func close(f: cap File) -> i32 }
+type Handle { value: i32 }
+impl Close for Handle {
+    func close(f: cap File) -> i32 { 0 }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let diagnostics = crate::core::check_program(&file).expect_err("impl method leak");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0256)
+                && diagnostic.message.contains("f")
+        }));
+    }
+
+    #[test]
+    fn ownership_checker_tracks_transition_capabilities() {
+        let file = parse(
+            r#"
+cap File
+flow Door {
+    state Closed
+    state Open
+    transition open(Closed, f: cap File) -> Open { do { return Open {} } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let diagnostics = crate::core::check_program(&file).expect_err("transition leak");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0256)
+                && diagnostic.message.contains("f")
+        }));
     }
 }
 
