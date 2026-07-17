@@ -414,6 +414,11 @@ impl<'a> Interpreter<'a> {
         })
     }
 
+    pub(in crate::interp) fn effective_persistent_fields(&self, flow: &FlowDef) -> Vec<String> {
+        self.resolved_persistent_fields(&flow.name)
+            .unwrap_or_else(|| flow.persistent_fields.clone())
+    }
+
     pub(crate) fn resolved_mailbox_depth(&self, flow_name: &str) -> Option<usize> {
         let Some(map) = self.resolved_mailbox_depths.as_ref() else {
             return None;
