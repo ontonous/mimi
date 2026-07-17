@@ -23,6 +23,7 @@ impl<'a> Checker<'a> {
         self.cap_vars.push(HashMap::new());
         self.push_borrow_scope();
         let mut seen_return = false;
+        let mut last_expr_type = None;
         for (i, stmt) in block.iter().enumerate() {
             // Unreachable code detection
             if seen_return {
@@ -49,17 +50,14 @@ impl<'a> Checker<'a> {
             if let Stmt::Let { pos, .. } = stmt {
                 self.set_pos(pos.0, pos.1);
             }
+            if i + 1 == block.len() {
+                if let Stmt::Expr(expr) = stmt {
+                    last_expr_type = Some(self.infer_expr(expr, scopes));
+                    continue;
+                }
+            }
             self.check_stmt(stmt, ret, scopes);
         }
-        // Only the actual last statement determines the implicit return type.
-        // If it is not an expression statement, there is no implicit return.
-        let last_expr_type = block.last().and_then(|stmt| {
-            if let Stmt::Expr(e) = stmt {
-                Some(self.infer_expr(e, scopes))
-            } else {
-                None
-            }
-        });
         // Check for unconsumed caps before popping
         self.check_unconsumed_caps();
         self.pop_borrow_scope();
@@ -706,27 +704,7 @@ impl<'a> Checker<'a> {
                 // creates a copy and both variables are independently usable.
                 if matches!(&final_ty, Type::Cap(_)) {
                     if let Some(Expr::Ident(src_name)) = init {
-                        if let Some(cap_scope) = self.cap_vars.last_mut() {
-                            if let Some(info) = cap_scope.get_mut(src_name) {
-                                if info.consumed {
-                                    self.errors.push(
-                                        Diagnostic::error_code(
-                                            crate::diagnostic::codes::E0304,
-                                            format!(
-                                                "capability '{}' has already been consumed",
-                                                src_name
-                                            ),
-                                            Span::single(self.current_line, self.current_col),
-                                        )
-                                        .with_help(
-                                            "capabilities are linear - each can only be moved once",
-                                        ),
-                                    );
-                                } else {
-                                    info.consumed = true;
-                                }
-                            }
-                        }
+                        self.consume_capability(src_name, crate::core::ResourceActionKind::Move);
                     }
                 }
                 // Track mutability
@@ -773,9 +751,16 @@ impl<'a> Checker<'a> {
                         if let Some(s) = self.cap_vars.last_mut() {
                             s.insert(
                                 name.clone(),
-                                crate::core::checker::CapVarInfo { consumed: false },
+                                crate::core::checker::CapVarInfo {
+                                    consumed: false,
+                                    maybe_consumed: false,
+                                },
                             );
                         }
+                        self.record_resource_action(
+                            crate::core::ResourceActionKind::Introduce,
+                            name,
+                        );
                         // Introduce the cap as an effect
                         if let Some(s) = self.available_effects.last_mut() {
                             s.insert(cap_name.clone(), true);
@@ -798,6 +783,7 @@ impl<'a> Checker<'a> {
                         ),
                     );
                 }
+                self.check_return_capabilities(None);
             }
             Stmt::Return(Some(e)) => {
                 if self.flow_return_targets.is_empty() {
@@ -844,6 +830,17 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
+                let returned = if let Expr::Ident(name) = e {
+                    if self.cap_info(name).is_some() {
+                        self.consume_capability(name, crate::core::ResourceActionKind::Return);
+                        Some(name.as_str())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                self.check_return_capabilities(returned);
             }
             Stmt::Break(_) => {
                 if self.loop_depth == 0 {
@@ -872,15 +869,32 @@ impl<'a> Checker<'a> {
                         format!("if condition must be bool, found {}", fmt_type(&ct)),
                     );
                 }
-                // Push new scope for then branch
+                let entry_caps = self.cap_vars.clone();
                 self.var_scopes.push(HashMap::new());
+                self.ownership_control_path.push("then".to_string());
                 self.check_block(then_, ret, scopes);
+                self.ownership_control_path.pop();
                 self.var_scopes.pop();
+                let then_caps = self.cap_vars.clone();
+                let then_falls_through = !self.block_returns_on_all_paths(then_);
+                self.cap_vars = entry_caps.clone();
+                let mut else_falls_through = true;
                 if let Some(else_) = else_ {
                     // Push new scope for else branch
                     self.var_scopes.push(HashMap::new());
+                    self.ownership_control_path.push("else".to_string());
                     self.check_block(else_, ret, scopes);
+                    self.ownership_control_path.pop();
                     self.var_scopes.pop();
+                    else_falls_through = !self.block_returns_on_all_paths(else_);
+                }
+                let else_caps = self.cap_vars.clone();
+                self.cap_vars = entry_caps;
+                match (then_falls_through, else_falls_through) {
+                    (true, true) => self.merge_capability_branches(&then_caps, &else_caps),
+                    (true, false) => self.cap_vars = then_caps,
+                    (false, true) => self.cap_vars = else_caps,
+                    (false, false) => {}
                 }
             }
             Stmt::While { cond, body } => {
@@ -891,24 +905,33 @@ impl<'a> Checker<'a> {
                         format!("while condition must be bool, found {}", fmt_type(&ct)),
                     );
                 }
+                let entry_caps = self.cap_vars.clone();
                 self.loop_depth += 1;
                 self.check_block(body, ret, scopes);
                 self.loop_depth -= 1;
+                let body_caps = self.cap_vars.clone();
+                self.merge_loop_capabilities(entry_caps, &body_caps);
             }
             Stmt::WhileLet { pat, init, body } => {
                 // CG-H3: Array and Slice (with rest tail view) are supported in codegen.
                 let it = self.infer_expr(init, scopes);
                 scopes.push(HashMap::new());
                 self.check_pattern(pat, &it, scopes);
+                let entry_caps = self.cap_vars.clone();
                 self.loop_depth += 1;
                 self.check_block(body, ret, scopes);
                 self.loop_depth -= 1;
+                let body_caps = self.cap_vars.clone();
+                self.merge_loop_capabilities(entry_caps, &body_caps);
                 scopes.pop();
             }
             Stmt::Loop(body) => {
+                let entry_caps = self.cap_vars.clone();
                 self.loop_depth += 1;
                 self.check_block(body, ret, scopes);
                 self.loop_depth -= 1;
+                let body_caps = self.cap_vars.clone();
+                self.merge_loop_capabilities(entry_caps, &body_caps);
             }
             Stmt::For {
                 var,
@@ -940,9 +963,12 @@ impl<'a> Checker<'a> {
                 if let Some(s) = scopes.last_mut() {
                     s.insert(var.clone(), elem_ty);
                 }
+                let entry_caps = self.cap_vars.clone();
                 self.loop_depth += 1;
                 self.check_block(body, ret, scopes);
                 self.loop_depth -= 1;
+                let body_caps = self.cap_vars.clone();
+                self.merge_loop_capabilities(entry_caps, &body_caps);
                 scopes.pop();
             }
             Stmt::Block(block) => {
@@ -1406,24 +1432,7 @@ impl<'a> Checker<'a> {
                 }
                 // Mark the capability as consumed
                 if let Expr::Ident(name) = expr {
-                    if let Some(cap_scope) = self.cap_vars.last_mut() {
-                        if let Some(info) = cap_scope.get_mut(name) {
-                            if info.consumed {
-                                self.errors.push(
-                                    Diagnostic::error_code(
-                                        crate::diagnostic::codes::E0304,
-                                        format!("capability '{}' has already been consumed", name),
-                                        Span::single(self.current_line, self.current_col),
-                                    )
-                                    .with_help(
-                                        "capabilities are linear - each can only be dropped once",
-                                    ),
-                                );
-                            } else {
-                                info.consumed = true;
-                            }
-                        }
-                    }
+                    self.consume_capability(name, crate::core::ResourceActionKind::Drop);
                 }
             }
             Stmt::Requires(expr, _) => {
@@ -1500,16 +1509,35 @@ impl<'a> Checker<'a> {
                     param_scope.insert(p.name.clone(), self.resolve_type(&p.ty));
                 }
                 nested_scopes.insert(0, param_scope);
-                self.check_block_with_implicit_return(
-                    &func.body,
-                    &nested_ret,
-                    &mut nested_scopes,
-                );
+                let outer_caps = self.cap_vars.clone();
+                let outer_owner = self.current_ownership_owner.clone();
+                self.cap_vars = vec![HashMap::new()];
+                let nested_owner = outer_owner
+                    .as_ref()
+                    .map(|owner| crate::core::NodeId(format!("{}::nested::{}", owner.0, func.name)))
+                    .unwrap_or_else(|| {
+                        crate::core::NodeId(format!("function:nested::{}", func.name))
+                    });
+                let ownership_params: Vec<(String, Type)> = func
+                    .params
+                    .iter()
+                    .map(|p| (p.name.clone(), self.resolve_type(&p.ty)))
+                    .collect();
+                let previous_owner = self.begin_callable_ownership(nested_owner, &ownership_params);
+                self.check_block_with_implicit_return(&func.body, &nested_ret, &mut nested_scopes);
+                self.check_unconsumed_caps();
+                self.end_callable_ownership(previous_owner);
+                self.cap_vars = outer_caps;
+                self.current_ownership_owner = outer_owner;
             }
             Stmt::Do(body) => {
                 self.check_block(body, ret, scopes);
             }
-            Stmt::Delegate { kind, expr, target: _ } => {
+            Stmt::Delegate {
+                kind,
+                expr,
+                target: _,
+            } => {
                 self.infer_expr(expr, scopes);
                 // T-H14: static permission checks for view/mutate/consume.
                 if let Some(root) = Self::place_root_ident(expr) {

@@ -831,12 +831,7 @@ impl<'a> Checker<'a> {
                             .iter()
                             .map(|fld| fld.name.as_str())
                             .collect();
-                        let required = [
-                            "last_state",
-                            "unexpected_event",
-                            "snapshot",
-                            "trace",
-                        ];
+                        let required = ["last_state", "unexpected_event", "snapshot", "trace"];
                         if !required.iter().all(|r| names.contains(r)) {
                             self.emit_code(
                                 crate::diagnostic::codes::E0402,
@@ -961,9 +956,11 @@ impl<'a> Checker<'a> {
             }
             Item::Module(m) => {
                 self.set_pos(m.pos.0, m.pos.1);
+                self.module_path.push(m.name.clone());
                 for inner in &m.items {
                     self.check_item(inner);
                 }
+                self.module_path.pop();
             }
             Item::Actor(actor) => {
                 self.set_pos(actor.pos.0, actor.pos.1);
@@ -1012,6 +1009,20 @@ impl<'a> Checker<'a> {
                         .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
                     self.var_scopes.push(HashMap::new());
                     self.cap_vars.push(HashMap::new());
+                    let ownership_params: Vec<(String, Type)> = method
+                        .params
+                        .iter()
+                        .map(|p| (p.name.clone(), self.resolve_type(&p.ty)))
+                        .collect();
+                    let actor_name = if self.module_path.is_empty() {
+                        actor.name.clone()
+                    } else {
+                        format!("{}::{}", self.module_path.join("::"), actor.name)
+                    };
+                    let previous_owner = self.begin_callable_ownership(
+                        crate::core::NodeId(format!("function:{}::{}", actor_name, method.name)),
+                        &ownership_params,
+                    );
                     let implicit_return =
                         self.check_block_with_implicit_return(&method.body, &ret, &mut scopes);
                     self.check_method_implicit_return(
@@ -1020,6 +1031,7 @@ impl<'a> Checker<'a> {
                         implicit_return,
                     );
                     self.check_unconsumed_caps();
+                    self.end_callable_ownership(previous_owner);
                     self.cap_vars.pop();
                     self.var_scopes.pop();
                 }
@@ -1194,6 +1206,18 @@ impl<'a> Checker<'a> {
                     }
                     self.var_scopes.push(HashMap::new());
                     self.cap_vars.push(HashMap::new());
+                    let ownership_params: Vec<(String, Type)> = method
+                        .params
+                        .iter()
+                        .map(|p| (p.name.clone(), self.resolve_type(&p.ty)))
+                        .collect();
+                    let previous_owner = self.begin_callable_ownership(
+                        crate::core::NodeId(format!(
+                            "function:{}::{}::{}",
+                            impl_def.type_name, impl_def.trait_name, method.name
+                        )),
+                        &ownership_params,
+                    );
                     let implicit_return =
                         self.check_block_with_implicit_return(&method.body, &ret, &mut scopes);
                     self.check_method_implicit_return(
@@ -1205,6 +1229,7 @@ impl<'a> Checker<'a> {
                         implicit_return,
                     );
                     self.check_unconsumed_caps();
+                    self.end_callable_ownership(previous_owner);
                     self.var_scopes.pop();
                     self.cap_vars.pop();
                     self.generic_scope
@@ -1444,8 +1469,27 @@ impl<'a> Checker<'a> {
                         self.current_ret = Some(ret_type.clone());
                         self.var_scopes.push(std::collections::HashMap::new());
                         self.cap_vars.push(std::collections::HashMap::new());
+                        let ownership_params: Vec<(String, Type)> = t
+                            .params
+                            .iter()
+                            .map(|p| (p.name.clone(), self.resolve_type(&p.ty)))
+                            .collect();
+                        let flow_name = if self.module_path.is_empty() {
+                            f.name.clone()
+                        } else {
+                            format!("{}::{}", self.module_path.join("::"), f.name)
+                        };
+                        let previous_owner = self.begin_callable_ownership(
+                            crate::core::NodeId(format!(
+                                "transition:{}::{}::{}",
+                                flow_name, t.name, t.from_state
+                            )),
+                            &ownership_params,
+                        );
                         // Type-check the body as a block
                         self.check_block(body, &ret_type, &mut scopes);
+                        self.check_unconsumed_caps();
+                        self.end_callable_ownership(previous_owner);
                         self.cap_vars.pop();
                         self.var_scopes.pop();
                         self.current_ret = prev_ret;
@@ -1556,7 +1600,9 @@ impl<'a> Checker<'a> {
                     //    - mutate (Type::RefMut or name "mutate T"): invariant — flow
                     //      payload field types must exactly match protocol payload type
                     for ps in &proto.states {
-                        let Some(proto_ty) = ps.payload_type.as_ref() else { continue };
+                        let Some(proto_ty) = ps.payload_type.as_ref() else {
+                            continue;
+                        };
                         let is_mutate = matches!(proto_ty, crate::ast::Type::RefMut(_, _))
                             || matches!(
                                 proto_ty,

@@ -122,9 +122,19 @@ impl<'a> Checker<'a> {
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
         self.infer_expr(cond, scopes);
+        let entry_caps = self.cap_vars.clone();
+        self.ownership_control_path.push("expr-then".to_string());
         let then_ty = self.infer_block_expr(then_, scopes);
+        self.ownership_control_path.pop();
+        let then_caps = self.cap_vars.clone();
+        self.cap_vars = entry_caps.clone();
         if let Some(eb) = else_ {
+            self.ownership_control_path.push("expr-else".to_string());
             let else_ty = self.infer_block_expr(eb, scopes);
+            self.ownership_control_path.pop();
+            let else_caps = self.cap_vars.clone();
+            self.cap_vars = entry_caps;
+            self.merge_capability_branches(&then_caps, &else_caps);
             // Bug-3: use unify instead of same_type to enable bidirectional type inference.
             // This allows the expected type to propagate into both branches, so
             // `Some(1)` in an `Option<i64>` context can infer i64 from the expected type.
@@ -142,6 +152,8 @@ impl<'a> Checker<'a> {
                 Type::Name("unknown".into(), vec![])
             }
         } else {
+            self.cap_vars = entry_caps;
+            self.merge_capability_branches(&then_caps, &self.cap_vars.clone());
             then_ty
         }
     }

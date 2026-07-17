@@ -12,6 +12,17 @@ use super::unification::UnificationTable;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CapVarInfo {
     pub consumed: bool,
+    pub maybe_consumed: bool,
+}
+
+fn cap_resource_state(info: &CapVarInfo) -> super::ResourceState {
+    if info.maybe_consumed {
+        super::ResourceState::MaybeConsumed
+    } else if info.consumed {
+        super::ResourceState::Consumed
+    } else {
+        super::ResourceState::Available
+    }
 }
 
 pub(crate) struct Checker<'a> {
@@ -99,6 +110,9 @@ pub(crate) struct Checker<'a> {
     pub(crate) mutate_params: std::collections::HashSet<String>,
     /// v0.29.27: nesting depth of `pinned { }` blocks (FFI anchor).
     pub(crate) in_pinned_depth: usize,
+    pub(crate) ownership_ledgers: HashMap<super::NodeId, super::OwnershipLedger>,
+    pub(crate) current_ownership_owner: Option<super::NodeId>,
+    pub(crate) ownership_control_path: Vec<String>,
 }
 
 #[allow(dead_code)]
@@ -146,7 +160,216 @@ impl<'a> Checker<'a> {
             view_params: std::collections::HashSet::new(),
             mutate_params: std::collections::HashSet::new(),
             in_pinned_depth: 0,
+            ownership_ledgers: HashMap::new(),
+            current_ownership_owner: None,
+            ownership_control_path: Vec::new(),
         }
+    }
+
+    pub(crate) fn cap_info(&self, name: &str) -> Option<&CapVarInfo> {
+        self.cap_vars.iter().rev().find_map(|scope| scope.get(name))
+    }
+
+    pub(crate) fn cap_info_mut(&mut self, name: &str) -> Option<&mut CapVarInfo> {
+        self.cap_vars
+            .iter_mut()
+            .rev()
+            .find_map(|scope| scope.get_mut(name))
+    }
+
+    pub(crate) fn record_resource_action(
+        &mut self,
+        kind: super::ResourceActionKind,
+        resource: &str,
+    ) {
+        let Some(owner) = self.current_ownership_owner.clone() else {
+            return;
+        };
+        let ledger = self
+            .ownership_ledgers
+            .entry(owner.clone())
+            .or_insert_with(|| super::OwnershipLedger::new(owner));
+        ledger.actions.push(super::ResourceAction {
+            kind,
+            resource: resource.to_string(),
+            control_path: self.ownership_control_path.clone(),
+            span: Span::single(self.current_line, self.current_col),
+        });
+    }
+
+    pub(crate) fn merge_capability_branches(
+        &mut self,
+        then_caps: &[HashMap<String, CapVarInfo>],
+        else_caps: &[HashMap<String, CapVarInfo>],
+    ) {
+        let owner = self.current_ownership_owner.clone();
+        let span = Span::single(self.current_line, self.current_col);
+        let mut merges = Vec::new();
+        let mut inconsistent = Vec::new();
+
+        for scope_index in 0..self.cap_vars.len() {
+            let names: Vec<String> = self.cap_vars[scope_index].keys().cloned().collect();
+            for name in names {
+                let then_state = then_caps
+                    .get(scope_index)
+                    .and_then(|scope| scope.get(&name))
+                    .map(cap_resource_state)
+                    .unwrap_or(crate::core::ResourceState::Available);
+                let else_state = else_caps
+                    .get(scope_index)
+                    .and_then(|scope| scope.get(&name))
+                    .map(cap_resource_state)
+                    .unwrap_or(crate::core::ResourceState::Available);
+                let merged_state = if then_state == else_state {
+                    then_state
+                } else {
+                    crate::core::ResourceState::MaybeConsumed
+                };
+
+                if let Some(info) = self.cap_vars[scope_index].get_mut(&name) {
+                    info.consumed = merged_state == crate::core::ResourceState::Consumed;
+                    info.maybe_consumed = merged_state == crate::core::ResourceState::MaybeConsumed;
+                }
+                if merged_state == crate::core::ResourceState::MaybeConsumed {
+                    inconsistent.push(name.clone());
+                }
+                merges.push(crate::core::BranchMerge {
+                    resource: name,
+                    then_state,
+                    else_state,
+                    merged_state,
+                    span,
+                });
+            }
+        }
+
+        if let Some(owner) = owner {
+            if let Some(ledger) = self.ownership_ledgers.get_mut(&owner) {
+                ledger.branch_merges.extend(merges);
+            }
+        }
+        for name in inconsistent {
+            self.errors.push(
+                Diagnostic::error_code(
+                    crate::diagnostic::codes::E0304,
+                    format!(
+                        "capability '{}' is consumed on only some control-flow paths",
+                        name
+                    ),
+                    span,
+                )
+                .with_help(
+                    "move, return, transfer, or drop the capability on every branch, or on none",
+                ),
+            );
+        }
+    }
+
+    pub(crate) fn check_return_capabilities(&mut self, returned: Option<&str>) {
+        let mut unconsumed = Vec::new();
+        for scope in &self.cap_vars {
+            for (name, info) in scope {
+                if returned != Some(name.as_str()) && (!info.consumed || info.maybe_consumed) {
+                    unconsumed.push(name.clone());
+                }
+            }
+        }
+        for name in unconsumed {
+            self.emit_code(
+                crate::diagnostic::codes::E0256,
+                format!(
+                    "linear capability '{}' must be consumed before this return path",
+                    name
+                ),
+            );
+        }
+    }
+
+    pub(crate) fn merge_loop_capabilities(
+        &mut self,
+        entry_caps: Vec<HashMap<String, CapVarInfo>>,
+        body_caps: &[HashMap<String, CapVarInfo>],
+    ) {
+        let mut changed = Vec::new();
+        for (scope_index, entry_scope) in entry_caps.iter().enumerate() {
+            for (name, entry_info) in entry_scope {
+                let body_info = body_caps
+                    .get(scope_index)
+                    .and_then(|scope| scope.get(name))
+                    .unwrap_or(entry_info);
+                if cap_resource_state(entry_info) != cap_resource_state(body_info) {
+                    changed.push(name.clone());
+                }
+            }
+        }
+        self.cap_vars = entry_caps;
+        for name in changed {
+            self.errors.push(
+                Diagnostic::error_code(
+                    crate::diagnostic::codes::E0304,
+                    format!(
+                        "capability '{}' cannot be consumed inside a potentially repeating loop",
+                        name
+                    ),
+                    Span::single(self.current_line, self.current_col),
+                )
+                .with_help(
+                    "move or drop the capability outside the loop; loop-carried ownership requires CFG fixed-point analysis",
+                ),
+            );
+        }
+    }
+
+    pub(crate) fn consume_capability(&mut self, name: &str, kind: super::ResourceActionKind) {
+        let mut transitioned = false;
+        let mut already_consumed = false;
+        if let Some(info) = self.cap_info_mut(name) {
+            if info.consumed || info.maybe_consumed {
+                already_consumed = true;
+            } else {
+                info.consumed = true;
+                info.maybe_consumed = false;
+                transitioned = true;
+            }
+        }
+        if already_consumed {
+            self.emit_code(
+                crate::diagnostic::codes::E0304,
+                format!("capability '{}' has already been consumed", name),
+            );
+        } else if transitioned {
+            self.record_resource_action(kind, name);
+        }
+    }
+
+    pub(crate) fn begin_callable_ownership(
+        &mut self,
+        owner: super::NodeId,
+        params: &[(String, Type)],
+    ) -> Option<super::NodeId> {
+        let previous = self.current_ownership_owner.replace(owner.clone());
+        self.ownership_ledgers
+            .entry(owner.clone())
+            .or_insert_with(|| super::OwnershipLedger::new(owner));
+        for (name, ty) in params {
+            if matches!(ty, Type::Cap(_)) {
+                if let Some(scope) = self.cap_vars.last_mut() {
+                    scope.insert(
+                        name.clone(),
+                        CapVarInfo {
+                            consumed: false,
+                            maybe_consumed: false,
+                        },
+                    );
+                }
+                self.record_resource_action(super::ResourceActionKind::Introduce, name);
+            }
+        }
+        previous
+    }
+
+    pub(crate) fn end_callable_ownership(&mut self, previous: Option<super::NodeId>) {
+        self.current_ownership_owner = previous;
     }
 
     /// Set the current position for fallback error spans.
