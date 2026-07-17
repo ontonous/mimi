@@ -405,6 +405,8 @@ pub struct VerifierCtx {
     // path so the substitution survives function boundaries.
     #[allow(dead_code)]
     pub(crate) let_subst: HashMap<String, Expr>,
+    /// Function names materialised from CheckedProgram (qualified).
+    pub(crate) checked_function_names: std::collections::HashSet<String>,
 }
 
 /// Backward-compatible verifier with its own solver session.
@@ -430,6 +432,11 @@ impl Verifier {
         &mut self,
         program: &crate::core::CheckedProgram<'_>,
     ) -> Vec<VerificationResult> {
+        self.ctx.checked_function_names = program
+            .functions()
+            .values()
+            .map(|function| function.qualified_name.clone())
+            .collect();
         self.verify_file(program.file())
     }
 
