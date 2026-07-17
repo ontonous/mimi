@@ -222,10 +222,23 @@ impl UnificationTable {
         }
     }
 
-    /// Unify two types. Adds constraints to the unification table.
-    ///
-    /// Both types should be resolved before calling this (or this will resolve them).
+    /// Stable unification entrypoint. Escape placeholders are rejected here;
+    /// callers at an explicit inference boundary must use `unify_inference`.
     pub fn unify(&mut self, a: &Type, b: &Type) -> Result<(), UnifyError> {
+        let a_resolved = self.resolve(a);
+        let b_resolved = self.resolve(b);
+        if is_escape_type(&a_resolved) || is_escape_type(&b_resolved) {
+            return Err(UnifyError::Mismatch(format!(
+                "checked unification rejects escape types {} and {}",
+                crate::core::helpers::fmt_type(&a_resolved),
+                crate::core::helpers::fmt_type(&b_resolved)
+            )));
+        }
+        self.unify_inference(&a_resolved, &b_resolved)
+    }
+
+    /// Permissive unification for explicit local inference boundaries only.
+    pub fn unify_inference(&mut self, a: &Type, b: &Type) -> Result<(), UnifyError> {
         let a_resolved = self.resolve(a);
         let b_resolved = self.resolve(b);
 
@@ -282,34 +295,34 @@ impl UnificationTable {
 
             // Dual representation normalization: Name("Option", [T]) <-> Option(T)
             (Type::Name(n, args), Type::Option(inner)) if n == "Option" && args.len() == 1 => {
-                self.unify(&args[0], inner)
+                self.unify_inference(&args[0], inner)
             }
             (Type::Option(inner), Type::Name(n, args)) if n == "Option" && args.len() == 1 => {
-                self.unify(inner, &args[0])
+                self.unify_inference(inner, &args[0])
             }
             (Type::Name(n, args), Type::Result(ok, err)) if n == "Result" && args.len() == 2 => {
-                self.unify(&args[0], ok)?;
-                self.unify(&args[1], err)
+                self.unify_inference(&args[0], ok)?;
+                self.unify_inference(&args[1], err)
             }
             (Type::Result(ok, err), Type::Name(n, args)) if n == "Result" && args.len() == 2 => {
-                self.unify(ok, &args[0])?;
-                self.unify(err, &args[1])
+                self.unify_inference(ok, &args[0])?;
+                self.unify_inference(err, &args[1])
             }
             // Same constructors — unify structurally
             (Type::Name(na, aa), Type::Name(nb, ab)) if na == nb && aa.len() == ab.len() => {
                 for (a, b) in aa.iter().zip(ab.iter()) {
-                    self.unify(a, b)?;
+                    self.unify_inference(a, b)?;
                 }
                 Ok(())
             }
-            (Type::Option(a), Type::Option(b)) => self.unify(a, b),
+            (Type::Option(a), Type::Option(b)) => self.unify_inference(a, b),
             (Type::Result(a1, a2), Type::Result(b1, b2)) => {
-                self.unify(a1, b1)?;
-                self.unify(a2, b2)
+                self.unify_inference(a1, b1)?;
+                self.unify_inference(a2, b2)
             }
             (Type::Tuple(a), Type::Tuple(b)) if a.len() == b.len() => {
                 for (a, b) in a.iter().zip(b.iter()) {
-                    self.unify(a, b)?;
+                    self.unify_inference(a, b)?;
                 }
                 Ok(())
             }
@@ -323,25 +336,25 @@ impl UnificationTable {
                     )));
                 }
                 for (a, b) in a_args.iter().zip(b_args.iter()) {
-                    self.unify(a, b)?;
+                    self.unify_inference(a, b)?;
                 }
-                self.unify(a_ret, b_ret)
+                self.unify_inference(a_ret, b_ret)
             }
-            (Type::Ref(_, a), Type::Ref(_, b)) => self.unify(a, b),
-            (Type::RefMut(_, a), Type::RefMut(_, b)) => self.unify(a, b),
-            (Type::Shared(a), Type::Shared(b)) => self.unify(a, b),
-            (Type::LocalShared(a), Type::LocalShared(b)) => self.unify(a, b),
-            (Type::Weak(a), Type::Weak(b)) => self.unify(a, b),
-            (Type::WeakLocal(a), Type::WeakLocal(b)) => self.unify(a, b),
-            (Type::RawPtr(a), Type::RawPtr(b)) => self.unify(a, b),
-            (Type::RawPtrMut(a), Type::RawPtrMut(b)) => self.unify(a, b),
-            (Type::CShared(a), Type::CShared(b)) => self.unify(a, b),
-            (Type::CBorrow(a), Type::CBorrow(b)) => self.unify(a, b),
-            (Type::CBorrowMut(a), Type::CBorrowMut(b)) => self.unify(a, b),
-            (Type::CBuffer(a), Type::CBuffer(b)) => self.unify(a, b),
-            (Type::Slice(a), Type::Slice(b)) => self.unify(a, b),
-            (Type::Array(a, na), Type::Array(b, nb)) if na == nb => self.unify(a, b),
-            (Type::Newtype(na, a), Type::Newtype(nb, b)) if na == nb => self.unify(a, b),
+            (Type::Ref(_, a), Type::Ref(_, b)) => self.unify_inference(a, b),
+            (Type::RefMut(_, a), Type::RefMut(_, b)) => self.unify_inference(a, b),
+            (Type::Shared(a), Type::Shared(b)) => self.unify_inference(a, b),
+            (Type::LocalShared(a), Type::LocalShared(b)) => self.unify_inference(a, b),
+            (Type::Weak(a), Type::Weak(b)) => self.unify_inference(a, b),
+            (Type::WeakLocal(a), Type::WeakLocal(b)) => self.unify_inference(a, b),
+            (Type::RawPtr(a), Type::RawPtr(b)) => self.unify_inference(a, b),
+            (Type::RawPtrMut(a), Type::RawPtrMut(b)) => self.unify_inference(a, b),
+            (Type::CShared(a), Type::CShared(b)) => self.unify_inference(a, b),
+            (Type::CBorrow(a), Type::CBorrow(b)) => self.unify_inference(a, b),
+            (Type::CBorrowMut(a), Type::CBorrowMut(b)) => self.unify_inference(a, b),
+            (Type::CBuffer(a), Type::CBuffer(b)) => self.unify_inference(a, b),
+            (Type::Slice(a), Type::Slice(b)) => self.unify_inference(a, b),
+            (Type::Array(a, na), Type::Array(b, nb)) if na == nb => self.unify_inference(a, b),
+            (Type::Newtype(na, a), Type::Newtype(nb, b)) if na == nb => self.unify_inference(a, b),
             // CO-H3 (audit): Newtype is transparent — unify with inner type.
             // Guard prevents cross-newtype unification: Newtype("A",_) vs Newtype("B",_)
             // only succeeds if inner of A matches B's same-name case in the recursive call.
@@ -362,10 +375,10 @@ impl UnificationTable {
             // `i32` in a function call. A future v0.31 stricter-newtype pass
             // may add E0259 for cross-newtype coercion.
             (Type::Newtype(_, inner), other) if !matches!(other, Type::Newtype(..)) => {
-                self.unify(inner, other)
+                self.unify_inference(inner, other)
             }
             (other, Type::Newtype(_, inner)) if !matches!(other, Type::Newtype(..)) => {
-                self.unify(inner, other)
+                self.unify_inference(inner, other)
             }
             // Newtypes are distinct — different names don't unify (type safety)
             (Type::ImplTrait(a), Type::ImplTrait(b)) | (Type::DynTrait(a), Type::DynTrait(b)) => {
@@ -432,6 +445,42 @@ impl UnificationTable {
             )));
         }
         self.unify(&a_resolved, &b_resolved)
+    }
+}
+
+fn is_escape_type(ty: &Type) -> bool {
+    match ty {
+        Type::Infer => true,
+        Type::Name(name, args) => name == "Any" || name == "_" || args.iter().any(is_escape_type),
+        Type::Ref(_, inner)
+        | Type::RefMut(_, inner)
+        | Type::Option(inner)
+        | Type::Shared(inner)
+        | Type::LocalShared(inner)
+        | Type::Weak(inner)
+        | Type::WeakLocal(inner)
+        | Type::Array(inner, _)
+        | Type::Slice(inner)
+        | Type::Newtype(_, inner)
+        | Type::CBuffer(inner)
+        | Type::RawPtr(inner)
+        | Type::RawPtrMut(inner)
+        | Type::CShared(inner)
+        | Type::CBorrow(inner)
+        | Type::CBorrowMut(inner)
+        | Type::ForAll(_, inner) => is_escape_type(inner),
+        Type::Result(ok, err) => is_escape_type(ok) || is_escape_type(err),
+        Type::Tuple(items) => items.iter().any(is_escape_type),
+        Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
+            args.iter().any(is_escape_type) || is_escape_type(ret)
+        }
+        Type::TypeVar(_)
+        | Type::Cap(_)
+        | Type::DynTrait(_)
+        | Type::ImplTrait(_)
+        | Type::Nothing
+        | Type::Allocator
+        | Type::RawString => false,
     }
 }
 
@@ -509,9 +558,19 @@ mod tests {
     }
 
     #[test]
-    fn test_wildcard_placeholder() {
+    fn checked_unify_rejects_wildcard_placeholder() {
         let mut table = UnificationTable::new();
         let wildcard = Type::Name("_".into(), vec![]);
-        assert!(table.unify(&wildcard, &i32_ty()).is_ok());
+        assert!(table.unify(&wildcard, &i32_ty()).is_err());
+        assert!(table.unify_inference(&wildcard, &i32_ty()).is_ok());
+    }
+
+    #[test]
+    fn checked_unify_rejects_nested_escape_types() {
+        let mut table = UnificationTable::new();
+        let option_any = Type::Option(Box::new(Type::Name("Any".into(), vec![])));
+        let option_i32 = Type::Option(Box::new(i32_ty()));
+        assert!(table.unify(&option_any, &option_i32).is_err());
+        assert!(table.unify_inference(&option_any, &option_i32).is_ok());
     }
 }
