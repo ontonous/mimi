@@ -1448,6 +1448,27 @@ func main() -> i32 { 0 }
         assert!(program.function("write").is_some());
     }
 
+
+    #[test]
+    fn interpreter_from_checked_installs_session_and_protocol_directories() {
+        let file = parse(
+            r#"
+protocol Sensor {
+    state Idle
+    state Active
+    transition start(Idle) -> Active
+}
+session Ping = !i32 . end
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert!(interp.has_resolved_session("Ping"));
+        assert!(interp.has_resolved_protocol("Sensor"));
+        assert!(!interp.has_resolved_protocol("Missing"));
+    }
+
     #[test]
     fn canonical_flow_ids_include_module_path() {
         let file = parse(
