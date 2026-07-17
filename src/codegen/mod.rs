@@ -307,6 +307,7 @@ pub struct CodeGenerator<'ctx> {
     /// Function directory from CheckedProgram: qualified_name -> arity.
     resolved_function_arity: Option<HashMap<String, usize>>,
     resolved_function_effects: Option<HashMap<String, Vec<String>>>,
+    resolved_comptime_functions: Option<std::collections::HashSet<String>>,
     /// Session names from CheckedProgram.
     resolved_sessions: Option<std::collections::HashSet<String>>,
     /// Protocol names from CheckedProgram.
@@ -443,6 +444,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_transition_param_arity: None,
             resolved_function_arity: None,
             resolved_function_effects: None,
+            resolved_comptime_functions: None,
             resolved_sessions: None,
             resolved_protocols: None,
             resolved_actors: None,
@@ -463,6 +465,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+
+    pub(crate) fn is_resolved_comptime_function(&self, name: &str) -> bool {
+        self.resolved_comptime_functions
+            .as_ref()
+            .is_some_and(|set| set.contains(name))
+    }
 
     pub(crate) fn resolved_function_effects(&self, name: &str) -> Option<Vec<String>> {
         self.resolved_function_effects
