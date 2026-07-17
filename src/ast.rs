@@ -37,6 +37,7 @@ pub enum Item {
     ExternBlock(ExternBlock),
     Const {
         name: String,
+        pos: (usize, usize),
         ty: Option<Type>,
         value: Expr,
         pub_: bool,
@@ -49,6 +50,8 @@ pub enum Item {
 
 #[derive(Debug, Clone)]
 pub struct ExternBlock {
+    pub pos: (usize, usize),
+    pub origin: AstOrigin,
     pub abi: String,
     pub funcs: Vec<ExternFunc>,
     /// If true, the compiler wraps all FFI calls in this block with
@@ -93,6 +96,8 @@ pub enum CapMode {
 #[derive(Debug, Clone)]
 pub struct TraitDef {
     pub name: String,
+    pub pos: (usize, usize),
+    pub origin: AstOrigin,
     pub methods: Vec<TraitMethod>,
     pub generics: Vec<GenericParam>,
 }
@@ -107,6 +112,8 @@ pub struct TraitMethod {
 
 #[derive(Debug, Clone)]
 pub struct ImplDef {
+    pub pos: (usize, usize),
+    pub origin: AstOrigin,
     pub generics: Vec<GenericParam>,
     pub trait_name: String,
     pub trait_args: Vec<Type>,
@@ -118,6 +125,8 @@ pub struct ImplDef {
 #[derive(Debug, Clone)]
 pub struct CapDef {
     pub name: String,
+    pub pos: (usize, usize),
+    pub origin: AstOrigin,
     /// None for simple cap, Some(other_cap) for combined cap (A + B)
     pub combined_with: Option<String>,
 }

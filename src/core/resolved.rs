@@ -12,6 +12,11 @@ pub struct NodeId(pub String);
 pub enum ResolvedItemKind {
     Function,
     Type,
+    Constant,
+    Capability,
+    Trait,
+    Impl,
+    ExternBlock,
     Module,
     Actor,
     Flow,
@@ -291,6 +296,49 @@ fn collect_items(
                     );
                 }
             }
+            Item::Const { name, pos, .. } => insert_item(
+                resolved_items,
+                ResolvedItemKind::Constant,
+                &qualify(module, name),
+                AstOrigin::User,
+                Span::from(*pos),
+                errors,
+            ),
+            Item::Cap(cap) => insert_item(
+                resolved_items,
+                ResolvedItemKind::Capability,
+                &qualify(module, &cap.name),
+                cap.origin,
+                Span::from(cap.pos),
+                errors,
+            ),
+            Item::Trait(trait_def) => insert_item(
+                resolved_items,
+                ResolvedItemKind::Trait,
+                &qualify(module, &trait_def.name),
+                trait_def.origin,
+                Span::from(trait_def.pos),
+                errors,
+            ),
+            Item::Impl(impl_def) => insert_item(
+                resolved_items,
+                ResolvedItemKind::Impl,
+                &qualify(
+                    module,
+                    &format!("{}:for:{}", impl_def.trait_name, impl_def.type_name),
+                ),
+                impl_def.origin,
+                Span::from(impl_def.pos),
+                errors,
+            ),
+            Item::ExternBlock(block) => insert_item(
+                resolved_items,
+                ResolvedItemKind::ExternBlock,
+                &qualify(module, &format!("{}:at:{}", block.abi, block.pos.0)),
+                block.origin,
+                Span::from(block.pos),
+                errors,
+            ),
             Item::Actor(actor) => insert_item(
                 resolved_items,
                 ResolvedItemKind::Actor,
@@ -315,7 +363,6 @@ fn collect_items(
                 Span::from(session.pos),
                 errors,
             ),
-            _ => {}
         }
     }
 }
@@ -331,6 +378,11 @@ fn insert_item(
     let kind_name = match kind {
         ResolvedItemKind::Function => "function",
         ResolvedItemKind::Type => "type",
+        ResolvedItemKind::Constant => "const",
+        ResolvedItemKind::Capability => "capability",
+        ResolvedItemKind::Trait => "trait",
+        ResolvedItemKind::Impl => "impl",
+        ResolvedItemKind::ExternBlock => "extern",
         ResolvedItemKind::Module => "module",
         ResolvedItemKind::Actor => "actor",
         ResolvedItemKind::Flow => "flow",
@@ -688,6 +740,35 @@ func main() -> i32 { 0 }
         assert!(!program
             .items()
             .contains_key(&NodeId("type:ExecResult".to_string())));
+    }
+
+    #[test]
+    fn resolved_item_directory_covers_remaining_top_level_items() {
+        let file = parse(
+            r#"
+cap Read
+trait Show { func show(self: i32) -> i32; }
+type Number = i32
+impl Show for Number { func show(self: Number) -> i32 { 0 } }
+const ANSWER: i32 = 42
+extern "C" { func abs(value: i32) -> i32; }
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        for node_id in [
+            "capability:Read",
+            "trait:Show",
+            "impl:Show:for:Number",
+            "const:ANSWER",
+            "extern:C:at:7",
+        ] {
+            let item = program
+                .items()
+                .get(&NodeId(node_id.to_string()))
+                .unwrap_or_else(|| panic!("missing {node_id}"));
+            assert!(item.origin.user_span().start_line > 0);
+        }
     }
 
     #[test]
