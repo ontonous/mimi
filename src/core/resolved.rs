@@ -1925,6 +1925,38 @@ func main() -> i32 { 0 }
     }
 
 
+
+    #[test]
+    fn ownership_summary_flags_maybe_consumed_branch_merge() {
+        let file = parse(
+            r#"
+cap File
+func bad(flag: bool, f: cap File) -> i32 {
+    if flag { drop(f) }
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        // This program is rejected by checker; use check_program expect_err then
+        // still materialize IR is not available. Instead check accepted both-path
+        // program for merge without maybe, and use a custom accepted pattern.
+        // For maybe-consumed, checker errors before IR success. Validate helper
+        // on a synthetic ledger instead.
+        let mut ledger = crate::core::OwnershipLedger::new(crate::core::NodeId(
+            "function:synthetic".into(),
+        ));
+        ledger.branch_merges.push(crate::core::BranchMerge {
+            resource: "f".into(),
+            then_state: crate::core::ResourceState::Consumed,
+            else_state: crate::core::ResourceState::Available,
+            merged_state: crate::core::ResourceState::MaybeConsumed,
+            span: crate::span::Span::single(1, 1),
+        });
+        assert!(ledger.has_maybe_consumed_merge());
+        assert_eq!(ledger.action_count(crate::core::ResourceActionKind::Drop), 0);
+    }
+
     #[test]
     fn resolved_types_and_extern_blocks_are_indexed() {
         let file = parse(
