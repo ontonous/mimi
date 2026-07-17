@@ -124,6 +124,16 @@ pub struct CapabilityRequirement {
     pub span: Span,
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedFunction {
+    pub node_id: NodeId,
+    pub qualified_name: String,
+    pub params: Vec<(String, Type)>,
+    pub ret: Type,
+    pub is_comptime: bool,
+    pub origin: Origin,
+}
+
 #[derive(Debug)]
 pub struct CheckedProgram<'a> {
     file: &'a File,
@@ -131,6 +141,7 @@ pub struct CheckedProgram<'a> {
     node_meta: HashMap<NodeId, NodeMeta>,
     flows: HashMap<FlowId, ResolvedFlow>,
     transitions: HashMap<TransitionId, ResolvedTransition>,
+    functions: HashMap<NodeId, ResolvedFunction>,
     backend_requirements: Vec<CapabilityRequirement>,
     ownership_ledgers: HashMap<NodeId, OwnershipLedger>,
 }
@@ -149,6 +160,7 @@ impl<'a> CheckedProgram<'a> {
         let mut flows = HashMap::new();
         let mut items = HashMap::new();
         let mut node_meta = HashMap::new();
+        let mut functions = HashMap::new();
         let mut backend_requirements = Vec::new();
         let mut errors = Vec::new();
         collect_items(
@@ -156,6 +168,7 @@ impl<'a> CheckedProgram<'a> {
             "",
             &mut items,
             &mut node_meta,
+            &mut functions,
             &mut flows,
             &mut transitions,
             &mut backend_requirements,
@@ -170,6 +183,7 @@ impl<'a> CheckedProgram<'a> {
             node_meta,
             flows,
             transitions,
+            functions,
             backend_requirements,
             ownership_ledgers,
         })
@@ -189,6 +203,16 @@ impl<'a> CheckedProgram<'a> {
 
     pub fn items(&self) -> &HashMap<NodeId, ResolvedItem> {
         &self.items
+    }
+
+    pub fn functions(&self) -> &HashMap<NodeId, ResolvedFunction> {
+        &self.functions
+    }
+
+    pub fn function(&self, qualified_name: &str) -> Option<&ResolvedFunction> {
+        self.functions
+            .values()
+            .find(|function| function.qualified_name == qualified_name)
     }
 
     pub fn node_meta(&self) -> &HashMap<NodeId, NodeMeta> {
@@ -279,6 +303,7 @@ fn collect_items(
     module: &str,
     resolved_items: &mut HashMap<NodeId, ResolvedItem>,
     node_meta: &mut HashMap<NodeId, NodeMeta>,
+    functions: &mut HashMap<NodeId, ResolvedFunction>,
     flows: &mut HashMap<FlowId, ResolvedFlow>,
     transitions: &mut HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: &mut Vec<CapabilityRequirement>,
@@ -301,6 +326,7 @@ fn collect_items(
                     &qualified,
                     resolved_items,
                     node_meta,
+                    functions,
                     flows,
                     transitions,
                     backend_requirements,
@@ -328,18 +354,64 @@ fn collect_items(
             }
             Item::Func(function) => {
                 let qualified = qualify(module, &function.name);
+                let span = Span::from(function.pos);
                 insert_item(
                     resolved_items,
                     ResolvedItemKind::Function,
                     &qualified,
                     AstOrigin::User,
-                    Span::from(function.pos),
+                    span,
                     errors,
+                );
+                let node_id = NodeId(format!("function:{}", qualified));
+                let origin = Origin::User(span);
+                let params = function
+                    .params
+                    .iter()
+                    .map(|param| (param.name.clone(), param.ty.clone()))
+                    .collect::<Vec<_>>();
+                for (name, ty) in &params {
+                    if contains_unresolved_type(ty) {
+                        errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: unresolved or erased type '{}' in function '{}' parameter '{}'",
+                                crate::core::fmt_type(ty),
+                                qualified,
+                                name
+                            ),
+                            span,
+                        ));
+                    }
+                }
+                let ret = function
+                    .ret
+                    .clone()
+                    .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
+                if contains_unresolved_type(&ret) {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: unresolved or erased return type '{}' in function '{}'",
+                            crate::core::fmt_type(&ret),
+                            qualified
+                        ),
+                        span,
+                    ));
+                }
+                functions.insert(
+                    node_id.clone(),
+                    ResolvedFunction {
+                        node_id,
+                        qualified_name: qualified.clone(),
+                        params,
+                        ret,
+                        is_comptime: function.is_comptime,
+                        origin,
+                    },
                 );
                 collect_block_meta(
                     &function.body,
                     &format!("function:{}", qualified),
-                    Span::from(function.pos),
+                    span,
                     node_meta,
                 );
             }
@@ -1075,6 +1147,29 @@ func main() -> i32 { 0 }
         assert!(program.transition("Counter", "inc", "Pos").is_some());
         assert!(program.transition("Counter", "inc", "Missing").is_none());
         assert!(program.transition("Counter", "dec", "Zero").is_none());
+    }
+
+
+    #[test]
+    fn resolved_function_signatures_are_indexed_by_qualified_name() {
+        let file = parse(
+            r#"
+module util {
+    func twice(x: i32) -> i32 { x + x }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let twice = program
+            .function("util::twice")
+            .expect("util::twice signature");
+        assert_eq!(twice.params.len(), 1);
+        assert_eq!(twice.params[0].0, "x");
+        assert!(matches!(&twice.params[0].1, Type::Name(n, _) if n == "i32"));
+        assert!(matches!(&twice.ret, Type::Name(n, _) if n == "i32"));
+        assert!(program.function("twice").is_none());
+        assert!(program.function("main").is_some());
     }
 
     #[test]
