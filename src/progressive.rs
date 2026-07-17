@@ -27,7 +27,16 @@ pub fn apply_progressive_typestate(file: &mut File) -> bool {
     }
     // Script mode: inject invisible Main / Single.
     file.implicit_single = true;
-    file.items.insert(0, Item::Flow(make_implicit_main_flow()));
+    let main_pos = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Func(function) if function.name == "main" => Some(function.pos),
+            _ => None,
+        })
+        .unwrap_or((1, 1));
+    file.items
+        .insert(0, Item::Flow(make_implicit_main_flow(main_pos)));
     true
 }
 
@@ -40,18 +49,22 @@ fn file_has_user_flow(file: &File) -> bool {
 }
 
 /// `flow Main { state Single; transition run(Single) -> Single { do { return Single { } } } }`
-fn make_implicit_main_flow() -> FlowDef {
+fn make_implicit_main_flow(pos: (usize, usize)) -> FlowDef {
     let run_body = vec![Stmt::Return(Some(Expr::Record {
         ty: Some("Single".to_string()),
         fields: vec![],
     }))];
     FlowDef {
         name: "Main".to_string(),
+        pos,
+        origin: AstOrigin::RuntimeSystem,
         pub_: false,
         generics: vec![],
         annotations: vec![],
         states: vec![StateDef {
             name: "Single".to_string(),
+            pos,
+            origin: AstOrigin::RuntimeSystem,
             payload: None,
         }],
         transitions: vec![TransitionDef {
@@ -60,7 +73,7 @@ fn make_implicit_main_flow() -> FlowDef {
             params: vec![],
             to_states: vec!["Single".to_string()],
             body: Some(run_body),
-            pos: (0, 0),
+            pos,
             is_fallback: false,
             is_ffi_pinned: false,
         }],
@@ -150,11 +163,15 @@ mod tests {
         let mut file = empty_file();
         file.items.push(Item::Flow(FlowDef {
             name: "User".into(),
+            pos: (1, 1),
+            origin: AstOrigin::User,
             pub_: false,
             generics: vec![],
             annotations: vec![],
             states: vec![StateDef {
                 name: "A".into(),
+                pos: (2, 1),
+                origin: AstOrigin::User,
                 payload: None,
             }],
             transitions: vec![],

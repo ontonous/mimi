@@ -704,6 +704,7 @@ impl Parser {
     }
 
     fn parse_flow_def(&mut self) -> Result<FlowDef, ParseError> {
+        let pos = (self.peek().line, self.peek().col);
         self.expect_keyword(TokenKind::Flow)?;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
@@ -978,6 +979,8 @@ impl Parser {
         self.expect(TokenKind::RBrace, "`}`")?;
         Ok(FlowDef {
             name,
+            pos,
+            origin: AstOrigin::User,
             pub_: false,
             generics,
             annotations,
@@ -991,6 +994,7 @@ impl Parser {
     }
 
     fn parse_state_def(&mut self) -> Result<StateDef, ParseError> {
+        let pos = (self.peek().line, self.peek().col);
         self.expect_keyword(TokenKind::State)?;
         let name = self.expect_ident()?;
         let payload = if self.at(&TokenKind::LBrace) {
@@ -1015,7 +1019,12 @@ impl Parser {
             None
         };
         self.match_semi();
-        Ok(StateDef { name, payload })
+        Ok(StateDef {
+            name,
+            pos,
+            origin: AstOrigin::User,
+            payload,
+        })
     }
 
     fn parse_transition_def(&mut self) -> Result<TransitionDef, ParseError> {
