@@ -302,6 +302,7 @@ pub struct CodeGenerator<'ctx> {
     /// Canonical transitions from CheckedProgram for fail-closed dispatch.
     resolved_transitions: Option<HashMap<(String, String, String), Vec<String>>>,
     resolved_fallback_transitions: Option<std::collections::HashSet<(String, String, String)>>,
+    resolved_ffi_pinned_transitions: Option<std::collections::HashSet<(String, String, String)>>,
     /// Function directory from CheckedProgram: qualified_name -> arity.
     resolved_function_arity: Option<HashMap<String, usize>>,
     /// Session names from CheckedProgram.
@@ -435,6 +436,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             flow_defs: HashMap::new(),
             resolved_transitions: None,
             resolved_fallback_transitions: None,
+            resolved_ffi_pinned_transitions: None,
             resolved_function_arity: None,
             resolved_sessions: None,
             resolved_protocols: None,

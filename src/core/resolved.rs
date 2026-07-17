@@ -2210,6 +2210,8 @@ func main() -> i32 { 0 }
                 )
         }));
         assert!(!verifier.is_checked_fallback_transition("Door", "open", "Closed"));
+        assert!(!verifier.is_checked_ffi_pinned_transition("Door", "open", "Closed"));
+        assert!(!interp.is_resolved_ffi_pinned_transition("Door", "open", "Closed"));
     }
 
     #[test]

@@ -17,6 +17,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
         let mut resolved = std::collections::HashMap::new();
         let mut fallbacks = std::collections::HashSet::new();
+        let mut pinned = std::collections::HashSet::new();
         for (id, transition) in program.transitions() {
             let key = (
                 id.flow.0.clone(),
@@ -31,10 +32,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             if transition.is_fallback {
                 fallbacks.insert(key.clone());
             }
+            if transition.is_ffi_pinned {
+                pinned.insert(key.clone());
+            }
             resolved.insert(key, targets);
         }
         self.resolved_transitions = Some(resolved);
         self.resolved_fallback_transitions = Some(fallbacks);
+        self.resolved_ffi_pinned_transitions = Some(pinned);
         let mut arity = std::collections::HashMap::new();
         for function in program.functions().values() {
             arity.insert(function.qualified_name.clone(), function.params.len());

@@ -436,6 +436,7 @@ pub struct VerifierCtx {
     pub(crate) checked_constants: std::collections::HashSet<String>,
     pub(crate) checked_flow_protocols: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_fallback_transitions: std::collections::HashSet<String>,
+    pub(crate) checked_ffi_pinned_transitions: std::collections::HashSet<String>,
 }
 
 /// Backward-compatible verifier with its own solver session.
@@ -564,6 +565,17 @@ impl Verifier {
                 )
             })
             .collect();
+        self.ctx.checked_ffi_pinned_transitions = program
+            .transitions()
+            .values()
+            .filter(|transition| transition.is_ffi_pinned)
+            .map(|transition| {
+                format!(
+                    "{}::{}::{}",
+                    transition.id.flow.0, transition.id.event, transition.id.source.name
+                )
+            })
+            .collect();
         self.verify_file(program.file())
     }
 
@@ -649,6 +661,17 @@ impl Verifier {
     ) -> bool {
         self.ctx
             .checked_fallback_transitions
+            .contains(&format!("{}::{}::{}", flow, event, source))
+    }
+
+    pub(crate) fn is_checked_ffi_pinned_transition(
+        &self,
+        flow: &str,
+        event: &str,
+        source: &str,
+    ) -> bool {
+        self.ctx
+            .checked_ffi_pinned_transitions
             .contains(&format!("{}::{}::{}", flow, event, source))
     }
 
