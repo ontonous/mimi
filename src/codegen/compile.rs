@@ -9,6 +9,18 @@ use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{InitializationConfig, Target, TargetMachine};
 use inkwell::OptimizationLevel;
 
+
+fn encode_resolved_const_value(value: &crate::core::ResolvedConstValue) -> String {
+    match value {
+        crate::core::ResolvedConstValue::Int(v) => format!("int:{}", v),
+        crate::core::ResolvedConstValue::Float(v) => format!("float:{}", v),
+        crate::core::ResolvedConstValue::Bool(v) => format!("bool:{}", v),
+        crate::core::ResolvedConstValue::String(v) => format!("string:{}", v),
+        crate::core::ResolvedConstValue::Unit => "unit".into(),
+        crate::core::ResolvedConstValue::Complex => "complex".into(),
+    }
+}
+
 impl<'ctx> CodeGenerator<'ctx> {
     pub fn compile_checked(
         &mut self,
@@ -95,6 +107,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map(|constant| constant.qualified_name.clone())
                 .collect(),
         );
+        let mut constant_values = std::collections::HashMap::new();
+        for constant in program.constants().values() {
+            constant_values.insert(
+                constant.qualified_name.clone(),
+                (
+                    constant.ty.clone(),
+                    encode_resolved_const_value(&constant.value),
+                ),
+            );
+        }
+        self.resolved_constant_values = Some(constant_values);
         let mut traits = std::collections::HashMap::new();
         for trait_def in program.traits().values() {
             traits.insert(trait_def.qualified_name.clone(), trait_def.methods.clone());

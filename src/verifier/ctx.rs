@@ -440,6 +440,7 @@ pub struct VerifierCtx {
     pub(crate) checked_transactional_fields: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_metadata_shadow_fields: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_constants: std::collections::HashSet<String>,
+    pub(crate) checked_constant_values: std::collections::HashMap<String, (Option<String>, String)>,
     pub(crate) checked_flow_protocols: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_fallback_transitions: std::collections::HashSet<String>,
     pub(crate) checked_ffi_pinned_transitions: std::collections::HashSet<String>,
@@ -451,6 +452,18 @@ pub struct VerifierCtx {
 pub struct Verifier {
     pub(crate) ctx: VerifierCtx,
     pub(crate) session: SolverSession,
+}
+
+
+fn encode_checked_const_value(value: &crate::core::ResolvedConstValue) -> String {
+    match value {
+        crate::core::ResolvedConstValue::Int(v) => format!("int:{}", v),
+        crate::core::ResolvedConstValue::Float(v) => format!("float:{}", v),
+        crate::core::ResolvedConstValue::Bool(v) => format!("bool:{}", v),
+        crate::core::ResolvedConstValue::String(v) => format!("string:{}", v),
+        crate::core::ResolvedConstValue::Unit => "unit".into(),
+        crate::core::ResolvedConstValue::Complex => "complex".into(),
+    }
 }
 
 impl Verifier {
@@ -593,6 +606,17 @@ impl Verifier {
             .values()
             .map(|constant| constant.qualified_name.clone())
             .collect();
+        let mut constant_values = std::collections::HashMap::new();
+        for constant in program.constants().values() {
+            constant_values.insert(
+                constant.qualified_name.clone(),
+                (
+                    constant.ty.clone(),
+                    encode_checked_const_value(&constant.value),
+                ),
+            );
+        }
+        self.ctx.checked_constant_values = constant_values;
         let mut flow_protocols = std::collections::HashMap::new();
         for flow in program.flows().values() {
             if !flow.impl_protocols.is_empty() {
@@ -729,6 +753,13 @@ impl Verifier {
 
     pub(crate) fn has_checked_constant(&self, name: &str) -> bool {
         self.ctx.checked_constants.contains(name)
+    }
+
+    pub(crate) fn checked_constant_value(
+        &self,
+        name: &str,
+    ) -> Option<(Option<String>, String)> {
+        self.ctx.checked_constant_values.get(name).cloned()
     }
 
     pub(crate) fn checked_flow_protocols(&self, flow_name: &str) -> Option<Vec<String>> {

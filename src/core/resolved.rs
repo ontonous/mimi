@@ -178,10 +178,23 @@ pub struct ResolvedCapability {
     pub origin: Origin,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedConstValue {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    String(String),
+    Unit,
+    /// Non-literal or non-materializable initializer (fail-closed: value not folded).
+    Complex,
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedConstant {
     pub node_id: NodeId,
     pub qualified_name: String,
+    pub ty: Option<String>,
+    pub value: ResolvedConstValue,
     pub origin: Origin,
 }
 
@@ -713,7 +726,13 @@ fn collect_items(
                     },
                 );
             }
-            Item::Const { name, pos, .. } => {
+            Item::Const {
+                name,
+                pos,
+                ty,
+                value,
+                ..
+            } => {
                 let qualified = qualify(module, name);
                 let span = Span::from(*pos);
                 insert_item(
@@ -725,11 +744,23 @@ fn collect_items(
                     errors,
                 );
                 let node_id = NodeId(format!("constant:{}", qualified));
+                let ty_str = ty.as_ref().map(crate::core::fmt_type);
+                if ty.as_ref().is_some_and(contains_unresolved_type) {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "const `{}` has unresolved type in CheckedProgram materialization",
+                            qualified
+                        ),
+                        span,
+                    ));
+                }
                 constants.insert(
                     node_id.clone(),
                     ResolvedConstant {
                         node_id,
                         qualified_name: qualified,
+                        ty: ty_str,
+                        value: materialize_const_value(value),
                         origin: Origin::User(span),
                     },
                 );
@@ -1495,6 +1526,25 @@ fn resolve_origin(origin: AstOrigin, parent: &NodeId, span: Span) -> Origin {
             parent: parent.clone(),
             span,
         },
+    }
+}
+
+fn materialize_const_value(expr: &crate::ast::Expr) -> ResolvedConstValue {
+    match expr {
+        crate::ast::Expr::Literal(lit) => match lit {
+            crate::ast::Lit::Int(v) => ResolvedConstValue::Int(*v),
+            crate::ast::Lit::Float(v) => ResolvedConstValue::Float(*v),
+            crate::ast::Lit::Bool(v) => ResolvedConstValue::Bool(*v),
+            crate::ast::Lit::String(v) => ResolvedConstValue::String(v.clone()),
+            crate::ast::Lit::Unit => ResolvedConstValue::Unit,
+            crate::ast::Lit::FString(_) => ResolvedConstValue::Complex,
+        },
+        crate::ast::Expr::Unary(crate::ast::UnOp::Neg, inner) => match materialize_const_value(inner) {
+            ResolvedConstValue::Int(v) => ResolvedConstValue::Int(-v),
+            ResolvedConstValue::Float(v) => ResolvedConstValue::Float(-v),
+            other => other,
+        },
+        _ => ResolvedConstValue::Complex,
     }
 }
 
@@ -2477,14 +2527,44 @@ func main() -> i32 { 0 }
             r#"
 cap Io
 const MAX: i32 = 10
+const NEG: i32 = -3
+const FLAG: bool = true
 func main() -> i32 { MAX }
 "#,
         );
         let program = crate::core::check_program(&file).expect("check");
+        let max = program.constant("MAX").expect("MAX");
+        assert_eq!(max.ty.as_deref(), Some("i32"));
+        assert_eq!(max.value, crate::core::ResolvedConstValue::Int(10));
+        let neg = program.constant("NEG").expect("NEG");
+        assert_eq!(neg.value, crate::core::ResolvedConstValue::Int(-3));
+        let flag = program.constant("FLAG").expect("FLAG");
+        assert_eq!(flag.value, crate::core::ResolvedConstValue::Bool(true));
         let interp = crate::interp::Interpreter::from_checked(&program);
         assert!(interp.has_resolved_capability("Io"));
         assert!(interp.has_resolved_constant("MAX"));
         assert!(!interp.has_resolved_constant("Missing"));
+        assert_eq!(
+            interp.resolved_constant_value("MAX"),
+            Some((Some("i32".into()), "int:10".into()))
+        );
+        assert_eq!(
+            interp.resolved_constant_value("NEG"),
+            Some((Some("i32".into()), "int:-3".into()))
+        );
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert_eq!(
+            verifier.checked_constant_value("MAX"),
+            Some((Some("i32".into()), "int:10".into()))
+        );
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "const_vals");
+        codegen.compile_checked(&program).expect("compile");
+        assert_eq!(
+            codegen.resolved_constant_value("FLAG"),
+            Some((Some("bool".into()), "bool:true".into()))
+        );
     }
 
 

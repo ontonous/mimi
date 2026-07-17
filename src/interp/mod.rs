@@ -150,6 +150,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_capabilities: Option<std::collections::HashSet<String>>,
     /// Constant names materialised from CheckedProgram.
     pub(in crate::interp) resolved_constants: Option<std::collections::HashSet<String>>,
+    /// Constant directory: name -> (type display, encoded value).
+    pub(in crate::interp) resolved_constant_values: Option<HashMap<String, (Option<String>, String)>>,
     /// Trait method directories materialised from CheckedProgram.
     pub(in crate::interp) resolved_traits: Option<HashMap<String, Vec<String>>>,
     /// Impl directories materialised from CheckedProgram: "Trait:for:Type" -> methods.
@@ -292,6 +294,17 @@ impl<'a> Interpreter<'a> {
             .map(|constant| constant.qualified_name.clone())
             .collect();
         interp.resolved_constants = Some(constants);
+        let mut constant_values = HashMap::new();
+        for constant in program.constants().values() {
+            constant_values.insert(
+                constant.qualified_name.clone(),
+                (
+                    constant.ty.clone(),
+                    encode_resolved_const_value(&constant.value),
+                ),
+            );
+        }
+        interp.resolved_constant_values = Some(constant_values);
         let mut traits = HashMap::new();
         for trait_def in program.traits().values() {
             traits.insert(trait_def.qualified_name.clone(), trait_def.methods.clone());
@@ -436,6 +449,15 @@ impl<'a> Interpreter<'a> {
         self.resolved_constants
             .as_ref()
             .is_some_and(|set| set.contains(qualified_name))
+    }
+
+    pub(crate) fn resolved_constant_value(
+        &self,
+        qualified_name: &str,
+    ) -> Option<(Option<String>, String)> {
+        self.resolved_constant_values
+            .as_ref()
+            .and_then(|map| map.get(qualified_name).cloned())
     }
 
     pub(crate) fn resolved_trait_methods(&self, qualified_name: &str) -> Option<Vec<String>> {
@@ -716,6 +738,7 @@ impl<'a> Interpreter<'a> {
             resolved_actors: None,
             resolved_capabilities: None,
             resolved_constants: None,
+            resolved_constant_values: None,
             resolved_traits: None,
             resolved_impls: None,
             resolved_ownership_owners: None,
@@ -1809,3 +1832,15 @@ impl<'a> Interpreter<'a> {
         0
     }
 }
+fn encode_resolved_const_value(value: &crate::core::ResolvedConstValue) -> String {
+    match value {
+        crate::core::ResolvedConstValue::Int(v) => format!("int:{}", v),
+        crate::core::ResolvedConstValue::Float(v) => format!("float:{}", v),
+        crate::core::ResolvedConstValue::Bool(v) => format!("bool:{}", v),
+        crate::core::ResolvedConstValue::String(v) => format!("string:{}", v),
+        crate::core::ResolvedConstValue::Unit => "unit".into(),
+        crate::core::ResolvedConstValue::Complex => "complex".into(),
+    }
+}
+
+
