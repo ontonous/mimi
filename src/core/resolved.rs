@@ -2199,6 +2199,17 @@ func main() -> i32 { 0 }
                 &t.id.event,
                 &t.id.source.name
             )));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert!(program.transitions().values().any(|t| {
+            t.is_fallback
+                && verifier.is_checked_fallback_transition(
+                    &t.id.flow.0,
+                    &t.id.event,
+                    &t.id.source.name,
+                )
+        }));
+        assert!(!verifier.is_checked_fallback_transition("Door", "open", "Closed"));
     }
 
     #[test]
