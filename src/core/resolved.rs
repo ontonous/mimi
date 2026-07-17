@@ -1,9 +1,12 @@
-use crate::ast::{File, FlowDef, Item, Type};
+use crate::ast::{AstOrigin, File, FlowDef, Item, Type};
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use std::collections::HashMap;
 
 pub const RESOLVED_IR_VERSION: &str = "mimi-resolved-ir-1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NodeId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FlowId(pub String);
@@ -16,8 +19,10 @@ pub struct StateId {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedState {
+    pub node_id: NodeId,
     pub id: StateId,
     pub payload: Vec<(String, Type)>,
+    pub origin: Origin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -27,26 +32,41 @@ pub struct TransitionId {
     pub source: StateId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransitionOrigin {
-    User,
-    PrototypeFallback,
-    RuntimeSystem,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    User(Span),
+    Desugared { parent: NodeId, span: Span },
+    PrototypeFallback { parent: NodeId, span: Span },
+    RuntimeSystem { parent: NodeId, span: Span },
+}
+
+impl Origin {
+    pub fn user_span(&self) -> Span {
+        match self {
+            Self::User(span)
+            | Self::Desugared { span, .. }
+            | Self::PrototypeFallback { span, .. }
+            | Self::RuntimeSystem { span, .. } => *span,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ResolvedTransition {
+    pub node_id: NodeId,
     pub id: TransitionId,
     pub targets: Vec<StateId>,
-    pub origin: TransitionOrigin,
+    pub origin: Origin,
     pub span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub struct ResolvedFlow {
+    pub node_id: NodeId,
     pub id: FlowId,
     pub states: HashMap<String, ResolvedState>,
     pub transitions: Vec<TransitionId>,
+    pub origin: Origin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +224,8 @@ fn collect_flow(
     errors: &mut Vec<Diagnostic>,
 ) {
     let flow_id = FlowId(qualified_name.to_string());
+    let flow_node_id = NodeId(format!("flow:{}", qualified_name));
+    let flow_span = Span::from(flow.pos);
     let states = flow
         .states
         .iter()
@@ -219,7 +241,17 @@ fn collect_flow(
                 .iter()
                 .map(|field| (field.name.clone(), field.ty.clone()))
                 .collect();
-            (state.name.clone(), ResolvedState { id, payload })
+            let node_id = NodeId(format!("state:{}::{}", qualified_name, state.name));
+            let origin = resolve_origin(state.origin, &flow_node_id, Span::from(state.pos));
+            (
+                state.name.clone(),
+                ResolvedState {
+                    node_id,
+                    id,
+                    payload,
+                    origin,
+                },
+            )
         })
         .collect();
     let mut flow_transition_ids = Vec::with_capacity(flow.transitions.len());
@@ -228,11 +260,7 @@ fn collect_flow(
             requirement_id: "FLOW-TURN-001",
             capability: "flow.transactional",
             flow: flow_id.clone(),
-            span: flow
-                .transitions
-                .first()
-                .map(|transition| Span::from(transition.pos))
-                .unwrap_or_else(|| Span::single(0, 0)),
+            span: flow_span,
         });
     }
     for transition in &flow.transitions {
@@ -246,7 +274,12 @@ fn collect_flow(
             source,
         };
         let span = Span::from(transition.pos);
+        let node_id = NodeId(format!(
+            "transition:{}::{}::{}",
+            qualified_name, transition.name, transition.from_state
+        ));
         let resolved = ResolvedTransition {
+            node_id,
             id: id.clone(),
             targets: transition
                 .to_states
@@ -257,11 +290,17 @@ fn collect_flow(
                 })
                 .collect(),
             origin: if transition.is_ffi_pinned {
-                TransitionOrigin::RuntimeSystem
+                Origin::RuntimeSystem {
+                    parent: flow_node_id.clone(),
+                    span: flow_span,
+                }
             } else if transition.is_fallback {
-                TransitionOrigin::PrototypeFallback
+                Origin::PrototypeFallback {
+                    parent: flow_node_id.clone(),
+                    span: flow_span,
+                }
             } else {
-                TransitionOrigin::User
+                Origin::User(span)
             },
             span,
         };
@@ -287,9 +326,11 @@ fn collect_flow(
         }
     }
     let resolved_flow = ResolvedFlow {
+        node_id: flow_node_id.clone(),
         id: flow_id.clone(),
         states,
         transitions: flow_transition_ids,
+        origin: resolve_origin(flow.origin, &flow_node_id, flow_span),
     };
     if flows.insert(flow_id.clone(), resolved_flow).is_some() {
         errors.push(Diagnostic::error(
@@ -297,11 +338,26 @@ fn collect_flow(
                 "TOOL-RESOLUTION-001: duplicate canonical flow '{}'",
                 flow_id.0
             ),
-            flow.transitions
-                .first()
-                .map(|transition| Span::from(transition.pos))
-                .unwrap_or_else(|| Span::single(0, 0)),
+            flow_span,
         ));
+    }
+}
+
+fn resolve_origin(origin: AstOrigin, parent: &NodeId, span: Span) -> Origin {
+    match origin {
+        AstOrigin::User => Origin::User(span),
+        AstOrigin::Desugared => Origin::Desugared {
+            parent: parent.clone(),
+            span,
+        },
+        AstOrigin::PrototypeFallback => Origin::PrototypeFallback {
+            parent: parent.clone(),
+            span,
+        },
+        AstOrigin::RuntimeSystem => Origin::RuntimeSystem {
+            parent: parent.clone(),
+            span,
+        },
     }
 }
 
@@ -429,8 +485,31 @@ module beta {
         let alpha = program.flow("alpha::Worker").expect("alpha flow");
         let idle = alpha.states.get("Idle").expect("Idle state");
         assert_eq!(idle.id.flow.0, "alpha::Worker");
+        assert_eq!(idle.node_id.0, "state:alpha::Worker::Idle");
+        assert_eq!(idle.origin.user_span().start_line, 4);
         assert!(idle.payload.is_empty());
         assert!(program.flow("Worker").is_none());
+    }
+
+    #[test]
+    fn generated_flow_nodes_keep_user_span_and_system_origin() {
+        let file = parse(
+            r#"
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let flow = program.flow("Main").expect("implicit Main flow");
+        assert!(matches!(flow.origin, Origin::RuntimeSystem { .. }));
+        assert_eq!(flow.origin.user_span().start_line, 2);
+        let single = flow.states.get("Single").expect("Single state");
+        assert!(matches!(single.origin, Origin::RuntimeSystem { .. }));
+        assert_eq!(single.origin.user_span().start_line, 2);
+        assert!(flow
+            .transitions
+            .iter()
+            .filter_map(|id| program.transitions().get(id))
+            .all(|transition| transition.origin.user_span().start_line > 0));
     }
 }
 

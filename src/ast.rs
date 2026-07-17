@@ -11,6 +11,14 @@ pub struct File {
     pub implicit_single: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AstOrigin {
+    User,
+    Desugared,
+    PrototypeFallback,
+    RuntimeSystem,
+}
+
 #[derive(Debug, Clone)]
 pub struct Import {
     pub path: Vec<String>,
@@ -615,6 +623,10 @@ pub enum Type {
 #[derive(Debug, Clone)]
 pub struct FlowDef {
     pub name: String,
+    /// Source position of the `flow` keyword. Generated flows inherit the
+    /// source position of the construct that caused their lowering.
+    pub pos: (usize, usize),
+    pub origin: AstOrigin,
     pub pub_: bool,
     pub generics: Vec<GenericParam>,
     pub annotations: Vec<FlowAnnotation>,
@@ -644,6 +656,10 @@ pub enum FlowAnnotation {
 #[derive(Debug, Clone)]
 pub struct StateDef {
     pub name: String,
+    /// Source position of the `state` keyword. Generated states inherit their
+    /// parent flow position.
+    pub pos: (usize, usize),
+    pub origin: AstOrigin,
     pub payload: Option<Vec<Field>>,
 }
 

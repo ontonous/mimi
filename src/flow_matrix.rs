@@ -120,7 +120,7 @@ fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
                 params: params.clone(),
                 to_states: vec!["Fault".to_string()],
                 body: Some(body),
-                pos: (0, 0),
+                pos: flow.pos,
                 is_fallback: true,
                 is_ffi_pinned: false,
             });
@@ -297,7 +297,7 @@ fn inject_peer_fault_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
             params: vec![],
             to_states: vec!["Fault".to_string()],
             body: Some(body),
-            pos: (0, 0),
+            pos: flow.pos,
             is_fallback: true,
             is_ffi_pinned: false,
         });
@@ -312,7 +312,7 @@ fn inject_peer_fault_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
             params: vec![],
             to_states: vec!["Fault".to_string()],
             body: Some(body),
-            pos: (0, 0),
+            pos: flow.pos,
             is_fallback: true,
             is_ffi_pinned: false,
         });
@@ -412,7 +412,7 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
             params: vec![],
             to_states: vec!["FFI_Pinned".to_string()],
             body: Some(make_passthrough_body("FFI_Pinned")),
-            pos: (0, 0),
+            pos: flow.pos,
             is_fallback: false,
             is_ffi_pinned: true,
         });
@@ -430,7 +430,7 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
             params: vec![],
             to_states: vec![active.clone()],
             body: Some(make_passthrough_body(&active)),
-            pos: (0, 0),
+            pos: flow.pos,
             is_fallback: false,
             is_ffi_pinned: true,
         });
@@ -449,7 +449,7 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
             params: vec![],
             to_states: vec!["Fault".to_string()],
             body: Some(body),
-            pos: (0, 0),
+            pos: flow.pos,
             is_fallback: true,
             is_ffi_pinned: true,
         });
@@ -477,7 +477,7 @@ fn inject_system_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>)
             params: vec![],
             to_states: vec![root.clone()],
             body: Some(body),
-            pos: (0, 0),
+            pos: flow.pos,
             is_fallback: true,
             is_ffi_pinned: false,
         });
@@ -497,7 +497,7 @@ fn inject_system_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>)
             params: vec![],
             to_states: vec![root],
             body: Some(body),
-            pos: (0, 0),
+            pos: flow.pos,
             is_fallback: true,
             is_ffi_pinned: false,
         });
@@ -522,6 +522,8 @@ fn ensure_fault_state(flow: &mut FlowDef) {
     if !flow.states.iter().any(|s| s.name == "Fault") {
         flow.states.push(StateDef {
             name: "Fault".to_string(),
+            pos: flow.pos,
+            origin: AstOrigin::RuntimeSystem,
             payload: Some(vec![
                 Field {
                     name: "last_state".to_string(),
@@ -871,12 +873,16 @@ mod tests {
     fn sample_flow() -> FlowDef {
         FlowDef {
             name: "Counter".to_string(),
+            pos: (1, 1),
+            origin: AstOrigin::User,
             pub_: false,
             generics: vec![],
             annotations: vec![],
             states: vec![
                 StateDef {
                     name: "Zero".to_string(),
+                    pos: (2, 1),
+                    origin: AstOrigin::User,
                     payload: Some(vec![Field {
                         name: "count".to_string(),
                         ty: Type::Name("i32".to_string(), vec![]),
@@ -884,6 +890,8 @@ mod tests {
                 },
                 StateDef {
                     name: "Positive".to_string(),
+                    pos: (3, 1),
+                    origin: AstOrigin::User,
                     payload: Some(vec![Field {
                         name: "count".to_string(),
                         ty: Type::Name("i32".to_string(), vec![]),
@@ -952,6 +960,8 @@ mod tests {
         let mut flow = sample_flow();
         flow.states.push(StateDef {
             name: "Fault".to_string(),
+            pos: flow.pos,
+            origin: AstOrigin::User,
             payload: Some(vec![Field {
                 name: "trace".to_string(),
                 ty: Type::Name("string".to_string(), vec![]),

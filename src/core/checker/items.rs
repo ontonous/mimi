@@ -1233,10 +1233,7 @@ impl<'a> Checker<'a> {
             }
             Item::Flow(f) => {
                 let qualified = format!("flow::{}", f.name);
-                self.set_pos(
-                    f.transitions.first().map(|t| t.pos).unwrap_or((1, 1)).0,
-                    f.transitions.first().map(|t| t.pos).unwrap_or((1, 1)).1,
-                );
+                self.set_pos(f.pos.0, f.pos.1);
                 // Check state name uniqueness
                 let mut seen_states: std::collections::HashSet<&str> =
                     std::collections::HashSet::new();
