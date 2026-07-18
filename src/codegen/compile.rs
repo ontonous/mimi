@@ -170,6 +170,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         );
         let mut protocol_transitions = std::collections::HashMap::new();
         let mut protocol_payloads = std::collections::HashMap::new();
+        let mut protocol_states = std::collections::HashMap::new();
+        let mut protocol_state_payloads = std::collections::HashMap::new();
         for protocol in program.protocols().values() {
             protocol_transitions.insert(
                 protocol.qualified_name.clone(),
@@ -185,17 +187,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                     })
                     .collect(),
             );
+            let mut state_names = protocol.states.clone();
+            state_names.sort();
+            protocol_states.insert(protocol.qualified_name.clone(), state_names);
             for state in &protocol.state_payloads {
                 if let Some(ty) = &state.payload_type {
                     protocol_payloads.insert(
                         format!("{}.{}", protocol.qualified_name, state.name),
                         ty.clone(),
                     );
+                    protocol_state_payloads.insert(
+                        format!("{}.{}", protocol.qualified_name, state.name),
+                        (state.payload_name.clone().unwrap_or_default(), ty.clone()),
+                    );
                 }
             }
         }
         self.resolved_protocol_transitions = Some(protocol_transitions);
         self.resolved_protocol_payloads = Some(protocol_payloads);
+        self.resolved_protocol_states = Some(protocol_states);
+        self.resolved_protocol_state_payloads = Some(protocol_state_payloads);
         let mut actors = std::collections::HashMap::new();
         for actor in program.actors().values() {
             actors.insert(actor.qualified_name.clone(), actor.methods.clone());

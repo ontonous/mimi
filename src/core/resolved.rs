@@ -3998,6 +3998,14 @@ func main() -> i32 { 0 }
             interp.resolved_protocol_payload("Sensor", "Active").as_deref(),
             Some("i32")
         );
+        assert_eq!(
+            interp.resolved_protocol_state_payload("Sensor", "Active"),
+            Some(("data".into(), "i32".into()))
+        );
+        assert_eq!(
+            interp.resolved_protocol_states("Sensor"),
+            Some(vec!["Active".into(), "Idle".into()])
+        );
         assert!(interp
             .resolved_protocol_transitions("Sensor")
             .is_some_and(|trs| trs.iter().any(|(e, f, _)| e == "start" && f == "Idle")));
@@ -4007,12 +4015,28 @@ func main() -> i32 { 0 }
             verifier.checked_protocol_payload("Sensor", "Active").as_deref(),
             Some("i32")
         );
+        assert_eq!(
+            verifier.checked_protocol_state_payload("Sensor", "Active"),
+            Some(("data".into(), "i32".into()))
+        );
+        assert_eq!(
+            verifier.checked_protocol_states("Sensor"),
+            Some(vec!["Active".into(), "Idle".into()])
+        );
         let context = inkwell::context::Context::create();
         let mut codegen = crate::codegen::CodeGenerator::new(&context, "proto");
         codegen.compile_checked(&program).expect("compile");
         assert_eq!(
             codegen.resolved_protocol_payload("Sensor", "Active").as_deref(),
             Some("i32")
+        );
+        assert_eq!(
+            codegen.resolved_protocol_state_payload("Sensor", "Active"),
+            Some(("data".into(), "i32".into()))
+        );
+        assert_eq!(
+            codegen.resolved_protocol_states("Sensor"),
+            Some(vec!["Active".into(), "Idle".into()])
         );
     }
 

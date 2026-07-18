@@ -449,6 +449,8 @@ pub struct VerifierCtx {
     pub(crate) checked_protocols: std::collections::HashSet<String>,
     pub(crate) checked_protocol_transitions: std::collections::HashMap<String, Vec<(String, String, String)>>,
     pub(crate) checked_protocol_payloads: std::collections::HashMap<String, String>,
+    pub(crate) checked_protocol_states: std::collections::HashMap<String, Vec<String>>,
+    pub(crate) checked_protocol_state_payloads: std::collections::HashMap<String, (String, String)>,
     /// Trait names materialised from CheckedProgram.
     pub(crate) checked_traits: std::collections::HashSet<String>,
     pub(crate) checked_method_signatures: std::collections::HashMap<String, (usize, String)>,
@@ -782,6 +784,8 @@ impl Verifier {
             .collect();
         let mut protocol_transitions = std::collections::HashMap::new();
         let mut protocol_payloads = std::collections::HashMap::new();
+        let mut protocol_states = std::collections::HashMap::new();
+        let mut protocol_state_payloads = std::collections::HashMap::new();
         for protocol in program.protocols().values() {
             protocol_transitions.insert(
                 protocol.qualified_name.clone(),
@@ -797,17 +801,26 @@ impl Verifier {
                     })
                     .collect(),
             );
+            let mut state_names = protocol.states.clone();
+            state_names.sort();
+            protocol_states.insert(protocol.qualified_name.clone(), state_names);
             for state in &protocol.state_payloads {
                 if let Some(ty) = &state.payload_type {
                     protocol_payloads.insert(
                         format!("{}.{}", protocol.qualified_name, state.name),
                         ty.clone(),
                     );
+                    protocol_state_payloads.insert(
+                        format!("{}.{}", protocol.qualified_name, state.name),
+                        (state.payload_name.clone().unwrap_or_default(), ty.clone()),
+                    );
                 }
             }
         }
         self.ctx.checked_protocol_transitions = protocol_transitions;
         self.ctx.checked_protocol_payloads = protocol_payloads;
+        self.ctx.checked_protocol_states = protocol_states;
+        self.ctx.checked_protocol_state_payloads = protocol_state_payloads;
         self.ctx.checked_traits = program
             .traits()
             .values()
@@ -1289,6 +1302,21 @@ impl Verifier {
     ) -> Option<String> {
         self.ctx
             .checked_protocol_payloads
+            .get(&format!("{protocol}.{state}"))
+            .cloned()
+    }
+
+    pub(crate) fn checked_protocol_states(&self, protocol: &str) -> Option<Vec<String>> {
+        self.ctx.checked_protocol_states.get(protocol).cloned()
+    }
+
+    pub(crate) fn checked_protocol_state_payload(
+        &self,
+        protocol: &str,
+        state: &str,
+    ) -> Option<(String, String)> {
+        self.ctx
+            .checked_protocol_state_payloads
             .get(&format!("{protocol}.{state}"))
             .cloned()
     }
