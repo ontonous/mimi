@@ -93,8 +93,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if let Ok(val) = self.fold_quote_block(block) {
                     return Ok(val);
                 }
-                // Fall through to runtime QuotedAst construction.
-                self.compile_quote_runtime(block)
+                Err(CompileError::Unsupported(
+                    "runtime-dependent quote is unsupported by QuotedAst ABI v1; ast_eval is compile-time only"
+                        .into(),
+                ))
             }
             Expr::QuoteInterpolate(inner) => {
                 // v0.28.21 — `$(expr)` interpolations are evaluated at

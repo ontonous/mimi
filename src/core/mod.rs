@@ -25,18 +25,12 @@ pub use ownership::{
 };
 pub use resolved::{
     BackendProfile, CheckedProgram, FlowId, NodeId, NodeMeta, Origin, ResolvedActor,
-    ResolvedActorMethod,
-    ResolvedMethodSig,
-    ResolvedCapability, ResolvedConstant,
-    ResolvedCallKind,
-    ResolvedCallSite,
-    ResolvedConstValue, ResolvedExternBlock,
-    ResolvedExternFunc, ResolvedFlow, ResolvedFunction,
-    ResolvedImpl, ResolvedItem, ResolvedItemKind, ResolvedProtocol,
-    ResolvedProtocolTransition,
-    ResolvedProtocolState, ResolvedSession, ResolvedState,
-    ResolvedTrait, ResolvedTypeDef, ResolvedTypeKind, SpanPrecision, StateId, TransitionId,
-    RESOLVED_IR_VERSION,
+    ResolvedActorMethod, ResolvedCallKind, ResolvedCallSite, ResolvedCapability,
+    ResolvedConstValue, ResolvedConstant, ResolvedExternBlock, ResolvedExternFunc, ResolvedFlow,
+    ResolvedFunction, ResolvedImpl, ResolvedItem, ResolvedItemKind, ResolvedMethodSig,
+    ResolvedProtocol, ResolvedProtocolState, ResolvedProtocolTransition, ResolvedSession,
+    ResolvedState, ResolvedTrait, ResolvedTypeDef, ResolvedTypeKind, SpanPrecision, StateId,
+    TransitionId, RESOLVED_IR_VERSION,
 };
 
 pub fn check(file: &File) -> Result<(), Vec<Diagnostic>> {

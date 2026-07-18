@@ -441,7 +441,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if s_ty.get_bit_width() < 64 {
                             self.builder
                                 .build_int_z_extend(s, i64_ty, "struct_size")
-                                .map_err(|e| CompileError::LlvmError(format!("size error: {}", e)))?
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("size error: {}", e))
+                                })?
                         } else {
                             s
                         }
@@ -452,12 +454,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => i64_ty.const_int(0, false),
         };
-        let raw_ptr = self.malloc_or_abort(struct_size_val_full, &format!("{}_fields", actor.name))?;
+        let raw_ptr =
+            self.malloc_or_abort(struct_size_val_full, &format!("{}_fields", actor.name))?;
         // Cast the heap pointer to the struct type for GEP field access.
         let alloca = match actor_ty {
             BasicTypeEnum::StructType(sty) => self
                 .builder
-                .build_bit_cast(raw_ptr, sty.ptr_type(inkwell::AddressSpace::default()), "fields_as_struct")
+                .build_bit_cast(
+                    raw_ptr,
+                    sty.ptr_type(inkwell::AddressSpace::default()),
+                    "fields_as_struct",
+                )
                 .map_err(|e| CompileError::LlvmError(format!("ptr cast: {}", e)))?
                 .into_pointer_value(),
             _ => return Err(CompileError::LlvmError("actor type error".to_string())),
@@ -568,11 +575,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicValueEnum::PointerValue(pv) => pv,
                     _ => i8_ptr.const_null(),
                 };
-                let _ = self.build_call(
-                    set_fn,
-                    &[hv.into(), depth_val.into()],
-                    "set_mailbox_depth",
-                );
+                let _ =
+                    self.build_call(set_fn, &[hv.into(), depth_val.into()], "set_mailbox_depth");
             }
         }
 
@@ -1378,9 +1382,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut blob_offset: u64 = 0;
         for (i, arg) in args.iter().enumerate() {
             let val = self.compile_expr(arg, vars)?;
-            let param_ty = method_params.get(i).and_then(|t| {
-                types::mimi_type_to_llvm(self.context, t)
-            });
+            let param_ty = method_params
+                .get(i)
+                .and_then(|t| types::mimi_type_to_llvm(self.context, t));
             let store_ty = param_ty.unwrap_or_else(|| match val {
                 BasicValueEnum::IntValue(iv) => BasicTypeEnum::IntType(iv.get_type()),
                 BasicValueEnum::FloatValue(fv) => BasicTypeEnum::FloatType(fv.get_type()),
@@ -1417,11 +1421,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if iv.get_type().get_bit_width() == 1 {
                             self.builder
                                 .build_int_z_extend(iv, t, &format!("arg_zext_{}", i))
-                                .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("zext error: {}", e))
+                                })?
                         } else {
                             self.builder
                                 .build_int_s_extend(iv, t, &format!("arg_sext_{}", i))
-                                .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("sext error: {}", e))
+                                })?
                         }
                     } else if iv.get_type().get_bit_width() > t.get_bit_width() {
                         self.builder
@@ -1453,11 +1461,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if iv.get_type().get_bit_width() == 1 {
                             self.builder
                                 .build_int_z_extend(iv, i64_ty, &format!("arg_zext_{}", i))
-                                .map_err(|e| CompileError::LlvmError(format!("zext error: {}", e)))?
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("zext error: {}", e))
+                                })?
                         } else {
                             self.builder
                                 .build_int_s_extend(iv, i64_ty, &format!("arg_sext_{}", i))
-                                .map_err(|e| CompileError::LlvmError(format!("sext error: {}", e)))?
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("sext error: {}", e))
+                                })?
                         }
                     } else {
                         iv

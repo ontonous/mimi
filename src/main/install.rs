@@ -57,7 +57,8 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
             if pkg_resolve::checksum_matches(&dst, entry.checksum.as_deref()) {
                 println!("  = {} ({})", dep.name, entry.version);
                 skipped += 1;
-                let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
+                let sub_deps =
+                    pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
                 for sub_dep in sub_deps {
                     queue.push(sub_dep);
                 }
@@ -83,7 +84,8 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
                 }
                 println!("  = {} ({}, cached)", dep.name, entry.version);
                 skipped += 1;
-                let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
+                let sub_deps =
+                    pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
                 for sub_dep in sub_deps {
                     queue.push(sub_dep);
                 }
@@ -108,7 +110,8 @@ pub(crate) fn install(frozen: bool, offline: bool) -> Result<(), String> {
                     }
                     println!("  = {} ({}, frozen)", dep.name, entry.version);
                     skipped += 1;
-                    let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
+                    let sub_deps =
+                        pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
                     for sub_dep in sub_deps {
                         queue.push(sub_dep);
                     }

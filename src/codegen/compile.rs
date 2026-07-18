@@ -9,7 +9,6 @@ use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{InitializationConfig, Target, TargetMachine};
 use inkwell::OptimizationLevel;
 
-
 fn encode_resolved_const_value(value: &crate::core::ResolvedConstValue) -> String {
     match value {
         crate::core::ResolvedConstValue::Int(v) => format!("int:{}", v),
@@ -33,11 +32,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut param_arity = std::collections::HashMap::new();
         let mut param_lists = std::collections::HashMap::new();
         for (id, transition) in program.transitions() {
-            let key = (
-                id.flow.0.clone(),
-                id.event.clone(),
-                id.source.name.clone(),
-            );
+            let key = (id.flow.0.clone(), id.event.clone(), id.source.name.clone());
             let targets = transition
                 .targets
                 .iter()
@@ -436,19 +431,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             );
         }
         self.resolved_call_sites = Some(call_sites);
-        let mut call_sites_by_owner: std::collections::HashMap<String, Vec<(String, usize, String)>> =
-            std::collections::HashMap::new();
+        let mut call_sites_by_owner: std::collections::HashMap<
+            String,
+            Vec<(String, usize, String)>,
+        > = std::collections::HashMap::new();
         if let Some(sites) = self.resolved_call_sites.as_ref() {
             for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in sites {
-                call_sites_by_owner
-                    .entry(owner.clone())
-                    .or_default()
-                    .push((callee.clone(), *argc, kind.clone()));
+                call_sites_by_owner.entry(owner.clone()).or_default().push((
+                    callee.clone(),
+                    *argc,
+                    kind.clone(),
+                ));
             }
         }
         self.resolved_call_sites_by_owner = Some(call_sites_by_owner);
-        let mut call_sites_by_callee: std::collections::HashMap<String, Vec<(String, usize, String)>> =
-            std::collections::HashMap::new();
+        let mut call_sites_by_callee: std::collections::HashMap<
+            String,
+            Vec<(String, usize, String)>,
+        > = std::collections::HashMap::new();
         if let Some(sites) = self.resolved_call_sites.as_ref() {
             for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in sites {
                 call_sites_by_callee
@@ -464,10 +464,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         for actor in program.actors().values() {
             for method in &actor.method_signatures {
                 let key = format!("{}.{}", actor.qualified_name, method.name);
-                actor_method_signatures.insert(
-                    key.clone(),
-                    (method.params.len(), method.ret.clone()),
-                );
+                actor_method_signatures
+                    .insert(key.clone(), (method.params.len(), method.ret.clone()));
                 actor_method_params.insert(key.clone(), method.params.clone());
                 actor_method_effects.insert(key, method.effects.clone());
             }
@@ -602,15 +600,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.resolved_flow_protocols = Some(flow_protocols);
-        self.compile_file(program.legacy_body_file()).map_err(|error| {
-            let mut diagnostic = error.to_diagnostic();
-            if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {
-                if let Some(span) = program.entry_span() {
-                    diagnostic = diagnostic.with_span(span);
+        self.compile_file(program.legacy_body_file())
+            .map_err(|error| {
+                let mut diagnostic = error.to_diagnostic();
+                if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {
+                    if let Some(span) = program.entry_span() {
+                        diagnostic = diagnostic.with_span(span);
+                    }
                 }
-            }
-            vec![diagnostic]
-        })
+                vec![diagnostic]
+            })
     }
 
     pub(super) fn mangle_name(base: &str, type_map: &HashMap<String, crate::ast::Type>) -> String {

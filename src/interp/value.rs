@@ -172,6 +172,11 @@ pub enum QuotedAst {
     Break(Option<Box<QuotedAst>>),
     Continue,
     While(Box<QuotedAst>, Box<QuotedAst>),
+    WhileLet {
+        pat: Pattern,
+        init: Box<QuotedAst>,
+        body: Box<QuotedAst>,
+    },
     Loop(Box<QuotedAst>),
     For(String, Box<QuotedAst>, Box<QuotedAst>),
     Assign(Box<QuotedAst>, Box<QuotedAst>),
@@ -193,8 +198,10 @@ pub enum QuotedAst {
     Lambda {
         params: Vec<Param>,
         ret: Option<Type>,
-        body: Box<QuotedAst>,
+        body: Block,
+        captured: HashMap<String, Value>,
     },
+    Cast(Box<QuotedAst>, Type),
     NamedArg(String, Box<QuotedAst>),
     MapLiteral(Vec<(QuotedAst, QuotedAst)>),
     SetLiteral(Vec<QuotedAst>),

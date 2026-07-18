@@ -400,7 +400,10 @@ println(2)
 ";
         let result = fmt.format(input);
         assert!(
-            result.contains("/*") && result.contains("line1") && result.contains("line2") && result.contains("*/"),
+            result.contains("/*")
+                && result.contains("line1")
+                && result.contains("line2")
+                && result.contains("*/"),
             "multiline block comment corrupted: {}",
             result
         );

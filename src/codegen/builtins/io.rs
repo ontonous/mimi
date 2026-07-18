@@ -76,14 +76,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let num_fields = fields.len();
                 // Named record: Display-like `Name { field: value, ... }`
                 if !arg_type.is_empty()
-                    && self.type_defs.get(arg_type).is_some_and(|td| {
-                        matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                    })
+                    && self
+                        .type_defs
+                        .get(arg_type)
+                        .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
                 {
-                    let alloca = self.build_alloca(
-                        BasicTypeEnum::StructType(sv.get_type()),
-                        "print_rec",
-                    )?;
+                    let alloca =
+                        self.build_alloca(BasicTypeEnum::StructType(sv.get_type()), "print_rec")?;
                     self.build_store(alloca, *sv)?;
                     let str_ptr = self.emit_record_display(arg_type, alloca)?;
                     return Ok((
@@ -93,9 +92,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 // Custom enum: {i32 tag, i64 payload}
                 if !arg_type.is_empty()
-                    && self.type_defs.get(arg_type).is_some_and(|td| {
-                        matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
-                    })
+                    && self
+                        .type_defs
+                        .get(arg_type)
+                        .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Enum(_)))
                 {
                     let str_ptr = self.emit_enum_display(arg_type, *sv)?;
                     return Ok((
@@ -114,9 +114,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
                     )
                 {
-                    let enum_ty = if self.type_defs.get(arg_type).is_some_and(|td| {
-                        matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
-                    }) {
+                    let enum_ty = if self
+                        .type_defs
+                        .get(arg_type)
+                        .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Enum(_)))
+                    {
                         Some(arg_type.to_string())
                     } else if let Some((owner, _)) = self.find_variant_owner(arg_type) {
                         Some(owner)
@@ -149,133 +151,93 @@ impl<'ctx> CodeGenerator<'ctx> {
                 {
                     // Mimi list struct: {i64 len, ptr data} — require i64 len
                     // so Option {i1, ptr} is not misclassified as List.
-                    let str_ptr =
-                        if arg_type == "List<string>" || arg_type.starts_with("List<string>") {
-                            self.emit_list_string_to_string(*sv)?
-                        } else if arg_type.starts_with("List<List<")
-                            || arg_type
-                                .strip_prefix("List<")
-                                .is_some_and(|s| s.starts_with("List<"))
-                        {
-                            // Nested list: pick inner-list formatter from element type.
-                            let mid = Self::strip_first_type_arg(arg_type, "List")
-                                .unwrap_or_else(|| "List".to_string());
-                            let elem = Self::strip_first_type_arg(&mid, "List")
-                                .unwrap_or_default();
-                            if elem.starts_with('(') {
-                                // List of List of product tuples.
-                                self.emit_list_list_product_tuple_to_string(*sv, &elem)?
-                            } else {
-                                let inner_fn = if elem == "string" {
-                                    "mimi_list_to_string"
-                                } else if elem.starts_with("Map") {
-                                    "mimi_list_map_to_string"
-                                } else if elem.starts_with("Set") {
-                                    "mimi_list_set_to_string"
-                                } else {
-                                    "mimi_list_i32_to_string"
-                                };
-                                self.emit_list_list_to_string(*sv, inner_fn)?
-                            }
-                        } else if let Some(inner) = arg_type
+                    let str_ptr = if arg_type == "List<string>"
+                        || arg_type.starts_with("List<string>")
+                    {
+                        self.emit_list_string_to_string(*sv)?
+                    } else if arg_type.starts_with("List<List<")
+                        || arg_type
                             .strip_prefix("List<")
-                            .and_then(|s| s.strip_suffix('>'))
+                            .is_some_and(|s| s.starts_with("List<"))
+                    {
+                        // Nested list: pick inner-list formatter from element type.
+                        let mid = Self::strip_first_type_arg(arg_type, "List")
+                            .unwrap_or_else(|| "List".to_string());
+                        let elem = Self::strip_first_type_arg(&mid, "List").unwrap_or_default();
+                        if elem.starts_with('(') {
+                            // List of List of product tuples.
+                            self.emit_list_list_product_tuple_to_string(*sv, &elem)?
+                        } else {
+                            let inner_fn = if elem == "string" {
+                                "mimi_list_to_string"
+                            } else if elem.starts_with("Map") {
+                                "mimi_list_map_to_string"
+                            } else if elem.starts_with("Set") {
+                                "mimi_list_set_to_string"
+                            } else {
+                                "mimi_list_i32_to_string"
+                            };
+                            self.emit_list_list_to_string(*sv, inner_fn)?
+                        }
+                    } else if let Some(inner) = arg_type
+                        .strip_prefix("List<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if self
+                            .type_defs
+                            .get(inner)
+                            .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
                         {
-                            if self.type_defs.get(inner).is_some_and(|td| {
-                                matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                            self.emit_list_record_to_string(*sv, inner)?
+                        } else if inner.starts_with("Option") {
+                            self.emit_list_option_to_string(*sv, inner)?
+                        } else if inner.starts_with("Result") {
+                            // Result of product uses uniform heap pack runtime.
+                            if let Some(ok_ty) = inner.strip_prefix("Result<").and_then(|s| {
+                                let mut depth = 0i32;
+                                for (i, ch) in s.char_indices() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            return Some(s[..i].trim());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                None
                             }) {
-                                self.emit_list_record_to_string(*sv, inner)?
-                            } else if inner.starts_with("Option") {
-                                self.emit_list_option_to_string(*sv, inner)?
-                            } else if inner.starts_with("Result") {
-                                // Result of product uses uniform heap pack runtime.
-                                if let Some(ok_ty) =
-                                    inner.strip_prefix("Result<").and_then(|s| {
-                                        let mut depth = 0i32;
-                                        for (i, ch) in s.char_indices() {
-                                            match ch {
-                                                '<' | '(' => depth += 1,
-                                                '>' | ')' => depth -= 1,
-                                                ',' if depth == 0 => {
-                                                    return Some(s[..i].trim());
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-                                        None
-                                    })
-                                {
-                                    if ok_ty.starts_with('(')
-                                        || self.is_product_tuple_alias(ok_ty)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(ok_ty)
-                                        {
-                                            self.resolve_alias_type_name(ok_ty)
-                                        } else {
-                                            ok_ty.to_string()
-                                        };
-                                        let list_alloca = self.build_alloca(
-                                            BasicTypeEnum::StructType(self.list_struct_type()),
-                                            "list_res_prod_disp",
-                                        )?;
-                                        self.build_store(list_alloca, *sv)?;
-                                        self.emit_list_result_product_runtime(
-                                            list_alloca,
-                                            &elem,
-                                            1,
-                                        )?
-                                    } else if ok_ty.starts_with("Map<string, ") {
-                                        if let Some(inner_val) = ok_ty
-                                            .strip_prefix("Map<string, ")
-                                            .and_then(|s| s.strip_suffix('>'))
-                                        {
-                                            if inner_val.starts_with('(')
-                                                || self.is_product_tuple_alias(inner_val)
-                                            {
-                                                let elem = if self
-                                                    .is_product_tuple_alias(inner_val)
-                                                {
-                                                    self.resolve_alias_type_name(inner_val)
-                                                } else {
-                                                    inner_val.to_string()
-                                                };
-                                                let list_alloca = self.build_alloca(
-                                                    BasicTypeEnum::StructType(
-                                                        self.list_struct_type(),
-                                                    ),
-                                                    "list_res_map_prod_disp",
-                                                )?;
-                                                self.build_store(list_alloca, *sv)?;
-                                                self.emit_list_result_map_product_runtime(
-                                                    list_alloca,
-                                                    &elem,
-                                                    1,
-                                                )?
-                                            } else {
-                                                self.emit_list_result_to_string(*sv, inner)?
-                                            }
-                                        } else {
-                                            self.emit_list_result_to_string(*sv, inner)?
-                                        }
-                                    } else if let Some(set_elem) = ok_ty
-                                        .strip_prefix("Set<")
+                                if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
+                                    let elem = if self.is_product_tuple_alias(ok_ty) {
+                                        self.resolve_alias_type_name(ok_ty)
+                                    } else {
+                                        ok_ty.to_string()
+                                    };
+                                    let list_alloca = self.build_alloca(
+                                        BasicTypeEnum::StructType(self.list_struct_type()),
+                                        "list_res_prod_disp",
+                                    )?;
+                                    self.build_store(list_alloca, *sv)?;
+                                    self.emit_list_result_product_runtime(list_alloca, &elem, 1)?
+                                } else if ok_ty.starts_with("Map<string, ") {
+                                    if let Some(inner_val) = ok_ty
+                                        .strip_prefix("Map<string, ")
                                         .and_then(|s| s.strip_suffix('>'))
                                     {
-                                        if set_elem.starts_with('(')
-                                            || self.is_product_tuple_alias(set_elem)
+                                        if inner_val.starts_with('(')
+                                            || self.is_product_tuple_alias(inner_val)
                                         {
-                                            let elem = if self.is_product_tuple_alias(set_elem)
-                                            {
-                                                self.resolve_alias_type_name(set_elem)
+                                            let elem = if self.is_product_tuple_alias(inner_val) {
+                                                self.resolve_alias_type_name(inner_val)
                                             } else {
-                                                set_elem.to_string()
+                                                inner_val.to_string()
                                             };
                                             let list_alloca = self.build_alloca(
                                                 BasicTypeEnum::StructType(self.list_struct_type()),
-                                                "list_res_set_prod_disp",
+                                                "list_res_map_prod_disp",
                                             )?;
                                             self.build_store(list_alloca, *sv)?;
-                                            self.emit_list_result_set_product_runtime(
+                                            self.emit_list_result_map_product_runtime(
                                                 list_alloca,
                                                 &elem,
                                                 1,
@@ -286,33 +248,60 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     } else {
                                         self.emit_list_result_to_string(*sv, inner)?
                                     }
+                                } else if let Some(set_elem) =
+                                    ok_ty.strip_prefix("Set<").and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if set_elem.starts_with('(')
+                                        || self.is_product_tuple_alias(set_elem)
+                                    {
+                                        let elem = if self.is_product_tuple_alias(set_elem) {
+                                            self.resolve_alias_type_name(set_elem)
+                                        } else {
+                                            set_elem.to_string()
+                                        };
+                                        let list_alloca = self.build_alloca(
+                                            BasicTypeEnum::StructType(self.list_struct_type()),
+                                            "list_res_set_prod_disp",
+                                        )?;
+                                        self.build_store(list_alloca, *sv)?;
+                                        self.emit_list_result_set_product_runtime(
+                                            list_alloca,
+                                            &elem,
+                                            1,
+                                        )?
+                                    } else {
+                                        self.emit_list_result_to_string(*sv, inner)?
+                                    }
                                 } else {
                                     self.emit_list_result_to_string(*sv, inner)?
                                 }
-                            } else if self.type_defs.get(inner).is_some_and(|td| {
-                                matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
-                            }) {
-                                self.emit_list_enum_to_string(*sv, inner)?
-                            } else if inner.starts_with("Map") {
-                                self.emit_list_map_to_string(*sv, inner)?
-                            } else if inner.starts_with("Set") || inner == "set" {
-                                self.emit_list_set_to_string(*sv, inner)?
-                            } else if inner.starts_with('(')
-                                || self.is_product_tuple_alias(inner)
-                            {
-                                // List of product tuples (or alias of them) as ptrtoint.
-                                let elem = if self.is_product_tuple_alias(inner) {
-                                    self.resolve_alias_type_name(inner)
-                                } else {
-                                    inner.to_string()
-                                };
-                                self.emit_list_product_tuple_to_string(*sv, &elem)?
                             } else {
-                                self.emit_list_i32_to_string(*sv)?
+                                self.emit_list_result_to_string(*sv, inner)?
                             }
+                        } else if self
+                            .type_defs
+                            .get(inner)
+                            .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Enum(_)))
+                        {
+                            self.emit_list_enum_to_string(*sv, inner)?
+                        } else if inner.starts_with("Map") {
+                            self.emit_list_map_to_string(*sv, inner)?
+                        } else if inner.starts_with("Set") || inner == "set" {
+                            self.emit_list_set_to_string(*sv, inner)?
+                        } else if inner.starts_with('(') || self.is_product_tuple_alias(inner) {
+                            // List of product tuples (or alias of them) as ptrtoint.
+                            let elem = if self.is_product_tuple_alias(inner) {
+                                self.resolve_alias_type_name(inner)
+                            } else {
+                                inner.to_string()
+                            };
+                            self.emit_list_product_tuple_to_string(*sv, &elem)?
                         } else {
                             self.emit_list_i32_to_string(*sv)?
-                        };
+                        }
+                    } else {
+                        self.emit_list_i32_to_string(*sv)?
+                    };
                     Ok((
                         BasicMetadataValueEnum::PointerValue(str_ptr),
                         "%s".to_string(),
@@ -401,8 +390,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         matches!(td.kind, crate::ast::TypeDefKind::Record(_))
                                     })
                             });
-                        let str_ptr =
-                            self.emit_result_to_string_typed(*sv, ok_rec, arg_type)?;
+                        let str_ptr = self.emit_result_to_string_typed(*sv, ok_rec, arg_type)?;
                         return Ok((
                             BasicMetadataValueEnum::PointerValue(str_ptr),
                             "%s".to_string(),
@@ -476,9 +464,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 // Named record stored as pointer to struct alloca.
                 if !arg_type.is_empty()
-                    && self.type_defs.get(arg_type).is_some_and(|td| {
-                        matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                    })
+                    && self
+                        .type_defs
+                        .get(arg_type)
+                        .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
                 {
                     let str_ptr = self.emit_record_display(arg_type, pv)?;
                     return Ok((
@@ -514,16 +503,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .strip_prefix("List<")
                             .and_then(|s| s.strip_suffix('>'))
                         {
-                            if list_elem.starts_with('(')
-                                || self.is_product_tuple_alias(list_elem)
+                            if list_elem.starts_with('(') || self.is_product_tuple_alias(list_elem)
                             {
                                 let elem = if self.is_product_tuple_alias(list_elem) {
                                     self.resolve_alias_type_name(list_elem)
                                 } else {
                                     list_elem.to_string()
                                 };
-                                                                let raw =
-                                    self.emit_map_list_product_to_json(*iv, &elem, 1)?;
+                                let raw = self.emit_map_list_product_to_json(*iv, &elem, 1)?;
                                 return Ok((
                                     BasicMetadataValueEnum::PointerValue(raw),
                                     "%s".to_string(),
@@ -537,15 +524,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if map_val.starts_with('(')
                                         || self.is_product_tuple_alias(map_val)
                                     {
-                                        let elem = if self.is_product_tuple_alias(map_val)
-                                        {
+                                        let elem = if self.is_product_tuple_alias(map_val) {
                                             self.resolve_alias_type_name(map_val)
                                         } else {
                                             map_val.to_string()
                                         };
-                                        let raw = self.emit_map_list_map_product_to_json(
-                                            *iv, &elem, 1,
-                                        )?;
+                                        let raw =
+                                            self.emit_map_list_map_product_to_json(*iv, &elem, 1)?;
                                         return Ok((
                                             BasicMetadataValueEnum::PointerValue(raw),
                                             "%s".to_string(),
@@ -558,17 +543,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if list_elem2.starts_with('(')
                                             || self.is_product_tuple_alias(list_elem2)
                                         {
-                                            let elem = if self
-                                                .is_product_tuple_alias(list_elem2)
-                                            {
+                                            let elem = if self.is_product_tuple_alias(list_elem2) {
                                                 self.resolve_alias_type_name(list_elem2)
                                             } else {
                                                 list_elem2.to_string()
                                             };
-                                            let raw = self
-                                                .emit_map_list_map_list_product_to_json(
-                                                    *iv, &elem, 1,
-                                                )?;
+                                            let raw = self.emit_map_list_map_list_product_to_json(
+                                                *iv, &elem, 1,
+                                            )?;
                                             return Ok((
                                                 BasicMetadataValueEnum::PointerValue(raw),
                                                 "%s".to_string(),
@@ -589,9 +571,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     } else {
                                         set_elem.to_string()
                                     };
-                                    let raw = self.emit_map_list_set_product_to_json(
-                                        *iv, &elem, 1,
-                                    )?;
+                                    let raw =
+                                        self.emit_map_list_set_product_to_json(*iv, &elem, 1)?;
                                     return Ok((
                                         BasicMetadataValueEnum::PointerValue(raw),
                                         "%s".to_string(),
@@ -605,17 +586,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if val_ty.starts_with('(')
                                             || self.is_product_tuple_alias(val_ty)
                                         {
-                                            let elem = if self
-                                                .is_product_tuple_alias(val_ty)
-                                            {
+                                            let elem = if self.is_product_tuple_alias(val_ty) {
                                                 self.resolve_alias_type_name(val_ty)
                                             } else {
                                                 val_ty.to_string()
                                             };
-                                            let raw = self
-                                                .emit_map_list_set_map_product_to_json(
-                                                    *iv, &elem, 1,
-                                                )?;
+                                            let raw = self.emit_map_list_set_map_product_to_json(
+                                                *iv, &elem, 1,
+                                            )?;
                                             return Ok((
                                                 BasicMetadataValueEnum::PointerValue(raw),
                                                 "%s".to_string(),
@@ -630,16 +608,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if opt_inner.starts_with('(')
                                         || self.is_product_tuple_alias(opt_inner)
                                     {
-                                        let elem = if self.is_product_tuple_alias(opt_inner)
-                                        {
+                                        let elem = if self.is_product_tuple_alias(opt_inner) {
                                             self.resolve_alias_type_name(opt_inner)
                                         } else {
                                             opt_inner.to_string()
                                         };
-                                        let raw = self
-                                            .emit_map_list_set_option_product_to_json(
-                                                *iv, &elem, 1,
-                                            )?;
+                                        let raw = self.emit_map_list_set_option_product_to_json(
+                                            *iv, &elem, 1,
+                                        )?;
                                         return Ok((
                                             BasicMetadataValueEnum::PointerValue(raw),
                                             "%s".to_string(),
@@ -666,8 +642,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if ok_ty.starts_with('(')
                                             || self.is_product_tuple_alias(ok_ty)
                                         {
-                                            let elem = if self.is_product_tuple_alias(ok_ty)
-                                            {
+                                            let elem = if self.is_product_tuple_alias(ok_ty) {
                                                 self.resolve_alias_type_name(ok_ty)
                                             } else {
                                                 ok_ty.to_string()
@@ -696,9 +671,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     } else {
                                         opt_inner.to_string()
                                     };
-                                    let raw = self.emit_map_list_option_product_to_json(
-                                        *iv, &elem, 1,
-                                    )?;
+                                    let raw =
+                                        self.emit_map_list_option_product_to_json(*iv, &elem, 1)?;
                                     return Ok((
                                         BasicMetadataValueEnum::PointerValue(raw),
                                         "%s".to_string(),
@@ -711,16 +685,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if set_elem.starts_with('(')
                                         || self.is_product_tuple_alias(set_elem)
                                     {
-                                        let elem = if self.is_product_tuple_alias(set_elem)
-                                        {
+                                        let elem = if self.is_product_tuple_alias(set_elem) {
                                             self.resolve_alias_type_name(set_elem)
                                         } else {
                                             set_elem.to_string()
                                         };
-                                        let raw = self
-                                            .emit_map_list_option_set_product_to_json(
-                                                *iv, &elem, 1,
-                                            )?;
+                                        let raw = self.emit_map_list_option_set_product_to_json(
+                                            *iv, &elem, 1,
+                                        )?;
                                         return Ok((
                                             BasicMetadataValueEnum::PointerValue(raw),
                                             "%s".to_string(),
@@ -754,17 +726,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 } else {
                                     res_ok.to_string()
                                 };
-                                if product.starts_with('(')
-                                    || self.is_product_tuple_alias(&product)
+                                if product.starts_with('(') || self.is_product_tuple_alias(&product)
                                 {
                                     let elem = if self.is_product_tuple_alias(&product) {
                                         self.resolve_alias_type_name(&product)
                                     } else {
                                         product
                                     };
-                                    let raw = self.emit_map_list_result_product_to_json(
-                                        *iv, &elem, 1,
-                                    )?;
+                                    let raw =
+                                        self.emit_map_list_result_product_to_json(*iv, &elem, 1)?;
                                     return Ok((
                                         BasicMetadataValueEnum::PointerValue(raw),
                                         "%s".to_string(),
@@ -794,8 +764,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if opt_inner.starts_with('(')
                                         || self.is_product_tuple_alias(opt_inner)
                                     {
-                                        let elem = if self.is_product_tuple_alias(opt_inner)
-                                        {
+                                        let elem = if self.is_product_tuple_alias(opt_inner) {
                                             self.resolve_alias_type_name(opt_inner)
                                         } else {
                                             opt_inner.to_string()
@@ -816,16 +785,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .strip_prefix("Set<")
                             .and_then(|s| s.strip_suffix('>'))
                         {
-                            if set_elem.starts_with('(')
-                                || self.is_product_tuple_alias(set_elem)
-                            {
+                            if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
                                 let elem = if self.is_product_tuple_alias(set_elem) {
                                     self.resolve_alias_type_name(set_elem)
                                 } else {
                                     set_elem.to_string()
                                 };
-                                let raw =
-                                    self.emit_map_set_product_to_json(*iv, &elem, 1)?;
+                                let raw = self.emit_map_set_product_to_json(*iv, &elem, 1)?;
                                 return Ok((
                                     BasicMetadataValueEnum::PointerValue(raw),
                                     "%s".to_string(),
@@ -843,9 +809,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     } else {
                                         list_elem.to_string()
                                     };
-                                    let raw = self.emit_map_set_list_product_to_json(
-                                        *iv, &elem, 1,
-                                    )?;
+                                    let raw =
+                                        self.emit_map_set_list_product_to_json(*iv, &elem, 1)?;
                                     return Ok((
                                         BasicMetadataValueEnum::PointerValue(raw),
                                         "%s".to_string(),
@@ -859,17 +824,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if val_ty.starts_with('(')
                                             || self.is_product_tuple_alias(val_ty)
                                         {
-                                            let elem = if self
-                                                .is_product_tuple_alias(val_ty)
-                                            {
+                                            let elem = if self.is_product_tuple_alias(val_ty) {
                                                 self.resolve_alias_type_name(val_ty)
                                             } else {
                                                 val_ty.to_string()
                                             };
-                                            let raw = self
-                                                .emit_map_set_list_map_product_to_json(
-                                                    *iv, &elem, 1,
-                                                )?;
+                                            let raw = self.emit_map_set_list_map_product_to_json(
+                                                *iv, &elem, 1,
+                                            )?;
                                             return Ok((
                                                 BasicMetadataValueEnum::PointerValue(raw),
                                                 "%s".to_string(),
@@ -886,15 +848,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if val_ty.starts_with('(')
                                         || self.is_product_tuple_alias(val_ty)
                                     {
-                                        let elem = if self.is_product_tuple_alias(val_ty)
-                                        {
+                                        let elem = if self.is_product_tuple_alias(val_ty) {
                                             self.resolve_alias_type_name(val_ty)
                                         } else {
                                             val_ty.to_string()
                                         };
-                                        let raw = self.emit_map_set_map_product_to_json(
-                                            *iv, &elem, 1,
-                                        )?;
+                                        let raw =
+                                            self.emit_map_set_map_product_to_json(*iv, &elem, 1)?;
                                         return Ok((
                                             BasicMetadataValueEnum::PointerValue(raw),
                                             "%s".to_string(),
@@ -907,17 +867,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if list_elem.starts_with('(')
                                             || self.is_product_tuple_alias(list_elem)
                                         {
-                                            let elem = if self
-                                                .is_product_tuple_alias(list_elem)
-                                            {
+                                            let elem = if self.is_product_tuple_alias(list_elem) {
                                                 self.resolve_alias_type_name(list_elem)
                                             } else {
                                                 list_elem.to_string()
                                             };
-                                            let raw = self
-                                                .emit_map_set_map_list_product_to_json(
-                                                    *iv, &elem, 1,
-                                                )?;
+                                            let raw = self.emit_map_set_map_list_product_to_json(
+                                                *iv, &elem, 1,
+                                            )?;
                                             return Ok((
                                                 BasicMetadataValueEnum::PointerValue(raw),
                                                 "%s".to_string(),
@@ -938,9 +895,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     } else {
                                         opt_inner.to_string()
                                     };
-                                    let raw = self.emit_map_set_option_product_to_json(
-                                        *iv, &elem, 1,
-                                    )?;
+                                    let raw =
+                                        self.emit_map_set_option_product_to_json(*iv, &elem, 1)?;
                                     return Ok((
                                         BasicMetadataValueEnum::PointerValue(raw),
                                         "%s".to_string(),
@@ -973,17 +929,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 } else {
                                     res_ok.to_string()
                                 };
-                                if product.starts_with('(')
-                                    || self.is_product_tuple_alias(&product)
+                                if product.starts_with('(') || self.is_product_tuple_alias(&product)
                                 {
                                     let elem = if self.is_product_tuple_alias(&product) {
                                         self.resolve_alias_type_name(&product)
                                     } else {
                                         product
                                     };
-                                    let raw = self.emit_map_set_result_product_to_json(
-                                        *iv, &elem, 1,
-                                    )?;
+                                    let raw =
+                                        self.emit_map_set_result_product_to_json(*iv, &elem, 1)?;
                                     return Ok((
                                         BasicMetadataValueEnum::PointerValue(raw),
                                         "%s".to_string(),
@@ -1012,16 +966,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if opt_inner.starts_with('(')
                                         || self.is_product_tuple_alias(opt_inner)
                                     {
-                                        let elem = if self.is_product_tuple_alias(opt_inner)
-                                        {
+                                        let elem = if self.is_product_tuple_alias(opt_inner) {
                                             self.resolve_alias_type_name(opt_inner)
                                         } else {
                                             opt_inner.to_string()
                                         };
-                                        let raw = self
-                                            .emit_map_set_result_option_product_to_json(
-                                                *iv, &elem, 1,
-                                            )?;
+                                        let raw = self.emit_map_set_result_option_product_to_json(
+                                            *iv, &elem, 1,
+                                        )?;
                                         return Ok((
                                             BasicMetadataValueEnum::PointerValue(raw),
                                             "%s".to_string(),
@@ -1034,16 +986,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .strip_prefix("Option<")
                             .and_then(|s| s.strip_suffix('>'))
                         {
-                            if opt_elem.starts_with('(')
-                                || self.is_product_tuple_alias(opt_elem)
-                            {
+                            if opt_elem.starts_with('(') || self.is_product_tuple_alias(opt_elem) {
                                 let elem = if self.is_product_tuple_alias(opt_elem) {
                                     self.resolve_alias_type_name(opt_elem)
                                 } else {
                                     opt_elem.to_string()
                                 };
-                                let raw =
-                                    self.emit_map_option_product_to_json(*iv, &elem, 1)?;
+                                let raw = self.emit_map_option_product_to_json(*iv, &elem, 1)?;
                                 return Ok((
                                     BasicMetadataValueEnum::PointerValue(raw),
                                     "%s".to_string(),
@@ -1057,15 +1006,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if inner_val.starts_with('(')
                                         || self.is_product_tuple_alias(inner_val)
                                     {
-                                        let elem = if self.is_product_tuple_alias(inner_val)
-                                        {
+                                        let elem = if self.is_product_tuple_alias(inner_val) {
                                             self.resolve_alias_type_name(inner_val)
                                         } else {
                                             inner_val.to_string()
                                         };
-                                        let raw = self.emit_map_option_map_product_to_json(
-                                            *iv, &elem, 1,
-                                        )?;
+                                        let raw = self
+                                            .emit_map_option_map_product_to_json(*iv, &elem, 1)?;
                                         return Ok((
                                             BasicMetadataValueEnum::PointerValue(raw),
                                             "%s".to_string(),
@@ -1078,9 +1025,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if list_elem.starts_with('(')
                                             || self.is_product_tuple_alias(list_elem)
                                         {
-                                            let elem = if self
-                                                .is_product_tuple_alias(list_elem)
-                                            {
+                                            let elem = if self.is_product_tuple_alias(list_elem) {
                                                 self.resolve_alias_type_name(list_elem)
                                             } else {
                                                 list_elem.to_string()
@@ -1109,9 +1054,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     } else {
                                         set_elem.to_string()
                                     };
-                                    let raw = self.emit_map_option_set_product_to_json(
-                                        *iv, &elem, 1,
-                                    )?;
+                                    let raw =
+                                        self.emit_map_option_set_product_to_json(*iv, &elem, 1)?;
                                     return Ok((
                                         BasicMetadataValueEnum::PointerValue(raw),
                                         "%s".to_string(),
@@ -1124,16 +1068,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if list_elem.starts_with('(')
                                         || self.is_product_tuple_alias(list_elem)
                                     {
-                                        let elem = if self.is_product_tuple_alias(list_elem)
-                                        {
+                                        let elem = if self.is_product_tuple_alias(list_elem) {
                                             self.resolve_alias_type_name(list_elem)
                                         } else {
                                             list_elem.to_string()
                                         };
-                                        let raw = self
-                                            .emit_map_option_set_list_product_to_json(
-                                                *iv, &elem, 1,
-                                            )?;
+                                        let raw = self.emit_map_option_set_list_product_to_json(
+                                            *iv, &elem, 1,
+                                        )?;
                                         return Ok((
                                             BasicMetadataValueEnum::PointerValue(raw),
                                             "%s".to_string(),
@@ -1148,9 +1090,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if val_ty.starts_with('(')
                                             || self.is_product_tuple_alias(val_ty)
                                         {
-                                            let elem = if self
-                                                .is_product_tuple_alias(val_ty)
-                                            {
+                                            let elem = if self.is_product_tuple_alias(val_ty) {
                                                 self.resolve_alias_type_name(val_ty)
                                             } else {
                                                 val_ty.to_string()
@@ -1179,9 +1119,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     } else {
                                         list_elem.to_string()
                                     };
-                                    let raw = self.emit_map_option_list_product_to_json(
-                                        *iv, &elem, 1,
-                                    )?;
+                                    let raw =
+                                        self.emit_map_option_list_product_to_json(*iv, &elem, 1)?;
                                     return Ok((
                                         BasicMetadataValueEnum::PointerValue(raw),
                                         "%s".to_string(),
@@ -1195,9 +1134,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if val_ty.starts_with('(')
                                             || self.is_product_tuple_alias(val_ty)
                                         {
-                                            let elem = if self
-                                                .is_product_tuple_alias(val_ty)
-                                            {
+                                            let elem = if self.is_product_tuple_alias(val_ty) {
                                                 self.resolve_alias_type_name(val_ty)
                                             } else {
                                                 val_ty.to_string()
@@ -1240,17 +1177,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 } else {
                                     res_ok.to_string()
                                 };
-                                if product.starts_with('(')
-                                    || self.is_product_tuple_alias(&product)
+                                if product.starts_with('(') || self.is_product_tuple_alias(&product)
                                 {
                                     let elem = if self.is_product_tuple_alias(&product) {
                                         self.resolve_alias_type_name(&product)
                                     } else {
                                         product
                                     };
-                                    let raw = self.emit_map_option_result_product_to_json(
-                                        *iv, &elem, 1,
-                                    )?;
+                                    let raw =
+                                        self.emit_map_option_result_product_to_json(*iv, &elem, 1)?;
                                     return Ok((
                                         BasicMetadataValueEnum::PointerValue(raw),
                                         "%s".to_string(),
@@ -1280,8 +1215,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if list_elem.starts_with('(')
                                         || self.is_product_tuple_alias(list_elem)
                                     {
-                                        let elem = if self.is_product_tuple_alias(list_elem)
-                                        {
+                                        let elem = if self.is_product_tuple_alias(list_elem) {
                                             self.resolve_alias_type_name(list_elem)
                                         } else {
                                             list_elem.to_string()
@@ -1313,9 +1247,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                                 None
                             }) {
-                                if ok_ty.starts_with('(')
-                                    || self.is_product_tuple_alias(ok_ty)
-                                {
+                                if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
                                     let elem = if self.is_product_tuple_alias(ok_ty) {
                                         self.resolve_alias_type_name(ok_ty)
                                     } else {
@@ -1336,17 +1268,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if inner_val.starts_with('(')
                                             || self.is_product_tuple_alias(inner_val)
                                         {
-                                            let elem = if self
-                                                .is_product_tuple_alias(inner_val)
-                                            {
+                                            let elem = if self.is_product_tuple_alias(inner_val) {
                                                 self.resolve_alias_type_name(inner_val)
                                             } else {
                                                 inner_val.to_string()
                                             };
-                                            let raw = self
-                                                .emit_map_result_map_product_to_json(
-                                                    *iv, &elem, 1,
-                                                )?;
+                                            let raw = self.emit_map_result_map_product_to_json(
+                                                *iv, &elem, 1,
+                                            )?;
                                             return Ok((
                                                 BasicMetadataValueEnum::PointerValue(raw),
                                                 "%s".to_string(),
@@ -1354,22 +1283,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                     }
                                 }
-                                if let Some(set_elem) = ok_ty
-                                    .strip_prefix("Set<")
-                                    .and_then(|s| s.strip_suffix('>'))
+                                if let Some(set_elem) =
+                                    ok_ty.strip_prefix("Set<").and_then(|s| s.strip_suffix('>'))
                                 {
                                     if set_elem.starts_with('(')
                                         || self.is_product_tuple_alias(set_elem)
                                     {
-                                        let elem = if self.is_product_tuple_alias(set_elem)
-                                        {
+                                        let elem = if self.is_product_tuple_alias(set_elem) {
                                             self.resolve_alias_type_name(set_elem)
                                         } else {
                                             set_elem.to_string()
                                         };
-                                        let raw = self.emit_map_result_set_product_to_json(
-                                            *iv, &elem, 1,
-                                        )?;
+                                        let raw = self
+                                            .emit_map_result_set_product_to_json(*iv, &elem, 1)?;
                                         return Ok((
                                             BasicMetadataValueEnum::PointerValue(raw),
                                             "%s".to_string(),
@@ -1382,9 +1308,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if list_elem.starts_with('(')
                                             || self.is_product_tuple_alias(list_elem)
                                         {
-                                            let elem = if self
-                                                .is_product_tuple_alias(list_elem)
-                                            {
+                                            let elem = if self.is_product_tuple_alias(list_elem) {
                                                 self.resolve_alias_type_name(list_elem)
                                             } else {
                                                 list_elem.to_string()
@@ -1407,9 +1331,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             if val_ty.starts_with('(')
                                                 || self.is_product_tuple_alias(val_ty)
                                             {
-                                                let elem = if self
-                                                    .is_product_tuple_alias(val_ty)
-                                                {
+                                                let elem = if self.is_product_tuple_alias(val_ty) {
                                                     self.resolve_alias_type_name(val_ty)
                                                 } else {
                                                     val_ty.to_string()
@@ -1433,15 +1355,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if list_elem.starts_with('(')
                                         || self.is_product_tuple_alias(list_elem)
                                     {
-                                        let elem = if self.is_product_tuple_alias(list_elem)
-                                        {
+                                        let elem = if self.is_product_tuple_alias(list_elem) {
                                             self.resolve_alias_type_name(list_elem)
                                         } else {
                                             list_elem.to_string()
                                         };
-                                        let raw = self.emit_map_result_list_product_to_json(
-                                            *iv, &elem, 1,
-                                        )?;
+                                        let raw = self
+                                            .emit_map_result_list_product_to_json(*iv, &elem, 1)?;
                                         return Ok((
                                             BasicMetadataValueEnum::PointerValue(raw),
                                             "%s".to_string(),
@@ -1455,9 +1375,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             if val_ty.starts_with('(')
                                                 || self.is_product_tuple_alias(val_ty)
                                             {
-                                                let elem = if self
-                                                    .is_product_tuple_alias(val_ty)
-                                                {
+                                                let elem = if self.is_product_tuple_alias(val_ty) {
                                                     self.resolve_alias_type_name(val_ty)
                                                 } else {
                                                     val_ty.to_string()
@@ -1480,8 +1398,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if set_elem.starts_with('(')
                                             || self.is_product_tuple_alias(set_elem)
                                         {
-                                            let elem = if self.is_product_tuple_alias(set_elem)
-                                            {
+                                            let elem = if self.is_product_tuple_alias(set_elem) {
                                                 self.resolve_alias_type_name(set_elem)
                                             } else {
                                                 set_elem.to_string()
@@ -1503,8 +1420,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if opt_inner.starts_with('(')
                                             || self.is_product_tuple_alias(opt_inner)
                                         {
-                                            let elem = if self.is_product_tuple_alias(opt_inner)
-                                            {
+                                            let elem = if self.is_product_tuple_alias(opt_inner) {
                                                 self.resolve_alias_type_name(opt_inner)
                                             } else {
                                                 opt_inner.to_string()
@@ -1527,16 +1443,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if opt_elem.starts_with('(')
                                         || self.is_product_tuple_alias(opt_elem)
                                     {
-                                        let elem = if self.is_product_tuple_alias(opt_elem)
-                                        {
+                                        let elem = if self.is_product_tuple_alias(opt_elem) {
                                             self.resolve_alias_type_name(opt_elem)
                                         } else {
                                             opt_elem.to_string()
                                         };
-                                        let raw = self
-                                            .emit_map_result_option_product_to_json(
-                                                *iv, &elem, 1,
-                                            )?;
+                                        let raw = self.emit_map_result_option_product_to_json(
+                                            *iv, &elem, 1,
+                                        )?;
                                         return Ok((
                                             BasicMetadataValueEnum::PointerValue(raw),
                                             "%s".to_string(),
@@ -1549,9 +1463,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if list_elem.starts_with('(')
                                             || self.is_product_tuple_alias(list_elem)
                                         {
-                                            let elem = if self
-                                                .is_product_tuple_alias(list_elem)
-                                            {
+                                            let elem = if self.is_product_tuple_alias(list_elem) {
                                                 self.resolve_alias_type_name(list_elem)
                                             } else {
                                                 list_elem.to_string()
@@ -1583,8 +1495,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     } else {
                                         inner_val.to_string()
                                     };
-                                    let raw =
-                                        self.emit_map_map_product_to_json(*iv, &elem, 1)?;
+                                    let raw = self.emit_map_map_product_to_json(*iv, &elem, 1)?;
                                     return Ok((
                                         BasicMetadataValueEnum::PointerValue(raw),
                                         "%s".to_string(),
@@ -1597,16 +1508,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if set_elem.starts_with('(')
                                         || self.is_product_tuple_alias(set_elem)
                                     {
-                                        let elem = if self
-                                            .is_product_tuple_alias(set_elem)
-                                        {
+                                        let elem = if self.is_product_tuple_alias(set_elem) {
                                             self.resolve_alias_type_name(set_elem)
                                         } else {
                                             set_elem.to_string()
                                         };
-                                        let raw = self.emit_map_map_set_product_to_json(
-                                            *iv, &elem, 1,
-                                        )?;
+                                        let raw =
+                                            self.emit_map_map_set_product_to_json(*iv, &elem, 1)?;
                                         return Ok((
                                             BasicMetadataValueEnum::PointerValue(raw),
                                             "%s".to_string(),
@@ -1620,16 +1528,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if list_elem.starts_with('(')
                                         || self.is_product_tuple_alias(list_elem)
                                     {
-                                        let elem = if self
-                                            .is_product_tuple_alias(list_elem)
-                                        {
+                                        let elem = if self.is_product_tuple_alias(list_elem) {
                                             self.resolve_alias_type_name(list_elem)
                                         } else {
                                             list_elem.to_string()
                                         };
-                                        let raw = self.emit_map_map_list_product_to_json(
-                                            *iv, &elem, 1,
-                                        )?;
+                                        let raw =
+                                            self.emit_map_map_list_product_to_json(*iv, &elem, 1)?;
                                         return Ok((
                                             BasicMetadataValueEnum::PointerValue(raw),
                                             "%s".to_string(),
@@ -1643,16 +1548,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if opt_inner.starts_with('(')
                                         || self.is_product_tuple_alias(opt_inner)
                                     {
-                                        let elem = if self
-                                            .is_product_tuple_alias(opt_inner)
-                                        {
+                                        let elem = if self.is_product_tuple_alias(opt_inner) {
                                             self.resolve_alias_type_name(opt_inner)
                                         } else {
                                             opt_inner.to_string()
                                         };
-                                        let raw = self.emit_map_map_option_product_to_json(
-                                            *iv, &elem, 1,
-                                        )?;
+                                        let raw = self
+                                            .emit_map_map_option_product_to_json(*iv, &elem, 1)?;
                                         return Ok((
                                             BasicMetadataValueEnum::PointerValue(raw),
                                             "%s".to_string(),
@@ -1660,9 +1562,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                 }
                                 if inner_val.starts_with("Result<") {
-                                    if let Some(ok_ty) = inner_val
-                                        .strip_prefix("Result<")
-                                        .and_then(|s| {
+                                    if let Some(ok_ty) =
+                                        inner_val.strip_prefix("Result<").and_then(|s| {
                                             let mut depth = 0i32;
                                             for (i, ch) in s.char_indices() {
                                                 match ch {
@@ -1680,16 +1581,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if ok_ty.starts_with('(')
                                             || self.is_product_tuple_alias(ok_ty)
                                         {
-                                            let elem = if self.is_product_tuple_alias(ok_ty)
-                                            {
+                                            let elem = if self.is_product_tuple_alias(ok_ty) {
                                                 self.resolve_alias_type_name(ok_ty)
                                             } else {
                                                 ok_ty.to_string()
                                             };
-                                            let raw = self
-                                                .emit_map_map_result_product_to_json(
-                                                    *iv, &elem, 1,
-                                                )?;
+                                            let raw = self.emit_map_map_result_product_to_json(
+                                                *iv, &elem, 1,
+                                            )?;
                                             return Ok((
                                                 BasicMetadataValueEnum::PointerValue(raw),
                                                 "%s".to_string(),
@@ -1721,10 +1620,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .try_as_basic_value_opt()
                         .ok_or("map to_json void")?
                         .into_pointer_value();
-                    return Ok((
-                        BasicMetadataValueEnum::PointerValue(raw),
-                        "%s".to_string(),
-                    ));
+                    return Ok((BasicMetadataValueEnum::PointerValue(raw), "%s".to_string()));
                 }
                 if arg_type == "Set" || arg_type.starts_with("Set<") || arg_type == "set" {
                     if let Some(elem) = arg_type
@@ -1748,11 +1644,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .strip_prefix("Map<string, ")
                                 .and_then(|s| s.strip_suffix('>'))
                             {
-                                if val_ty.starts_with('(')
-                                    || self.is_product_tuple_alias(val_ty)
-                                {
-                                    let resolved = if self.is_product_tuple_alias(val_ty)
-                                    {
+                                if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                    let resolved = if self.is_product_tuple_alias(val_ty) {
                                         self.resolve_alias_type_name(val_ty)
                                     } else {
                                         val_ty.to_string()
@@ -1782,8 +1675,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                         arity.max(1)
                                     };
-                                    let func = self
-                                        .get_runtime_fn("mimi_set_to_json_map_product_i64")?;
+                                    let func =
+                                        self.get_runtime_fn("mimi_set_to_json_map_product_i64")?;
                                     let i64_ty = self.context.i64_type();
                                     let raw = self
                                         .build_call(
@@ -1814,9 +1707,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if list_elem.starts_with('(')
                                         || self.is_product_tuple_alias(list_elem)
                                     {
-                                        let resolved = if self
-                                            .is_product_tuple_alias(list_elem)
-                                        {
+                                        let resolved = if self.is_product_tuple_alias(list_elem) {
                                             self.resolve_alias_type_name(list_elem)
                                         } else {
                                             list_elem.to_string()
@@ -1880,9 +1771,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if set_elem.starts_with('(')
                                         || self.is_product_tuple_alias(set_elem)
                                     {
-                                        let resolved = if self
-                                            .is_product_tuple_alias(set_elem)
-                                        {
+                                        let resolved = if self.is_product_tuple_alias(set_elem) {
                                             self.resolve_alias_type_name(set_elem)
                                         } else {
                                             set_elem.to_string()
@@ -1953,9 +1842,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if val_ty.starts_with('(')
                                         || self.is_product_tuple_alias(val_ty)
                                     {
-                                        let resolved = if self
-                                            .is_product_tuple_alias(val_ty)
-                                        {
+                                        let resolved = if self.is_product_tuple_alias(val_ty) {
                                             self.resolve_alias_type_name(val_ty)
                                         } else {
                                             val_ty.to_string()
@@ -2014,23 +1901,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                             }
                         }
-                        if let Some(res_ok) = elem
-                            .strip_prefix("Result<")
-                            .and_then(|s| {
-                                let mut depth = 0i32;
-                                for (i, ch) in s.char_indices() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            return Some(s[..i].trim());
-                                        }
-                                        _ => {}
+                        if let Some(res_ok) = elem.strip_prefix("Result<").and_then(|s| {
+                            let mut depth = 0i32;
+                            for (i, ch) in s.char_indices() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' | ')' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        return Some(s[..i].trim());
                                     }
+                                    _ => {}
                                 }
-                                None
-                            })
-                        {
+                            }
+                            None
+                        }) {
                             if res_ok.starts_with("Map<string, ") {
                                 if let Some(val_ty) = res_ok
                                     .strip_prefix("Map<string, ")
@@ -2039,9 +1923,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if val_ty.starts_with('(')
                                         || self.is_product_tuple_alias(val_ty)
                                     {
-                                        let resolved = if self
-                                            .is_product_tuple_alias(val_ty)
-                                        {
+                                        let resolved = if self.is_product_tuple_alias(val_ty) {
                                             self.resolve_alias_type_name(val_ty)
                                         } else {
                                             val_ty.to_string()
@@ -2105,9 +1987,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if list_elem.starts_with('(')
                                         || self.is_product_tuple_alias(list_elem)
                                     {
-                                        let resolved = if self
-                                            .is_product_tuple_alias(list_elem)
-                                        {
+                                        let resolved = if self.is_product_tuple_alias(list_elem) {
                                             self.resolve_alias_type_name(list_elem)
                                         } else {
                                             list_elem.to_string()
@@ -2166,9 +2046,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                             }
                         }
-                        if let Some(list_elem) = elem
-                            .strip_prefix("List<")
-                            .and_then(|s| s.strip_suffix('>'))
+                        if let Some(list_elem) =
+                            elem.strip_prefix("List<").and_then(|s| s.strip_suffix('>'))
                         {
                             if list_elem.starts_with("Map<string, ") {
                                 if let Some(val_ty) = list_elem
@@ -2178,9 +2057,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if val_ty.starts_with('(')
                                         || self.is_product_tuple_alias(val_ty)
                                     {
-                                        let resolved = if self
-                                            .is_product_tuple_alias(val_ty)
-                                        {
+                                        let resolved = if self.is_product_tuple_alias(val_ty) {
                                             self.resolve_alias_type_name(val_ty)
                                         } else {
                                             val_ty.to_string()
@@ -2243,9 +2120,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .strip_prefix("Option<")
                             .and_then(|s| s.strip_suffix('>'))
                         {
-                            if opt_elem.starts_with('(')
-                                || self.is_product_tuple_alias(opt_elem)
-                            {
+                            if opt_elem.starts_with('(') || self.is_product_tuple_alias(opt_elem) {
                                 let resolved = if self.is_product_tuple_alias(opt_elem) {
                                     self.resolve_alias_type_name(opt_elem)
                                 } else {
@@ -2258,26 +2133,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     "%s".to_string(),
                                 ));
                             }
-                            if let Some(res_ok) = opt_elem
-                                .strip_prefix("Result<")
-                                .and_then(|s| {
-                                    let mut depth = 0i32;
-                                    for (i, ch) in s.char_indices() {
-                                        match ch {
-                                            '<' | '(' => depth += 1,
-                                            '>' | ')' => depth -= 1,
-                                            ',' if depth == 0 => {
-                                                return Some(s[..i].trim());
-                                            }
-                                            _ => {}
+                            if let Some(res_ok) = opt_elem.strip_prefix("Result<").and_then(|s| {
+                                let mut depth = 0i32;
+                                for (i, ch) in s.char_indices() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            return Some(s[..i].trim());
                                         }
+                                        _ => {}
                                     }
-                                    None
-                                })
-                            {
-                                if res_ok.starts_with('(')
-                                    || self.is_product_tuple_alias(res_ok)
-                                {
+                                }
+                                None
+                            }) {
+                                if res_ok.starts_with('(') || self.is_product_tuple_alias(res_ok) {
                                     let resolved = if self.is_product_tuple_alias(res_ok) {
                                         self.resolve_alias_type_name(res_ok)
                                     } else {
@@ -2308,9 +2178,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                                 None
                             }) {
-                                if ok_ty.starts_with('(')
-                                    || self.is_product_tuple_alias(ok_ty)
-                                {
+                                if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
                                     let resolved = if self.is_product_tuple_alias(ok_ty) {
                                         self.resolve_alias_type_name(ok_ty)
                                     } else {
@@ -2330,17 +2198,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if opt_inner.starts_with('(')
                                         || self.is_product_tuple_alias(opt_inner)
                                     {
-                                        let resolved = if self
-                                            .is_product_tuple_alias(opt_inner)
-                                        {
+                                        let resolved = if self.is_product_tuple_alias(opt_inner) {
                                             self.resolve_alias_type_name(opt_inner)
                                         } else {
                                             opt_inner.to_string()
                                         };
-                                        let raw = self
-                                            .emit_set_result_option_product_to_json(
-                                                *iv, &resolved, 1,
-                                            )?;
+                                        let raw = self.emit_set_result_option_product_to_json(
+                                            *iv, &resolved, 1,
+                                        )?;
                                         return Ok((
                                             BasicMetadataValueEnum::PointerValue(raw),
                                             "%s".to_string(),
@@ -2354,9 +2219,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if list_elem.starts_with('(')
                                         || self.is_product_tuple_alias(list_elem)
                                     {
-                                        let resolved = if self
-                                            .is_product_tuple_alias(list_elem)
-                                        {
+                                        let resolved = if self.is_product_tuple_alias(list_elem) {
                                             self.resolve_alias_type_name(list_elem)
                                         } else {
                                             list_elem.to_string()
@@ -2421,9 +2284,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if val_ty.starts_with('(')
                                             || self.is_product_tuple_alias(val_ty)
                                         {
-                                            let resolved = if self
-                                                .is_product_tuple_alias(val_ty)
-                                            {
+                                            let resolved = if self.is_product_tuple_alias(val_ty) {
                                                 self.resolve_alias_type_name(val_ty)
                                             } else {
                                                 val_ty.to_string()
@@ -2503,10 +2364,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .try_as_basic_value_opt()
                         .ok_or("set display void")?
                         .into_pointer_value();
-                    return Ok((
-                        BasicMetadataValueEnum::PointerValue(raw),
-                        "%s".to_string(),
-                    ));
+                    return Ok((BasicMetadataValueEnum::PointerValue(raw), "%s".to_string()));
                 }
                 // A1: Ensure integer is i64 for printf("%ld").
                 // i1 bool OR typed `bool` (is_ok/is_err return i64 0/1): print
@@ -3236,9 +3094,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::PointerValue(list_ptr),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "list_set_option_product_json",
             )?
@@ -3288,9 +3144,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::PointerValue(list_ptr),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "list_set_map_product_json",
             )?
@@ -3338,9 +3192,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::PointerValue(list_ptr),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "list_set_result_product_json",
             )?
@@ -3423,12 +3275,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_int_value();
         let cont = self
             .builder
-            .build_int_compare(
-                IntPredicate::ULT,
-                idx,
-                len,
-                "list_res_opt_prod_json_cont",
-            )
+            .build_int_compare(IntPredicate::ULT, idx, len, "list_res_opt_prod_json_cont")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         self.builder
             .build_conditional_branch(cont, body_bb, done_bb)
@@ -3437,12 +3284,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let zero = i64_ty.const_int(0, false);
         let need_comma = self
             .builder
-            .build_int_compare(
-                IntPredicate::UGT,
-                idx,
-                zero,
-                "list_res_opt_prod_json_comma",
-            )
+            .build_int_compare(IntPredicate::UGT, idx, zero, "list_res_opt_prod_json_comma")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         let comma_bb = self
             .context
@@ -3523,8 +3365,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         let merge_bb = self
             .context
             .append_basic_block(parent, "list_res_opt_prod_json_merge");
-        let piece_slot =
-            self.build_alloca(BasicTypeEnum::PointerType(i8_ptr), "list_res_opt_prod_piece")?;
+        let piece_slot = self.build_alloca(
+            BasicTypeEnum::PointerType(i8_ptr),
+            "list_res_opt_prod_piece",
+        )?;
         self.builder
             .build_conditional_branch(is_ok, ok_bb, err_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -3732,9 +3576,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .and_then(|s| s.split(',').next())
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
-        let is_named_record = self.type_defs.get(&ok_inner).is_some_and(|td| {
-            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-        });
+        let is_named_record = self
+            .type_defs
+            .get(&ok_inner)
+            .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)));
         let i64_ty = self.context.i64_type();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let list_ty = self.list_struct_type();
@@ -3897,8 +3742,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             } else {
                 self.emit_product_tuple_to_json(ok_sv)?
             };
-            let wrap =
-                self.malloc_or_abort(i64_ty.const_int(1024, false), "list_res_prod_wrap")?;
+            let wrap = self.malloc_or_abort(i64_ty.const_int(1024, false), "list_res_prod_wrap")?;
             let fmt = self
                 .builder
                 .build_global_string_ptr("{\"Ok\":[%s]}", "list_res_prod_ok_fmt")
@@ -4060,7 +3904,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get_insert_block()
             .and_then(|bb| bb.get_parent())
             .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
-        let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_opt_tup_json_i")?;
+        let idx_alloca =
+            self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_opt_tup_json_i")?;
         self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
         let loop_bb = self
             .context
@@ -4183,9 +4028,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .strip_prefix("Option<")
             .and_then(|s| s.strip_suffix('>'))
             .unwrap_or("");
-        let is_named_record = self.type_defs.get(inner_name).is_some_and(|td| {
-            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-        });
+        let is_named_record = self
+            .type_defs
+            .get(inner_name)
+            .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)));
         let snprintf_fn = self.get_runtime_fn("snprintf")?;
         let piece = if let BasicValueEnum::StructValue(pay_sv) = pay {
             let pfields = pay_sv.get_type().get_field_types();
@@ -4396,9 +4242,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
         let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_tup_json_i")?;
         self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
-        let loop_bb = self.context.append_basic_block(parent, "list_tup_json_loop");
-        let body_bb = self.context.append_basic_block(parent, "list_tup_json_body");
-        let done_bb = self.context.append_basic_block(parent, "list_tup_json_done");
+        let loop_bb = self
+            .context
+            .append_basic_block(parent, "list_tup_json_loop");
+        let body_bb = self
+            .context
+            .append_basic_block(parent, "list_tup_json_body");
+        let done_bb = self
+            .context
+            .append_basic_block(parent, "list_tup_json_done");
         self.builder
             .build_unconditional_branch(loop_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -4424,7 +4276,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let comma_bb = self
             .context
             .append_basic_block(parent, "list_tup_json_comma_bb");
-        let elem_bb = self.context.append_basic_block(parent, "list_tup_json_elem");
+        let elem_bb = self
+            .context
+            .append_basic_block(parent, "list_tup_json_elem");
         self.builder
             .build_conditional_branch(need_comma, comma_bb, elem_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -4715,7 +4569,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_compare(IntPredicate::UGT, idx, zero, "list_enum_comma")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let comma_bb = self.context.append_basic_block(parent, "list_enum_comma_bb");
+        let comma_bb = self
+            .context
+            .append_basic_block(parent, "list_enum_comma_bb");
         let elem_bb = self.context.append_basic_block(parent, "list_enum_elem");
         self.builder
             .build_conditional_branch(need_comma, comma_bb, elem_bb)
@@ -4769,7 +4625,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         );
         let loaded = self
             .builder
-            .build_load(BasicTypeEnum::StructType(enum_sty), enum_ptr, "list_enum_ld")
+            .build_load(
+                BasicTypeEnum::StructType(enum_sty),
+                enum_ptr,
+                "list_enum_ld",
+            )
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_struct_value();
         let enum_str = self.emit_enum_display(enum_name, loaded)?;
@@ -4943,12 +4803,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|s| s.trim())
             .filter(|inner| {
                 !inner.is_empty()
-                    && self.type_defs.get(*inner).is_some_and(|td| {
-                        matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                    })
+                    && self
+                        .type_defs
+                        .get(*inner)
+                        .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
             });
-        let res_str =
-            self.emit_result_to_string_typed(loaded, ok_rec, elem_res_type)?;
+        let res_str = self.emit_result_to_string_typed(loaded, ok_rec, elem_res_type)?;
         self.build_call(
             strcat_fn,
             &[
@@ -5095,10 +4955,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // fall back to canonical {i1,i64} for scalar Option elements.
         let opt_ty = crate::codegen::extract_list_elem_type(&format!("List<{}>", elem_opt_type))
             .unwrap_or_else(|| {
-                crate::ast::Type::Name("Option".into(), vec![crate::ast::Type::Name(
-                    "i64".into(),
-                    vec![],
-                )])
+                crate::ast::Type::Name(
+                    "Option".into(),
+                    vec![crate::ast::Type::Name("i64".into(), vec![])],
+                )
             });
         let opt_sty = match self.llvm_type_for(&opt_ty) {
             Some(BasicTypeEnum::StructType(s)) => s,
@@ -5245,12 +5105,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_pointer_value();
         let elem_ptr = unsafe {
             self.builder
-                .build_gep(
-                    i64_ty,
-                    data_ptr,
-                    &[idx],
-                    "list_rec_elem_ptr",
-                )
+                .build_gep(i64_ty, data_ptr, &[idx], "list_rec_elem_ptr")
                 .map_err(|e| CompileError::LlvmError(e.to_string()))?
         };
         let elem_i64 = self
@@ -5342,11 +5197,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ],
                 true,
             );
-            self.module.add_function(
-                "snprintf",
-                ty,
-                Some(inkwell::module::Linkage::External),
-            )
+            self.module
+                .add_function("snprintf", ty, Some(inkwell::module::Linkage::External))
         });
         let parent = self
             .builder
@@ -5492,9 +5344,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         type_name: &str,
         struct_ptr: inkwell::values::PointerValue<'ctx>,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let td = self.type_defs.get(type_name).ok_or_else(|| {
-            CompileError::LlvmError(format!("no type def for {}", type_name))
-        })?;
+        let td = self
+            .type_defs
+            .get(type_name)
+            .ok_or_else(|| CompileError::LlvmError(format!("no type def for {}", type_name)))?;
         let fields = match &td.kind {
             crate::ast::TypeDefKind::Record(fields) => fields.clone(),
             _ => {
@@ -5504,9 +5357,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )))
             }
         };
-        let llvm_ty = *self.type_llvm.get(type_name).ok_or_else(|| {
-            CompileError::LlvmError(format!("no LLVM type for {}", type_name))
-        })?;
+        let llvm_ty = *self
+            .type_llvm
+            .get(type_name)
+            .ok_or_else(|| CompileError::LlvmError(format!("no LLVM type for {}", type_name)))?;
         let BasicTypeEnum::StructType(sty) = llvm_ty else {
             return Err(CompileError::LlvmError(format!(
                 "{} is not a struct",
@@ -5653,11 +5507,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ],
                 true,
             );
-            self.module.add_function(
-                "snprintf",
-                ty,
-                Some(inkwell::module::Linkage::External),
-            )
+            self.module
+                .add_function("snprintf", ty, Some(inkwell::module::Linkage::External))
         });
         self.build_call(snprintf_fn, &all_args, "rec_disp_snprintf")?;
         Ok(buf)
@@ -5669,9 +5520,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "mimi_map_to_json_string"
         } else if type_name.contains("Map<string, bool>") {
             "mimi_map_to_json_bool"
-        } else if type_name.contains("Map<string, f64>")
-            || type_name.contains("Map<string, f32>")
-        {
+        } else if type_name.contains("Map<string, f64>") || type_name.contains("Map<string, f32>") {
             "mimi_map_to_json_f64"
         } else {
             "mimi_map_to_json_i64"
@@ -5830,7 +5679,10 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Strip first type argument from `Prefix<A, …>` / `Prefix<A>` → `A`.
     /// Handles nested brackets (e.g. `Result<Option<Map<string, i32>>, i32>`).
-    pub(in crate::codegen) fn strip_first_type_arg(type_name: &str, prefix: &str) -> Option<String> {
+    pub(in crate::codegen) fn strip_first_type_arg(
+        type_name: &str,
+        prefix: &str,
+    ) -> Option<String> {
         let rest = type_name.strip_prefix(prefix)?.strip_prefix('<')?;
         // Track both angle-bracket and paren depth so product tuples like
         // List<(i32, i32)> do not split on the comma inside the tuple.
@@ -5921,11 +5773,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map_err(|e| CompileError::LlvmError(e.to_string()))?;
             let loaded = self
                 .builder
-                .build_load(
-                    BasicTypeEnum::StructType(str_sty),
-                    as_ptr,
-                    "res_err_str_ld",
-                )
+                .build_load(BasicTypeEnum::StructType(str_sty), as_ptr, "res_err_str_ld")
                 .map_err(|e| CompileError::LlvmError(e.to_string()))?
                 .into_struct_value();
             let data_ptr = self
@@ -5994,11 +5842,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.builder.position_at_end(merge_bb);
         Ok(self
-            .build_load(
-                BasicTypeEnum::PointerType(i8_ptr),
-                out_slot,
-                "res_err_j_ld",
-            )?
+            .build_load(BasicTypeEnum::PointerType(i8_ptr), out_slot, "res_err_j_ld")?
             .into_pointer_value())
     }
 
@@ -6047,9 +5891,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(ok_bb);
         let ok_pay = self.build_extract_value(sv.into(), 1, "res_j_ok")?;
         let ok_inner = Self::strip_first_type_arg(res_type, "Result").unwrap_or_default();
-        let is_named_record = self.type_defs.get(&ok_inner).is_some_and(|td| {
-            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-        });
+        let is_named_record = self
+            .type_defs
+            .get(&ok_inner)
+            .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)));
         let ok_json = if let BasicValueEnum::StructValue(ok_sv) = ok_pay {
             let ofields = ok_sv.get_type().get_field_types();
             let ok_is_nested_result = ofields.len() >= 3
@@ -6190,11 +6035,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         self.builder.position_at_end(merge_bb);
         Ok(self
-            .build_load(
-                BasicTypeEnum::PointerType(i8_ptr),
-                out_slot,
-                "res_j_result",
-            )?
+            .build_load(BasicTypeEnum::PointerType(i8_ptr), out_slot, "res_j_result")?
             .into_pointer_value())
     }
 
@@ -6233,11 +6074,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ],
                 true,
             );
-            self.module.add_function(
-                "snprintf",
-                ty,
-                Some(inkwell::module::Linkage::External),
-            )
+            self.module
+                .add_function("snprintf", ty, Some(inkwell::module::Linkage::External))
         });
         let parent = self
             .builder
@@ -6315,11 +6153,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let list_ty = self.list_struct_type();
                     let loaded = self
                         .builder
-                        .build_load(
-                            BasicTypeEnum::StructType(list_ty),
-                            ptr,
-                            "res_ok_list_ld",
-                        )
+                        .build_load(BasicTypeEnum::StructType(list_ty), ptr, "res_ok_list_ld")
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?
                         .into_struct_value();
                     let list_str = self.emit_result_ok_list_display(loaded, arg_type)?;
@@ -6453,8 +6287,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         );
                     if is_enum_layout {
                         // Result Ok of custom enum — use enum display when type known.
-                        let ok_ty = Self::strip_first_type_arg(arg_type, "Result")
-                            .unwrap_or_default();
+                        let ok_ty =
+                            Self::strip_first_type_arg(arg_type, "Result").unwrap_or_default();
                         if !ok_ty.is_empty()
                             && self.type_defs.get(&ok_ty).is_some_and(|td| {
                                 matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
@@ -6471,9 +6305,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 &[
                                     BasicMetadataValueEnum::PointerValue(buf),
                                     BasicMetadataValueEnum::IntValue(buf_size),
-                                    BasicMetadataValueEnum::PointerValue(
-                                        fmt.as_pointer_value(),
-                                    ),
+                                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
                                     BasicMetadataValueEnum::PointerValue(enum_str),
                                 ],
                                 "res_ok_enum_snprintf",
@@ -6490,17 +6322,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 &[
                                     BasicMetadataValueEnum::PointerValue(buf),
                                     BasicMetadataValueEnum::IntValue(buf_size),
-                                    BasicMetadataValueEnum::PointerValue(
-                                        fmt.as_pointer_value(),
-                                    ),
+                                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
                                     BasicMetadataValueEnum::PointerValue(tup_str),
                                 ],
                                 "res_ok_tup_snprintf",
                             )?;
                         }
                     } else {
-                        let tup_str =
-                            self.emit_product_tuple_to_string(val.into_struct_value())?;
+                        let tup_str = self.emit_product_tuple_to_string(val.into_struct_value())?;
                         let fmt = self
                             .builder
                             .build_global_string_ptr("Ok(%s)", "res_ok_tup_fmt")
@@ -6529,9 +6358,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Result of Map/Set: Ok payload is opaque handle (i64).
                     // Prefer Set root before Map contains — Result<Set<Map<…>>>
                     // must not take the Map branch (nested Map substring).
-                    if label == "ok"
-                        && (arg_type.contains("Map<") || arg_type.contains("Set<"))
-                    {
+                    if label == "ok" && (arg_type.contains("Map<") || arg_type.contains("Set<")) {
                         let ok_root = arg_type
                             .strip_prefix("Result<")
                             .and_then(|s| {
@@ -6574,9 +6401,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if val_ty.starts_with('(')
                                             || self.is_product_tuple_alias(val_ty)
                                         {
-                                            let resolved = if self
-                                                .is_product_tuple_alias(val_ty)
-                                            {
+                                            let resolved = if self.is_product_tuple_alias(val_ty) {
                                                 self.resolve_alias_type_name(val_ty)
                                             } else {
                                                 val_ty.to_string()
@@ -6639,8 +6464,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             .into_pointer_value()
                                         }
                                     } else {
-                                        let set_fn =
-                                            self.get_runtime_fn("mimi_set_to_display")?;
+                                        let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
                                         self.build_call(
                                             set_fn,
                                             &[BasicMetadataValueEnum::IntValue(as_i64)],
@@ -6657,19 +6481,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if opt_inner.starts_with('(')
                                         || self.is_product_tuple_alias(opt_inner)
                                     {
-                                        let resolved = if self
-                                            .is_product_tuple_alias(opt_inner)
-                                        {
+                                        let resolved = if self.is_product_tuple_alias(opt_inner) {
                                             self.resolve_alias_type_name(opt_inner)
                                         } else {
                                             opt_inner.to_string()
                                         };
-                                        self.emit_set_option_product_to_json(
-                                            as_i64, &resolved, 1,
-                                        )?
+                                        self.emit_set_option_product_to_json(as_i64, &resolved, 1)?
                                     } else {
-                                        let set_fn =
-                                            self.get_runtime_fn("mimi_set_to_display")?;
+                                        let set_fn = self.get_runtime_fn("mimi_set_to_display")?;
                                         self.build_call(
                                             set_fn,
                                             &[BasicMetadataValueEnum::IntValue(as_i64)],
@@ -6734,8 +6553,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .strip_prefix("Map<string, ")
                                 .and_then(|s| s.strip_suffix('>'))
                             {
-                                if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty)
-                                {
+                                if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
                                     let elem = if self.is_product_tuple_alias(val_ty) {
                                         self.resolve_alias_type_name(val_ty)
                                     } else {
@@ -6825,8 +6643,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if inner_val.starts_with('(')
                                             || self.is_product_tuple_alias(inner_val)
                                         {
-                                            let elem = if self.is_product_tuple_alias(inner_val)
-                                            {
+                                            let elem = if self.is_product_tuple_alias(inner_val) {
                                                 self.resolve_alias_type_name(inner_val)
                                             } else {
                                                 inner_val.to_string()
@@ -6986,16 +6803,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .get_insert_block()
                         .and_then(|bb| bb.get_parent())
                         .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
-                    let str_bb =
-                        self.context
-                            .append_basic_block(parent_fn, &format!("res_{}_str", label));
-                    let int_bb =
-                        self.context
-                            .append_basic_block(parent_fn, &format!("res_{}_int", label));
-                    let arm_merge = self.context.append_basic_block(
-                        parent_fn,
-                        &format!("res_{}_arm_merge", label),
-                    );
+                    let str_bb = self
+                        .context
+                        .append_basic_block(parent_fn, &format!("res_{}_str", label));
+                    let int_bb = self
+                        .context
+                        .append_basic_block(parent_fn, &format!("res_{}_int", label));
+                    let arm_merge = self
+                        .context
+                        .append_basic_block(parent_fn, &format!("res_{}_arm_merge", label));
                     self.builder
                         .build_conditional_branch(is_heapish, str_bb, int_bb)
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -7139,21 +6955,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                     {
                         // Nested custom enum {i32, i64}
-                        let ok_inner = Self::strip_first_type_arg(arg_type, "Result")
-                            .unwrap_or_default();
-                        let enum_ty = if self.type_defs.get(&ok_inner).is_some_and(|td| {
-                            matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
-                        }) {
-                            Some(ok_inner.as_str())
-                        } else {
-                            self.type_defs.iter().find_map(|(n, td)| {
-                                if matches!(td.kind, crate::ast::TypeDefKind::Enum(_)) {
-                                    Some(n.as_str())
-                                } else {
-                                    None
-                                }
-                            })
-                        };
+                        let ok_inner =
+                            Self::strip_first_type_arg(arg_type, "Result").unwrap_or_default();
+                        let enum_ty =
+                            if self.type_defs.get(&ok_inner).is_some_and(|td| {
+                                matches!(td.kind, crate::ast::TypeDefKind::Enum(_))
+                            }) {
+                                Some(ok_inner.as_str())
+                            } else {
+                                self.type_defs.iter().find_map(|(n, td)| {
+                                    if matches!(td.kind, crate::ast::TypeDefKind::Enum(_)) {
+                                        Some(n.as_str())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            };
                         if let Some(et) = enum_ty {
                             let nested = self.emit_enum_display(et, sv)?;
                             let fmt = self
@@ -7491,9 +7308,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if val_ty.starts_with('(')
                                         || self.is_product_tuple_alias(val_ty)
                                     {
-                                        let resolved = if self
-                                            .is_product_tuple_alias(val_ty)
-                                        {
+                                        let resolved = if self.is_product_tuple_alias(val_ty) {
                                             self.resolve_alias_type_name(val_ty)
                                         } else {
                                             val_ty.to_string()
@@ -7523,9 +7338,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             arity.max(1)
                                         };
-                                        let func = self.get_runtime_fn(
-                                            "mimi_set_to_json_map_product_i64",
-                                        )?;
+                                        let func = self
+                                            .get_runtime_fn("mimi_set_to_json_map_product_i64")?;
                                         let i64_ty = self.context.i64_type();
                                         self.build_call(
                                             func,
@@ -7544,8 +7358,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         .ok_or("opt set map display void")?
                                         .into_pointer_value()
                                     } else {
-                                        let fn_name =
-                                            Self::set_display_fn_for_type(arg_type);
+                                        let fn_name = Self::set_display_fn_for_type(arg_type);
                                         let func = self.get_runtime_fn(fn_name)?;
                                         self.build_call(
                                             func,
@@ -7618,12 +7431,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicValueEnum::PointerValue(pv) => {
                 if inner_record.is_some() {
                     OptPay::RecPtr(pv)
-                } else if arg_type.starts_with("Option<List")
-                    || arg_type.contains("List<")
-                {
+                } else if arg_type.starts_with("Option<List") || arg_type.contains("List<") {
                     // Defer list load until Some arm.
-                    let as_i64 = self
-                        .build_ptr_to_int(pv, i64_ty, "opt_list_ptr_i64")?;
+                    let as_i64 = self.build_ptr_to_int(pv, i64_ty, "opt_list_ptr_i64")?;
                     OptPay::NestedList(as_i64)
                 } else {
                     OptPay::StrPtr(pv)
@@ -7650,8 +7460,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     matches!(td.kind, crate::ast::TypeDefKind::Record(_))
                                 })
                         });
-                    let nested =
-                        self.emit_result_to_string_typed(psv, ok_rec, &res_ty)?;
+                    let nested = self.emit_result_to_string_typed(psv, ok_rec, &res_ty)?;
                     OptPay::StrPtr(nested)
                 } else if pfields.len() == 2
                     && matches!(
@@ -7700,8 +7509,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else {
                         OptPay::Int(i64_ty.const_int(0, false))
                     }
-                } else if pfields.len() >= 1
-                    && matches!(pfields[0], BasicTypeEnum::PointerType(_))
+                } else if pfields.len() >= 1 && matches!(pfields[0], BasicTypeEnum::PointerType(_))
                 {
                     // string {ptr,len}
                     let dp = self
@@ -7712,15 +7520,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .strip_prefix("Option<")
                     .and_then(|s| s.strip_suffix('>'))
                     .filter(|n| {
-                        self.type_defs.get(*n).is_some_and(|td| {
-                            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                        })
+                        self.type_defs
+                            .get(*n)
+                            .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
                     })
                 {
                     // Named record by-value in Option payload.
                     let rec_ty = psv.get_type();
-                    let tmp = self
-                        .build_alloca(BasicTypeEnum::StructType(rec_ty), "opt_rec_disp_tmp")?;
+                    let tmp =
+                        self.build_alloca(BasicTypeEnum::StructType(rec_ty), "opt_rec_disp_tmp")?;
                     self.build_store(tmp, psv)?;
                     let rec_str = self.emit_record_display(rec_name, tmp)?;
                     OptPay::StrPtr(rec_str)
@@ -7794,11 +7602,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ],
                 true,
             );
-            self.module.add_function(
-                "snprintf",
-                ty,
-                Some(inkwell::module::Linkage::External),
-            )
+            self.module
+                .add_function("snprintf", ty, Some(inkwell::module::Linkage::External))
         });
         let parent = self
             .builder
@@ -7924,11 +7729,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 );
                 let loaded = self
                     .builder
-                    .build_load(
-                        BasicTypeEnum::StructType(res_sty),
-                        nested_ptr,
-                        "opt_res_ld",
-                    )
+                    .build_load(BasicTypeEnum::StructType(res_sty), nested_ptr, "opt_res_ld")
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?
                     .into_struct_value();
                 let res_ty = Self::strip_first_type_arg(arg_type, "Option")
@@ -7958,11 +7759,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let list_ty = self.list_struct_type();
                 let loaded = self
                     .builder
-                    .build_load(
-                        BasicTypeEnum::StructType(list_ty),
-                        list_ptr,
-                        "opt_list_ld",
-                    )
+                    .build_load(BasicTypeEnum::StructType(list_ty), list_ptr, "opt_list_ld")
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?
                     .into_struct_value();
                 let list_str = if arg_type.contains("List<string>") {
@@ -7974,16 +7771,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .and_then(|s| s.strip_suffix('>'))
                 {
                     if inner.starts_with("List<") {
-                        let mid = Self::strip_first_type_arg(
-                            &format!("List<{}>", inner),
-                            "List",
-                        )
-                        .unwrap_or_else(|| inner.to_string());
-                        let mid_elem = Self::strip_first_type_arg(&mid, "List")
-                            .unwrap_or_else(|| mid.clone());
-                        if mid_elem.starts_with('(')
-                            || self.is_product_tuple_alias(&mid_elem)
-                        {
+                        let mid = Self::strip_first_type_arg(&format!("List<{}>", inner), "List")
+                            .unwrap_or_else(|| inner.to_string());
+                        let mid_elem =
+                            Self::strip_first_type_arg(&mid, "List").unwrap_or_else(|| mid.clone());
+                        if mid_elem.starts_with('(') || self.is_product_tuple_alias(&mid_elem) {
                             let elem = if self.is_product_tuple_alias(&mid_elem) {
                                 self.resolve_alias_type_name(&mid_elem)
                             } else {
@@ -7993,8 +7785,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         } else {
                             self.emit_list_i32_to_string(loaded)?
                         }
-                    } else if inner.starts_with('(') || self.is_product_tuple_alias(inner)
-                    {
+                    } else if inner.starts_with('(') || self.is_product_tuple_alias(inner) {
                         let elem = if self.is_product_tuple_alias(inner) {
                             self.resolve_alias_type_name(inner)
                         } else {
@@ -8102,9 +7893,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
         let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_map_nest_i")?;
         self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
-        let loop_bb = self.context.append_basic_block(parent, "list_map_nest_loop");
-        let body_bb = self.context.append_basic_block(parent, "list_map_nest_body");
-        let done_bb = self.context.append_basic_block(parent, "list_map_nest_done");
+        let loop_bb = self
+            .context
+            .append_basic_block(parent, "list_map_nest_loop");
+        let body_bb = self
+            .context
+            .append_basic_block(parent, "list_map_nest_body");
+        let done_bb = self
+            .context
+            .append_basic_block(parent, "list_map_nest_done");
         self.builder
             .build_unconditional_branch(loop_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -8127,8 +7924,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_compare(IntPredicate::UGT, idx, zero, "list_map_nest_comma")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let comma_bb = self.context.append_basic_block(parent, "list_map_nest_comma_bb");
-        let elem_bb = self.context.append_basic_block(parent, "list_map_nest_elem");
+        let comma_bb = self
+            .context
+            .append_basic_block(parent, "list_map_nest_comma_bb");
+        let elem_bb = self
+            .context
+            .append_basic_block(parent, "list_map_nest_elem");
         self.builder
             .build_conditional_branch(need_comma, comma_bb, elem_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -8274,9 +8075,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
         let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_map_prod_i")?;
         self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
-        let loop_bb = self.context.append_basic_block(parent, "list_map_prod_loop");
-        let body_bb = self.context.append_basic_block(parent, "list_map_prod_body");
-        let done_bb = self.context.append_basic_block(parent, "list_map_prod_done");
+        let loop_bb = self
+            .context
+            .append_basic_block(parent, "list_map_prod_loop");
+        let body_bb = self
+            .context
+            .append_basic_block(parent, "list_map_prod_body");
+        let done_bb = self
+            .context
+            .append_basic_block(parent, "list_map_prod_done");
         self.builder
             .build_unconditional_branch(loop_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -8299,8 +8106,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_compare(IntPredicate::UGT, idx, zero, "list_map_prod_comma")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let comma_bb = self.context.append_basic_block(parent, "list_map_prod_comma_bb");
-        let elem_bb = self.context.append_basic_block(parent, "list_map_prod_elem");
+        let comma_bb = self
+            .context
+            .append_basic_block(parent, "list_map_prod_comma_bb");
+        let elem_bb = self
+            .context
+            .append_basic_block(parent, "list_map_prod_elem");
         self.builder
             .build_conditional_branch(need_comma, comma_bb, elem_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -8412,9 +8223,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "set_result_option_product_json",
             )?
@@ -8423,7 +8232,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_pointer_value())
     }
 
-        /// Set of Result of product-tuple values.
+    /// Set of Result of product-tuple values.
     pub(in crate::codegen) fn emit_set_result_product_to_json(
         &self,
         handle: inkwell::values::IntValue<'ctx>,
@@ -8463,9 +8272,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "set_result_product_json",
             )?
@@ -8514,9 +8321,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "set_option_result_product_json",
             )?
@@ -8565,9 +8370,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "set_option_product_json",
             )?
@@ -8616,9 +8419,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(set_handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "set_product_json",
             )?
@@ -8667,9 +8468,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::PointerValue(list_alloca),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "list_res_set_prod_rt",
             )?
@@ -8718,9 +8517,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::PointerValue(list_alloca),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "list_res_map_prod_rt",
             )?
@@ -8769,9 +8566,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::PointerValue(list_alloca),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "list_res_prod_rt",
             )?
@@ -8838,7 +8633,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_compare(IntPredicate::UGT, idx, zero, "list_res_set_comma")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let comma_bb = self.context.append_basic_block(parent, "list_res_set_comma_bb");
+        let comma_bb = self
+            .context
+            .append_basic_block(parent, "list_res_set_comma_bb");
         let elem_bb = self.context.append_basic_block(parent, "list_res_set_elem");
         self.builder
             .build_conditional_branch(need_comma, comma_bb, elem_bb)
@@ -8895,7 +8692,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         let ok_slot = unsafe {
             self.builder
-                .build_gep(i64_ty, res_ptr, &[i64_ty.const_int(1, false)], "list_res_set_ok")
+                .build_gep(
+                    i64_ty,
+                    res_ptr,
+                    &[i64_ty.const_int(1, false)],
+                    "list_res_set_ok",
+                )
                 .map_err(|e| CompileError::LlvmError(e.to_string()))?
         };
         let ok_h = self
@@ -8905,7 +8707,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_int_value();
         let err_slot = unsafe {
             self.builder
-                .build_gep(i64_ty, res_ptr, &[i64_ty.const_int(2, false)], "list_res_set_err")
+                .build_gep(
+                    i64_ty,
+                    res_ptr,
+                    &[i64_ty.const_int(2, false)],
+                    "list_res_set_err",
+                )
                 .map_err(|e| CompileError::LlvmError(e.to_string()))?
         };
         let err_h = self
@@ -9019,7 +8826,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_compare(IntPredicate::UGT, idx, zero, "list_opt_set_comma")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-        let comma_bb = self.context.append_basic_block(parent, "list_opt_set_comma_bb");
+        let comma_bb = self
+            .context
+            .append_basic_block(parent, "list_opt_set_comma_bb");
         let elem_bb = self.context.append_basic_block(parent, "list_opt_set_elem");
         self.builder
             .build_conditional_branch(need_comma, comma_bb, elem_bb)
@@ -9077,7 +8886,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         let pay_slot = unsafe {
             self.builder
-                .build_gep(i64_ty, opt_ptr, &[i64_ty.const_int(1, false)], "list_opt_set_pay")
+                .build_gep(
+                    i64_ty,
+                    opt_ptr,
+                    &[i64_ty.const_int(1, false)],
+                    "list_opt_set_pay",
+                )
                 .map_err(|e| CompileError::LlvmError(e.to_string()))?
         };
         let set_h = self
@@ -9173,9 +8987,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(map_handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_map_product_json",
             )?
@@ -9224,9 +9036,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(map_handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_set_product_json",
             )?
@@ -9275,9 +9085,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(map_handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_list_product_json",
             )?
@@ -9326,9 +9134,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_option_product_json",
             )?
@@ -9377,9 +9183,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_list_option_set_product_json",
             )?
@@ -9428,9 +9232,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_list_option_product_json",
             )?
@@ -9479,9 +9281,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_set_list_map_product_json",
             )?
@@ -9529,9 +9329,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_list_set_map_product_json",
             )?
@@ -9579,9 +9377,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_map_result_product_json",
             )?
@@ -9629,9 +9425,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_map_list_product_json",
             )?
@@ -9679,9 +9473,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_map_option_product_json",
             )?
@@ -9729,9 +9521,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_map_set_product_json",
             )?
@@ -9779,9 +9569,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_set_map_list_product_json",
             )?
@@ -9829,9 +9617,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_set_map_product_json",
             )?
@@ -9880,9 +9666,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_list_map_list_product_json",
             )?
@@ -9930,9 +9714,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_option_map_list_product_json",
             )?
@@ -9980,9 +9762,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_list_map_product_json",
             )?
@@ -10031,9 +9811,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_set_list_product_json",
             )?
@@ -10082,9 +9860,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_set_option_product_json",
             )?
@@ -10133,9 +9909,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_set_result_option_product_json",
             )?
@@ -10184,9 +9958,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_set_result_product_json",
             )?
@@ -10235,9 +10007,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_list_result_option_product_json",
             )?
@@ -10286,9 +10056,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_list_set_result_product_json",
             )?
@@ -10337,9 +10105,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_list_set_option_product_json",
             )?
@@ -10388,9 +10154,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_list_set_product_json",
             )?
@@ -10439,9 +10203,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_list_result_product_json",
             )?
@@ -10490,9 +10252,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_option_list_product_json",
             )?
@@ -10541,9 +10301,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_result_option_list_product_json",
             )?
@@ -10592,9 +10350,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_option_result_list_product_json",
             )?
@@ -10643,9 +10399,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_result_list_option_product_json",
             )?
@@ -10694,9 +10448,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_result_list_set_product_json",
             )?
@@ -10745,9 +10497,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_result_list_product_json",
             )?
@@ -10796,9 +10546,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_option_result_product_json",
             )?
@@ -10847,9 +10595,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_result_option_product_json",
             )?
@@ -10899,9 +10645,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_result_set_map_product_json",
             )?
@@ -10950,9 +10694,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_option_set_map_product_json",
             )?
@@ -11001,9 +10743,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_result_list_map_product_json",
             )?
@@ -11052,9 +10792,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_option_list_map_product_json",
             )?
@@ -11102,9 +10840,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_result_set_list_product_json",
             )?
@@ -11153,9 +10889,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_result_set_product_json",
             )?
@@ -11204,9 +10938,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_option_set_list_product_json",
             )?
@@ -11255,9 +10987,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_option_set_product_json",
             )?
@@ -11306,9 +11036,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_result_map_product_json",
             )?
@@ -11357,9 +11085,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_option_map_product_json",
             )?
@@ -11408,9 +11134,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_result_product_json",
             )?
@@ -11461,9 +11185,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     BasicMetadataValueEnum::IntValue(map_handle),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(
-                        i64_ty.const_int(display_style as u64, false),
-                    ),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
                 ],
                 "map_product_json",
             )?
@@ -11533,9 +11255,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         func,
                         &[
                             BasicMetadataValueEnum::PointerValue(list_ptr),
-                            BasicMetadataValueEnum::IntValue(
-                                i64_ty.const_int(arity as u64, false),
-                            ),
+                            BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
                             BasicMetadataValueEnum::IntValue(i64_ty.const_int(0, false)),
                         ],
                         "list_opt_prod_json",
@@ -11800,9 +11520,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 (BasicTypeEnum::StructType(sty), BasicValueEnum::StructValue(fsv)) => {
                     let ffields = sty.get_field_types();
-                    if ffields.len() >= 1
-                        && matches!(ffields[0], BasicTypeEnum::PointerType(_))
-                    {
+                    if ffields.len() >= 1 && matches!(ffields[0], BasicTypeEnum::PointerType(_)) {
                         // string {ptr,len}
                         let ptr = self
                             .build_extract_value(fsv.into(), 0, "prod_str_ptr")?
@@ -12190,11 +11908,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ],
                 true,
             );
-            self.module.add_function(
-                "snprintf",
-                ty,
-                Some(inkwell::module::Linkage::External),
-            )
+            self.module
+                .add_function("snprintf", ty, Some(inkwell::module::Linkage::External))
         });
         self.build_call(snprintf_fn, &all_args, "tup_snprintf")?;
         Ok(buf)
@@ -12242,7 +11957,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i64_ty = self.context.i64_type();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let list_ty = self.list_struct_type();
-        let alloca = self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_list_tup_print")?;
+        let alloca =
+            self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_list_tup_print")?;
         self.build_store(alloca, sv)?;
         let len = self.load_list_len(alloca)?;
         let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_list_tup_buf")?;
@@ -12265,12 +11981,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get_insert_block()
             .and_then(|bb| bb.get_parent())
             .ok_or_else(|| CompileError::LlvmError("no parent".into()))?;
-        let idx_alloca =
-            self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_list_tup_i")?;
+        let idx_alloca = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "list_list_tup_i")?;
         self.build_store(idx_alloca, i64_ty.const_int(0, false))?;
-        let loop_bb = self.context.append_basic_block(parent, "list_list_tup_loop");
-        let body_bb = self.context.append_basic_block(parent, "list_list_tup_body");
-        let done_bb = self.context.append_basic_block(parent, "list_list_tup_done");
+        let loop_bb = self
+            .context
+            .append_basic_block(parent, "list_list_tup_loop");
+        let body_bb = self
+            .context
+            .append_basic_block(parent, "list_list_tup_body");
+        let done_bb = self
+            .context
+            .append_basic_block(parent, "list_list_tup_done");
         self.builder
             .build_unconditional_branch(loop_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -12296,7 +12017,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let comma_bb = self
             .context
             .append_basic_block(parent, "list_list_tup_comma_bb");
-        let elem_bb = self.context.append_basic_block(parent, "list_list_tup_elem");
+        let elem_bb = self
+            .context
+            .append_basic_block(parent, "list_list_tup_elem");
         self.builder
             .build_conditional_branch(need_comma, comma_bb, elem_bb)
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -12392,8 +12115,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let list_ty = self.list_struct_type();
         let len = self.load_list_len(list_alloca)?;
-        let buf =
-            self.malloc_or_abort(i64_ty.const_int(8192, false), "list_list_tup_json_buf")?;
+        let buf = self.malloc_or_abort(i64_ty.const_int(8192, false), "list_list_tup_json_buf")?;
         let open = self
             .builder
             .build_global_string_ptr("[", "list_list_tup_json_open")

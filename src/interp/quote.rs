@@ -50,10 +50,14 @@ impl<'a> Interpreter<'a> {
                 let q_body = Box::new(self.quote_block(body)?);
                 Ok(Some(QuotedAst::While(q_cond, q_body)))
             }
-            Stmt::WhileLet { pat: _, init, body } => {
+            Stmt::WhileLet { pat, init, body } => {
                 let q_init = Box::new(self.quote_expr(init)?);
                 let q_body = Box::new(self.quote_block(body)?);
-                Ok(Some(QuotedAst::While(q_init, q_body)))
+                Ok(Some(QuotedAst::WhileLet {
+                    pat: pat.clone(),
+                    init: q_init,
+                    body: q_body,
+                }))
             }
             Stmt::For {
                 var,
@@ -227,20 +231,9 @@ impl<'a> Interpreter<'a> {
                     fields: q_fields?,
                 })
             }
-            Expr::Match(subject, arms) => {
-                let q_subject = Box::new(self.quote_expr(subject)?);
-                let q_arms: Result<Vec<MatchArmQuoted>, InterpError> = arms
-                    .iter()
-                    .map(|arm| {
-                        Ok(MatchArmQuoted {
-                            pat: arm.pat.clone(),
-                            guard: arm.guard.as_ref().map(|g| self.quote_expr(g)).transpose()?,
-                            body: self.quote_expr(&arm.body)?,
-                        })
-                    })
-                    .collect();
-                Ok(QuotedAst::Match(q_subject, q_arms?))
-            }
+            Expr::Match(_, _) => Err(InterpError::new(
+                "quoted AST node 'Match' is unsupported by ABI v1",
+            )),
             Expr::If { cond, then_, else_ } => {
                 let q_cond = Box::new(self.quote_expr(cond)?);
                 let q_then = Box::new(self.quote_block(then_)?);
@@ -251,12 +244,15 @@ impl<'a> Interpreter<'a> {
                 Ok(QuotedAst::If(q_cond, q_then, q_else))
             }
             Expr::Lambda { params, ret, body } => {
-                // C1: preserve lambda params and return type in the quoted AST.
-                let quoted_body = self.quote_block(body)?;
+                let closure = self.eval_lambda(params, ret, body)?;
+                let Value::Closure { captured, .. } = closure else {
+                    unreachable!("eval_lambda must produce a closure")
+                };
                 Ok(QuotedAst::Lambda {
                     params: params.clone(),
                     ret: ret.clone(),
-                    body: Box::new(quoted_body),
+                    body: body.clone(),
+                    captured,
                 })
             }
             Expr::Turbofish(name, _type_args, args) => {
@@ -349,10 +345,10 @@ impl<'a> Interpreter<'a> {
                 name.clone(),
                 Box::new(self.quote_expr(value)?),
             )),
-            Expr::Cast(inner, _target_type) => {
-                // Cast is not supported in quote context, just quote the inner expression
-                self.quote_expr(inner)
-            }
+            Expr::Cast(inner, target_type) => Ok(QuotedAst::Cast(
+                Box::new(self.quote_expr(inner)?),
+                target_type.clone(),
+            )),
         }
     }
 
@@ -663,6 +659,29 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(Value::Unit)
             }
+            QuotedAst::WhileLet { pat, init, body } => {
+                loop {
+                    let value = self.eval_quoted_ast(init)?;
+                    let Some(bindings) = self.match_pattern(pat, &value) else {
+                        break;
+                    };
+                    let result = self.with_scope(|this| {
+                        for (name, value) in bindings {
+                            this.bind(&name, value)?;
+                        }
+                        this.eval_quoted_ast(body)
+                    })?;
+                    if self.early_return.is_some() {
+                        return Ok(result);
+                    }
+                    match self.loop_action.take() {
+                        Some(LoopAction::Break(value)) => return Ok(value.unwrap_or(Value::Unit)),
+                        Some(LoopAction::Continue) => continue,
+                        None => {}
+                    }
+                }
+                Ok(Value::Unit)
+            }
             QuotedAst::Loop(body) => {
                 loop {
                     if self.early_return.is_some() {
@@ -829,13 +848,19 @@ impl<'a> Interpreter<'a> {
                 }
             }
             QuotedAst::Lambda {
-                params: _,
-                ret: _,
+                params,
+                ret,
                 body,
-            } => {
-                // C1: evaluate the lambda body (same as pre-C1 behavior but
-                // with params/ret preserved in the QuotedAst structure).
-                self.eval_quoted_ast(body)
+                captured,
+            } => Ok(Value::Closure {
+                params: params.clone(),
+                ret: ret.clone(),
+                body: body.clone(),
+                captured: captured.clone(),
+            }),
+            QuotedAst::Cast(inner, target_type) => {
+                let value = self.eval_quoted_ast(inner)?;
+                self.cast_value(value, target_type)
             }
             _ => Err(InterpError::new(format!(
                 "unsupported quoted AST node: {:?}",
