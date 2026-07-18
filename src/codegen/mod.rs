@@ -363,6 +363,7 @@ pub struct CodeGenerator<'ctx> {
     resolved_extern_funcs: Option<std::collections::HashSet<String>>,
     resolved_extern_abis: Option<HashMap<String, String>>,
     resolved_extern_signatures: Option<HashMap<String, (usize, String)>>,
+    resolved_extern_params: Option<HashMap<String, Vec<(String, String)>>>,
     resolved_extern_no_panic: Option<std::collections::HashSet<String>>,
     resolved_extern_unsafe: Option<std::collections::HashSet<String>>,
     resolved_call_sites: Option<HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>>,
@@ -531,6 +532,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_extern_funcs: None,
             resolved_extern_abis: None,
             resolved_extern_signatures: None,
+            resolved_extern_params: None,
             resolved_extern_no_panic: None,
             resolved_extern_unsafe: None,
             resolved_call_sites: None,
@@ -634,6 +636,12 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     pub(crate) fn resolved_extern_signature(&self, name: &str) -> Option<(usize, String)> {
         self.resolved_extern_signatures
+            .as_ref()
+            .and_then(|map| map.get(name).cloned())
+    }
+
+    pub(crate) fn resolved_extern_params(&self, name: &str) -> Option<Vec<(String, String)>> {
+        self.resolved_extern_params
             .as_ref()
             .and_then(|map| map.get(name).cloned())
     }

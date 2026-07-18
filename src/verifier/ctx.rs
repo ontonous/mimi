@@ -440,6 +440,7 @@ pub struct VerifierCtx {
     pub(crate) checked_extern_funcs: std::collections::HashSet<String>,
     pub(crate) checked_extern_abis: std::collections::HashMap<String, String>,
     pub(crate) checked_extern_signatures: std::collections::HashMap<String, (usize, String)>,
+    pub(crate) checked_extern_params: std::collections::HashMap<String, Vec<(String, String)>>,
     pub(crate) checked_extern_no_panic: std::collections::HashSet<String>,
     pub(crate) checked_extern_unsafe: std::collections::HashSet<String>,
     pub(crate) checked_call_sites: std::collections::HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>,
@@ -720,12 +721,15 @@ impl Verifier {
         self.ctx.checked_extern_funcs = extern_funcs;
         self.ctx.checked_extern_abis = extern_abis;
         let mut extern_signatures = std::collections::HashMap::new();
+        let mut extern_params = std::collections::HashMap::new();
         for block in program.extern_blocks().values() {
             for sig in &block.signatures {
                 extern_signatures.insert(sig.name.clone(), (sig.params.len(), sig.ret.clone()));
+                extern_params.insert(sig.name.clone(), sig.params.clone());
             }
         }
         self.ctx.checked_extern_signatures = extern_signatures;
+        self.ctx.checked_extern_params = extern_params;
         let mut extern_no_panic = std::collections::HashSet::new();
         let mut extern_unsafe = std::collections::HashSet::new();
         for block in program.extern_blocks().values() {
@@ -1238,6 +1242,10 @@ impl Verifier {
 
     pub(crate) fn checked_extern_signature(&self, name: &str) -> Option<(usize, String)> {
         self.ctx.checked_extern_signatures.get(name).cloned()
+    }
+
+    pub(crate) fn checked_extern_params(&self, name: &str) -> Option<Vec<(String, String)>> {
+        self.ctx.checked_extern_params.get(name).cloned()
     }
 
     pub(crate) fn is_checked_extern_no_panic(&self, name: &str) -> bool {
