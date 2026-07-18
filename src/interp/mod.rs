@@ -215,6 +215,7 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_extern_abis: Option<HashMap<String, String>>,
     /// Extern function signatures: name -> (arity, ret).
     pub(in crate::interp) resolved_extern_signatures: Option<HashMap<String, (usize, String)>>,
+    pub(in crate::interp) resolved_extern_params: Option<HashMap<String, Vec<(String, String)>>>,
     pub(in crate::interp) resolved_extern_no_panic: Option<std::collections::HashSet<String>>,
     pub(in crate::interp) resolved_extern_unsafe: Option<std::collections::HashSet<String>>,
     /// Typed call sites from CheckedProgram: node_id -> (owner, callee, argc, kind).
@@ -690,12 +691,15 @@ impl<'a> Interpreter<'a> {
         interp.resolved_extern_funcs = Some(extern_funcs);
         interp.resolved_extern_abis = Some(extern_abis);
         let mut extern_signatures = HashMap::new();
+        let mut extern_params = HashMap::new();
         for block in program.extern_blocks().values() {
             for sig in &block.signatures {
                 extern_signatures.insert(sig.name.clone(), (sig.params.len(), sig.ret.clone()));
+                extern_params.insert(sig.name.clone(), sig.params.clone());
             }
         }
         interp.resolved_extern_signatures = Some(extern_signatures);
+        interp.resolved_extern_params = Some(extern_params);
         let mut extern_no_panic = std::collections::HashSet::new();
         let mut extern_unsafe = std::collections::HashSet::new();
         for block in program.extern_blocks().values() {
@@ -1161,6 +1165,12 @@ impl<'a> Interpreter<'a> {
             .and_then(|map| map.get(name).cloned())
     }
 
+    pub(crate) fn resolved_extern_params(&self, name: &str) -> Option<Vec<(String, String)>> {
+        self.resolved_extern_params
+            .as_ref()
+            .and_then(|map| map.get(name).cloned())
+    }
+
     pub(crate) fn is_resolved_extern_no_panic(&self, name: &str) -> bool {
         self.resolved_extern_no_panic
             .as_ref()
@@ -1555,6 +1565,7 @@ impl<'a> Interpreter<'a> {
             resolved_extern_funcs: None,
             resolved_extern_abis: None,
             resolved_extern_signatures: None,
+            resolved_extern_params: None,
             resolved_extern_no_panic: None,
             resolved_extern_unsafe: None,
             resolved_call_sites: None,

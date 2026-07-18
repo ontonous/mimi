@@ -3707,17 +3707,29 @@ func main() -> i32 { 0 }
         assert!(interp.has_resolved_extern_func("c_abs"));
         assert_eq!(interp.resolved_extern_abi("c_abs"), Some("C"));
         assert_eq!(interp.resolved_extern_signature("c_abs"), Some((1, "i32".into())));
+        assert_eq!(
+            interp.resolved_extern_params("c_abs"),
+            Some(vec![("x".into(), "i32".into())])
+        );
         let mut verifier = crate::verifier::Verifier::new().expect("z3");
         let _ = verifier.verify_checked(&program);
         assert!(verifier.has_checked_type_def("Point"));
         assert!(verifier.has_checked_extern_func("c_abs"));
         assert_eq!(verifier.checked_extern_abi("c_abs"), Some("C"));
         assert_eq!(verifier.checked_extern_signature("c_abs"), Some((1, "i32".into())));
+        assert_eq!(
+            verifier.checked_extern_params("c_abs"),
+            Some(vec![("x".into(), "i32".into())])
+        );
         let context = inkwell::context::Context::create();
         let mut codegen = crate::codegen::CodeGenerator::new(&context, "abi");
         codegen.compile_checked(&program).expect("compile");
         assert_eq!(codegen.resolved_extern_abi("c_abs"), Some("C"));
         assert_eq!(codegen.resolved_extern_signature("c_abs"), Some((1, "i32".into())));
+        assert_eq!(
+            codegen.resolved_extern_params("c_abs"),
+            Some(vec![("x".into(), "i32".into())])
+        );
     }
 
 
