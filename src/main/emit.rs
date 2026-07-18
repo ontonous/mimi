@@ -153,13 +153,14 @@ pub(crate) fn resolved_type_defs(
 #[cfg(test)]
 mod tests {
     use super::{
-        checked_component_input, resolved_exported_funcs, resolved_extern_funcs,
-        resolved_type_defs,
+        checked_component_input, resolved_exported_funcs, resolved_extern_funcs, resolved_type_defs,
     };
 
     fn parse(source: &str) -> mimi::ast::File {
         let tokens = mimi::lexer::Lexer::new(source).tokenize().expect("lex");
-        mimi::parser::Parser::new(tokens).parse_file().expect("parse")
+        mimi::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse")
     }
 
     #[test]
@@ -207,7 +208,10 @@ extern "C" {
         assert_eq!(funcs.len(), 1);
         assert_eq!(funcs[0].name, "read");
         assert_eq!(funcs[0].params[0].name, "buf");
-        assert_eq!(funcs[0].params[0].cap_mode, Some(mimi::ast::CapMode::Borrow));
+        assert_eq!(
+            funcs[0].params[0].cap_mode,
+            Some(mimi::ast::CapMode::Borrow)
+        );
         assert!(funcs[0].no_panic);
     }
 
@@ -259,7 +263,8 @@ module a { type Point { x: i32 } }
 module b { type Point { y: i32 } }
 "#,
         );
-        let error = checked_component_input(&colliding).expect_err("duplicate type names must fail");
+        let error =
+            checked_component_input(&colliding).expect_err("duplicate type names must fail");
         assert!(error.contains("Point"));
     }
 }

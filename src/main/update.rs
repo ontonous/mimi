@@ -44,7 +44,8 @@ pub(crate) fn update() -> Result<(), String> {
             if pkg_resolve::checksum_matches(&dst, old_entry.checksum.as_deref()) {
                 println!("  = {} ({})", dep.name, old_entry.version);
                 updated_count += 1;
-                let sub_deps = pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
+                let sub_deps =
+                    pkg_resolve::read_transitive_deps(&dst, &visited.keys().cloned().collect());
                 for sub_dep in sub_deps {
                     println!("    → {} (dependency of {})", sub_dep.name, dep.name);
                     queue.push(sub_dep);

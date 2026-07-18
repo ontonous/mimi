@@ -49,11 +49,10 @@ impl Acc {
                 for dep in deps {
                     if let Some(path_str) = &dep.path {
                         // Path deps may use ../sibling (monorepo). Absolute/NUL rejected.
-                        let dep_path =
-                            match crate::path_safety::resolve_path_dep(&dir, path_str) {
-                                Ok(p) => p,
-                                Err(_) => continue,
-                            };
+                        let dep_path = match crate::path_safety::resolve_path_dep(&dir, path_str) {
+                            Ok(p) => p,
+                            Err(_) => continue,
+                        };
                         if dep_path.exists() {
                             self.dep_paths.insert(dep.name.clone(), dep_path);
                         }
@@ -94,9 +93,7 @@ pub fn flow_load_main_with_file(
     path: &Path,
     file: File,
 ) -> Result<(Acc, LoadedModule), String> {
-    let canonical = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf());
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let module_name = acc.module_key(&canonical);
     let loaded = LoadedModule {
         path: canonical.clone(),
@@ -113,7 +110,6 @@ pub fn flow_load_main_with_file(
     }
     Ok((acc, loaded))
 }
-
 
 /// Load a file (from cache or fresh) and all its transitive imports.
 pub fn flow_load_file(mut acc: Acc, path: PathBuf) -> Result<(Acc, LoadedModule), String> {
@@ -267,8 +263,8 @@ fn resolve_import_path(from: &Path, import_path: &[String], acc: &Acc) -> Result
     let deps_dir = acc.base_dir.join(".mimi").join("deps");
     if deps_dir.exists() {
         if let Some(first) = import_path.first() {
-            let declared = acc.dep_paths.contains_key(first)
-                || acc.lock_entries.contains_key(first);
+            let declared =
+                acc.dep_paths.contains_key(first) || acc.lock_entries.contains_key(first);
             if !declared {
                 // Fall through — do not load undeclared cached packages.
             } else {

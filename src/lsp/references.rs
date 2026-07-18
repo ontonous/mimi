@@ -10,8 +10,6 @@ fn byte_col_to_utf16(line: &str, byte: usize) -> usize {
         .1
 }
 
-
-
 impl LspServer {
     pub fn compute_definition(
         &self,
@@ -391,7 +389,8 @@ impl LspServer {
         // L-H2: only rename within the enclosing function of the cursor
         // (not whole-file text replace of every occurrence).
         let lines: Vec<&str> = text.lines().collect();
-        let (range_start, range_end) = enclosing_func_line_range(text, line).unwrap_or((0, lines.len()));
+        let (range_start, range_end) =
+            enclosing_func_line_range(text, line).unwrap_or((0, lines.len()));
 
         let mut changes = Vec::new();
         for (i, line_text) in lines.iter().enumerate().take(range_end).skip(range_start) {
@@ -765,7 +764,6 @@ impl LspServer {
     }
 }
 
-
 /// Approximate line range of the function containing `cursor_line` (0-based).
 fn enclosing_func_line_range(text: &str, cursor_line: usize) -> Option<(usize, usize)> {
     let lines: Vec<&str> = text.lines().collect();
@@ -783,7 +781,10 @@ fn enclosing_func_line_range(text: &str, cursor_line: usize) -> Option<(usize, u
     let mut end = lines.len();
     for i in (start + 1)..lines.len() {
         let t = lines[i].trim_start();
-        if (t.starts_with("func ") || t.starts_with("fn ") || t.starts_with("type ") || t.starts_with("flow "))
+        if (t.starts_with("func ")
+            || t.starts_with("fn ")
+            || t.starts_with("type ")
+            || t.starts_with("flow "))
             && !t.starts_with("func main")
             && i > cursor_line
         {

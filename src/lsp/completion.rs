@@ -1,4 +1,3 @@
-
 /// L-H13: take the prefix of a line up to an LSP UTF-16 character offset.
 fn prefix_to_utf16(line: &str, character: usize) -> String {
     let map = crate::lsp::position_map::PositionMap::new(line);

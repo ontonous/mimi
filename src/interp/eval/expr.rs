@@ -687,11 +687,9 @@ impl<'a> Interpreter<'a> {
                                     flow_name, method, source
                                 )));
                             }
-                            if let Some(arity) = self.resolved_transition_param_arity(
-                                flow_name,
-                                method,
-                                source,
-                            ) {
+                            if let Some(arity) =
+                                self.resolved_transition_param_arity(flow_name, method, source)
+                            {
                                 // vals[0] is from-state payload; remaining are event params.
                                 let event_argc = vals.len().saturating_sub(1);
                                 if event_argc != arity {

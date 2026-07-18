@@ -658,10 +658,7 @@ impl Parser {
                 let expr = sub.parse_expr(0)?;
                 if !sub.at(&TokenKind::Eof) {
                     return Err(ParseError::new(
-                        format!(
-                            "trailing tokens in f-string interpolation: `{}`",
-                            expr_str
-                        ),
+                        format!("trailing tokens in f-string interpolation: `{}`", expr_str),
                         base_line,
                         base_col,
                     ));

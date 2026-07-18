@@ -772,7 +772,7 @@ pub extern "C" fn __mimi_pow_i64(base: i64, exp: i64) -> i64 {
     // not silent zero (which collides with legitimate 0**n results).
     if exp < 0 {
         mimi_runtime_abort(
-            b"negative exponent not supported for integers\0".as_ptr() as *const std::ffi::c_char,
+            b"negative exponent not supported for integers\0".as_ptr() as *const std::ffi::c_char
         );
     }
     if exp == 0 {
@@ -787,7 +787,7 @@ pub extern "C" fn __mimi_pow_i64(base: i64, exp: i64) -> i64 {
                 Some(v) => result = v,
                 None => {
                     mimi_runtime_abort(
-                        b"integer overflow in power\0".as_ptr() as *const std::ffi::c_char,
+                        b"integer overflow in power\0".as_ptr() as *const std::ffi::c_char
                     );
                 }
             }
@@ -798,7 +798,7 @@ pub extern "C" fn __mimi_pow_i64(base: i64, exp: i64) -> i64 {
                 Some(v) => b = v,
                 None => {
                     mimi_runtime_abort(
-                        b"integer overflow in power\0".as_ptr() as *const std::ffi::c_char,
+                        b"integer overflow in power\0".as_ptr() as *const std::ffi::c_char
                     );
                 }
             }
@@ -1238,8 +1238,7 @@ fn safe_c_string_from_handle(handle: ValueHandle) -> Option<String> {
             if b == 0 {
                 // Re-check mapping before trusting the snapshot.
                 let mut mvec2: u8 = 0;
-                if libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec2) != 0
-                {
+                if libc::mincore(page_start as *mut std::ffi::c_void, page_size, &mut mvec2) != 0 {
                     return None;
                 }
                 return Some(String::from_utf8_lossy(&local[..len]).into_owned());
@@ -1458,12 +1457,15 @@ pub extern "C" fn mimi_str_concat(
 /// Character-index (Unicode scalar) `char_at`.
 /// Returns a new heap-allocated 1-char string; aborts on OOB / invalid UTF-8.
 #[no_mangle]
-pub extern "C" fn mimi_str_char_at(s: *const std::ffi::c_char, index: i64) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_str_char_at(
+    s: *const std::ffi::c_char,
+    index: i64,
+) -> *mut std::ffi::c_char {
     // SAFETY: `cstr_to_string` handles null pointers safely.
     let ss = unsafe { cstr_to_string(s) };
     if index < 0 {
         mimi_runtime_abort(
-            b"str_char_at: index out of bounds\0".as_ptr() as *const std::ffi::c_char,
+            b"str_char_at: index out of bounds\0".as_ptr() as *const std::ffi::c_char
         );
     }
     match ss.chars().nth(index as usize) {
@@ -1473,7 +1475,7 @@ pub extern "C" fn mimi_str_char_at(s: *const std::ffi::c_char, index: i64) -> *m
             alloc_c_string(encoded)
         }
         None => mimi_runtime_abort(
-            b"str_char_at: index out of bounds\0".as_ptr() as *const std::ffi::c_char,
+            b"str_char_at: index out of bounds\0".as_ptr() as *const std::ffi::c_char
         ),
     }
 }
@@ -1490,7 +1492,7 @@ pub extern "C" fn mimi_str_substring(
     let ss = unsafe { cstr_to_string(s) };
     if start < 0 || end < 0 {
         mimi_runtime_abort(
-            b"str_substring: index out of bounds\0".as_ptr() as *const std::ffi::c_char,
+            b"str_substring: index out of bounds\0".as_ptr() as *const std::ffi::c_char
         );
     }
     if start > end {
@@ -1501,7 +1503,7 @@ pub extern "C" fn mimi_str_substring(
     let e_idx = end as usize;
     if e_idx > chars.len() {
         mimi_runtime_abort(
-            b"str_substring: end out of bounds\0".as_ptr() as *const std::ffi::c_char,
+            b"str_substring: end out of bounds\0".as_ptr() as *const std::ffi::c_char
         );
     }
     let result: String = chars[s_idx..e_idx].iter().collect();
@@ -1543,18 +1545,17 @@ pub extern "C" fn mimi_str_split(
     let data_ptr = if len <= 0 {
         std::ptr::null_mut()
     } else {
-        let data_size = match (len as usize)
-            .checked_mul(std::mem::size_of::<*mut std::ffi::c_char>())
-        {
-            Some(s) => s,
-            None => {
-                return Box::into_raw(Box::new(MimiList {
-                    len: 0,
-                    data: std::ptr::null_mut(),
-                    owns_data: true,
-                }));
-            }
-        };
+        let data_size =
+            match (len as usize).checked_mul(std::mem::size_of::<*mut std::ffi::c_char>()) {
+                Some(s) => s,
+                None => {
+                    return Box::into_raw(Box::new(MimiList {
+                        len: 0,
+                        data: std::ptr::null_mut(),
+                        owns_data: true,
+                    }));
+                }
+            };
         // SAFETY: data_size > 0; result checked for null.
         let ptr = unsafe { libc::malloc(data_size) as *mut *mut std::ffi::c_char };
         if ptr.is_null() {
@@ -1916,7 +1917,11 @@ fn list_map_to_string_impl(
 
 /// Option of Map handle → `{"Some":[{…}]}` / `"None"`.
 #[no_mangle]
-pub extern "C" fn mimi_option_map_to_json(disc: i64, handle: MapHandle, mode: i64) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_option_map_to_json(
+    disc: i64,
+    handle: MapHandle,
+    mode: i64,
+) -> *mut std::ffi::c_char {
     if disc == 0 {
         return alloc_c_string("\"None\"");
     }
@@ -1948,7 +1953,11 @@ pub extern "C" fn mimi_option_map_to_json(disc: i64, handle: MapHandle, mode: i6
 
 /// Option of Set handle → `{"Some":[[…]]}` / `"None"`.
 #[no_mangle]
-pub extern "C" fn mimi_option_set_to_json(disc: i64, handle: SetHandle, mode: i64) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_option_set_to_json(
+    disc: i64,
+    handle: SetHandle,
+    mode: i64,
+) -> *mut std::ffi::c_char {
     if disc == 0 {
         return alloc_c_string("\"None\"");
     }
@@ -2608,7 +2617,12 @@ pub extern "C" fn mimi_getenv(name: *const std::ffi::c_char) -> *mut std::ffi::c
 pub extern "C" fn mimi_args_count() -> i64 {
     init_cli_args();
     // Prefer get_or_init so concurrent races never panic on missing OnceLock.
-    let args_mutex = CLI_ARGS.get_or_init(|| Mutex::new(CliArgs { argc: 0, argv: vec![] }));
+    let args_mutex = CLI_ARGS.get_or_init(|| {
+        Mutex::new(CliArgs {
+            argc: 0,
+            argv: vec![],
+        })
+    });
     let args = args_mutex.lock().unwrap_or_else(|e| e.into_inner());
     if args.argc <= 1 {
         return 0;
@@ -2619,7 +2633,12 @@ pub extern "C" fn mimi_args_count() -> i64 {
 #[no_mangle]
 pub extern "C" fn mimi_args_list() -> *mut MimiList {
     init_cli_args();
-    let args_mutex = CLI_ARGS.get_or_init(|| Mutex::new(CliArgs { argc: 0, argv: vec![] }));
+    let args_mutex = CLI_ARGS.get_or_init(|| {
+        Mutex::new(CliArgs {
+            argc: 0,
+            argv: vec![],
+        })
+    });
     let args = args_mutex.lock().unwrap_or_else(|e| e.into_inner());
     let count = if args.argc <= 1 {
         0
@@ -2659,7 +2678,12 @@ pub extern "C" fn mimi_args_list() -> *mut MimiList {
 #[no_mangle]
 pub extern "C" fn mimi_args_get(i: i64) -> *mut std::ffi::c_char {
     init_cli_args();
-    let args_mutex = CLI_ARGS.get_or_init(|| Mutex::new(CliArgs { argc: 0, argv: vec![] }));
+    let args_mutex = CLI_ARGS.get_or_init(|| {
+        Mutex::new(CliArgs {
+            argc: 0,
+            argv: vec![],
+        })
+    });
     let args = args_mutex.lock().unwrap_or_else(|e| e.into_inner());
     if i < 0 || i >= (args.argc - 1) as i64 {
         return std::ptr::null_mut();
@@ -3882,11 +3906,7 @@ pub extern "C" fn mimi_map_from_json_list_product_i64(
         };
         if !data_ptr.is_null() && !prod_handles.is_empty() {
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    prod_handles.as_ptr(),
-                    data_ptr,
-                    prod_handles.len(),
-                );
+                std::ptr::copy_nonoverlapping(prod_handles.as_ptr(), data_ptr, prod_handles.len());
             }
         }
         unsafe {
@@ -4238,9 +4258,6 @@ pub extern "C" fn mimi_map_from_json_product_i64(
     handle
 }
 
-
-
-
 /// Map of Result of Map of product from JSON.
 /// Pack: `{i64 disc, i64 map_handle_or_err}` disc 1=Ok map handle, 0=Err string ptr.
 #[no_mangle]
@@ -4413,7 +4430,9 @@ pub extern "C" fn mimi_map_from_json_result_map_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -4486,10 +4505,6 @@ pub extern "C" fn mimi_map_to_json_result_map_product_i64(
     alloc_c_string(&parts.join(""))
 }
 
-
-
-
-
 /// Map of Option of Result of product from JSON.
 /// Pack: `{i64 disc, i64 res_handle}` disc 0=None; res_handle is Result product pack
 /// `{i64 res_disc, i64[n] fields or err}` (same as map result product).
@@ -4551,10 +4566,7 @@ pub extern "C" fn mimi_map_from_json_option_result_product_i64(
         if pack.is_null() {
             continue;
         }
-        let is_none = if bytes[i] == b'n'
-            && i + 4 <= bytes.len()
-            && &bytes[i..i + 4] == b"null"
-        {
+        let is_none = if bytes[i] == b'n' && i + 4 <= bytes.len() && &bytes[i..i + 4] == b"null" {
             i += 4;
             true
         } else {
@@ -4649,7 +4661,9 @@ pub extern "C" fn mimi_map_from_json_option_result_product_i64(
             let _ = n;
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -4736,11 +4750,6 @@ pub extern "C" fn mimi_map_to_json_option_result_product_i64(
     alloc_c_string(&parts.join(""))
 }
 
-
-
-
-
-
 /// List of Option of product from JSON.
 /// Element pack: `{i64 disc, i64[n] fields}` disc 1=Some, 0=None.
 #[no_mangle]
@@ -4808,7 +4817,9 @@ pub extern "C" fn mimi_list_from_json_option_product_i64(
                 }
                 let mut v: i64 = 0;
                 while i < bytes.len() && bytes[i].is_ascii_digit() {
-                    v = v.saturating_mul(10).saturating_add((bytes[i] - b'0') as i64);
+                    v = v
+                        .saturating_mul(10)
+                        .saturating_add((bytes[i] - b'0') as i64);
                     i += 1;
                 }
                 if neg {
@@ -4985,7 +4996,6 @@ pub extern "C" fn mimi_list_option_product_to_json(
     parts.push(String::from("]"));
     alloc_c_string(&parts.join(""))
 }
-
 
 /// List of Option of Set of product from JSON.
 /// Element pack: `{i64 opt_disc, i64 set_handle}`.
@@ -5332,8 +5342,7 @@ pub extern "C" fn mimi_map_to_json_list_option_set_product_i64(
             continue;
         }
         let list_ptr = vh as *const MimiList;
-        let json_ptr =
-            mimi_list_option_set_product_to_json(list_ptr, arity, display_style);
+        let json_ptr = mimi_list_option_set_product_to_json(list_ptr, arity, display_style);
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
             unsafe {
@@ -5482,12 +5491,6 @@ pub extern "C" fn mimi_map_to_json_list_option_product_i64(
     parts.push(String::from("}"));
     alloc_c_string(&parts.join(""))
 }
-
-
-
-
-
-
 
 /// Set of Option of Result of product from JSON.
 #[no_mangle]
@@ -5684,10 +5687,7 @@ pub extern "C" fn mimi_set_to_json_option_result_product_i64(
                 ));
             } else {
                 let body: Vec<String> = fields.iter().map(|x| x.to_string()).collect();
-                parts.push(format!(
-                    "{{\"Some\":[{{\"Ok\":[[{}]]}}]}}",
-                    body.join(",")
-                ));
+                parts.push(format!("{{\"Some\":[{{\"Ok\":[[{}]]}}]}}", body.join(",")));
             }
         }
         parts.push(String::from("]"));
@@ -5777,9 +5777,8 @@ pub extern "C" fn mimi_set_to_json_result_option_product_i64(
                             if opt_disc == 0 {
                                 (1i64, String::new(), 0i64, vec![0; n])
                             } else {
-                                let fields = unsafe {
-                                    std::slice::from_raw_parts(opt_h.add(1), n).to_vec()
-                                };
+                                let fields =
+                                    unsafe { std::slice::from_raw_parts(opt_h.add(1), n).to_vec() };
                                 (1i64, String::new(), 1i64, fields)
                             }
                         }
@@ -5832,10 +5831,6 @@ pub extern "C" fn mimi_set_to_json_result_option_product_i64(
         alloc_c_string(&parts.join(""))
     }
 }
-
-
-
-
 
 /// Set of Map of product from JSON array of map objects.
 #[no_mangle]
@@ -5973,8 +5968,6 @@ pub extern "C" fn mimi_set_to_json_list_map_product_i64(
         alloc_c_string(&parts.join(""))
     }
 }
-
-
 
 /// Set of Result of Map of product from JSON.
 
@@ -6622,7 +6615,9 @@ pub extern "C" fn mimi_map_from_json_option_map_list_product_i64(
             break;
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -7036,8 +7031,7 @@ pub extern "C" fn mimi_map_to_json_map_result_product_i64(
         parts.push(json_escape_string(k));
         parts.push(String::from(":"));
         let vh = **v;
-        let inner_json =
-            mimi_map_to_json_result_product_i64(vh as MapHandle, arity, display_style);
+        let inner_json = mimi_map_to_json_result_product_i64(vh as MapHandle, arity, display_style);
         let s = unsafe { cstr_to_string(inner_json) };
         if !inner_json.is_null() {
             unsafe {
@@ -7305,8 +7299,7 @@ pub extern "C" fn mimi_map_to_json_set_map_list_product_i64(
         parts.push(json_escape_string(k));
         parts.push(String::from(":"));
         let vh = **v;
-        let set_json =
-            mimi_set_to_json_map_list_product_i64(vh as SetHandle, arity, display_style);
+        let set_json = mimi_set_to_json_map_list_product_i64(vh as SetHandle, arity, display_style);
         let s = unsafe { cstr_to_string(set_json) };
         if !set_json.is_null() {
             unsafe {
@@ -7570,8 +7563,7 @@ pub extern "C" fn mimi_map_to_json_map_list_product_i64(
         parts.push(json_escape_string(k));
         parts.push(String::from(":"));
         let vh = **v;
-        let inner_json =
-            mimi_map_to_json_list_product_i64(vh as MapHandle, arity, display_style);
+        let inner_json = mimi_map_to_json_list_product_i64(vh as MapHandle, arity, display_style);
         let s = unsafe { cstr_to_string(inner_json) };
         if !inner_json.is_null() {
             unsafe {
@@ -7703,8 +7695,7 @@ pub extern "C" fn mimi_map_to_json_map_option_product_i64(
         parts.push(json_escape_string(k));
         parts.push(String::from(":"));
         let vh = **v;
-        let inner_json =
-            mimi_map_to_json_option_product_i64(vh as MapHandle, arity, display_style);
+        let inner_json = mimi_map_to_json_option_product_i64(vh as MapHandle, arity, display_style);
         let s = unsafe { cstr_to_string(inner_json) };
         if !inner_json.is_null() {
             unsafe {
@@ -8423,8 +8414,6 @@ pub extern "C" fn mimi_list_from_json_set_product_i64(
     list
 }
 
-
-
 /// Set of List of product from JSON array of list-of-product arrays.
 #[no_mangle]
 pub extern "C" fn mimi_set_from_json_list_product_i64(
@@ -8588,7 +8577,6 @@ pub extern "C" fn mimi_set_to_json_list_product_i64(
     }
 }
 
-
 /// List of Map of product from JSON array of map objects.
 #[no_mangle]
 pub extern "C" fn mimi_list_from_json_map_product_i64(
@@ -8732,7 +8720,6 @@ pub extern "C" fn mimi_list_map_product_to_json(
     alloc_c_string(&parts.join(""))
 }
 
-
 /// Map of Set of List of Map of product from JSON.
 #[no_mangle]
 pub extern "C" fn mimi_map_from_json_set_list_map_product_i64(
@@ -8852,8 +8839,7 @@ pub extern "C" fn mimi_map_to_json_set_list_map_product_i64(
         parts.push(json_escape_string(k));
         parts.push(String::from(":"));
         let vh = **v;
-        let set_json =
-            mimi_set_to_json_list_map_product_i64(vh as SetHandle, arity, display_style);
+        let set_json = mimi_set_to_json_list_map_product_i64(vh as SetHandle, arity, display_style);
         let s = unsafe { cstr_to_string(set_json) };
         if !set_json.is_null() {
             unsafe {
@@ -9122,8 +9108,7 @@ pub extern "C" fn mimi_map_to_json_set_map_product_i64(
         parts.push(json_escape_string(k));
         parts.push(String::from(":"));
         let vh = **v;
-        let set_json =
-            mimi_set_to_json_map_product_i64(vh as SetHandle, arity, display_style);
+        let set_json = mimi_set_to_json_map_product_i64(vh as SetHandle, arity, display_style);
         let s = unsafe { cstr_to_string(set_json) };
         if !set_json.is_null() {
             unsafe {
@@ -9359,7 +9344,9 @@ pub extern "C" fn mimi_map_from_json_set_list_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, set_h as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, set_h as ValueHandle);
         }
     }
     handle
@@ -9411,7 +9398,6 @@ pub extern "C" fn mimi_map_to_json_set_list_product_i64(
     parts.push(String::from("}"));
     alloc_c_string(&parts.join(""))
 }
-
 
 /// Map of List of Set of Result of product from JSON.
 #[no_mangle]
@@ -9537,8 +9523,7 @@ pub extern "C" fn mimi_map_to_json_list_set_result_product_i64(
             continue;
         }
         let list_ptr = vh as *const MimiList;
-        let json_ptr =
-            mimi_list_set_result_product_to_json(list_ptr, arity, display_style);
+        let json_ptr = mimi_list_set_result_product_to_json(list_ptr, arity, display_style);
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
             unsafe {
@@ -9675,8 +9660,7 @@ pub extern "C" fn mimi_map_to_json_list_set_option_product_i64(
             continue;
         }
         let list_ptr = vh as *const MimiList;
-        let json_ptr =
-            mimi_list_set_option_product_to_json(list_ptr, arity, display_style);
+        let json_ptr = mimi_list_set_option_product_to_json(list_ptr, arity, display_style);
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
             unsafe {
@@ -9960,8 +9944,7 @@ pub extern "C" fn mimi_list_set_option_product_to_json(
             });
         }
         let h = unsafe { *(lst.data as *const i64).offset(i) };
-        let set_json =
-            mimi_set_to_json_option_product_i64(h as SetHandle, arity, display_style);
+        let set_json = mimi_set_to_json_option_product_i64(h as SetHandle, arity, display_style);
         let s = unsafe { cstr_to_string(set_json) };
         if !set_json.is_null() {
             unsafe {
@@ -10104,8 +10087,7 @@ pub extern "C" fn mimi_list_set_result_product_to_json(
             });
         }
         let h = unsafe { *(lst.data as *const i64).offset(i) };
-        let set_json =
-            mimi_set_to_json_result_product_i64(h as SetHandle, arity, display_style);
+        let set_json = mimi_set_to_json_result_product_i64(h as SetHandle, arity, display_style);
         let s = unsafe { cstr_to_string(set_json) };
         if !set_json.is_null() {
             unsafe {
@@ -10140,7 +10122,7 @@ pub extern "C" fn mimi_list_from_json_result_option_product_i64(
         return empty();
     }
     // Parse as list of tagged Result via wrapping each element through option product helper
-    // by building a JSON array and reusing map_from_json_result_option_product single-key? 
+    // by building a JSON array and reusing map_from_json_result_option_product single-key?
     // Simpler: walk array and call map_from_json_result_option_product for each {"_":elem}
     let s = unsafe { cstr_to_string(json) };
     let bytes = s.as_bytes();
@@ -10274,10 +10256,11 @@ pub extern "C" fn mimi_list_result_option_product_to_json(
         let tmp = mimi_map_new();
         if tmp != 0 {
             unsafe {
-                (*map_from_handle(tmp)).inner.insert("_".into(), h as ValueHandle);
+                (*map_from_handle(tmp))
+                    .inner
+                    .insert("_".into(), h as ValueHandle);
             }
-            let json_ptr =
-                mimi_map_to_json_result_option_product_i64(tmp, arity, display_style);
+            let json_ptr = mimi_map_to_json_result_option_product_i64(tmp, arity, display_style);
             let s = unsafe { cstr_to_string(json_ptr) };
             if !json_ptr.is_null() {
                 unsafe {
@@ -10625,7 +10608,9 @@ pub extern "C" fn mimi_map_from_json_result_option_list_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -10703,8 +10688,7 @@ pub extern "C" fn mimi_map_to_json_result_option_list_product_i64(
                                 .inner
                                 .insert("_".into(), list_ptr as ValueHandle);
                         }
-                        let json_ptr =
-                            mimi_map_to_json_list_product_i64(tmp, arity, display_style);
+                        let json_ptr = mimi_map_to_json_list_product_i64(tmp, arity, display_style);
                         let s = unsafe { cstr_to_string(json_ptr) };
                         if !json_ptr.is_null() {
                             unsafe {
@@ -10733,7 +10717,6 @@ pub extern "C" fn mimi_map_to_json_result_option_list_product_i64(
     parts.push(String::from("}"));
     alloc_c_string(&parts.join(""))
 }
-
 
 /// Map of Option of Set of List of product from JSON.
 /// Pack: `{i64 disc, i64 set_handle}` disc 1=Some set of list product, 0=None.
@@ -10880,7 +10863,9 @@ pub extern "C" fn mimi_map_from_json_option_set_list_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -11066,7 +11051,9 @@ pub extern "C" fn mimi_map_from_json_option_result_list_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -11122,8 +11109,7 @@ pub extern "C" fn mimi_map_to_json_option_result_list_product_i64(
                         .inner
                         .insert("_".into(), res_h as ValueHandle);
                 }
-                let json_ptr =
-                    mimi_map_to_json_result_list_product_i64(tmp, arity, display_style);
+                let json_ptr = mimi_map_to_json_result_list_product_i64(tmp, arity, display_style);
                 let s = unsafe { cstr_to_string(json_ptr) };
                 if !json_ptr.is_null() {
                     unsafe {
@@ -11150,7 +11136,6 @@ pub extern "C" fn mimi_map_to_json_option_result_list_product_i64(
     parts.push(String::from("}"));
     alloc_c_string(&parts.join(""))
 }
-
 
 /// Map of Result of List of Set of product from JSON.
 /// Pack: `{i64 disc, i64 list_or_err}` Ok list is List of Set product handles.
@@ -11305,7 +11290,9 @@ pub extern "C" fn mimi_map_from_json_result_list_set_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -11535,7 +11522,9 @@ pub extern "C" fn mimi_map_from_json_result_list_option_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -11694,7 +11683,9 @@ pub extern "C" fn mimi_map_from_json_set_option_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, set_h as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, set_h as ValueHandle);
         }
     }
     handle
@@ -11746,7 +11737,6 @@ pub extern "C" fn mimi_map_to_json_set_option_product_i64(
     parts.push(String::from("}"));
     alloc_c_string(&parts.join(""))
 }
-
 
 /// Map of Set of Result of Option of product from JSON.
 #[no_mangle]
@@ -11834,7 +11824,9 @@ pub extern "C" fn mimi_map_from_json_set_result_option_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, set_h as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, set_h as ValueHandle);
         }
     }
     handle
@@ -11874,8 +11866,7 @@ pub extern "C" fn mimi_map_to_json_set_result_option_product_i64(
             continue;
         }
         let set_h = vh as SetHandle;
-        let json_ptr =
-            mimi_set_to_json_result_option_product_i64(set_h, arity, display_style);
+        let json_ptr = mimi_set_to_json_result_option_product_i64(set_h, arity, display_style);
         let s = unsafe { cstr_to_string(json_ptr) };
         if !json_ptr.is_null() {
             unsafe {
@@ -11974,7 +11965,9 @@ pub extern "C" fn mimi_map_from_json_set_result_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, set_h as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, set_h as ValueHandle);
         }
     }
     handle
@@ -12383,7 +12376,9 @@ pub extern "C" fn mimi_map_from_json_option_list_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -12696,7 +12691,9 @@ pub extern "C" fn mimi_map_from_json_result_list_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -12878,7 +12875,10 @@ pub extern "C" fn mimi_map_from_json_result_option_product_i64(
                     i += 1;
                 }
                 let arr = String::from_utf8_lossy(&bytes[arr_start..i]).into_owned();
-                let c_arr = alloc_c_string(&format!("[{}]", arr.trim_start_matches('[').trim_end_matches(']')));
+                let c_arr = alloc_c_string(&format!(
+                    "[{}]",
+                    arr.trim_start_matches('[').trim_end_matches(']')
+                ));
                 // Parse as option product: wrap array as single Some element JSON
                 let opt_json = format!("[{}]", &arr);
                 let c_opt = alloc_c_string(&opt_json);
@@ -12998,7 +12998,9 @@ pub extern "C" fn mimi_map_from_json_result_option_product_i64(
                     let rest = &obj[pos + 4..];
                     let rb = rest.as_bytes();
                     let mut k = 0usize;
-                    while k < rb.len() && rb[k].is_ascii_whitespace() || (k < rb.len() && rb[k] == b':') {
+                    while k < rb.len() && rb[k].is_ascii_whitespace()
+                        || (k < rb.len() && rb[k] == b':')
+                    {
                         k += 1;
                     }
                     // skip :
@@ -13101,7 +13103,9 @@ pub extern "C" fn mimi_map_from_json_result_option_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -13188,8 +13192,6 @@ pub extern "C" fn mimi_map_to_json_result_option_product_i64(
     parts.push(String::from("}"));
     alloc_c_string(&parts.join(""))
 }
-
-
 
 /// Map of Result of Set of Map of product from JSON.
 #[no_mangle]
@@ -13373,7 +13375,9 @@ pub extern "C" fn mimi_map_from_json_result_set_map_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -13554,7 +13558,9 @@ pub extern "C" fn mimi_map_from_json_option_set_map_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -13803,7 +13809,9 @@ pub extern "C" fn mimi_map_from_json_result_list_map_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -13984,7 +13992,9 @@ pub extern "C" fn mimi_map_from_json_option_list_map_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -14203,7 +14213,9 @@ pub extern "C" fn mimi_map_from_json_result_set_list_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -14430,7 +14442,9 @@ pub extern "C" fn mimi_map_from_json_result_set_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -14556,16 +14570,10 @@ pub extern "C" fn mimi_map_from_json_option_set_product_i64(
         if i >= bytes.len() {
             break;
         }
-        let is_none = if bytes[i] == b'n'
-            && i + 4 <= bytes.len()
-            && &bytes[i..i + 4] == b"null"
-        {
+        let is_none = if bytes[i] == b'n' && i + 4 <= bytes.len() && &bytes[i..i + 4] == b"null" {
             i += 4;
             true
-        } else if bytes[i] == b'"'
-            && i + 6 <= bytes.len()
-            && &bytes[i..i + 6] == b"\"None\""
-        {
+        } else if bytes[i] == b'"' && i + 6 <= bytes.len() && &bytes[i..i + 6] == b"\"None\"" {
             i += 6;
             true
         } else {
@@ -14626,7 +14634,9 @@ pub extern "C" fn mimi_map_from_json_option_set_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -14746,16 +14756,10 @@ pub extern "C" fn mimi_map_from_json_option_map_product_i64(
         if i >= bytes.len() {
             break;
         }
-        let is_none = if bytes[i] == b'n'
-            && i + 4 <= bytes.len()
-            && &bytes[i..i + 4] == b"null"
-        {
+        let is_none = if bytes[i] == b'n' && i + 4 <= bytes.len() && &bytes[i..i + 4] == b"null" {
             i += 4;
             true
-        } else if bytes[i] == b'"'
-            && i + 6 <= bytes.len()
-            && &bytes[i..i + 6] == b"\"None\""
-        {
+        } else if bytes[i] == b'"' && i + 6 <= bytes.len() && &bytes[i..i + 6] == b"\"None\"" {
             i += 6;
             true
         } else {
@@ -14817,7 +14821,9 @@ pub extern "C" fn mimi_map_from_json_option_map_product_i64(
             }
         }
         unsafe {
-            (*map_from_handle(handle)).inner.insert(key, pack as ValueHandle);
+            (*map_from_handle(handle))
+                .inner
+                .insert(key, pack as ValueHandle);
         }
     }
     handle
@@ -14940,16 +14946,10 @@ pub extern "C" fn mimi_map_from_json_option_product_i64(
             break;
         }
         // None: null or "None"
-        let is_none = if bytes[i] == b'n'
-            && i + 4 <= bytes.len()
-            && &bytes[i..i + 4] == b"null"
-        {
+        let is_none = if bytes[i] == b'n' && i + 4 <= bytes.len() && &bytes[i..i + 4] == b"null" {
             i += 4;
             true
-        } else if bytes[i] == b'"'
-            && i + 6 <= bytes.len()
-            && &bytes[i..i + 6] == b"\"None\""
-        {
+        } else if bytes[i] == b'"' && i + 6 <= bytes.len() && &bytes[i..i + 6] == b"\"None\"" {
             i += 6;
             true
         } else {
@@ -15200,7 +15200,9 @@ pub extern "C" fn mimi_map_from_json_result_product_i64(
                     } else if i < bytes.len() && bytes[i].is_ascii_digit() {
                         let mut v: i64 = 0;
                         while i < bytes.len() && bytes[i].is_ascii_digit() {
-                            v = v.saturating_mul(10).saturating_add((bytes[i] - b'0') as i64);
+                            v = v
+                                .saturating_mul(10)
+                                .saturating_add((bytes[i] - b'0') as i64);
                             i += 1;
                         }
                         err_str = v.to_string();
@@ -15699,8 +15701,6 @@ pub extern "C" fn mimi_set_to_json_product_i64(
     }
 }
 
-
-
 /// List of Result of product from JSON array of tagged objects / bare products.
 /// Elements stored as heap `{i64 disc, i64[n] fields or err string ptr}` ValueHandles in list data.
 #[no_mangle]
@@ -15906,9 +15906,6 @@ pub extern "C" fn mimi_list_from_json_result_product_i64(
     }
     list
 }
-
-
-
 
 /// List of Result of Set of product from JSON.
 /// Elements: heap `{i64 disc, i64 set_or_err}`.
@@ -16506,7 +16503,6 @@ pub extern "C" fn mimi_list_result_product_to_json(
     alloc_c_string(&parts.join(""))
 }
 
-
 /// Set of Result of product from JSON array of tagged objects.
 #[no_mangle]
 pub extern "C" fn mimi_set_from_json_result_product_i64(
@@ -16704,8 +16700,7 @@ pub extern "C" fn mimi_set_to_json_result_product_i64(
                         };
                         (0i64, vec![0; n], err_s)
                     } else {
-                        let fields =
-                            unsafe { std::slice::from_raw_parts(ptr.add(1), n).to_vec() };
+                        let fields = unsafe { std::slice::from_raw_parts(ptr.add(1), n).to_vec() };
                         (1i64, fields, String::new())
                     }
                 }
@@ -16788,16 +16783,10 @@ pub extern "C" fn mimi_set_from_json_option_product_i64(
         if ptr.is_null() {
             break;
         }
-        let is_none = if bytes[i] == b'n'
-            && i + 4 <= bytes.len()
-            && &bytes[i..i + 4] == b"null"
-        {
+        let is_none = if bytes[i] == b'n' && i + 4 <= bytes.len() && &bytes[i..i + 4] == b"null" {
             i += 4;
             true
-        } else if bytes[i] == b'"'
-            && i + 6 <= bytes.len()
-            && &bytes[i..i + 6] == b"\"None\""
-        {
+        } else if bytes[i] == b'"' && i + 6 <= bytes.len() && &bytes[i..i + 6] == b"\"None\"" {
             i += 6;
             true
         } else {
@@ -17237,9 +17226,7 @@ pub extern "C" fn mimi_set_to_display_string(handle: SetHandle) -> *mut std::ffi
     let mut vals: Vec<String> = set
         .inner
         .iter()
-        .map(|v| {
-            safe_c_string_from_handle(*v as ValueHandle).unwrap_or_else(|| v.to_string())
-        })
+        .map(|v| safe_c_string_from_handle(*v as ValueHandle).unwrap_or_else(|| v.to_string()))
         .collect();
     vals.sort();
     let mut s = String::from("Set{");
@@ -17597,8 +17584,12 @@ impl RegexEngine {
                     let mut last_span: Option<(usize, usize)> = None;
                     for _ in 0..count {
                         let mut inner_caps = Vec::new();
-                        match Self::match_with_captures(inner, &text[t2..], depth + 1, &mut inner_caps)
-                        {
+                        match Self::match_with_captures(
+                            inner,
+                            &text[t2..],
+                            depth + 1,
+                            &mut inner_caps,
+                        ) {
                             Some(n) => {
                                 last_span = Some((t2, t2 + n));
                                 // Nested captures: merge relative offsets
@@ -17631,20 +17622,19 @@ impl RegexEngine {
                         // We pushed nested during loop; insert this group at caps_len.
                         if let Some(sp) = span {
                             // For multi-rep, span should be whole run
-                            let full = if count > 0 {
-                                (ti, t2)
-                            } else {
-                                sp
-                            };
+                            let full = if count > 0 { (ti, t2) } else { sp };
                             caps.insert(caps_len, Some(full));
                         } else {
                             caps.insert(caps_len, None);
                         }
                         // Try rest of pattern; offset new captures by t2 (suffix base).
                         let caps_before_rest = caps.len();
-                        if let Some(rest) =
-                            Self::match_with_captures(&pattern[after..], &text[t2..], depth + 1, caps)
-                        {
+                        if let Some(rest) = Self::match_with_captures(
+                            &pattern[after..],
+                            &text[t2..],
+                            depth + 1,
+                            caps,
+                        ) {
                             for c in caps.iter_mut().skip(caps_before_rest) {
                                 if let Some((a, b)) = *c {
                                     *c = Some((a + t2, b + t2));
@@ -17703,8 +17693,7 @@ impl RegexEngine {
                 let mut ok = true;
                 let mut p_tmp = pi;
                 for _ in 0..count {
-                    if t2 >= tlen
-                        || !Self::elem_match(pattern, &mut p_tmp, text[t2], elem_is_class)
+                    if t2 >= tlen || !Self::elem_match(pattern, &mut p_tmp, text[t2], elem_is_class)
                     {
                         ok = false;
                         break;
@@ -19740,13 +19729,11 @@ pub extern "C" fn mimi_pinned_fault_state() -> *const std::ffi::c_char {
         PINNED_FAULT_PENDING.with(|cell| {
             if let Some(ref info) = *cell.borrow() {
                 *cstr = Some(
-                    std::ffi::CString::new(info.state_name.as_str()).unwrap_or_else(
-                        |_| {
-                            // Fallback never fails: no interior NULs.
-                            std::ffi::CString::new("FFI_Pinned")
-                                .unwrap_or_else(|_| std::ffi::CString::default())
-                        },
-                    ),
+                    std::ffi::CString::new(info.state_name.as_str()).unwrap_or_else(|_| {
+                        // Fallback never fails: no interior NULs.
+                        std::ffi::CString::new("FFI_Pinned")
+                            .unwrap_or_else(|_| std::ffi::CString::default())
+                    }),
                 );
             }
         });
@@ -19950,9 +19937,8 @@ pub extern "C" fn mimi_shadow_dump() -> *const std::ffi::c_char {
                 ));
             }
         });
-        *cstr_cell.borrow_mut() = Some(
-            std::ffi::CString::new(buf).unwrap_or_else(|_| std::ffi::CString::default()),
-        );
+        *cstr_cell.borrow_mut() =
+            Some(std::ffi::CString::new(buf).unwrap_or_else(|_| std::ffi::CString::default()));
         cstr_cell
             .borrow()
             .as_ref()
@@ -20654,8 +20640,7 @@ pub extern "C" fn mimi_exec(cmd: *const std::ffi::c_char) -> *mut MimiExecResult
         });
         return Box::into_raw(res);
     }
-    static EXEC_WARNED: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
+    static EXEC_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !EXEC_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         eprintln!(
             "[mimi] RT-H5 WARNING: mimi_exec uses sh -c (shell injection risk).              Prefer mimi_exec_safe, or set MIMI_EXEC_STRICT=1 to refuse shell exec."
@@ -23140,11 +23125,7 @@ pub extern "C" fn mimi_broadcast(
         );
         if sz >= 8 {
             // L4: slice is exactly 8 bytes by construction; avoid silent zero.
-            let v = i64::from_le_bytes(
-                result_buf[0..8]
-                    .try_into()
-                    .unwrap_or([0u8; 8]),
-            );
+            let v = i64::from_le_bytes(result_buf[0..8].try_into().unwrap_or([0u8; 8]));
             results.push(v);
         } else {
             // v0.29.35: call failed → PeerFault sentinel
@@ -23759,6 +23740,17 @@ pub enum QuotedAstTag {
     QastNamedArg,
 }
 
+pub const QUOTED_AST_ABI_VERSION: i32 = 1;
+
+#[no_mangle]
+pub extern "C" fn mimi_quote_abi_version() -> i32 {
+    QUOTED_AST_ABI_VERSION
+}
+
+fn quote_tag_is_valid(tag: i32) -> bool {
+    (QuotedAstTag::QastInt as i32..=QuotedAstTag::QastNamedArg as i32).contains(&tag)
+}
+
 /// Runtime QuotedAst node. Layout: `repr(C)` so the codegen
 /// `i8*` pointer handed back to user code maps to this struct.
 #[repr(C)]
@@ -23776,6 +23768,9 @@ pub struct MimiQuotedAst {
 /// only — the v0.28.21 batch treats `Ident(name)` as a literal slot).
 #[no_mangle]
 pub extern "C" fn mimi_quote_new_leaf(tag: i32, value: i64) -> *mut MimiQuotedAst {
+    if !quote_tag_is_valid(tag) {
+        return std::ptr::null_mut();
+    }
     let node = Box::new(MimiQuotedAst {
         tag,
         argc: 0,
@@ -23798,6 +23793,9 @@ pub extern "C" fn mimi_quote_new_node(
     child1: *mut MimiQuotedAst,
     extra: i64,
 ) -> *mut MimiQuotedAst {
+    if !quote_tag_is_valid(tag) {
+        return std::ptr::null_mut();
+    }
     let node = Box::new(MimiQuotedAst {
         tag,
         argc: if child1.is_null() { 1 } else { 2 },
@@ -23820,6 +23818,9 @@ pub extern "C" fn mimi_quote_new_list(
     children: *const *mut MimiQuotedAst,
     len: i64,
 ) -> *mut MimiQuotedAst {
+    if !quote_tag_is_valid(tag) {
+        return std::ptr::null_mut();
+    }
     let len = len.max(0) as usize;
     // SAFETY: caller guarantees `children` points to `len` valid
     // `*mut MimiQuotedAst` pointers, each owned by the new node.
@@ -23966,6 +23967,12 @@ mod handle_registry_tests {
         assert_eq!(mimi_quote_data0(node), 0);
         assert_eq!(mimi_quote_argc(node), 0);
         assert!(mimi_quote_list_child(node, 0).is_null());
+    }
+
+    #[test]
+    fn quote_abi_is_versioned_and_rejects_unknown_tags() {
+        assert_eq!(mimi_quote_abi_version(), 1);
+        assert!(mimi_quote_new_leaf(i32::MAX, 42).is_null());
     }
 
     #[test]

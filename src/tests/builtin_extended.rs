@@ -60,7 +60,11 @@ func main() -> i32 {
 }
 "#;
     let err = run_source_result(src).expect_err("negative integer exponent must fail");
-    assert!(err.contains("negative exponent"), "unexpected error: {}", err);
+    assert!(
+        err.contains("negative exponent"),
+        "unexpected error: {}",
+        err
+    );
 }
 
 #[test]

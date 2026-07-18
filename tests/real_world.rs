@@ -367,9 +367,7 @@ fn real_world_flow_dual_backend_suite() {
         .filter(|p| {
             let name = p.file_name().and_then(|s| s.to_str());
             p.extension().is_some_and(|ext| ext == "mimi")
-                && name.is_some_and(|n| {
-                    n.starts_with("flow_") && !interpreter_only.contains(&n)
-                })
+                && name.is_some_and(|n| n.starts_with("flow_") && !interpreter_only.contains(&n))
         })
         .collect();
     sources.sort();

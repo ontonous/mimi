@@ -305,8 +305,10 @@ pub struct CodeGenerator<'ctx> {
     resolved_ffi_pinned_transitions: Option<std::collections::HashSet<(String, String, String)>>,
     resolved_transition_param_arity: Option<HashMap<(String, String, String), usize>>,
     resolved_transition_params: Option<HashMap<(String, String, String), Vec<(String, String)>>>,
-    resolved_transitions_by_flow: Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
-    resolved_transitions_by_event: Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
+    resolved_transitions_by_flow:
+        Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
+    resolved_transitions_by_event:
+        Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
     resolved_node_meta_spans: Option<HashMap<String, (usize, usize, usize, usize)>>,
     /// Function directory from CheckedProgram: qualified_name -> arity.
     resolved_function_arity: Option<HashMap<String, usize>>,
@@ -346,7 +348,8 @@ pub struct CodeGenerator<'ctx> {
     resolved_impls: Option<HashMap<String, Vec<String>>>,
     /// Ownership ledger owners from CheckedProgram.
     resolved_ownership_owners: Option<std::collections::HashSet<String>>,
-    resolved_ownership_summaries: Option<HashMap<String, (usize, usize, usize, usize, usize, bool)>>,
+    resolved_ownership_summaries:
+        Option<HashMap<String, (usize, usize, usize, usize, usize, bool)>>,
     resolved_ownership_resources: Option<HashMap<String, Vec<String>>>,
     resolved_ownership_actions: Option<HashMap<String, Vec<(String, String)>>>,
     resolved_ownership_merges: Option<HashMap<String, Vec<(String, String, String, String)>>>,
@@ -366,7 +369,20 @@ pub struct CodeGenerator<'ctx> {
     resolved_extern_params: Option<HashMap<String, Vec<(String, String)>>>,
     resolved_extern_no_panic: Option<std::collections::HashSet<String>>,
     resolved_extern_unsafe: Option<std::collections::HashSet<String>>,
-    resolved_call_sites: Option<HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>>,
+    resolved_call_sites: Option<
+        HashMap<
+            String,
+            (
+                String,
+                String,
+                usize,
+                Option<usize>,
+                Vec<String>,
+                Option<String>,
+                String,
+            ),
+        >,
+    >,
     resolved_call_sites_by_owner: Option<HashMap<String, Vec<(String, usize, String)>>>,
     resolved_call_sites_by_callee: Option<HashMap<String, Vec<(String, usize, String)>>>,
     /// Flow mailbox depths from CheckedProgram.
@@ -560,11 +576,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .and_then(|map| map.get(protocol).cloned())
     }
 
-    pub(crate) fn resolved_protocol_payload(
-        &self,
-        protocol: &str,
-        state: &str,
-    ) -> Option<String> {
+    pub(crate) fn resolved_protocol_payload(&self, protocol: &str, state: &str) -> Option<String> {
         self.resolved_protocol_payloads
             .as_ref()
             .and_then(|map| map.get(&format!("{protocol}.{state}")).cloned())
@@ -676,15 +688,12 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub(crate) fn has_resolved_call_to(&self, callee: &str) -> bool {
-        self.resolved_call_sites.as_ref().is_some_and(|map| {
-            map.values().any(|(_, name, _, _, _, _, _)| name == callee)
-        })
+        self.resolved_call_sites
+            .as_ref()
+            .is_some_and(|map| map.values().any(|(_, name, _, _, _, _, _)| name == callee))
     }
 
-    pub(crate) fn resolved_constant_value(
-        &self,
-        name: &str,
-    ) -> Option<(Option<String>, String)> {
+    pub(crate) fn resolved_constant_value(&self, name: &str) -> Option<(Option<String>, String)> {
         self.resolved_constant_values
             .as_ref()
             .and_then(|map| map.get(name).cloned())
@@ -696,10 +705,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .and_then(|map| map.get(name).map(String::as_str))
     }
 
-    pub(crate) fn resolved_function_params(
-        &self,
-        name: &str,
-    ) -> Option<Vec<(String, String)>> {
+    pub(crate) fn resolved_function_params(&self, name: &str) -> Option<Vec<(String, String)>> {
         self.resolved_function_params
             .as_ref()
             .and_then(|map| map.get(name).cloned())
@@ -741,9 +747,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         event: &str,
         source: &str,
     ) -> bool {
-        self.resolved_fallback_transitions.as_ref().is_some_and(|set| {
-            set.contains(&(flow.to_string(), event.to_string(), source.to_string()))
-        })
+        self.resolved_fallback_transitions
+            .as_ref()
+            .is_some_and(|set| {
+                set.contains(&(flow.to_string(), event.to_string(), source.to_string()))
+            })
     }
 
     pub(crate) fn resolved_transition_param_arity(
@@ -752,10 +760,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         event: &str,
         source: &str,
     ) -> Option<usize> {
-        self.resolved_transition_param_arity.as_ref().and_then(|map| {
-            map.get(&(flow.to_string(), event.to_string(), source.to_string()))
-                .copied()
-        })
+        self.resolved_transition_param_arity
+            .as_ref()
+            .and_then(|map| {
+                map.get(&(flow.to_string(), event.to_string(), source.to_string()))
+                    .copied()
+            })
     }
 
     pub(crate) fn resolved_transition_params(
@@ -770,10 +780,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         })
     }
 
-    pub(crate) fn resolved_type_fields(
-        &self,
-        name: &str,
-    ) -> Option<Vec<(String, String)>> {
+    pub(crate) fn resolved_type_fields(&self, name: &str) -> Option<Vec<(String, String)>> {
         self.resolved_type_fields
             .as_ref()
             .and_then(|map| map.get(name).cloned())
@@ -816,17 +823,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             .and_then(|map| map.get(&format!("{flow}.{state}")).cloned())
     }
 
-    pub(crate) fn resolved_actor_fields(
-        &self,
-        actor: &str,
-    ) -> Option<Vec<(String, String, bool)>> {
+    pub(crate) fn resolved_actor_fields(&self, actor: &str) -> Option<Vec<(String, String, bool)>> {
         self.resolved_actor_fields
             .as_ref()
             .and_then(|map| map.get(actor).cloned())
     }
 
     pub(crate) fn resolved_backend_requirements(&self) -> Option<&[(String, String)]> {
-        self.resolved_backend_requirements.as_ref().map(Vec::as_slice)
+        self.resolved_backend_requirements
+            .as_ref()
+            .map(Vec::as_slice)
     }
 
     pub(crate) fn resolved_node_meta_count(&self) -> Option<usize> {
@@ -846,9 +852,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub(crate) fn requires_resolved_capability(&self, capability: &str) -> bool {
-        self.resolved_backend_requirements.as_ref().is_some_and(|reqs| {
-            reqs.iter().any(|(cap, _)| cap == capability)
-        })
+        self.resolved_backend_requirements
+            .as_ref()
+            .is_some_and(|reqs| reqs.iter().any(|(cap, _)| cap == capability))
     }
 
     pub(crate) fn resolved_ownership_resources(&self, owner: &str) -> Option<Vec<String>> {
@@ -896,10 +902,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .and_then(|map| map.get(owner).cloned())
     }
 
-    pub(crate) fn resolved_ownership_actions(
-        &self,
-        owner: &str,
-    ) -> Option<Vec<(String, String)>> {
+    pub(crate) fn resolved_ownership_actions(&self, owner: &str) -> Option<Vec<(String, String)>> {
         self.resolved_ownership_actions
             .as_ref()
             .and_then(|map| map.get(owner).cloned())
@@ -1656,7 +1659,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.builder.position_before(&next);
                     } else {
                         // Alloca is last in its block; append after it.
-                        self.builder.position_at_end(base_inst.get_parent().unwrap_or(entry_bb));
+                        self.builder
+                            .position_at_end(base_inst.get_parent().unwrap_or(entry_bb));
                     }
                 } else if let Some(first_inst) = entry_bb.get_first_instruction() {
                     // Non-instruction base (e.g. argument): after first entry inst.
@@ -1817,10 +1821,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     (_, other) => other,
                 };
                 Some(BasicTypeEnum::StructType(self.context.struct_type(
-                    &[
-                        BasicTypeEnum::IntType(self.context.bool_type()),
-                        widened,
-                    ],
+                    &[BasicTypeEnum::IntType(self.context.bool_type()), widened],
                     false,
                 )))
             }

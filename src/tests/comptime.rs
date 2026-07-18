@@ -147,6 +147,63 @@ func main() -> i32 {
 }
 
 #[test]
+fn quote_eval_lambda_captures_and_invokes() {
+    let src = r#"
+func main() -> i32 {
+    let base = 40
+    let quoted = quote! { fn(x: i32) -> i32 { base + x } }
+    let add = ast_eval(quoted)
+    add(2)
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(42));
+}
+
+#[test]
+fn quote_eval_preserves_cast() {
+    let src = r#"
+func main() -> i32 {
+    ast_eval(quote! { 41.9 as i32 }) + 1
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(42));
+}
+
+#[test]
+fn quote_eval_while_let_binds_pattern() {
+    let src = r#"
+type MaybeInt {
+    Some(i32)
+    None
+}
+
+func main() -> i32 {
+    let item = Some(42)
+    ast_eval(quote! {
+        while let Some(value) = item {
+            break value
+        }
+    })
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(42));
+}
+
+#[test]
+fn quote_match_is_rejected_at_quote_boundary() {
+    let src = r#"
+func main() -> i32 {
+    ast_eval(quote! { match 1 { 1 => 42 _ => 0 } })
+}
+"#;
+    let err = run_source_result(src).expect_err("quoted Match must be rejected");
+    assert!(
+        err.contains("quoted AST node 'Match' is unsupported"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn math_boolean_arithmetic_is_erased() {
     let src = r#"
 func main() -> i32 {

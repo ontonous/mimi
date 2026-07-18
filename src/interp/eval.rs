@@ -653,11 +653,7 @@ impl<'a> Interpreter<'a> {
                 // already constructed a Fault record.
                 let mut out_fault = out;
                 if matches!(&out_fault, Value::Record(Some(n), _) if n == "Fault") {
-                    shadow_persistent_into_fault(
-                        &mut out_fault,
-                        &restored,
-                        &persistent_fields,
-                    );
+                    shadow_persistent_into_fault(&mut out_fault, &restored, &persistent_fields);
                 }
                 drop_fault_payload_except(&restored, &persistent_fields);
                 self.current_flow_state = prev_flow_state;
@@ -669,11 +665,7 @@ impl<'a> Interpreter<'a> {
             let mut out_fault = out;
             if let Value::Record(_, fields) = &restored {
                 if matches!(&out_fault, Value::Record(Some(n), _) if n == "Fault") {
-                    shadow_persistent_into_fault(
-                        &mut out_fault,
-                        &restored,
-                        &persistent_fields,
-                    );
+                    shadow_persistent_into_fault(&mut out_fault, &restored, &persistent_fields);
                 }
             }
             self.current_flow_state = prev_flow_state;

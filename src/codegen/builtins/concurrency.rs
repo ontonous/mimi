@@ -1169,9 +1169,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
             .map_err(|e| format!("shadow_alloc: {}", e))?;
         // TYS-C4: never unwrap call results — propagate as CompileError.
-        let v = call_try_basic_value(&call).ok_or_else(|| {
-            CompileError::LlvmError("shadow_alloc returned void".into())
-        })?;
+        let v = call_try_basic_value(&call)
+            .ok_or_else(|| CompileError::LlvmError("shadow_alloc returned void".into()))?;
         Ok(v.into_int_value().into())
     }
 
@@ -1226,9 +1225,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_call(func, &call_args, fn_name)
             .map_err(|e| format!("{}: {}", fn_name, e))?;
         // TYS-C4: never unwrap call results — propagate as CompileError.
-        let v = call_try_basic_value(&call).ok_or_else(|| {
-            CompileError::LlvmError(format!("{} returned void", fn_name))
-        })?;
+        let v = call_try_basic_value(&call)
+            .ok_or_else(|| CompileError::LlvmError(format!("{} returned void", fn_name)))?;
         Ok(v.into_int_value().into())
     }
 }

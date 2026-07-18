@@ -425,16 +425,19 @@ pub struct VerifierCtx {
         std::collections::HashMap<String, (usize, usize, usize, usize, usize, bool)>,
     pub(crate) checked_ownership_resources: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_ownership_actions: std::collections::HashMap<String, Vec<(String, String)>>,
-    pub(crate) checked_ownership_merges: std::collections::HashMap<String, Vec<(String, String, String, String)>>,
+    pub(crate) checked_ownership_merges:
+        std::collections::HashMap<String, Vec<(String, String, String, String)>>,
     pub(crate) checked_backend_requirements: Vec<(String, String)>,
     pub(crate) checked_node_meta_count: usize,
     pub(crate) checked_node_meta_paths: std::collections::HashSet<String>,
     pub(crate) checked_node_meta_precision: std::collections::HashMap<String, String>,
-    pub(crate) checked_node_meta_spans: std::collections::HashMap<String, (usize, usize, usize, usize)>,
+    pub(crate) checked_node_meta_spans:
+        std::collections::HashMap<String, (usize, usize, usize, usize)>,
     /// Type definition names materialised from CheckedProgram.
     pub(crate) checked_type_defs: std::collections::HashSet<String>,
     pub(crate) checked_type_fields: std::collections::HashMap<String, Vec<(String, String)>>,
-    pub(crate) checked_type_variants: std::collections::HashMap<String, Vec<(String, Option<String>)>>,
+    pub(crate) checked_type_variants:
+        std::collections::HashMap<String, Vec<(String, Option<String>)>>,
     pub(crate) checked_type_aliases: std::collections::HashMap<String, String>,
     /// Extern function names materialised from CheckedProgram.
     pub(crate) checked_extern_funcs: std::collections::HashSet<String>,
@@ -443,12 +446,26 @@ pub struct VerifierCtx {
     pub(crate) checked_extern_params: std::collections::HashMap<String, Vec<(String, String)>>,
     pub(crate) checked_extern_no_panic: std::collections::HashSet<String>,
     pub(crate) checked_extern_unsafe: std::collections::HashSet<String>,
-    pub(crate) checked_call_sites: std::collections::HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>,
-    pub(crate) checked_call_sites_by_owner: std::collections::HashMap<String, Vec<(String, usize, String)>>,
-    pub(crate) checked_call_sites_by_callee: std::collections::HashMap<String, Vec<(String, usize, String)>>,
+    pub(crate) checked_call_sites: std::collections::HashMap<
+        String,
+        (
+            String,
+            String,
+            usize,
+            Option<usize>,
+            Vec<String>,
+            Option<String>,
+            String,
+        ),
+    >,
+    pub(crate) checked_call_sites_by_owner:
+        std::collections::HashMap<String, Vec<(String, usize, String)>>,
+    pub(crate) checked_call_sites_by_callee:
+        std::collections::HashMap<String, Vec<(String, usize, String)>>,
     /// Protocol names materialised from CheckedProgram.
     pub(crate) checked_protocols: std::collections::HashSet<String>,
-    pub(crate) checked_protocol_transitions: std::collections::HashMap<String, Vec<(String, String, String)>>,
+    pub(crate) checked_protocol_transitions:
+        std::collections::HashMap<String, Vec<(String, String, String)>>,
     pub(crate) checked_protocol_payloads: std::collections::HashMap<String, String>,
     pub(crate) checked_protocol_states: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_protocol_state_payloads: std::collections::HashMap<String, (String, String)>,
@@ -462,12 +479,14 @@ pub struct VerifierCtx {
     /// Actor names materialised from CheckedProgram.
     pub(crate) checked_actors: std::collections::HashSet<String>,
     pub(crate) checked_actor_method_signatures: std::collections::HashMap<String, (usize, String)>,
-    pub(crate) checked_actor_method_params: std::collections::HashMap<String, Vec<(String, String)>>,
+    pub(crate) checked_actor_method_params:
+        std::collections::HashMap<String, Vec<(String, String)>>,
     pub(crate) checked_actor_method_effects: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_actor_fields: std::collections::HashMap<String, Vec<(String, String, bool)>>,
     /// Flow mailbox depths materialised from CheckedProgram.
     pub(crate) checked_mailbox_depths: std::collections::HashMap<String, usize>,
-    pub(crate) checked_flow_state_payloads: std::collections::HashMap<String, Vec<(String, String)>>,
+    pub(crate) checked_flow_state_payloads:
+        std::collections::HashMap<String, Vec<(String, String)>>,
     pub(crate) checked_flow_states: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_flow_events: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_item_kinds: std::collections::HashMap<String, String>,
@@ -484,8 +503,10 @@ pub struct VerifierCtx {
     pub(crate) checked_ffi_pinned_transitions: std::collections::HashSet<String>,
     pub(crate) checked_transition_param_arity: std::collections::HashMap<String, usize>,
     pub(crate) checked_transition_params: std::collections::HashMap<String, Vec<(String, String)>>,
-    pub(crate) checked_transitions_by_flow: std::collections::HashMap<String, Vec<(String, String, String, bool, bool, usize)>>,
-    pub(crate) checked_transitions_by_event: std::collections::HashMap<String, Vec<(String, String, String, bool, bool, usize)>>,
+    pub(crate) checked_transitions_by_flow:
+        std::collections::HashMap<String, Vec<(String, String, String, bool, bool, usize)>>,
+    pub(crate) checked_transitions_by_event:
+        std::collections::HashMap<String, Vec<(String, String, String, bool, bool, usize)>>,
 }
 
 /// Backward-compatible verifier with its own solver session.
@@ -494,7 +515,6 @@ pub struct Verifier {
     pub(crate) ctx: VerifierCtx,
     pub(crate) session: SolverSession,
 }
-
 
 fn encode_checked_const_value(value: &crate::core::ResolvedConstValue) -> String {
     match value {
@@ -765,18 +785,27 @@ impl Verifier {
             );
         }
         self.ctx.checked_call_sites = call_sites;
-        let mut call_sites_by_owner: std::collections::HashMap<String, Vec<(String, usize, String)>> =
-            std::collections::HashMap::new();
-        for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in &self.ctx.checked_call_sites {
-            call_sites_by_owner
-                .entry(owner.clone())
-                .or_default()
-                .push((callee.clone(), *argc, kind.clone()));
+        let mut call_sites_by_owner: std::collections::HashMap<
+            String,
+            Vec<(String, usize, String)>,
+        > = std::collections::HashMap::new();
+        for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in
+            &self.ctx.checked_call_sites
+        {
+            call_sites_by_owner.entry(owner.clone()).or_default().push((
+                callee.clone(),
+                *argc,
+                kind.clone(),
+            ));
         }
         self.ctx.checked_call_sites_by_owner = call_sites_by_owner;
-        let mut call_sites_by_callee: std::collections::HashMap<String, Vec<(String, usize, String)>> =
-            std::collections::HashMap::new();
-        for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in &self.ctx.checked_call_sites {
+        let mut call_sites_by_callee: std::collections::HashMap<
+            String,
+            Vec<(String, usize, String)>,
+        > = std::collections::HashMap::new();
+        for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in
+            &self.ctx.checked_call_sites
+        {
             call_sites_by_callee
                 .entry(callee.clone())
                 .or_default()
@@ -865,10 +894,8 @@ impl Verifier {
         for actor in program.actors().values() {
             for method in &actor.method_signatures {
                 let key = format!("{}.{}", actor.qualified_name, method.name);
-                actor_method_signatures.insert(
-                    key.clone(),
-                    (method.params.len(), method.ret.clone()),
-                );
+                actor_method_signatures
+                    .insert(key.clone(), (method.params.len(), method.ret.clone()));
                 actor_method_params.insert(key.clone(), method.params.clone());
                 actor_method_effects.insert(key, method.effects.clone());
             }
@@ -1048,7 +1075,7 @@ impl Verifier {
                 )
             })
             .collect();
-        
+
         let mut transitions_by_flow: std::collections::HashMap<
             String,
             Vec<(String, String, String, bool, bool, usize)>,
@@ -1115,13 +1142,13 @@ impl Verifier {
     }
 
     pub(crate) fn checked_function_return_type(&self, name: &str) -> Option<&str> {
-        self.ctx.checked_function_returns.get(name).map(String::as_str)
+        self.ctx
+            .checked_function_returns
+            .get(name)
+            .map(String::as_str)
     }
 
-    pub(crate) fn checked_function_params(
-        &self,
-        name: &str,
-    ) -> Option<Vec<(String, String)>> {
+    pub(crate) fn checked_function_params(&self, name: &str) -> Option<Vec<(String, String)>> {
         self.ctx.checked_function_params.get(name).cloned()
     }
 
@@ -1140,7 +1167,10 @@ impl Verifier {
     }
 
     pub(crate) fn checked_capability_combined_with(&self, name: &str) -> Option<&str> {
-        self.ctx.checked_capability_combined.get(name).map(String::as_str)
+        self.ctx
+            .checked_capability_combined
+            .get(name)
+            .map(String::as_str)
     }
 
     pub(crate) fn has_checked_session(&self, name: &str) -> bool {
@@ -1148,7 +1178,10 @@ impl Verifier {
     }
 
     pub(crate) fn checked_session_display(&self, name: &str) -> Option<&str> {
-        self.ctx.checked_session_displays.get(name).map(String::as_str)
+        self.ctx
+            .checked_session_displays
+            .get(name)
+            .map(String::as_str)
     }
 
     pub(crate) fn has_checked_ownership_owner(&self, owner: &str) -> bool {
@@ -1168,7 +1201,10 @@ impl Verifier {
     }
 
     pub(crate) fn checked_node_meta_precision(&self, path: &str) -> Option<&str> {
-        self.ctx.checked_node_meta_precision.get(path).map(String::as_str)
+        self.ctx
+            .checked_node_meta_precision
+            .get(path)
+            .map(String::as_str)
     }
 
     pub(crate) fn checked_node_meta_span(
@@ -1196,10 +1232,7 @@ impl Verifier {
         self.ctx.checked_ownership_resources.get(owner).cloned()
     }
 
-    pub(crate) fn checked_ownership_actions(
-        &self,
-        owner: &str,
-    ) -> Option<Vec<(String, String)>> {
+    pub(crate) fn checked_ownership_actions(&self, owner: &str) -> Option<Vec<(String, String)>> {
         self.ctx.checked_ownership_actions.get(owner).cloned()
     }
 
@@ -1214,10 +1247,7 @@ impl Verifier {
         self.ctx.checked_type_defs.contains(name)
     }
 
-    pub(crate) fn checked_type_fields(
-        &self,
-        name: &str,
-    ) -> Option<Vec<(String, String)>> {
+    pub(crate) fn checked_type_fields(&self, name: &str) -> Option<Vec<(String, String)>> {
         self.ctx.checked_type_fields.get(name).cloned()
     }
 
@@ -1278,26 +1308,36 @@ impl Verifier {
     }
 
     pub(crate) fn checked_call_return_type(&self, callee: &str) -> Option<String> {
-        self.ctx.checked_call_sites.values().find_map(|(_, name, _, _, _, ret, _)| {
-            if name == callee {
-                ret.clone()
-            } else {
-                None
-            }
-        })
+        self.ctx
+            .checked_call_sites
+            .values()
+            .find_map(
+                |(_, name, _, _, _, ret, _)| {
+                    if name == callee {
+                        ret.clone()
+                    } else {
+                        None
+                    }
+                },
+            )
     }
 
     pub(crate) fn has_checked_call_with_effect(&self, callee: &str, effect: &str) -> bool {
-        self.ctx.checked_call_sites.values().any(|(_, name, _, _, effects, _, _)| {
-            name == callee && effects.iter().any(|e| e == effect)
-        })
+        self.ctx
+            .checked_call_sites
+            .values()
+            .any(|(_, name, _, _, effects, _, _)| {
+                name == callee && effects.iter().any(|e| e == effect)
+            })
     }
 
     pub(crate) fn checked_call_arity_mismatches(&self) -> usize {
         self.ctx
             .checked_call_sites
             .values()
-            .filter(|(_, _, argc, expected, _, _, _)| expected.map(|exp| exp != *argc).unwrap_or(false))
+            .filter(|(_, _, argc, expected, _, _, _)| {
+                expected.map(|exp| exp != *argc).unwrap_or(false)
+            })
             .count()
     }
 
@@ -1312,11 +1352,7 @@ impl Verifier {
         self.ctx.checked_protocol_transitions.get(protocol).cloned()
     }
 
-    pub(crate) fn checked_protocol_payload(
-        &self,
-        protocol: &str,
-        state: &str,
-    ) -> Option<String> {
+    pub(crate) fn checked_protocol_payload(&self, protocol: &str, state: &str) -> Option<String> {
         self.ctx
             .checked_protocol_payloads
             .get(&format!("{protocol}.{state}"))
@@ -1391,23 +1427,27 @@ impl Verifier {
             .cloned()
     }
 
-    pub(crate) fn checked_actor_fields(
-        &self,
-        actor: &str,
-    ) -> Option<Vec<(String, String, bool)>> {
+    pub(crate) fn checked_actor_fields(&self, actor: &str) -> Option<Vec<(String, String, bool)>> {
         self.ctx.checked_actor_fields.get(actor).cloned()
     }
 
     pub(crate) fn checked_mailbox_depth(&self, flow_name: &str) -> Option<usize> {
-        self.ctx.checked_mailbox_depths.get(flow_name).copied().or_else(|| {
-            self.ctx.checked_mailbox_depths.iter().find_map(|(qualified, depth)| {
-                qualified
-                    .rsplit("::")
-                    .next()
-                    .filter(|bare| *bare == flow_name)
-                    .map(|_| *depth)
+        self.ctx
+            .checked_mailbox_depths
+            .get(flow_name)
+            .copied()
+            .or_else(|| {
+                self.ctx
+                    .checked_mailbox_depths
+                    .iter()
+                    .find_map(|(qualified, depth)| {
+                        qualified
+                            .rsplit("::")
+                            .next()
+                            .filter(|bare| *bare == flow_name)
+                            .map(|_| *depth)
+                    })
             })
-        })
     }
 
     pub(crate) fn checked_flow_state_payload(
@@ -1453,10 +1493,7 @@ impl Verifier {
         self.ctx.checked_constants.contains(name)
     }
 
-    pub(crate) fn checked_constant_value(
-        &self,
-        name: &str,
-    ) -> Option<(Option<String>, String)> {
+    pub(crate) fn checked_constant_value(&self, name: &str) -> Option<(Option<String>, String)> {
         self.ctx.checked_constant_values.get(name).cloned()
     }
 

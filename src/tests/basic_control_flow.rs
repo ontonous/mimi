@@ -1147,7 +1147,6 @@ func main() -> i32 {
     assert_eq!(run_source(src), interp::Value::Int(20));
 }
 
-
 #[test]
 fn actor_method_requires_checked() {
     // I-H3: actor methods honor requires when verify_contracts is on.
@@ -1180,7 +1179,6 @@ func main() -> i32 {
     assert!(call.is_err(), "expected requires failure, got {:?}", call);
 }
 
-
 #[test]
 fn spawn_named_func_is_deferred() {
     // I-H5: named-func spawn should complete via await (Deferred path).
@@ -1193,7 +1191,6 @@ func main() -> i32 {
 "#;
     assert_eq!(run_source(src), crate::interp::Value::Int(42));
 }
-
 
 #[test]
 fn for_loop_return_propagates() {
@@ -1214,7 +1211,6 @@ func main() -> i32 {
     assert_eq!(run_source(src), crate::interp::Value::Int(7));
 }
 
-
 #[test]
 fn parasteps_captures_outer_local() {
     // I-H6: parasteps worker must see outer locals used in spawn body.
@@ -1231,7 +1227,6 @@ func main() -> i32 {
 "#;
     assert_eq!(run_source(src), crate::interp::Value::Int(42));
 }
-
 
 #[test]
 fn digit_separator_ok() {
@@ -1259,7 +1254,6 @@ func main() -> i32 {
     }
 }
 
-
 #[test]
 fn match_hex_pattern() {
     // F-H10: match arms accept 0x/0b integer patterns.
@@ -1275,7 +1269,6 @@ func main() -> i32 {
 "#;
     assert_eq!(run_source(src), crate::interp::Value::Int(1));
 }
-
 
 #[test]
 fn async_sees_toplevel_const() {
@@ -1305,7 +1298,6 @@ func main() -> i32 {
     }
 }
 
-
 #[test]
 fn cap_double_consume_rejected() {
     // T-H4: linear caps cannot be dropped twice.
@@ -1321,7 +1313,6 @@ func main() -> i32 {
     let r = check_source(src);
     assert!(r.is_err(), "expected double-consume error");
 }
-
 
 #[test]
 fn random_half_open_range() {
@@ -1341,7 +1332,6 @@ func main() -> i32 {
 "#;
     assert_eq!(run_source(src), crate::interp::Value::Int(0));
 }
-
 
 #[test]
 #[ignore = "TC-H2: requires ASan/UBSan instrumented mimi object pipeline"]
