@@ -4,13 +4,76 @@ use std::path::Path;
 
 use crate::resolve_path;
 use mimi::ast::{self, File, Item};
+use mimi::core::BackendProfile;
 use mimi::{ffi, lexer, parser};
+
+pub(crate) fn validate_component_input(file: &File) -> Result<(), String> {
+    let checked = mimi::core::check_program(file).map_err(|diagnostics| {
+        let messages = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!("component input failed type checking: {messages}")
+    })?;
+    checked
+        .validate_backend(BackendProfile::Component)
+        .map_err(|diagnostics| {
+            let messages = diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!("component backend rejected input: {messages}")
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_component_input;
+
+    fn parse(source: &str) -> mimi::ast::File {
+        let tokens = mimi::lexer::Lexer::new(source).tokenize().expect("lex");
+        mimi::parser::Parser::new(tokens).parse_file().expect("parse")
+    }
+
+    #[test]
+    fn component_input_rejects_type_errors_before_generation() {
+        let file = parse(
+            r#"
+extern "C" {
+    func bad(x: MissingType) -> i32
+}
+"#,
+        );
+        let error = validate_component_input(&file).expect_err("must reject unresolved type");
+        assert!(error.contains("type checking"));
+    }
+
+    #[test]
+    fn component_input_rejects_unsupported_flow_capabilities() {
+        let file = parse(
+            r#"
+flow Choice {
+    state Pending
+    state Yes
+    state No
+    transition decide(Pending) -> Yes | No { do { return Yes {} } }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let error = validate_component_input(&file).expect_err("component must reject multi-target");
+        assert!(error.contains("flow.multi_target"));
+    }
+}
 
 pub(crate) fn emit_c_headers(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
+    validate_component_input(&file)?;
 
     let mut extern_funcs = Vec::new();
     let mut exported_funcs = Vec::new();
@@ -46,6 +109,7 @@ pub(crate) fn emit_py_bindings(
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
+    validate_component_input(&file)?;
 
     let mut extern_funcs = Vec::new();
     let mut exported_funcs = Vec::new();
@@ -124,6 +188,7 @@ pub(crate) fn emit_rust_bindings(path: Option<&Path>, output: Option<&Path>) -> 
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
+    validate_component_input(&file)?;
 
     let mut extern_funcs = Vec::new();
     let mut exported_funcs = Vec::new();
@@ -157,6 +222,7 @@ pub(crate) fn emit_go_bindings(path: Option<&Path>, output: Option<&Path>) -> Re
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
+    validate_component_input(&file)?;
 
     let mut extern_funcs = Vec::new();
     let mut type_defs = HashMap::new();
@@ -192,6 +258,7 @@ pub(crate) fn emit_node_bindings(
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
+    validate_component_input(&file)?;
 
     let mut extern_funcs = Vec::new();
     let mut type_defs = HashMap::new();
@@ -237,6 +304,7 @@ pub(crate) fn emit_java_bindings(
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
+    validate_component_input(&file)?;
 
     let mut extern_funcs = Vec::new();
     let mut type_defs = HashMap::new();
@@ -339,6 +407,7 @@ pub(crate) fn emit_cpp_bindings(path: Option<&Path>, output: Option<&Path>) -> R
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
+    validate_component_input(&file)?;
 
     let mut extern_funcs = Vec::new();
     let mut type_defs = HashMap::new();

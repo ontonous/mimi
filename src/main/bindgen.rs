@@ -14,6 +14,7 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
     let source = mimi::path_safety::read_source_capped(path)?;
     let tokens = mimi::lexer::Lexer::new(&source).tokenize()?;
     let file = mimi::parser::Parser::new(tokens).parse_file()?;
+    crate::emit::validate_component_input(&file)?;
 
     let mut extern_funcs = Vec::new();
     let mut exported_funcs = Vec::new();
