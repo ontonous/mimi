@@ -326,6 +326,8 @@ pub struct CodeGenerator<'ctx> {
     /// Actor method directory from CheckedProgram.
     resolved_actors: Option<HashMap<String, Vec<String>>>,
     resolved_actor_method_signatures: Option<HashMap<String, (usize, String)>>,
+    resolved_actor_method_params: Option<HashMap<String, Vec<(String, String)>>>,
+    resolved_actor_method_effects: Option<HashMap<String, Vec<String>>>,
     resolved_actor_fields: Option<HashMap<String, Vec<(String, String, bool)>>>,
     resolved_method_signatures: Option<HashMap<String, (usize, String)>>,
     /// Trait/impl method parameter directories: "TraitName.Method" -> [(param_name, type display)].
@@ -501,6 +503,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_protocol_state_payloads: None,
             resolved_actors: None,
             resolved_actor_method_signatures: None,
+            resolved_actor_method_params: None,
+            resolved_actor_method_effects: None,
             resolved_actor_fields: None,
             resolved_method_signatures: None,
             resolved_method_params: None,
@@ -604,6 +608,26 @@ impl<'ctx> CodeGenerator<'ctx> {
         method: &str,
     ) -> Option<(usize, String)> {
         self.resolved_actor_method_signatures
+            .as_ref()
+            .and_then(|map| map.get(&format!("{actor}.{method}")).cloned())
+    }
+
+    pub(crate) fn resolved_actor_method_params(
+        &self,
+        actor: &str,
+        method: &str,
+    ) -> Option<Vec<(String, String)>> {
+        self.resolved_actor_method_params
+            .as_ref()
+            .and_then(|map| map.get(&format!("{actor}.{method}")).cloned())
+    }
+
+    pub(crate) fn resolved_actor_method_effects(
+        &self,
+        actor: &str,
+        method: &str,
+    ) -> Option<Vec<String>> {
+        self.resolved_actor_method_effects
             .as_ref()
             .and_then(|map| map.get(&format!("{actor}.{method}")).cloned())
     }

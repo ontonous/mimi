@@ -456,15 +456,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         self.resolved_call_sites_by_callee = Some(call_sites_by_callee);
         let mut actor_method_signatures = std::collections::HashMap::new();
+        let mut actor_method_params = std::collections::HashMap::new();
+        let mut actor_method_effects = std::collections::HashMap::new();
         for actor in program.actors().values() {
             for method in &actor.method_signatures {
+                let key = format!("{}.{}", actor.qualified_name, method.name);
                 actor_method_signatures.insert(
-                    format!("{}.{}", actor.qualified_name, method.name),
+                    key.clone(),
                     (method.params.len(), method.ret.clone()),
                 );
+                actor_method_params.insert(key.clone(), method.params.clone());
+                actor_method_effects.insert(key, method.effects.clone());
             }
         }
         self.resolved_actor_method_signatures = Some(actor_method_signatures);
+        self.resolved_actor_method_params = Some(actor_method_params);
+        self.resolved_actor_method_effects = Some(actor_method_effects);
         let mut actor_fields = std::collections::HashMap::new();
         for actor in program.actors().values() {
             if !actor.fields.is_empty() {

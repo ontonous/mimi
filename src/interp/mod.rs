@@ -165,6 +165,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_actors: Option<HashMap<String, Vec<String>>>,
     /// Actor method signatures: "Actor.method" -> (arity, ret).
     pub(in crate::interp) resolved_actor_method_signatures: Option<HashMap<String, (usize, String)>>,
+    pub(in crate::interp) resolved_actor_method_params: Option<HashMap<String, Vec<(String, String)>>>,
+    pub(in crate::interp) resolved_actor_method_effects: Option<HashMap<String, Vec<String>>>,
     pub(in crate::interp) resolved_actor_fields: Option<HashMap<String, Vec<(String, String, bool)>>>,
     /// Capability names materialised from CheckedProgram.
     pub(in crate::interp) resolved_capabilities: Option<std::collections::HashSet<String>>,
@@ -457,14 +459,19 @@ impl<'a> Interpreter<'a> {
         interp.resolved_protocol_state_payloads = Some(protocol_state_payloads);
         let mut actors = HashMap::new();
         let mut actor_method_signatures = HashMap::new();
+        let mut actor_method_params = HashMap::new();
+        let mut actor_method_effects = HashMap::new();
         let mut actor_fields = HashMap::new();
         for actor in program.actors().values() {
             actors.insert(actor.qualified_name.clone(), actor.methods.clone());
             for method in &actor.method_signatures {
+                let key = format!("{}.{}", actor.qualified_name, method.name);
                 actor_method_signatures.insert(
-                    format!("{}.{}", actor.qualified_name, method.name),
+                    key.clone(),
                     (method.params.len(), method.ret.clone()),
                 );
+                actor_method_params.insert(key.clone(), method.params.clone());
+                actor_method_effects.insert(key, method.effects.clone());
             }
             if !actor.fields.is_empty() {
                 actor_fields.insert(
@@ -479,6 +486,8 @@ impl<'a> Interpreter<'a> {
         }
         interp.resolved_actors = Some(actors);
         interp.resolved_actor_method_signatures = Some(actor_method_signatures);
+        interp.resolved_actor_method_params = Some(actor_method_params);
+        interp.resolved_actor_method_effects = Some(actor_method_effects);
         interp.resolved_actor_fields = Some(actor_fields);
         let capabilities = program
             .capabilities()
@@ -932,6 +941,26 @@ impl<'a> Interpreter<'a> {
         method: &str,
     ) -> Option<(usize, String)> {
         self.resolved_actor_method_signatures
+            .as_ref()
+            .and_then(|map| map.get(&format!("{actor}.{method}")).cloned())
+    }
+
+    pub(crate) fn resolved_actor_method_params(
+        &self,
+        actor: &str,
+        method: &str,
+    ) -> Option<Vec<(String, String)>> {
+        self.resolved_actor_method_params
+            .as_ref()
+            .and_then(|map| map.get(&format!("{actor}.{method}")).cloned())
+    }
+
+    pub(crate) fn resolved_actor_method_effects(
+        &self,
+        actor: &str,
+        method: &str,
+    ) -> Option<Vec<String>> {
+        self.resolved_actor_method_effects
             .as_ref()
             .and_then(|map| map.get(&format!("{actor}.{method}")).cloned())
     }
@@ -1498,6 +1527,8 @@ impl<'a> Interpreter<'a> {
             resolved_protocol_state_payloads: None,
             resolved_actors: None,
             resolved_actor_method_signatures: None,
+            resolved_actor_method_params: None,
+            resolved_actor_method_effects: None,
             resolved_actor_fields: None,
             resolved_capabilities: None,
             resolved_capability_combined: None,
@@ -2629,4 +2660,3 @@ fn encode_resolved_const_value(value: &crate::core::ResolvedConstValue) -> Strin
         crate::core::ResolvedConstValue::Complex => "complex".into(),
     }
 }
-

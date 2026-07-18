@@ -461,6 +461,8 @@ pub struct VerifierCtx {
     /// Actor names materialised from CheckedProgram.
     pub(crate) checked_actors: std::collections::HashSet<String>,
     pub(crate) checked_actor_method_signatures: std::collections::HashMap<String, (usize, String)>,
+    pub(crate) checked_actor_method_params: std::collections::HashMap<String, Vec<(String, String)>>,
+    pub(crate) checked_actor_method_effects: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_actor_fields: std::collections::HashMap<String, Vec<(String, String, bool)>>,
     /// Flow mailbox depths materialised from CheckedProgram.
     pub(crate) checked_mailbox_depths: std::collections::HashMap<String, usize>,
@@ -854,15 +856,22 @@ impl Verifier {
             .map(|actor| actor.qualified_name.clone())
             .collect();
         let mut actor_method_signatures = std::collections::HashMap::new();
+        let mut actor_method_params = std::collections::HashMap::new();
+        let mut actor_method_effects = std::collections::HashMap::new();
         for actor in program.actors().values() {
             for method in &actor.method_signatures {
+                let key = format!("{}.{}", actor.qualified_name, method.name);
                 actor_method_signatures.insert(
-                    format!("{}.{}", actor.qualified_name, method.name),
+                    key.clone(),
                     (method.params.len(), method.ret.clone()),
                 );
+                actor_method_params.insert(key.clone(), method.params.clone());
+                actor_method_effects.insert(key, method.effects.clone());
             }
         }
         self.ctx.checked_actor_method_signatures = actor_method_signatures;
+        self.ctx.checked_actor_method_params = actor_method_params;
+        self.ctx.checked_actor_method_effects = actor_method_effects;
         let mut actor_fields = std::collections::HashMap::new();
         for actor in program.actors().values() {
             if !actor.fields.is_empty() {
@@ -1348,6 +1357,28 @@ impl Verifier {
     ) -> Option<(usize, String)> {
         self.ctx
             .checked_actor_method_signatures
+            .get(&format!("{actor}.{method}"))
+            .cloned()
+    }
+
+    pub(crate) fn checked_actor_method_params(
+        &self,
+        actor: &str,
+        method: &str,
+    ) -> Option<Vec<(String, String)>> {
+        self.ctx
+            .checked_actor_method_params
+            .get(&format!("{actor}.{method}"))
+            .cloned()
+    }
+
+    pub(crate) fn checked_actor_method_effects(
+        &self,
+        actor: &str,
+        method: &str,
+    ) -> Option<Vec<String>> {
+        self.ctx
+            .checked_actor_method_effects
             .get(&format!("{actor}.{method}"))
             .cloned()
     }
