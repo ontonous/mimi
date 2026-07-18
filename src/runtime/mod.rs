@@ -156,6 +156,7 @@ static LIVE_MAPS: std::sync::OnceLock<Mutex<HashSet<MapHandle>>> = std::sync::On
 static LIVE_SETS: std::sync::OnceLock<Mutex<HashSet<i64>>> = std::sync::OnceLock::new();
 static LIVE_ACTORS: std::sync::OnceLock<Mutex<HashMap<usize, std::sync::Arc<MimiActorRepr>>>> =
     std::sync::OnceLock::new();
+static LIVE_QUOTES: std::sync::OnceLock<Mutex<HashSet<usize>>> = std::sync::OnceLock::new();
 
 fn live_maps() -> &'static Mutex<HashSet<MapHandle>> {
     LIVE_MAPS.get_or_init(|| Mutex::new(HashSet::new()))
@@ -165,6 +166,42 @@ fn live_sets() -> &'static Mutex<HashSet<i64>> {
 }
 fn live_actors() -> &'static Mutex<HashMap<usize, std::sync::Arc<MimiActorRepr>>> {
     LIVE_ACTORS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+fn live_quotes() -> &'static Mutex<HashSet<usize>> {
+    LIVE_QUOTES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn quote_register_live(node: *mut MimiQuotedAst) {
+    if !node.is_null() {
+        live_quotes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(node as usize);
+    }
+}
+
+fn quote_read<T>(
+    node: *mut MimiQuotedAst,
+    invalid: T,
+    read: impl FnOnce(&MimiQuotedAst) -> T,
+) -> T {
+    if node.is_null() {
+        return invalid;
+    }
+    let live = live_quotes().lock().unwrap_or_else(|e| e.into_inner());
+    if !live.contains(&(node as usize)) {
+        return invalid;
+    }
+    // The registry lock prevents a concurrent drop while the node is read.
+    read(unsafe { &*node })
+}
+
+fn quote_take_live(node: *mut MimiQuotedAst) -> bool {
+    !node.is_null()
+        && live_quotes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(node as usize))
 }
 
 fn map_register_live(handle: MapHandle) {
@@ -23746,7 +23783,9 @@ pub extern "C" fn mimi_quote_new_leaf(tag: i32, value: i64) -> *mut MimiQuotedAs
         data1: 0,
         data2: 0,
     });
-    Box::into_raw(node)
+    let node = Box::into_raw(node);
+    quote_register_live(node);
+    node
 }
 
 /// Allocate a binary / unary / index / field-style node with up to two
@@ -23766,7 +23805,9 @@ pub extern "C" fn mimi_quote_new_node(
         data1: if child1.is_null() { 0 } else { child1 as i64 },
         data2: extra,
     });
-    Box::into_raw(node)
+    let node = Box::into_raw(node);
+    quote_register_live(node);
+    node
 }
 
 /// Allocate a node backed by a heap-allocated children array (Call,
@@ -23796,14 +23837,16 @@ pub extern "C" fn mimi_quote_new_list(
         data1: 0,
         data2: len as i64,
     });
-    Box::into_raw(node)
+    let node = Box::into_raw(node);
+    quote_register_live(node);
+    node
 }
 
 /// Recursively free a QuotedAst subtree, including any children-array
 /// blobs. Safe to call on null (no-op).
 #[no_mangle]
 pub extern "C" fn mimi_quote_drop(node: *mut MimiQuotedAst) {
-    if node.is_null() {
+    if !quote_take_live(node) {
         return;
     }
     // SAFETY: `node` was created by `mimi_quote_new_*` and not yet
@@ -23840,79 +23883,55 @@ pub extern "C" fn mimi_quote_drop(node: *mut MimiQuotedAst) {
 /// when written to interpret the runtime node).
 #[no_mangle]
 pub extern "C" fn mimi_quote_tag(node: *mut MimiQuotedAst) -> i32 {
-    if node.is_null() {
-        return -1;
-    }
-    // SAFETY: caller guarantees `node` is a valid (non-freed) node.
-    unsafe { (*node).tag }
+    quote_read(node, -1, |node| node.tag)
 }
 
 /// Read `data0` (literal value or first child pointer). Callers that
 /// want a child pointer can cast the result to `*mut MimiQuotedAst`.
 #[no_mangle]
 pub extern "C" fn mimi_quote_data0(node: *mut MimiQuotedAst) -> i64 {
-    if node.is_null() {
-        return 0;
-    }
-    // SAFETY: caller guarantees `node` is a valid (non-freed) node.
-    unsafe { (*node).data0 }
+    quote_read(node, 0, |node| node.data0)
 }
 
 /// Read `data1`.
 #[no_mangle]
 pub extern "C" fn mimi_quote_data1(node: *mut MimiQuotedAst) -> i64 {
-    if node.is_null() {
-        return 0;
-    }
-    // SAFETY: caller guarantees `node` is a valid (non-freed) node.
-    unsafe { (*node).data1 }
+    quote_read(node, 0, |node| node.data1)
 }
 
 /// Read `data2`.
 #[no_mangle]
 pub extern "C" fn mimi_quote_data2(node: *mut MimiQuotedAst) -> i64 {
-    if node.is_null() {
-        return 0;
-    }
-    // SAFETY: caller guarantees `node` is a valid (non-freed) node.
-    unsafe { (*node).data2 }
+    quote_read(node, 0, |node| node.data2)
 }
 
 /// Read `argc` (number of children).
 #[no_mangle]
 pub extern "C" fn mimi_quote_argc(node: *mut MimiQuotedAst) -> i32 {
-    if node.is_null() {
-        return 0;
-    }
-    // SAFETY: caller guarantees `node` is a valid (non-freed) node.
-    unsafe { (*node).argc }
+    quote_read(node, 0, |node| node.argc)
 }
 
 /// Read child at index `i` from a list-style node. Returns null on
 /// out-of-range or if the node isn't list-style.
 #[no_mangle]
 pub extern "C" fn mimi_quote_list_child(node: *mut MimiQuotedAst, i: i64) -> *mut MimiQuotedAst {
-    if node.is_null() {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: caller guarantees `node` is a valid (non-freed) node.
-    unsafe {
-        if (*node).argc <= 2 {
+    quote_read(node, std::ptr::null_mut(), |node| unsafe {
+        if node.argc <= 2 {
             return std::ptr::null_mut();
         }
-        let arr_ptr = (*node).data0 as *const Vec<*mut MimiQuotedAst>;
+        let arr_ptr = node.data0 as *const Vec<*mut MimiQuotedAst>;
         if arr_ptr.is_null() {
             return std::ptr::null_mut();
         }
         let idx = i as usize;
-        let len = (*node).argc as usize;
+        let len = node.argc as usize;
         if idx >= len {
             return std::ptr::null_mut();
         }
         // SAFETY: `arr_ptr` is a valid `Vec` created by `mimi_quote_new_list`.
         let vec = &*arr_ptr;
         (*vec)[idx]
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -23921,6 +23940,33 @@ pub extern "C" fn mimi_quote_list_child(node: *mut MimiQuotedAst, i: i64) -> *mu
 #[cfg(test)]
 mod handle_registry_tests {
     use super::*;
+
+    #[test]
+    fn quote_accessors_reject_same_layout_unregistered_metadata() {
+        let mut forged = MimiQuotedAst {
+            tag: QuotedAstTag::QastInt as i32,
+            argc: 0,
+            data0: 99,
+            data1: 0,
+            data2: 0,
+        };
+        let ptr = &mut forged as *mut MimiQuotedAst;
+        assert_eq!(mimi_quote_tag(ptr), -1);
+        assert_eq!(mimi_quote_data0(ptr), 0);
+        assert_eq!(mimi_quote_argc(ptr), 0);
+        assert!(mimi_quote_list_child(ptr, 0).is_null());
+    }
+
+    #[test]
+    fn quote_snapshot_accessors_reject_dropped_handle() {
+        let node = mimi_quote_new_leaf(QuotedAstTag::QastInt as i32, 42);
+        assert_eq!(mimi_quote_tag(node), QuotedAstTag::QastInt as i32);
+        mimi_quote_drop(node);
+        assert_eq!(mimi_quote_tag(node), -1);
+        assert_eq!(mimi_quote_data0(node), 0);
+        assert_eq!(mimi_quote_argc(node), 0);
+        assert!(mimi_quote_list_child(node, 0).is_null());
+    }
 
     #[test]
     fn map_double_destroy_is_noop() {
