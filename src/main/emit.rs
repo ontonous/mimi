@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::resolve_path;
-use mimi::ast::{self, File, Item};
+use mimi::ast::{self, File};
 use mimi::core::BackendProfile;
 use mimi::{ffi, lexer, parser};
 
@@ -122,9 +122,40 @@ pub(crate) fn resolved_exported_funcs(
     Ok(exported)
 }
 
+pub(crate) fn resolved_type_defs(
+    checked: &mimi::core::CheckedProgram<'_>,
+) -> Result<HashMap<String, ast::TypeDef>, String> {
+    let mut definitions = checked.type_defs().values().collect::<Vec<_>>();
+    definitions.sort_by(|left, right| left.qualified_name.cmp(&right.qualified_name));
+    let mut projected = HashMap::new();
+    for definition in definitions {
+        if definition.declaration.decl_pos.is_none() {
+            continue;
+        }
+        let name = definition
+            .qualified_name
+            .rsplit("::")
+            .next()
+            .unwrap_or(&definition.qualified_name)
+            .to_string();
+        let mut declaration = definition.declaration.clone();
+        declaration.name = name.clone();
+        if projected.insert(name.clone(), declaration).is_some() {
+            return Err(format!(
+                "component type name '{}' is declared more than once after projection",
+                name
+            ));
+        }
+    }
+    Ok(projected)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{checked_component_input, resolved_exported_funcs, resolved_extern_funcs};
+    use super::{
+        checked_component_input, resolved_exported_funcs, resolved_extern_funcs,
+        resolved_type_defs,
+    };
 
     fn parse(source: &str) -> mimi::ast::File {
         let tokens = mimi::lexer::Lexer::new(source).tokenize().expect("lex");
@@ -208,6 +239,29 @@ extern "C" func exported(x: i32) -> i32 { x }
         assert_eq!(exported[0].params[0].name, "x");
         assert_eq!(exported[0].extern_abi.as_deref(), Some("C"));
     }
+
+    #[test]
+    fn resolved_type_catalog_preserves_layout_and_rejects_projection_collisions() {
+        let file = parse(
+            r#"
+#[repr(C)]
+type Point { x: i32, y: i32 }
+"#,
+        );
+        let checked = checked_component_input(&file).expect("checked component");
+        let types = resolved_type_defs(&checked).expect("resolved type catalog");
+        let point = types.get("Point").expect("Point");
+        assert!(point.attributes.contains(&mimi::ast::TypeAttribute::ReprC));
+
+        let colliding = parse(
+            r#"
+module a { type Point { x: i32 } }
+module b { type Point { y: i32 } }
+"#,
+        );
+        let error = checked_component_input(&colliding).expect_err("duplicate type names must fail");
+        assert!(error.contains("Point"));
+    }
 }
 
 pub(crate) fn emit_c_headers(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
@@ -219,8 +273,7 @@ pub(crate) fn emit_c_headers(path: Option<&Path>, output: Option<&Path>) -> Resu
 
     let extern_funcs = resolved_extern_funcs(&checked)?;
     let exported_funcs = resolved_exported_funcs(&checked, &extern_funcs)?;
-    let mut type_defs = HashMap::new();
-    collect_types(&file, &mut type_defs);
+    let type_defs = resolved_type_defs(&checked)?;
 
     let header = if exported_funcs.is_empty() {
         ffi::c_header::generate_c_header(&extern_funcs, type_defs)?
@@ -254,8 +307,7 @@ pub(crate) fn emit_py_bindings(
 
     let mut extern_funcs = resolved_extern_funcs(&checked)?;
     let exported_funcs = resolved_exported_funcs(&checked, &extern_funcs)?;
-    let mut type_defs = HashMap::new();
-    collect_types(&file, &mut type_defs);
+    let type_defs = resolved_type_defs(&checked)?;
     // Also include exported functions as extern-like declarations for Python bindings
     for ef in &exported_funcs {
         let extern_func = ast::ExternFunc {
@@ -332,8 +384,7 @@ pub(crate) fn emit_rust_bindings(path: Option<&Path>, output: Option<&Path>) -> 
 
     let extern_funcs = resolved_extern_funcs(&checked)?;
     let _exported_funcs = resolved_exported_funcs(&checked, &extern_funcs)?;
-    let mut type_defs = HashMap::new();
-    collect_types(&file, &mut type_defs);
+    let type_defs = resolved_type_defs(&checked)?;
 
     let pkg_name = path
         .file_stem()
@@ -364,8 +415,7 @@ pub(crate) fn emit_go_bindings(path: Option<&Path>, output: Option<&Path>) -> Re
     let checked = checked_component_input(&file)?;
 
     let extern_funcs = resolved_extern_funcs(&checked)?;
-    let mut type_defs = HashMap::new();
-    collect_types(&file, &mut type_defs);
+    let type_defs = resolved_type_defs(&checked)?;
 
     let pkg_name = path
         .file_stem()
@@ -400,8 +450,7 @@ pub(crate) fn emit_node_bindings(
     let checked = checked_component_input(&file)?;
 
     let extern_funcs = resolved_extern_funcs(&checked)?;
-    let mut type_defs = HashMap::new();
-    collect_types(&file, &mut type_defs);
+    let type_defs = resolved_type_defs(&checked)?;
 
     let pkg_name = path
         .file_stem()
@@ -446,8 +495,7 @@ pub(crate) fn emit_java_bindings(
     let checked = checked_component_input(&file)?;
 
     let extern_funcs = resolved_extern_funcs(&checked)?;
-    let mut type_defs = HashMap::new();
-    collect_types(&file, &mut type_defs);
+    let type_defs = resolved_type_defs(&checked)?;
 
     let pkg_name = path
         .file_stem()
@@ -480,27 +528,6 @@ pub(crate) fn emit_java_bindings(
     Ok(())
 }
 
-fn collect_types(file: &File, type_defs: &mut HashMap<String, ast::TypeDef>) {
-    for item in &file.items {
-        match item {
-            Item::Type(t) => {
-                type_defs.insert(t.name.clone(), t.clone());
-            }
-            Item::Module(m) => {
-                collect_types(
-                    &ast::File {
-                        imports: Vec::new(),
-                        items: m.items.clone(),
-                        implicit_single: false,
-                    },
-                    type_defs,
-                );
-            }
-            _ => {}
-        }
-    }
-}
-
 pub(crate) fn emit_cpp_bindings(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
@@ -509,8 +536,7 @@ pub(crate) fn emit_cpp_bindings(path: Option<&Path>, output: Option<&Path>) -> R
     let checked = checked_component_input(&file)?;
 
     let extern_funcs = resolved_extern_funcs(&checked)?;
-    let mut type_defs = HashMap::new();
-    collect_types(&file, &mut type_defs);
+    let type_defs = resolved_type_defs(&checked)?;
 
     let pkg_name = path
         .file_stem()

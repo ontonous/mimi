@@ -311,6 +311,8 @@ pub struct ResolvedTypeDef {
     pub fields: Vec<(String, String)>,
     /// Enum variants: (name, optional payload display).
     pub variants: Vec<(String, Option<String>)>,
+    /// Complete checked declaration snapshot for declaration-only consumers.
+    pub declaration: crate::ast::TypeDef,
     pub origin: Origin,
 }
 
@@ -1019,6 +1021,7 @@ fn collect_items(
                         alias_of,
                         fields,
                         variants,
+                        declaration: type_def.clone(),
                         origin: Origin::User(span),
                     },
                 );
