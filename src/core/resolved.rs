@@ -466,7 +466,9 @@ impl<'a> CheckedProgram<'a> {
         })
     }
 
-    pub fn file(&self) -> &'a File {
+    /// Transitional body source for backends that do not yet consume typed body IR.
+    /// Declaration-only consumers must use the resolved catalogs instead.
+    pub(crate) fn legacy_body_file(&self) -> &'a File {
         self.file
     }
 
