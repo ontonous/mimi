@@ -8,9 +8,9 @@ use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 /// Encode an expression as a Z3 Int term.
 /// May create field access variables on-the-fly when encountering Expr::Field.
 ///
-/// NOTE: Z3 Int is unbounded — overflow is NOT modeled. For overflow-aware
-/// verification, the Z3 encoding should use bit-vector (BV32) arithmetic.
-/// This is tracked as architecture debt (C2 / v0.30+).
+/// Values use unbounded Z3 Int terms. Checked machine-integer definedness is
+/// proved separately by `i32_definedness_obligations`, before a value equation
+/// may be used to prove a postcondition.
 pub(crate) fn expr_to_z3_int(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Int> {
     match expr {
         Expr::Literal(Lit::Int(n)) => Some(Z3Int::from_i64(*n)),
@@ -128,6 +128,102 @@ pub(crate) fn expr_to_z3_int(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Int> 
         Expr::Await(inner) => expr_to_z3_int(inner, vars),
         _ => None,
     }
+}
+
+pub(crate) struct IntDefinedness {
+    pub(crate) condition: Z3Bool,
+    pub(crate) failure: &'static str,
+}
+
+/// Collect the definedness VCs for checked i32 arithmetic in evaluation order.
+/// The value terms remain mathematical Ints so C-style truncating division is
+/// preserved; each intermediate result must independently fit in i32.
+pub(crate) fn i32_definedness_obligations(
+    expr: &Expr,
+    vars: &mut Z3VarMap,
+) -> Option<Vec<IntDefinedness>> {
+    let mut obligations = Vec::new();
+    collect_i32_definedness(expr, vars, &mut obligations)?;
+    Some(obligations)
+}
+
+fn collect_i32_definedness(
+    expr: &Expr,
+    vars: &mut Z3VarMap,
+    obligations: &mut Vec<IntDefinedness>,
+) -> Option<()> {
+    match expr {
+        Expr::Binary(op, lhs, rhs) => {
+            collect_i32_definedness(lhs, vars, obligations)?;
+            collect_i32_definedness(rhs, vars, obligations)?;
+            let l = expr_to_z3_int(lhs, vars)?;
+            let r = expr_to_z3_int(rhs, vars)?;
+            match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul => {
+                    let result = match op {
+                        BinOp::Add => Z3Int::add(&[&l, &r]),
+                        BinOp::Sub => Z3Int::sub(&[&l, &r]),
+                        BinOp::Mul => Z3Int::mul(&[&l, &r]),
+                        _ => unreachable!(),
+                    };
+                    let lo = Z3Int::from_i64(i32::MIN as i64);
+                    let hi = Z3Int::from_i64(i32::MAX as i64);
+                    obligations.push(IntDefinedness {
+                        condition: Z3Bool::and(&[&result.ge(&lo), &result.le(&hi)]),
+                        failure: "integer overflow is not excluded by preconditions",
+                    });
+                }
+                BinOp::Div | BinOp::Mod => {
+                    let zero = Z3Int::from_i64(0);
+                    let min = Z3Int::from_i64(i32::MIN as i64);
+                    let neg_one = Z3Int::from_i64(-1);
+                    let min_overflow = Z3Bool::and(&[&l.eq(&min), &r.eq(&neg_one)]);
+                    obligations.push(IntDefinedness {
+                        condition: Z3Bool::and(&[&r.ne(&zero), &min_overflow.not()]),
+                        failure: "integer operation is undefined (zero divisor or MIN / -1)",
+                    });
+                }
+                _ => {}
+            }
+        }
+        Expr::Unary(UnOp::Neg, inner) => {
+            collect_i32_definedness(inner, vars, obligations)?;
+            let value = expr_to_z3_int(inner, vars)?;
+            let min = Z3Int::from_i64(i32::MIN as i64);
+            obligations.push(IntDefinedness {
+                condition: value.ne(&min),
+                failure: "integer overflow is not excluded by preconditions",
+            });
+        }
+        Expr::If { cond, then_, else_ } => {
+            let condition = expr_to_z3_bool(cond, vars)?;
+            if let Some(then_expr) = block_tail_expr(then_) {
+                let mut branch = i32_definedness_obligations(&then_expr, vars)?;
+                for obligation in &mut branch {
+                    obligation.condition = condition.implies(&obligation.condition);
+                }
+                obligations.extend(branch);
+            }
+            if let Some(else_expr) = else_.as_ref().and_then(|block| block_tail_expr(block)) {
+                let mut branch = i32_definedness_obligations(&else_expr, vars)?;
+                let else_condition = condition.not();
+                for obligation in &mut branch {
+                    obligation.condition = else_condition.implies(&obligation.condition);
+                }
+                obligations.extend(branch);
+            }
+        }
+        Expr::Block(stmts) => {
+            if let Some(tail) = block_tail_expr(stmts) {
+                collect_i32_definedness(&tail, vars, obligations)?;
+            }
+        }
+        Expr::Spawn(inner) | Expr::Await(inner) => {
+            collect_i32_definedness(inner, vars, obligations)?;
+        }
+        _ => {}
+    }
+    Some(())
 }
 
 /// Convert an expression to a Z3 variable name for field/identity access.
