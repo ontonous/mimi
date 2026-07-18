@@ -44,7 +44,7 @@ pub fn verify_checked(
     program
         .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(format_check_errors)?;
-    flow::flow_verify_file_or_mock(program.file())
+    flow::flow_verify_file_or_mock(program.legacy_body_file())
 }
 
 /// Parse source and verify extern call sites using Z3.

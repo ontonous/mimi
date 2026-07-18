@@ -1103,7 +1103,7 @@ impl Verifier {
         }
         self.ctx.checked_transitions_by_flow = transitions_by_flow;
         self.ctx.checked_transitions_by_event = transitions_by_event;
-        self.verify_file(program.file())
+        self.verify_file(program.legacy_body_file())
     }
 
     pub(crate) fn has_checked_function(&self, name: &str) -> bool {

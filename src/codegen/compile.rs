@@ -602,7 +602,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.resolved_flow_protocols = Some(flow_protocols);
-        self.compile_file(program.file()).map_err(|error| {
+        self.compile_file(program.legacy_body_file()).map_err(|error| {
             let mut diagnostic = error.to_diagnostic();
             if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {
                 if let Some(span) = program.entry_span() {
