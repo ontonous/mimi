@@ -137,10 +137,7 @@ impl LspServer {
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
         let mut loader = crate::loader::ModuleLoader::new(base_dir);
-        if loader
-            .load_main_with_file(file_path, file.clone())
-            .is_ok()
-        {
+        if loader.load_main_with_file(file_path, file.clone()).is_ok() {
             if let Ok(merged) = loader.merge_all() {
                 *file = merged;
             }

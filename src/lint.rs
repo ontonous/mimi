@@ -917,64 +917,176 @@ fn std_module_export_used(module: &str, used: &std::collections::HashSet<String>
 fn std_module_pub_funcs(module: &str) -> &'static [&'static str] {
     match module {
         "io" => &[
-            "print_line", "print_raw", "print_format", "print_err", "print_int", "print_float",
-            "print_list", "input_line", "input_int", "input_float", "input_bool",
+            "print_line",
+            "print_raw",
+            "print_format",
+            "print_err",
+            "print_int",
+            "print_float",
+            "print_list",
+            "input_line",
+            "input_int",
+            "input_float",
+            "input_bool",
         ],
-        "fs" => &["exists", "read", "write", "read_lines", "write_lines", "file_size"],
+        "fs" => &[
+            "exists",
+            "read",
+            "write",
+            "read_lines",
+            "write_lines",
+            "file_size",
+        ],
         "strings" => &[
-            "char_at", "substring", "split", "join", "contains", "capitalize", "title",
-            "reverse_string", "truncate", "pad_left", "pad_right", "count_substring",
-            "is_blank", "replace_all", "to_lower", "trim",
+            "char_at",
+            "substring",
+            "split",
+            "join",
+            "contains",
+            "capitalize",
+            "title",
+            "reverse_string",
+            "truncate",
+            "pad_left",
+            "pad_right",
+            "count_substring",
+            "is_blank",
+            "replace_all",
+            "to_lower",
+            "trim",
         ],
         "collections" => &[
-            "find", "dedup", "concat", "sort_list", "map_list", "unique", "any", "all",
-            "partition", "group_by", "chunks", "intersperse", "min_list", "max_list",
-            "filter_list", "reduce_list",
+            "find",
+            "dedup",
+            "concat",
+            "sort_list",
+            "map_list",
+            "unique",
+            "any",
+            "all",
+            "partition",
+            "group_by",
+            "chunks",
+            "intersperse",
+            "min_list",
+            "max_list",
+            "filter_list",
+            "reduce_list",
         ],
         "mymath" => &[
-            "abs", "abs_float", "gcd", "lcm", "hypot", "clamp_int", "factorial", "fibonacci",
-            "is_prime", "random_int", "power", "sqrt_val", "collatz_steps", "mod_pow",
-            "is_power_of_two", "next_power_of_two",
+            "abs",
+            "abs_float",
+            "gcd",
+            "lcm",
+            "hypot",
+            "clamp_int",
+            "factorial",
+            "fibonacci",
+            "is_prime",
+            "random_int",
+            "power",
+            "sqrt_val",
+            "collatz_steps",
+            "mod_pow",
+            "is_power_of_two",
+            "next_power_of_two",
         ],
         "json" => &[
-            "to_json", "from_json", "get_string", "get_int", "get_element", "get_bool",
-            "get_float", "is_valid_json", "array_length",
+            "to_json",
+            "from_json",
+            "get_string",
+            "get_int",
+            "get_element",
+            "get_bool",
+            "get_float",
+            "is_valid_json",
+            "array_length",
         ],
         "maps" => &[
-            "new", "get", "set", "has_key", "remove", "size", "from_list", "is_empty",
-            "get_or_default", "merge", "to_list", "filter_keys", "map_values", "update",
-            "pick", "omit",
+            "new",
+            "get",
+            "set",
+            "has_key",
+            "remove",
+            "size",
+            "from_list",
+            "is_empty",
+            "get_or_default",
+            "merge",
+            "to_list",
+            "filter_keys",
+            "map_values",
+            "update",
+            "pick",
+            "omit",
         ],
-        "set" => &["size", "is_empty", "contains", "insert", "remove", "to_list"],
+        "set" => &[
+            "size", "is_empty", "contains", "insert", "remove", "to_list",
+        ],
         "crypto" => &[
-            "sha256", "base64_encode", "base64_decode", "hex_encode", "hex_decode", "is_valid_hex",
+            "sha256",
+            "base64_encode",
+            "base64_decode",
+            "hex_encode",
+            "hex_decode",
+            "is_valid_hex",
         ],
         "time" => &[
-            "timestamp", "timestamp_ms", "sleep_ms", "elapsed", "seconds_since", "millis_since",
+            "timestamp",
+            "timestamp_ms",
+            "sleep_ms",
+            "elapsed",
+            "seconds_since",
+            "millis_since",
             "duration",
         ],
         "env" => &[
-            "get_var", "cli_args", "get_var_or", "has_var", "get_int", "get_float", "arg_count",
+            "get_var",
+            "cli_args",
+            "get_var_or",
+            "has_var",
+            "get_int",
+            "get_float",
+            "arg_count",
             "first_arg",
         ],
         "testing" => &[
-            "assert_eq_int", "assert_ne_int", "assert_approx_eq_float", "assert_true",
-            "assert_false", "assert_eq_string", "assert_eq_bool",
+            "assert_eq_int",
+            "assert_ne_int",
+            "assert_approx_eq_float",
+            "assert_true",
+            "assert_false",
+            "assert_eq_string",
+            "assert_eq_bool",
         ],
         "csv" => &["parse_csv", "serialize_csv"],
         "template" => &["render_template"],
         "net" => &[
-            "tcp_socket", "tcp_connect", "tcp_listen", "tcp_accept", "tcp_send", "tcp_recv",
-            "fetch", "fetch_post",
+            "tcp_socket",
+            "tcp_connect",
+            "tcp_listen",
+            "tcp_accept",
+            "tcp_send",
+            "tcp_recv",
+            "fetch",
+            "fetch_post",
         ],
         "prelude" => &[
-            "identity", "clamp", "lerp", "compose", "pipe", "fail", "assert_msg",
-            "repeat_action", "times", "to_int_safe", "to_float_safe",
+            "identity",
+            "clamp",
+            "lerp",
+            "compose",
+            "pipe",
+            "fail",
+            "assert_msg",
+            "repeat_action",
+            "times",
+            "to_int_safe",
+            "to_float_safe",
         ],
         _ => &[],
     }
 }
-
 
 /// Collect all identifier names referenced in the file.
 fn collect_used_names(file: &File) -> std::collections::HashSet<String> {
@@ -1292,9 +1404,10 @@ func main() -> i32 {
         let file = parse_source(src);
         let result = Linter::new().lint(&file, src);
         assert!(
-            !result.diagnostics.iter().any(|d| {
-                d.code.as_deref() == Some(W006) && d.message.contains("timeout_ms")
-            }),
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| { d.code.as_deref() == Some(W006) && d.message.contains("timeout_ms") }),
             "timeout variable should be considered used: {:?}",
             result.diagnostics
         );
@@ -1420,7 +1533,6 @@ func main() -> i32 {
         );
     }
 
-
     #[test]
     fn lint_std_import_used_via_export() {
         // F-H6: use std::io + print_line should NOT warn unused import.
@@ -1428,9 +1540,7 @@ func main() -> i32 {
         let file = parse_source(src);
         let diags = Linter::new().lint(&file, src).diagnostics;
         assert!(
-            !diags
-                .iter()
-                .any(|d| d.code.as_deref() == Some(W010)),
+            !diags.iter().any(|d| d.code.as_deref() == Some(W010)),
             "std import used via export must not warn: {:?}",
             diags
         );

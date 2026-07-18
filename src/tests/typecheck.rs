@@ -1783,7 +1783,6 @@ func main() -> f64 {
     .is_ok());
 }
 
-
 #[test]
 fn view_param_field_write_rejected() {
     // T-H1: field write through view must be E0415.
@@ -1796,7 +1795,12 @@ func main() -> i32 { 0 }
 "#;
     let r = check_source(src);
     assert!(r.is_err(), "expected view field write error");
-    let msgs: String = r.unwrap_err().iter().map(|d| d.message.clone()).collect::<Vec<_>>().join(";");
+    let msgs: String = r
+        .unwrap_err()
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join(";");
     assert!(
         msgs.contains("view") || msgs.contains("read-only") || msgs.contains("E0415"),
         "unexpected: {}",
@@ -1815,14 +1819,18 @@ func main() -> i32 { 0 }
 "#;
     let r = check_source(src);
     assert!(r.is_err(), "expected view index write error");
-    let msgs: String = r.unwrap_err().iter().map(|d| d.message.clone()).collect::<Vec<_>>().join(";");
+    let msgs: String = r
+        .unwrap_err()
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join(";");
     assert!(
         msgs.contains("view") || msgs.contains("read-only") || msgs.contains("E0415"),
         "unexpected: {}",
         msgs
     );
 }
-
 
 #[test]
 fn fstring_interp_trailing_tokens_rejected() {
@@ -1839,7 +1847,6 @@ func main() -> i32 {
     assert!(r.is_err(), "expected trailing-token error, got {:?}", r);
 }
 
-
 #[test]
 fn mutate_param_call_realloc_rejected() {
     // T-H2: assigning a fresh call result to mutate param is realloc.
@@ -1852,14 +1859,18 @@ func main() -> i32 { 0 }
 "#;
     let r = check_source(src);
     assert!(r.is_err(), "expected mutate realloc error");
-    let msgs: String = r.unwrap_err().iter().map(|d| d.message.clone()).collect::<Vec<_>>().join(";");
+    let msgs: String = r
+        .unwrap_err()
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join(";");
     assert!(
         msgs.contains("mutate") || msgs.contains("realloc") || msgs.contains("E0417"),
         "unexpected: {}",
         msgs
     );
 }
-
 
 #[test]
 fn delegate_mutate_view_param_rejected() {
@@ -1874,7 +1885,6 @@ func main() -> i32 { 0 }
     // May fail parse if delegate syntax needs flow context — accept type or parse error.
     assert!(r.is_err(), "expected error for mutate-of-view delegate");
 }
-
 
 #[test]
 fn assign_while_borrowed_rejected() {

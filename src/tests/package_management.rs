@@ -356,8 +356,6 @@ fn test_framework_assert_ne_fails() {
     assert!(result.is_err());
 }
 
-
-
 fn mimi_bin() -> Option<std::path::PathBuf> {
     let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("target/debug/mimi");

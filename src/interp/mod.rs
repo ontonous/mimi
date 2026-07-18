@@ -130,18 +130,26 @@ pub struct Interpreter<'a> {
     flow_index: HashMap<String, FlowDef>,
     /// Canonical transitions from CheckedProgram: (flow, event, source) -> targets.
     /// When present, transition dispatch prefers this table over re-scanning FlowDef.
-    pub(in crate::interp) resolved_transitions: Option<HashMap<(String, String, String), Vec<String>>>,
+    pub(in crate::interp) resolved_transitions:
+        Option<HashMap<(String, String, String), Vec<String>>>,
     /// Fallback/matrix-injected transitions from CheckedProgram.
-    pub(in crate::interp) resolved_fallback_transitions: Option<std::collections::HashSet<(String, String, String)>>,
+    pub(in crate::interp) resolved_fallback_transitions:
+        Option<std::collections::HashSet<(String, String, String)>>,
     /// FFI-pinned system transitions from CheckedProgram.
-    pub(in crate::interp) resolved_ffi_pinned_transitions: Option<std::collections::HashSet<(String, String, String)>>,
+    pub(in crate::interp) resolved_ffi_pinned_transitions:
+        Option<std::collections::HashSet<(String, String, String)>>,
     /// Transition event parameter arity from CheckedProgram.
-    pub(in crate::interp) resolved_transition_param_arity: Option<HashMap<(String, String, String), usize>>,
-    pub(in crate::interp) resolved_transition_params: Option<HashMap<(String, String, String), Vec<(String, String)>>>,
+    pub(in crate::interp) resolved_transition_param_arity:
+        Option<HashMap<(String, String, String), usize>>,
+    pub(in crate::interp) resolved_transition_params:
+        Option<HashMap<(String, String, String), Vec<(String, String)>>>,
     /// Transitions grouped by flow: flow -> [(event, source, targets, fallback, pinned, argc)].
-    pub(in crate::interp) resolved_transitions_by_flow: Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
-    pub(in crate::interp) resolved_transitions_by_event: Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
-    pub(in crate::interp) resolved_node_meta_spans: Option<HashMap<String, (usize, usize, usize, usize)>>,
+    pub(in crate::interp) resolved_transitions_by_flow:
+        Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
+    pub(in crate::interp) resolved_transitions_by_event:
+        Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
+    pub(in crate::interp) resolved_node_meta_spans:
+        Option<HashMap<String, (usize, usize, usize, usize)>>,
     /// Function signatures from CheckedProgram: qualified_name -> (param_count, ret_fmt, effects).
     pub(in crate::interp) resolved_functions: Option<HashMap<String, (usize, String, Vec<String>)>>,
     /// Function parameter directories: name -> [(param_name, type display)].
@@ -154,20 +162,25 @@ pub struct Interpreter<'a> {
     /// Protocol names materialised from CheckedProgram.
     pub(in crate::interp) resolved_protocols: Option<std::collections::HashSet<String>>,
     /// Protocol transition records: protocol -> [(event, from, to)].
-    pub(in crate::interp) resolved_protocol_transitions: Option<HashMap<String, Vec<(String, String, String)>>>,
+    pub(in crate::interp) resolved_protocol_transitions:
+        Option<HashMap<String, Vec<(String, String, String)>>>,
     /// Protocol state payloads: "Protocol.State" -> payload type display.
     pub(in crate::interp) resolved_protocol_payloads: Option<HashMap<String, String>>,
     /// Protocol state name lists: "Protocol" -> [state_name].
     pub(in crate::interp) resolved_protocol_states: Option<HashMap<String, Vec<String>>>,
     /// Protocol state payload records: "Protocol.State" -> (payload_name, payload_type).
-    pub(in crate::interp) resolved_protocol_state_payloads: Option<HashMap<String, (String, String)>>,
+    pub(in crate::interp) resolved_protocol_state_payloads:
+        Option<HashMap<String, (String, String)>>,
     /// Actor method directories materialised from CheckedProgram: actor -> methods.
     pub(in crate::interp) resolved_actors: Option<HashMap<String, Vec<String>>>,
     /// Actor method signatures: "Actor.method" -> (arity, ret).
-    pub(in crate::interp) resolved_actor_method_signatures: Option<HashMap<String, (usize, String)>>,
-    pub(in crate::interp) resolved_actor_method_params: Option<HashMap<String, Vec<(String, String)>>>,
+    pub(in crate::interp) resolved_actor_method_signatures:
+        Option<HashMap<String, (usize, String)>>,
+    pub(in crate::interp) resolved_actor_method_params:
+        Option<HashMap<String, Vec<(String, String)>>>,
     pub(in crate::interp) resolved_actor_method_effects: Option<HashMap<String, Vec<String>>>,
-    pub(in crate::interp) resolved_actor_fields: Option<HashMap<String, Vec<(String, String, bool)>>>,
+    pub(in crate::interp) resolved_actor_fields:
+        Option<HashMap<String, Vec<(String, String, bool)>>>,
     /// Capability names materialised from CheckedProgram.
     pub(in crate::interp) resolved_capabilities: Option<std::collections::HashSet<String>>,
     /// Capability combinations: name -> combined_with (if any).
@@ -175,7 +188,8 @@ pub struct Interpreter<'a> {
     /// Constant names materialised from CheckedProgram.
     pub(in crate::interp) resolved_constants: Option<std::collections::HashSet<String>>,
     /// Constant directory: name -> (type display, encoded value).
-    pub(in crate::interp) resolved_constant_values: Option<HashMap<String, (Option<String>, String)>>,
+    pub(in crate::interp) resolved_constant_values:
+        Option<HashMap<String, (Option<String>, String)>>,
     /// Trait method directories materialised from CheckedProgram.
     pub(in crate::interp) resolved_traits: Option<HashMap<String, Vec<String>>>,
     /// Trait/impl method signatures: "Show.show" / "Show:for:Number.show" -> (arity, ret).
@@ -189,13 +203,16 @@ pub struct Interpreter<'a> {
     /// Ownership ledger owners materialised from CheckedProgram.
     pub(in crate::interp) resolved_ownership_owners: Option<std::collections::HashSet<String>>,
     /// Ownership action summaries: owner -> (intro, move, drop, return, merges, maybe_consumed).
-    pub(in crate::interp) resolved_ownership_summaries: Option<HashMap<String, (usize, usize, usize, usize, usize, bool)>>,
+    pub(in crate::interp) resolved_ownership_summaries:
+        Option<HashMap<String, (usize, usize, usize, usize, usize, bool)>>,
     /// Ownership resources per owner: owner -> resource names.
     pub(in crate::interp) resolved_ownership_resources: Option<HashMap<String, Vec<String>>>,
     /// Ownership actions: owner -> [(kind, resource)].
-    pub(in crate::interp) resolved_ownership_actions: Option<HashMap<String, Vec<(String, String)>>>,
+    pub(in crate::interp) resolved_ownership_actions:
+        Option<HashMap<String, Vec<(String, String)>>>,
     /// Ownership branch merges: owner -> [(resource, then, else, merged)].
-    pub(in crate::interp) resolved_ownership_merges: Option<HashMap<String, Vec<(String, String, String, String)>>>,
+    pub(in crate::interp) resolved_ownership_merges:
+        Option<HashMap<String, Vec<(String, String, String, String)>>>,
     /// Backend capability requirements: (capability, flow).
     pub(in crate::interp) resolved_backend_requirements: Option<Vec<(String, String)>>,
     /// NodeMeta path presence count from CheckedProgram.
@@ -207,7 +224,8 @@ pub struct Interpreter<'a> {
     /// Type definition kinds materialised from CheckedProgram.
     pub(in crate::interp) resolved_type_kinds: Option<HashMap<String, String>>,
     pub(in crate::interp) resolved_type_fields: Option<HashMap<String, Vec<(String, String)>>>,
-    pub(in crate::interp) resolved_type_variants: Option<HashMap<String, Vec<(String, Option<String>)>>>,
+    pub(in crate::interp) resolved_type_variants:
+        Option<HashMap<String, Vec<(String, Option<String>)>>>,
     pub(in crate::interp) resolved_type_aliases: Option<HashMap<String, String>>,
     /// Extern function names materialised from CheckedProgram.
     pub(in crate::interp) resolved_extern_funcs: Option<std::collections::HashSet<String>>,
@@ -219,15 +237,31 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_extern_no_panic: Option<std::collections::HashSet<String>>,
     pub(in crate::interp) resolved_extern_unsafe: Option<std::collections::HashSet<String>>,
     /// Typed call sites from CheckedProgram: node_id -> (owner, callee, argc, kind).
-    pub(in crate::interp) resolved_call_sites: Option<HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>>,
+    pub(in crate::interp) resolved_call_sites: Option<
+        HashMap<
+            String,
+            (
+                String,
+                String,
+                usize,
+                Option<usize>,
+                Vec<String>,
+                Option<String>,
+                String,
+            ),
+        >,
+    >,
     /// Call sites grouped by owner: owner -> [(callee, argc, kind)].
-    pub(in crate::interp) resolved_call_sites_by_owner: Option<HashMap<String, Vec<(String, usize, String)>>>,
+    pub(in crate::interp) resolved_call_sites_by_owner:
+        Option<HashMap<String, Vec<(String, usize, String)>>>,
     /// Call sites grouped by callee: callee -> [(owner, argc, kind)].
-    pub(in crate::interp) resolved_call_sites_by_callee: Option<HashMap<String, Vec<(String, usize, String)>>>,
+    pub(in crate::interp) resolved_call_sites_by_callee:
+        Option<HashMap<String, Vec<(String, usize, String)>>>,
     /// Flow mailbox depth limits materialised from CheckedProgram: flow -> depth.
     pub(in crate::interp) resolved_mailbox_depths: Option<HashMap<String, usize>>,
     /// Flow state payloads: "Flow.State" -> [(field, type display)].
-    pub(in crate::interp) resolved_flow_state_payloads: Option<HashMap<String, Vec<(String, String)>>>,
+    pub(in crate::interp) resolved_flow_state_payloads:
+        Option<HashMap<String, Vec<(String, String)>>>,
     /// Flow state names: flow -> [state].
     pub(in crate::interp) resolved_flow_states: Option<HashMap<String, Vec<String>>>,
     /// Flow event names: flow -> [event].
@@ -293,11 +327,7 @@ impl<'a> Interpreter<'a> {
         let mut param_arity = HashMap::new();
         let mut param_lists = HashMap::new();
         for (id, transition) in program.transitions() {
-            let key = (
-                id.flow.0.clone(),
-                id.event.clone(),
-                id.source.name.clone(),
-            );
+            let key = (id.flow.0.clone(), id.event.clone(), id.source.name.clone());
             let targets = transition
                 .targets
                 .iter()
@@ -324,8 +354,10 @@ impl<'a> Interpreter<'a> {
         interp.resolved_fallback_transitions = Some(fallbacks);
         interp.resolved_ffi_pinned_transitions = Some(pinned);
         interp.resolved_transition_param_arity = Some(param_arity);
-        let mut transitions_by_flow: HashMap<String, Vec<(String, String, String, bool, bool, usize)>> =
-            HashMap::new();
+        let mut transitions_by_flow: HashMap<
+            String,
+            Vec<(String, String, String, bool, bool, usize)>,
+        > = HashMap::new();
         for transition in program.transitions().values() {
             let flow = transition.id.flow.0.clone();
             let event = transition.id.event.clone();
@@ -348,8 +380,10 @@ impl<'a> Interpreter<'a> {
         for list in transitions_by_flow.values_mut() {
             list.sort();
         }
-        let mut transitions_by_event: HashMap<String, Vec<(String, String, String, bool, bool, usize)>> =
-            HashMap::new();
+        let mut transitions_by_event: HashMap<
+            String,
+            Vec<(String, String, String, bool, bool, usize)>,
+        > = HashMap::new();
         for transition in program.transitions().values() {
             let flow = transition.id.flow.0.clone();
             let event = transition.id.event.clone();
@@ -446,10 +480,7 @@ impl<'a> Interpreter<'a> {
                     );
                     protocol_state_payloads.insert(
                         format!("{}.{}", protocol.qualified_name, state.name),
-                        (
-                            state.payload_name.clone().unwrap_or_default(),
-                            ty.clone(),
-                        ),
+                        (state.payload_name.clone().unwrap_or_default(), ty.clone()),
                     );
                 }
             }
@@ -467,10 +498,8 @@ impl<'a> Interpreter<'a> {
             actors.insert(actor.qualified_name.clone(), actor.methods.clone());
             for method in &actor.method_signatures {
                 let key = format!("{}.{}", actor.qualified_name, method.name);
-                actor_method_signatures.insert(
-                    key.clone(),
-                    (method.params.len(), method.ret.clone()),
-                );
+                actor_method_signatures
+                    .insert(key.clone(), (method.params.len(), method.ret.clone()));
                 actor_method_params.insert(key.clone(), method.params.clone());
                 actor_method_effects.insert(key, method.effects.clone());
             }
@@ -529,10 +558,7 @@ impl<'a> Interpreter<'a> {
             for method in &trait_def.method_signatures {
                 let key = format!("{}.{}", trait_def.qualified_name, method.name);
                 method_signatures.insert(key.clone(), (method.params.len(), method.ret.clone()));
-                method_params.insert(
-                    key.clone(),
-                    method.params.clone(),
-                );
+                method_params.insert(key.clone(), method.params.clone());
                 method_effects.insert(key, method.effects.clone());
             }
         }
@@ -543,10 +569,7 @@ impl<'a> Interpreter<'a> {
             for method in &impl_def.method_signatures {
                 let key = format!("{}.{}", impl_def.qualified_name, method.name);
                 method_signatures.insert(key.clone(), (method.params.len(), method.ret.clone()));
-                method_params.insert(
-                    key.clone(),
-                    method.params.clone(),
-                );
+                method_params.insert(key.clone(), method.params.clone());
                 method_effects.insert(key, method.effects.clone());
             }
         }
@@ -738,14 +761,16 @@ impl<'a> Interpreter<'a> {
         let mut call_sites_by_owner: HashMap<String, Vec<(String, usize, String)>> = HashMap::new();
         if let Some(sites) = interp.resolved_call_sites.as_ref() {
             for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in sites {
-                call_sites_by_owner
-                    .entry(owner.clone())
-                    .or_default()
-                    .push((callee.clone(), *argc, kind.clone()));
+                call_sites_by_owner.entry(owner.clone()).or_default().push((
+                    callee.clone(),
+                    *argc,
+                    kind.clone(),
+                ));
             }
         }
         interp.resolved_call_sites_by_owner = Some(call_sites_by_owner);
-        let mut call_sites_by_callee: HashMap<String, Vec<(String, usize, String)>> = HashMap::new();
+        let mut call_sites_by_callee: HashMap<String, Vec<(String, usize, String)>> =
+            HashMap::new();
         if let Some(sites) = interp.resolved_call_sites.as_ref() {
             for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in sites {
                 call_sites_by_callee
@@ -860,9 +885,10 @@ impl<'a> Interpreter<'a> {
 
     /// Test/diagnostic access to CheckedProgram function effects.
     pub(crate) fn resolved_function_effects(&self, qualified_name: &str) -> Option<Vec<String>> {
-        self.resolved_functions
-            .as_ref()
-            .and_then(|map| map.get(qualified_name).map(|(_, _, effects)| effects.clone()))
+        self.resolved_functions.as_ref().and_then(|map| {
+            map.get(qualified_name)
+                .map(|(_, _, effects)| effects.clone())
+        })
     }
 
     pub(crate) fn resolved_function_params(
@@ -907,11 +933,7 @@ impl<'a> Interpreter<'a> {
             .and_then(|map| map.get(protocol).cloned())
     }
 
-    pub(crate) fn resolved_protocol_payload(
-        &self,
-        protocol: &str,
-        state: &str,
-    ) -> Option<String> {
+    pub(crate) fn resolved_protocol_payload(&self, protocol: &str, state: &str) -> Option<String> {
         self.resolved_protocol_payloads
             .as_ref()
             .and_then(|map| map.get(&format!("{protocol}.{state}")).cloned())
@@ -969,10 +991,7 @@ impl<'a> Interpreter<'a> {
             .and_then(|map| map.get(&format!("{actor}.{method}")).cloned())
     }
 
-    pub(crate) fn resolved_actor_fields(
-        &self,
-        actor: &str,
-    ) -> Option<Vec<(String, String, bool)>> {
+    pub(crate) fn resolved_actor_fields(&self, actor: &str) -> Option<Vec<(String, String, bool)>> {
         self.resolved_actor_fields
             .as_ref()
             .and_then(|map| map.get(actor).cloned())
@@ -984,10 +1003,7 @@ impl<'a> Interpreter<'a> {
             .is_some_and(|set| set.contains(qualified_name))
     }
 
-    pub(crate) fn resolved_capability_combined_with(
-        &self,
-        qualified_name: &str,
-    ) -> Option<&str> {
+    pub(crate) fn resolved_capability_combined_with(&self, qualified_name: &str) -> Option<&str> {
         self.resolved_capability_combined
             .as_ref()
             .and_then(|map| map.get(qualified_name).map(String::as_str))
@@ -1064,10 +1080,7 @@ impl<'a> Interpreter<'a> {
             .and_then(|map| map.get(owner).cloned())
     }
 
-    pub(crate) fn resolved_ownership_actions(
-        &self,
-        owner: &str,
-    ) -> Option<Vec<(String, String)>> {
+    pub(crate) fn resolved_ownership_actions(&self, owner: &str) -> Option<Vec<(String, String)>> {
         self.resolved_ownership_actions
             .as_ref()
             .and_then(|map| map.get(owner).cloned())
@@ -1083,7 +1096,9 @@ impl<'a> Interpreter<'a> {
     }
 
     pub(crate) fn resolved_backend_requirements(&self) -> Option<&[(String, String)]> {
-        self.resolved_backend_requirements.as_ref().map(Vec::as_slice)
+        self.resolved_backend_requirements
+            .as_ref()
+            .map(Vec::as_slice)
     }
 
     pub(crate) fn resolved_node_meta_count(&self) -> Option<usize> {
@@ -1112,9 +1127,9 @@ impl<'a> Interpreter<'a> {
     }
 
     pub(crate) fn requires_resolved_capability(&self, capability: &str) -> bool {
-        self.resolved_backend_requirements.as_ref().is_some_and(|reqs| {
-            reqs.iter().any(|(cap, _)| cap == capability)
-        })
+        self.resolved_backend_requirements
+            .as_ref()
+            .is_some_and(|reqs| reqs.iter().any(|(cap, _)| cap == capability))
     }
 
     pub(crate) fn resolved_type_kind(&self, qualified_name: &str) -> Option<&str> {
@@ -1185,7 +1200,20 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn resolved_call_sites(
         &self,
-    ) -> Option<&HashMap<String, (String, String, usize, Option<usize>, Vec<String>, Option<String>, String)>> {
+    ) -> Option<
+        &HashMap<
+            String,
+            (
+                String,
+                String,
+                usize,
+                Option<usize>,
+                Vec<String>,
+                Option<String>,
+                String,
+            ),
+        >,
+    > {
         self.resolved_call_sites.as_ref()
     }
 
@@ -1208,9 +1236,9 @@ impl<'a> Interpreter<'a> {
     }
 
     pub(crate) fn has_resolved_call_to(&self, callee: &str) -> bool {
-        self.resolved_call_sites.as_ref().is_some_and(|map| {
-            map.values().any(|(_, name, _, _, _, _, _)| name == callee)
-        })
+        self.resolved_call_sites
+            .as_ref()
+            .is_some_and(|map| map.values().any(|(_, name, _, _, _, _, _)| name == callee))
     }
 
     pub(crate) fn resolved_call_return_type(&self, callee: &str) -> Option<String> {
@@ -1248,9 +1276,11 @@ impl<'a> Interpreter<'a> {
         event: &str,
         source: &str,
     ) -> bool {
-        self.resolved_fallback_transitions.as_ref().is_some_and(|set| {
-            set.contains(&(flow.to_string(), event.to_string(), source.to_string()))
-        })
+        self.resolved_fallback_transitions
+            .as_ref()
+            .is_some_and(|set| {
+                set.contains(&(flow.to_string(), event.to_string(), source.to_string()))
+            })
     }
 
     pub(crate) fn is_resolved_ffi_pinned_transition(
@@ -1259,9 +1289,11 @@ impl<'a> Interpreter<'a> {
         event: &str,
         source: &str,
     ) -> bool {
-        self.resolved_ffi_pinned_transitions.as_ref().is_some_and(|set| {
-            set.contains(&(flow.to_string(), event.to_string(), source.to_string()))
-        })
+        self.resolved_ffi_pinned_transitions
+            .as_ref()
+            .is_some_and(|set| {
+                set.contains(&(flow.to_string(), event.to_string(), source.to_string()))
+            })
     }
 
     pub(crate) fn resolved_transition_targets(
@@ -1282,10 +1314,12 @@ impl<'a> Interpreter<'a> {
         event: &str,
         source: &str,
     ) -> Option<usize> {
-        self.resolved_transition_param_arity.as_ref().and_then(|map| {
-            map.get(&(flow.to_string(), event.to_string(), source.to_string()))
-                .copied()
-        })
+        self.resolved_transition_param_arity
+            .as_ref()
+            .and_then(|map| {
+                map.get(&(flow.to_string(), event.to_string(), source.to_string()))
+                    .copied()
+            })
     }
 
     pub(crate) fn resolved_transitions_for_flow(
@@ -1367,7 +1401,10 @@ impl<'a> Interpreter<'a> {
             .unwrap_or_else(|| flow.transactional_fields.clone())
     }
 
-    pub(in crate::interp) fn effective_metadata_shadow_fields(&self, flow: &FlowDef) -> Vec<String> {
+    pub(in crate::interp) fn effective_metadata_shadow_fields(
+        &self,
+        flow: &FlowDef,
+    ) -> Vec<String> {
         Self::resolved_field_set(&self.resolved_metadata_shadow_fields, &flow.name)
             .unwrap_or_else(|| flow.metadata_shadow_fields.clone())
     }

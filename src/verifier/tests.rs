@@ -1078,9 +1078,6 @@ func main() -> i32 { 0 }
     );
 }
 
-
-
-
 #[test]
 fn verify_branch_callee_ensures_not_unconditional() {
     require_z3!();
@@ -1738,8 +1735,7 @@ func main() -> i32 { 0 }
         f.unwrap()
     );
     assert!(
-        f.unwrap().message.contains("not established")
-            || f.unwrap().message.contains("invariant"),
+        f.unwrap().message.contains("not established") || f.unwrap().message.contains("invariant"),
         "message: {}",
         f.unwrap().message
     );
@@ -1913,7 +1909,6 @@ func main() -> i32 { 0 }
     assert!(r.is_err(), "expected typecheck failure for ill-typed body");
 }
 
-
 #[test]
 fn verify_actor_method_contract() {
     require_z3!();
@@ -1930,9 +1925,12 @@ func main() -> i32 { 0 }
 "#;
     let results = verify_source(src).expect("verify");
     let m = results.iter().find(|r| r.func_name.contains("get"));
-    assert!(m.is_some(), "actor method should be verified: {:?}", results);
+    assert!(
+        m.is_some(),
+        "actor method should be verified: {:?}",
+        results
+    );
 }
-
 
 #[test]
 fn verify_old_field_access() {

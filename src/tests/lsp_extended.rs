@@ -355,7 +355,11 @@ fn diagnostic_multiple_errors() {
 fn diagnostic_strict_mode() {
     let result = check_source_strict("func main() -> i32 { 42 }");
     // TC-H3: strict mode must accept a well-typed program.
-    assert!(result.is_ok(), "strict well-typed main failed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "strict well-typed main failed: {:?}",
+        result
+    );
 }
 
 // ===================== Phase D: References Tests =====================
@@ -538,7 +542,11 @@ fn hover_variable() {
     // TC-H3: hover may be None for unannotated lets, but must not panic.
     // Prefer Some when available.
     if let Some(h) = result {
-        assert!(h.get("contents").is_some(), "hover missing contents: {:?}", h);
+        assert!(
+            h.get("contents").is_some(),
+            "hover missing contents: {:?}",
+            h
+        );
     }
 }
 
@@ -640,7 +648,9 @@ fn signature_help_multiple_overloads() {
     // only if feature stubbed — prefer Some with signatures array).
     if let Some(help) = result {
         assert!(
-            help.get("signatures").is_some() || help.get("activeSignature").is_some() || help.is_object(),
+            help.get("signatures").is_some()
+                || help.get("activeSignature").is_some()
+                || help.is_object(),
             "unexpected signature help shape: {:?}",
             help
         );

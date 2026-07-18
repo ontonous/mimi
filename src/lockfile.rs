@@ -119,14 +119,14 @@ impl Lockfile {
     pub fn resolve_version(constraint: &str, available: &[&str]) -> Option<String> {
         // P-H4: sort by semver so `*` / best-match are independent of filesystem order.
         let mut sorted: Vec<&str> = available.to_vec();
-        sorted.sort_by(|a, b| {
-            match (semver::Version::parse(a), semver::Version::parse(b)) {
+        sorted.sort_by(
+            |a, b| match (semver::Version::parse(a), semver::Version::parse(b)) {
                 (Ok(va), Ok(vb)) => va.cmp(&vb),
                 (Ok(_), Err(_)) => std::cmp::Ordering::Less,
                 (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
                 (Err(_), Err(_)) => a.cmp(b),
-            }
-        });
+            },
+        );
 
         if constraint == "*" || constraint.is_empty() {
             return sorted.last().map(|s| s.to_string());

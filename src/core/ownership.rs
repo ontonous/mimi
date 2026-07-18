@@ -51,7 +51,10 @@ impl OwnershipLedger {
     }
 
     pub fn action_count(&self, kind: ResourceActionKind) -> usize {
-        self.actions.iter().filter(|action| action.kind == kind).count()
+        self.actions
+            .iter()
+            .filter(|action| action.kind == kind)
+            .count()
     }
 
     pub fn resources(&self) -> Vec<String> {

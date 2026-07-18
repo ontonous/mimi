@@ -437,13 +437,7 @@ impl<'a> CheckedProgram<'a> {
         if !errors.is_empty() {
             return Err(errors);
         }
-        collect_program_call_sites(
-            file,
-            &functions,
-            &extern_blocks,
-            &actors,
-            &mut call_sites,
-        );
+        collect_program_call_sites(file, &functions, &extern_blocks, &actors, &mut call_sites);
         Ok(Self {
             file,
             items,
@@ -643,10 +637,7 @@ impl<'a> CheckedProgram<'a> {
             .map(|type_def| type_def.fields.as_slice())
     }
 
-    pub fn type_def_variants(
-        &self,
-        qualified_name: &str,
-    ) -> Option<&[(String, Option<String>)]> {
+    pub fn type_def_variants(&self, qualified_name: &str) -> Option<&[(String, Option<String>)]> {
         self.type_def(qualified_name)
             .map(|type_def| type_def.variants.as_slice())
     }
@@ -1027,7 +1018,6 @@ fn collect_items(
                         origin: Origin::User(span),
                     },
                 );
-
             }
             Item::Const {
                 name,
@@ -1245,7 +1235,7 @@ fn collect_items(
                     errors,
                 );
                 let node_id = NodeId(format!("extern:{}", qualified));
-                                let funcs = block.funcs.iter().map(|func| func.name.clone()).collect();
+                let funcs = block.funcs.iter().map(|func| func.name.clone()).collect();
                 let mut signatures = Vec::new();
                 for func in &block.funcs {
                     for param in &func.params {
@@ -1282,9 +1272,7 @@ fn collect_items(
                         typed_params: func
                             .params
                             .iter()
-                            .map(|param| {
-                                (param.name.clone(), param.ty.clone(), param.cap_mode)
-                            })
+                            .map(|param| (param.name.clone(), param.ty.clone(), param.cap_mode))
                             .collect(),
                         ret: func
                             .ret
@@ -1311,7 +1299,6 @@ fn collect_items(
                         origin: resolve_origin(block.origin, &NodeId("extern".into()), span),
                     },
                 );
-
             }
 
             Item::Actor(actor) => {
@@ -1416,7 +1403,7 @@ fn collect_items(
                     errors,
                 );
                 let node_id = NodeId(format!("protocol:{}", qualified));
-                                let states = protocol
+                let states = protocol
                     .states
                     .iter()
                     .map(|state| state.name.clone())
@@ -1438,10 +1425,7 @@ fn collect_items(
                     state_payloads.push(ResolvedProtocolState {
                         name: state.name.clone(),
                         payload_name: state.payload_name.clone(),
-                        payload_type: state
-                            .payload_type
-                            .as_ref()
-                            .map(crate::core::fmt_type),
+                        payload_type: state.payload_type.as_ref().map(crate::core::fmt_type),
                     });
                 }
                 let transitions = protocol
@@ -1476,7 +1460,6 @@ fn collect_items(
                         origin: resolve_origin(protocol.origin, &NodeId("protocol".into()), span),
                     },
                 );
-
             }
             Item::Session(session) => {
                 let qualified = qualify(module, &session.name);
@@ -1490,7 +1473,7 @@ fn collect_items(
                     errors,
                 );
                 let node_id = NodeId(format!("session:{}", qualified));
-                                sessions.insert(
+                sessions.insert(
                     node_id.clone(),
                     ResolvedSession {
                         node_id,
@@ -1500,7 +1483,6 @@ fn collect_items(
                         origin: resolve_origin(session.origin, &NodeId("session".into()), span),
                     },
                 );
-
             }
         }
     }
@@ -2025,7 +2007,6 @@ fn resolve_origin(origin: AstOrigin, parent: &NodeId, span: Span) -> Origin {
     }
 }
 
-
 fn collect_program_call_sites(
     file: &File,
     functions: &HashMap<NodeId, ResolvedFunction>,
@@ -2051,7 +2032,9 @@ fn collect_program_call_sites(
         }
         // Keep names even if signature missing (defensive).
         for func in &block.funcs {
-            extern_info.entry(func.clone()).or_insert((0, "unit".into()));
+            extern_info
+                .entry(func.clone())
+                .or_insert((0, "unit".into()));
         }
     }
     let mut method_info: HashMap<String, (usize, Vec<String>, String)> = HashMap::new();
@@ -2077,14 +2060,7 @@ fn collect_program_call_sites(
         }
     }
     for item in &file.items {
-        collect_item_call_sites(
-            item,
-            "",
-            &function_info,
-            &extern_info,
-            &method_info,
-            out,
-        );
+        collect_item_call_sites(item, "", &function_info, &extern_info, &method_info, out);
     }
 }
 
@@ -2216,7 +2192,9 @@ fn collect_stmt_call_sites(
     out: &mut HashMap<NodeId, ResolvedCallSite>,
 ) {
     match stmt {
-        Stmt::Let { init: Some(expr), .. }
+        Stmt::Let {
+            init: Some(expr), ..
+        }
         | Stmt::Return(Some(expr))
         | Stmt::Break(Some(expr))
         | Stmt::Expr(expr)
@@ -2226,22 +2204,94 @@ fn collect_stmt_call_sites(
         | Stmt::Invariant(expr, _)
         | Stmt::SharedLet { init: expr, .. }
         | Stmt::Delegate { expr, .. } => {
-            collect_expr_call_sites(expr, owner, &format!("{path}/expr"), fallback, functions, externs, methods, out);
+            collect_expr_call_sites(
+                expr,
+                owner,
+                &format!("{path}/expr"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
         }
         Stmt::If { cond, then_, else_ } => {
-            collect_expr_call_sites(cond, owner, &format!("{path}/cond"), fallback, functions, externs, methods, out);
-            collect_block_call_sites(then_, owner, &format!("{path}/then"), fallback, functions, externs, methods, out);
+            collect_expr_call_sites(
+                cond,
+                owner,
+                &format!("{path}/cond"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
+            collect_block_call_sites(
+                then_,
+                owner,
+                &format!("{path}/then"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
             if let Some(block) = else_ {
-                collect_block_call_sites(block, owner, &format!("{path}/else"), fallback, functions, externs, methods, out);
+                collect_block_call_sites(
+                    block,
+                    owner,
+                    &format!("{path}/else"),
+                    fallback,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                );
             }
         }
         Stmt::While { cond, body } => {
-            collect_expr_call_sites(cond, owner, &format!("{path}/cond"), fallback, functions, externs, methods, out);
-            collect_block_call_sites(body, owner, &format!("{path}/body"), fallback, functions, externs, methods, out);
+            collect_expr_call_sites(
+                cond,
+                owner,
+                &format!("{path}/cond"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
+            collect_block_call_sites(
+                body,
+                owner,
+                &format!("{path}/body"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
         }
         Stmt::WhileLet { init, body, .. } => {
-            collect_expr_call_sites(init, owner, &format!("{path}/init"), fallback, functions, externs, methods, out);
-            collect_block_call_sites(body, owner, &format!("{path}/body"), fallback, functions, externs, methods, out);
+            collect_expr_call_sites(
+                init,
+                owner,
+                &format!("{path}/init"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
+            collect_block_call_sites(
+                body,
+                owner,
+                &format!("{path}/body"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
         }
         Stmt::Loop(body)
         | Stmt::Block(body)
@@ -2250,22 +2300,99 @@ fn collect_stmt_call_sites(
         | Stmt::OnFailure(body)
         | Stmt::Do(body)
         | Stmt::Parasteps(body) => {
-            collect_block_call_sites(body, owner, &format!("{path}/body"), fallback, functions, externs, methods, out);
+            collect_block_call_sites(
+                body,
+                owner,
+                &format!("{path}/body"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
         }
         Stmt::For { iterable, body, .. } => {
-            collect_expr_call_sites(iterable, owner, &format!("{path}/iterable"), fallback, functions, externs, methods, out);
-            collect_block_call_sites(body, owner, &format!("{path}/body"), fallback, functions, externs, methods, out);
+            collect_expr_call_sites(
+                iterable,
+                owner,
+                &format!("{path}/iterable"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
+            collect_block_call_sites(
+                body,
+                owner,
+                &format!("{path}/body"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
         }
         Stmt::Assign { target, value } => {
-            collect_expr_call_sites(target, owner, &format!("{path}/target"), fallback, functions, externs, methods, out);
-            collect_expr_call_sites(value, owner, &format!("{path}/value"), fallback, functions, externs, methods, out);
+            collect_expr_call_sites(
+                target,
+                owner,
+                &format!("{path}/target"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
+            collect_expr_call_sites(
+                value,
+                owner,
+                &format!("{path}/value"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
         }
-        Stmt::Pinned { expr, timeout, body, .. } => {
-            collect_expr_call_sites(expr, owner, &format!("{path}/expr"), fallback, functions, externs, methods, out);
+        Stmt::Pinned {
+            expr,
+            timeout,
+            body,
+            ..
+        } => {
+            collect_expr_call_sites(
+                expr,
+                owner,
+                &format!("{path}/expr"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
             if let Some(timeout) = timeout {
-                collect_expr_call_sites(timeout, owner, &format!("{path}/timeout"), fallback, functions, externs, methods, out);
+                collect_expr_call_sites(
+                    timeout,
+                    owner,
+                    &format!("{path}/timeout"),
+                    fallback,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                );
             }
-            collect_block_call_sites(body, owner, &format!("{path}/body"), fallback, functions, externs, methods, out);
+            collect_block_call_sites(
+                body,
+                owner,
+                &format!("{path}/body"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
         }
         Stmt::Func(function) => {
             let nested_owner = format!("{owner}/function:{}", function.name);
@@ -2281,7 +2408,16 @@ fn collect_stmt_call_sites(
             );
         }
         Stmt::Alloc { body, .. } => {
-            collect_block_call_sites(body, owner, &format!("{path}/body"), fallback, functions, externs, methods, out);
+            collect_block_call_sites(
+                body,
+                owner,
+                &format!("{path}/body"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
         }
         Stmt::Math(exprs) => {
             for (index, expr) in exprs.iter().enumerate() {
@@ -2330,7 +2466,16 @@ fn collect_expr_call_sites(
                     origin: Origin::User(fallback),
                 },
             );
-            collect_expr_call_sites(callee, owner, &format!("{path}/callee"), fallback, functions, externs, methods, out);
+            collect_expr_call_sites(
+                callee,
+                owner,
+                &format!("{path}/callee"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
             for (index, arg) in args.iter().enumerate() {
                 collect_expr_call_sites(
                     arg,
@@ -2345,8 +2490,26 @@ fn collect_expr_call_sites(
             }
         }
         Expr::Binary(_, left, right) | Expr::Index(left, right) => {
-            collect_expr_call_sites(left, owner, &format!("{path}/left"), fallback, functions, externs, methods, out);
-            collect_expr_call_sites(right, owner, &format!("{path}/right"), fallback, functions, externs, methods, out);
+            collect_expr_call_sites(
+                left,
+                owner,
+                &format!("{path}/left"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
+            collect_expr_call_sites(
+                right,
+                owner,
+                &format!("{path}/right"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
         }
         Expr::Unary(_, inner)
         | Expr::Field(inner, _)
@@ -2360,7 +2523,16 @@ fn collect_expr_call_sites(
         | Expr::TupleIndex(inner, _)
         | Expr::NamedArg(_, inner)
         | Expr::Cast(inner, _) => {
-            collect_expr_call_sites(inner, owner, &format!("{path}/inner"), fallback, functions, externs, methods, out);
+            collect_expr_call_sites(
+                inner,
+                owner,
+                &format!("{path}/inner"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
         }
         Expr::Tuple(items) | Expr::List(items) => {
             for (index, item) in items.iter().enumerate() {
@@ -2377,7 +2549,16 @@ fn collect_expr_call_sites(
             }
         }
         Expr::Match(scrutinee, arms) => {
-            collect_expr_call_sites(scrutinee, owner, &format!("{path}/scrutinee"), fallback, functions, externs, methods, out);
+            collect_expr_call_sites(
+                scrutinee,
+                owner,
+                &format!("{path}/scrutinee"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
             for (index, arm) in arms.iter().enumerate() {
                 collect_expr_call_sites(
                     &arm.body,
@@ -2405,30 +2586,125 @@ fn collect_expr_call_sites(
                 );
             }
         }
-        Expr::Block(block) | Expr::Comptime(block) | Expr::Quote(block) | Expr::Lambda { body: block, .. } => {
-            collect_block_call_sites(block, owner, &format!("{path}/block"), fallback, functions, externs, methods, out);
+        Expr::Block(block)
+        | Expr::Comptime(block)
+        | Expr::Quote(block)
+        | Expr::Lambda { body: block, .. } => {
+            collect_block_call_sites(
+                block,
+                owner,
+                &format!("{path}/block"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
         }
         Expr::If { cond, then_, else_ } => {
-            collect_expr_call_sites(cond, owner, &format!("{path}/cond"), fallback, functions, externs, methods, out);
-            collect_block_call_sites(then_, owner, &format!("{path}/then"), fallback, functions, externs, methods, out);
+            collect_expr_call_sites(
+                cond,
+                owner,
+                &format!("{path}/cond"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
+            collect_block_call_sites(
+                then_,
+                owner,
+                &format!("{path}/then"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
             if let Some(block) = else_ {
-                collect_block_call_sites(block, owner, &format!("{path}/else"), fallback, functions, externs, methods, out);
+                collect_block_call_sites(
+                    block,
+                    owner,
+                    &format!("{path}/else"),
+                    fallback,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                );
             }
         }
-        Expr::Comprehension { expr, iter, guard, .. } => {
-            collect_expr_call_sites(expr, owner, &format!("{path}/expr"), fallback, functions, externs, methods, out);
-            collect_expr_call_sites(iter, owner, &format!("{path}/iter"), fallback, functions, externs, methods, out);
+        Expr::Comprehension {
+            expr, iter, guard, ..
+        } => {
+            collect_expr_call_sites(
+                expr,
+                owner,
+                &format!("{path}/expr"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
+            collect_expr_call_sites(
+                iter,
+                owner,
+                &format!("{path}/iter"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
             if let Some(guard) = guard {
-                collect_expr_call_sites(guard, owner, &format!("{path}/guard"), fallback, functions, externs, methods, out);
+                collect_expr_call_sites(
+                    guard,
+                    owner,
+                    &format!("{path}/guard"),
+                    fallback,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                );
             }
         }
         Expr::SliceExpr { target, start, end } => {
-            collect_expr_call_sites(target, owner, &format!("{path}/target"), fallback, functions, externs, methods, out);
+            collect_expr_call_sites(
+                target,
+                owner,
+                &format!("{path}/target"),
+                fallback,
+                functions,
+                externs,
+                methods,
+                out,
+            );
             if let Some(start) = start {
-                collect_expr_call_sites(start, owner, &format!("{path}/start"), fallback, functions, externs, methods, out);
+                collect_expr_call_sites(
+                    start,
+                    owner,
+                    &format!("{path}/start"),
+                    fallback,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                );
             }
             if let Some(end) = end {
-                collect_expr_call_sites(end, owner, &format!("{path}/end"), fallback, functions, externs, methods, out);
+                collect_expr_call_sites(
+                    end,
+                    owner,
+                    &format!("{path}/end"),
+                    fallback,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                );
             }
         }
         Expr::Literal(lit) => {
@@ -2459,7 +2735,13 @@ fn resolve_call_callee(
     functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &HashMap<String, (usize, String)>,
     methods: &HashMap<String, (usize, Vec<String>, String)>,
-) -> (String, ResolvedCallKind, Option<usize>, Vec<String>, Option<String>) {
+) -> (
+    String,
+    ResolvedCallKind,
+    Option<usize>,
+    Vec<String>,
+    Option<String>,
+) {
     match callee {
         Expr::Ident(name) => {
             if let Some((arity, effects, ret)) = functions.get(name) {
@@ -2487,7 +2769,13 @@ fn resolve_call_callee(
                     Some(ret.clone()),
                 )
             } else {
-                (name.clone(), ResolvedCallKind::Unknown, None, Vec::new(), None)
+                (
+                    name.clone(),
+                    ResolvedCallKind::Unknown,
+                    None,
+                    Vec::new(),
+                    None,
+                )
             }
         }
         Expr::Field(obj, field) => {
@@ -2496,9 +2784,8 @@ fn resolve_call_callee(
                 _ => "_".into(),
             };
             let qualified = format!("{base}.{field}");
-            if let Some((arity, effects, ret)) = methods
-                .get(&qualified)
-                .or_else(|| methods.get(field))
+            if let Some((arity, effects, ret)) =
+                methods.get(&qualified).or_else(|| methods.get(field))
             {
                 (
                     qualified,
@@ -2511,18 +2798,31 @@ fn resolve_call_callee(
                 (qualified, ResolvedCallKind::Unknown, None, Vec::new(), None)
             }
         }
-        _ => ("<expr>".into(), ResolvedCallKind::Unknown, None, Vec::new(), None),
+        _ => (
+            "<expr>".into(),
+            ResolvedCallKind::Unknown,
+            None,
+            Vec::new(),
+            None,
+        ),
     }
 }
-
 
 fn format_session_type(ty: &crate::ast::SessionType) -> String {
     match ty {
         crate::ast::SessionType::Send(payload, cont) => {
-            format!("!{}.{}", crate::core::fmt_type(payload), format_session_type(cont))
+            format!(
+                "!{}.{}",
+                crate::core::fmt_type(payload),
+                format_session_type(cont)
+            )
         }
         crate::ast::SessionType::Recv(payload, cont) => {
-            format!("?{}.{}", crate::core::fmt_type(payload), format_session_type(cont))
+            format!(
+                "?{}.{}",
+                crate::core::fmt_type(payload),
+                format_session_type(cont)
+            )
         }
         crate::ast::SessionType::Dual(inner) => format!("dual({})", format_session_type(inner)),
         crate::ast::SessionType::Name(name) => name.clone(),
@@ -2540,11 +2840,13 @@ fn materialize_const_value(expr: &crate::ast::Expr) -> ResolvedConstValue {
             crate::ast::Lit::Unit => ResolvedConstValue::Unit,
             crate::ast::Lit::FString(_) => ResolvedConstValue::Complex,
         },
-        crate::ast::Expr::Unary(crate::ast::UnOp::Neg, inner) => match materialize_const_value(inner) {
-            ResolvedConstValue::Int(v) => ResolvedConstValue::Int(-v),
-            ResolvedConstValue::Float(v) => ResolvedConstValue::Float(-v),
-            other => other,
-        },
+        crate::ast::Expr::Unary(crate::ast::UnOp::Neg, inner) => {
+            match materialize_const_value(inner) {
+                ResolvedConstValue::Int(v) => ResolvedConstValue::Int(-v),
+                ResolvedConstValue::Float(v) => ResolvedConstValue::Float(-v),
+                other => other,
+            }
+        }
         _ => ResolvedConstValue::Complex,
     }
 }
@@ -2720,7 +3022,6 @@ func main() -> i32 { 0 }
         assert!(program.transition("Counter", "dec", "Zero").is_none());
     }
 
-
     #[test]
     fn resolved_function_signatures_are_indexed_by_qualified_name() {
         let file = parse(
@@ -2742,7 +3043,6 @@ func main() -> i32 { 0 }
         assert!(program.function("twice").is_none());
         assert!(program.function("main").is_some());
     }
-
 
     #[test]
     fn resolved_function_records_effect_clause() {
@@ -2768,12 +3068,8 @@ func main() -> i32 { 0 }
         );
         let program = crate::core::check_program(&file).expect("check");
         let session = program.session("Ping").expect("Ping session");
-        assert!(matches!(
-            session.body,
-            crate::ast::SessionType::Send(_, _)
-        ));
+        assert!(matches!(session.body, crate::ast::SessionType::Send(_, _)));
     }
-
 
     #[test]
     fn resolved_protocol_topology_is_indexed() {
@@ -2795,9 +3091,10 @@ func main() -> i32 { 0 }
         assert!(protocol
             .transitions
             .iter()
-            .any(|(name, from, to)| name == "start" && from == "Idle" && to.as_slice() == ["Active"]));
+            .any(|(name, from, to)| name == "start"
+                && from == "Idle"
+                && to.as_slice() == ["Active"]));
     }
-
 
     #[test]
     fn resolved_actor_fields_and_methods_are_indexed() {
@@ -2815,7 +3112,6 @@ func main() -> i32 { 0 }
         assert!(actor.fields.iter().any(|(n, _, _)| n == "count"));
         assert!(actor.methods.iter().any(|m| m == "inc"));
     }
-
 
     #[test]
     fn interpreter_from_checked_installs_function_directory() {
@@ -2862,8 +3158,6 @@ func main() -> i32 { 0 }
         );
     }
 
-
-
     #[test]
     fn consumers_install_comptime_function_directory() {
         let file = parse(
@@ -2906,7 +3200,6 @@ func main() -> i32 { 0 }
         assert!(!interp.has_resolved_protocol("Missing"));
     }
 
-
     #[test]
     fn interpreter_from_checked_installs_actor_directory() {
         let file = parse(
@@ -2926,7 +3219,6 @@ func main() -> i32 { 0 }
         assert!(methods.iter().any(|m| m == "inc"));
     }
 
-
     #[test]
     fn resolved_capabilities_and_constants_are_indexed() {
         let file = parse(
@@ -2940,8 +3232,6 @@ func main() -> i32 { MAX }
         assert!(program.capability("Io").is_some());
         assert!(program.constant("MAX").is_some());
     }
-
-
 
     #[test]
     fn resolved_traits_and_impls_are_indexed() {
@@ -2963,7 +3253,6 @@ func main() -> i32 { 0 }
             .values()
             .any(|i| i.trait_name == "Close" && i.type_name == "Handle"));
     }
-
 
     #[test]
     fn interpreter_from_checked_installs_trait_and_impl_directories() {
@@ -2988,35 +3277,17 @@ func main() -> i32 { 0 }
             .expect("Close for Handle");
         assert!(impl_methods.iter().any(|m| m == "close"));
         // Trait/impl method params + effects directories.
-        assert_eq!(
-            interp.resolved_method_params("Close.close"),
-            Some(vec![])
-        );
-        assert_eq!(
-            interp.resolved_method_effects("Close.close"),
-            Some(vec![])
-        );
+        assert_eq!(interp.resolved_method_params("Close.close"), Some(vec![]));
+        assert_eq!(interp.resolved_method_effects("Close.close"), Some(vec![]));
         let mut verifier = crate::verifier::Verifier::new().expect("z3");
         let _ = verifier.verify_checked(&program);
-        assert_eq!(
-            verifier.checked_method_params("Close.close"),
-            Some(vec![])
-        );
-        assert_eq!(
-            verifier.checked_method_effects("Close.close"),
-            Some(vec![])
-        );
+        assert_eq!(verifier.checked_method_params("Close.close"), Some(vec![]));
+        assert_eq!(verifier.checked_method_effects("Close.close"), Some(vec![]));
         let context = inkwell::context::Context::create();
         let mut codegen = crate::codegen::CodeGenerator::new(&context, "trait_params");
         codegen.compile_checked(&program).expect("compile");
-        assert_eq!(
-            codegen.resolved_method_params("Close.close"),
-            Some(vec![])
-        );
-        assert_eq!(
-            codegen.resolved_method_effects("Close.close"),
-            Some(vec![])
-        );
+        assert_eq!(codegen.resolved_method_params("Close.close"), Some(vec![]));
+        assert_eq!(codegen.resolved_method_effects("Close.close"), Some(vec![]));
     }
 
     #[test]
@@ -3041,10 +3312,7 @@ func main() -> i32 { 0 }
             interp.resolved_method_params("Writer.write"),
             Some(vec![("data".into(), "i32".into())])
         );
-        assert_eq!(
-            interp.resolved_method_effects("Writer.write"),
-            Some(vec![])
-        );
+        assert_eq!(interp.resolved_method_effects("Writer.write"), Some(vec![]));
         // Impl method: params + effects (Io) materialised under impl qualified name.
         assert_eq!(
             interp.resolved_method_params("Writer:for:Buffer.write"),
@@ -3085,7 +3353,6 @@ func main() -> i32 { 0 }
         );
     }
 
-
     #[test]
     fn consumers_install_ownership_ledger_owners() {
         let file = parse(
@@ -3103,7 +3370,10 @@ func main() -> i32 { 0 }
             ledger.action_count(crate::core::ResourceActionKind::Introduce),
             1
         );
-        assert_eq!(ledger.action_count(crate::core::ResourceActionKind::Drop), 1);
+        assert_eq!(
+            ledger.action_count(crate::core::ResourceActionKind::Drop),
+            1
+        );
         assert!(ledger.resources().iter().any(|r| r == "f"));
         let interp = crate::interp::Interpreter::from_checked(&program);
         assert!(interp.has_resolved_ownership_owner("function:close"));
@@ -3193,8 +3463,6 @@ func main() -> i32 { 0 }
             .is_some_and(|m| m.is_empty()));
     }
 
-
-
     #[test]
     fn ownership_summary_flags_maybe_consumed_branch_merge() {
         let file = parse(
@@ -3212,9 +3480,8 @@ func main() -> i32 { 0 }
         // program for merge without maybe, and use a custom accepted pattern.
         // For maybe-consumed, checker errors before IR success. Validate helper
         // on a synthetic ledger instead.
-        let mut ledger = crate::core::OwnershipLedger::new(crate::core::NodeId(
-            "function:synthetic".into(),
-        ));
+        let mut ledger =
+            crate::core::OwnershipLedger::new(crate::core::NodeId("function:synthetic".into()));
         ledger.branch_merges.push(crate::core::BranchMerge {
             resource: "f".into(),
             then_state: crate::core::ResourceState::Consumed,
@@ -3223,7 +3490,10 @@ func main() -> i32 { 0 }
             span: crate::span::Span::single(1, 1),
         });
         assert!(ledger.has_maybe_consumed_merge());
-        assert_eq!(ledger.action_count(crate::core::ResourceActionKind::Drop), 0);
+        assert_eq!(
+            ledger.action_count(crate::core::ResourceActionKind::Drop),
+            0
+        );
     }
 
     #[test]
@@ -3246,8 +3516,6 @@ func main() -> i32 { 0 }
             .any(|block| block.funcs.iter().any(|f| f == "c_abs")));
     }
 
-
-
     #[test]
     fn resolved_flow_records_annotations() {
         let file = parse(
@@ -3266,7 +3534,6 @@ func main() -> i32 { 0 }
         assert_eq!(flow.max_children, Some(3));
         assert_eq!(flow.mailbox_depth, Some(8));
     }
-
 
     #[test]
     fn interpreter_from_checked_prefers_resolved_max_children() {
@@ -3288,7 +3555,6 @@ func main() -> i32 { 0 }
         assert_eq!(interp.resolved_max_children(), Some(4));
     }
 
-
     #[test]
     fn interpreter_from_checked_installs_mailbox_depths() {
         let file = parse(
@@ -3307,7 +3573,6 @@ func main() -> i32 { 0 }
         assert_eq!(program.flow("Worker").unwrap().mailbox_depth, Some(64));
     }
 
-
     #[test]
     fn resolved_mailbox_depth_matches_module_qualified_flow() {
         let file = parse(
@@ -3323,15 +3588,11 @@ func main() -> i32 { 0 }
 "#,
         );
         let program = crate::core::check_program(&file).expect("check");
-        assert_eq!(
-            program.flow("net::Conn").unwrap().mailbox_depth,
-            Some(32)
-        );
+        assert_eq!(program.flow("net::Conn").unwrap().mailbox_depth, Some(32));
         let interp = crate::interp::Interpreter::from_checked(&program);
         assert_eq!(interp.resolved_mailbox_depth("Conn"), Some(32));
         assert_eq!(interp.resolved_mailbox_depth("net::Conn"), Some(32));
     }
-
 
     #[test]
     fn verifier_records_flow_annotation_directories() {
@@ -3352,7 +3613,6 @@ func main() -> i32 { 0 }
         assert_eq!(verifier.checked_max_children(), Some(5));
         assert_eq!(verifier.checked_mailbox_depth("Worker"), Some(16));
     }
-
 
     #[test]
     fn resolved_flow_records_persistent_field_sets() {
@@ -3377,7 +3637,6 @@ func main() -> i32 { 0 }
         assert!(flow.states.contains_key("Config"));
         assert!(flow.states.contains_key("Active"));
     }
-
 
     #[test]
     fn consumers_install_persistent_field_directories() {
@@ -3405,7 +3664,6 @@ func main() -> i32 { 0 }
         assert!(vfields.iter().any(|f| f == "timeout_ms"));
     }
 
-
     #[test]
     fn verifier_installs_transactional_field_directories() {
         let file = parse(
@@ -3432,7 +3690,6 @@ func main() -> i32 { 0 }
             }
         }
     }
-
 
     #[test]
     fn checked_program_exposes_backend_requirements() {
@@ -3475,7 +3732,6 @@ func main() -> i32 { 0 }
         assert!(!codegen.requires_resolved_capability("flow.multi_target"));
     }
 
-
     #[test]
     fn resolved_flow_records_impl_protocols() {
         let file = parse(
@@ -3496,7 +3752,6 @@ func main() -> i32 { 0 }
         let flow = program.flow("Lidar").expect("Lidar");
         assert!(flow.impl_protocols.iter().any(|p| p == "Sensor"));
     }
-
 
     #[test]
     fn consumers_install_flow_impl_protocol_directories() {
@@ -3527,7 +3782,6 @@ func main() -> i32 { 0 }
             .is_some_and(|p| p.iter().any(|n| n == "Sensor")));
     }
 
-
     #[test]
     fn resolved_transition_records_fallback_and_pinned_flags() {
         let file = parse(
@@ -3542,18 +3796,14 @@ func main() -> i32 { 0 }
         );
         // Matrix injects fallback edges; user open is not fallback.
         let program = crate::core::check_program(&file).expect("check");
-        let open = program
-            .transition("Door", "open", "Closed")
-            .expect("open");
+        let open = program.transition("Door", "open", "Closed").expect("open");
         assert!(!open.is_fallback);
         // Matrix injects fallback edges for undefined combinations.
         assert!(program.transitions().values().any(|t| t.is_fallback));
         let interp = crate::interp::Interpreter::from_checked(&program);
         assert!(!interp.is_resolved_fallback_transition("Door", "open", "Closed"));
-        assert!(program
-            .transitions()
-            .values()
-            .any(|t| t.is_fallback && interp.is_resolved_fallback_transition(
+        assert!(program.transitions().values().any(|t| t.is_fallback
+            && interp.is_resolved_fallback_transition(
                 &t.id.flow.0,
                 &t.id.event,
                 &t.id.source.name
@@ -3572,7 +3822,6 @@ func main() -> i32 { 0 }
         assert!(!verifier.is_checked_ffi_pinned_transition("Door", "open", "Closed"));
         assert!(!interp.is_resolved_ffi_pinned_transition("Door", "open", "Closed"));
     }
-
 
     #[test]
     fn interpreter_exposes_resolved_transition_targets() {
@@ -3597,7 +3846,6 @@ func main() -> i32 { 0 }
             .is_none());
     }
 
-
     #[test]
     fn codegen_exposes_resolved_transition_targets() {
         let file = parse(
@@ -3621,7 +3869,6 @@ func main() -> i32 { 0 }
         assert!(!codegen.is_resolved_fallback_transition("Door", "open", "Closed"));
     }
 
-
     #[test]
     fn resolved_transition_records_event_parameters() {
         let file = parse(
@@ -3635,14 +3882,11 @@ func main() -> i32 { 0 }
 "#,
         );
         let program = crate::core::check_program(&file).expect("check");
-        let open = program
-            .transition("Door", "open", "Closed")
-            .expect("open");
+        let open = program.transition("Door", "open", "Closed").expect("open");
         assert_eq!(open.params.len(), 1);
         assert_eq!(open.params[0].0, "code");
         assert!(matches!(&open.params[0].1, Type::Name(n, _) if n == "i32"));
     }
-
 
     #[test]
     fn consumers_use_resolved_transition_param_arity() {
@@ -3690,16 +3934,20 @@ func main() -> i32 { 0 }
         let by_flow = interp
             .resolved_transitions_for_flow("Door")
             .expect("Door transitions");
-        assert!(by_flow.iter().any(|(event, source, targets, fallback, _pinned, argc)| {
-            event == "open"
-                && source == "Closed"
-                && targets.contains("Open")
-                && !*fallback
-                && *argc == 1
-        }));
+        assert!(by_flow
+            .iter()
+            .any(|(event, source, targets, fallback, _pinned, argc)| {
+                event == "open"
+                    && source == "Closed"
+                    && targets.contains("Open")
+                    && !*fallback
+                    && *argc == 1
+            }));
         assert!(verifier
             .checked_transitions_for_flow("Door")
-            .is_some_and(|trs| trs.iter().any(|(e, s, _, _, _, _)| e == "open" && s == "Closed")));
+            .is_some_and(|trs| trs
+                .iter()
+                .any(|(e, s, _, _, _, _)| e == "open" && s == "Closed")));
         assert!(codegen
             .resolved_transitions_for_flow("Door")
             .is_some_and(|trs| trs.iter().any(|(e, _, targets, _, _, argc)| {
@@ -3708,16 +3956,20 @@ func main() -> i32 { 0 }
         let by_event = interp
             .resolved_transitions_for_event("open")
             .expect("open transitions");
-        assert!(by_event.iter().any(|(flow, source, targets, fallback, _pinned, argc)| {
-            flow == "Door"
-                && source == "Closed"
-                && targets.contains("Open")
-                && !*fallback
-                && *argc == 1
-        }));
+        assert!(by_event
+            .iter()
+            .any(|(flow, source, targets, fallback, _pinned, argc)| {
+                flow == "Door"
+                    && source == "Closed"
+                    && targets.contains("Open")
+                    && !*fallback
+                    && *argc == 1
+            }));
         assert!(verifier
             .checked_transitions_for_event("open")
-            .is_some_and(|trs| trs.iter().any(|(f, s, _, _, _, _)| f == "Door" && s == "Closed")));
+            .is_some_and(|trs| trs
+                .iter()
+                .any(|(f, s, _, _, _, _)| f == "Door" && s == "Closed")));
         assert!(codegen
             .resolved_transitions_for_event("open")
             .is_some_and(|trs| trs.iter().any(|(f, _, targets, _, _, argc)| {
@@ -3741,7 +3993,10 @@ func main() -> i32 { 0 }
         assert_eq!(interp.resolved_type_kind("Point"), Some("record"));
         assert!(interp.has_resolved_extern_func("c_abs"));
         assert_eq!(interp.resolved_extern_abi("c_abs"), Some("C"));
-        assert_eq!(interp.resolved_extern_signature("c_abs"), Some((1, "i32".into())));
+        assert_eq!(
+            interp.resolved_extern_signature("c_abs"),
+            Some((1, "i32".into()))
+        );
         assert_eq!(
             interp.resolved_extern_params("c_abs"),
             Some(vec![("x".into(), "i32".into())])
@@ -3751,7 +4006,10 @@ func main() -> i32 { 0 }
         assert!(verifier.has_checked_type_def("Point"));
         assert!(verifier.has_checked_extern_func("c_abs"));
         assert_eq!(verifier.checked_extern_abi("c_abs"), Some("C"));
-        assert_eq!(verifier.checked_extern_signature("c_abs"), Some((1, "i32".into())));
+        assert_eq!(
+            verifier.checked_extern_signature("c_abs"),
+            Some((1, "i32".into()))
+        );
         assert_eq!(
             verifier.checked_extern_params("c_abs"),
             Some(vec![("x".into(), "i32".into())])
@@ -3760,14 +4018,15 @@ func main() -> i32 { 0 }
         let mut codegen = crate::codegen::CodeGenerator::new(&context, "abi");
         codegen.compile_checked(&program).expect("compile");
         assert_eq!(codegen.resolved_extern_abi("c_abs"), Some("C"));
-        assert_eq!(codegen.resolved_extern_signature("c_abs"), Some((1, "i32".into())));
+        assert_eq!(
+            codegen.resolved_extern_signature("c_abs"),
+            Some((1, "i32".into()))
+        );
         assert_eq!(
             codegen.resolved_extern_params("c_abs"),
             Some(vec![("x".into(), "i32".into())])
         );
     }
-
-
 
     #[test]
     fn interpreter_resolved_extern_directory_matches_runtime_index() {
@@ -3831,8 +4090,6 @@ func main() -> i32 { MAX }
             Some((Some("bool".into()), "bool:true".into()))
         );
     }
-
-
 
     #[test]
     fn call_sites_resolve_function_and_extern_callees() {
@@ -3901,29 +4158,48 @@ func main() -> i32 {
         assert_eq!(interp.resolved_call_arity_mismatches(), 0);
         assert_eq!(codegen.resolved_call_arity_mismatches(), 0);
         assert_eq!(verifier.checked_call_arity_mismatches(), 0);
-        assert_eq!(interp.resolved_call_return_type("helper").as_deref(), Some("i32"));
-        assert_eq!(codegen.resolved_call_return_type("helper").as_deref(), Some("i32"));
-        assert_eq!(verifier.checked_call_return_type("helper").as_deref(), Some("i32"));
+        assert_eq!(
+            interp.resolved_call_return_type("helper").as_deref(),
+            Some("i32")
+        );
+        assert_eq!(
+            codegen.resolved_call_return_type("helper").as_deref(),
+            Some("i32")
+        );
+        assert_eq!(
+            verifier.checked_call_return_type("helper").as_deref(),
+            Some("i32")
+        );
         let main_calls = interp
             .resolved_call_sites_for_owner("function:main")
             .expect("main calls");
-        assert!(main_calls.iter().any(|(c, argc, kind)| c == "helper" && *argc == 1 && kind == "function"));
-        assert!(main_calls.iter().any(|(c, argc, kind)| c == "c_abs" && *argc == 1 && kind == "extern"));
+        assert!(main_calls
+            .iter()
+            .any(|(c, argc, kind)| c == "helper" && *argc == 1 && kind == "function"));
+        assert!(main_calls
+            .iter()
+            .any(|(c, argc, kind)| c == "c_abs" && *argc == 1 && kind == "extern"));
         assert!(verifier
             .checked_call_sites_for_owner("function:main")
             .is_some_and(|calls| calls.iter().any(|(c, _, _)| c == "helper")));
         assert!(codegen
             .resolved_call_sites_for_owner("function:main")
-            .is_some_and(|calls| calls.iter().any(|(c, _, kind)| c == "c_abs" && kind == "extern")));
+            .is_some_and(|calls| calls
+                .iter()
+                .any(|(c, _, kind)| c == "c_abs" && kind == "extern")));
         let helper_callers = interp
             .resolved_call_sites_for_callee("helper")
             .expect("helper callers");
         assert!(helper_callers
             .iter()
-            .any(|(owner, argc, kind)| owner == "function:main" && *argc == 1 && kind == "function"));
+            .any(|(owner, argc, kind)| owner == "function:main"
+                && *argc == 1
+                && kind == "function"));
         assert!(verifier
             .checked_call_sites_for_callee("c_abs")
-            .is_some_and(|cs| cs.iter().any(|(owner, _, kind)| owner == "function:main" && kind == "extern")));
+            .is_some_and(|cs| cs
+                .iter()
+                .any(|(owner, _, kind)| owner == "function:main" && kind == "extern")));
         assert!(codegen
             .resolved_call_sites_for_callee("helper")
             .is_some_and(|cs| cs.iter().any(|(owner, _, _)| owner == "function:main")));
@@ -3944,7 +4220,6 @@ func main() -> i32 { c_abs(1, 2) }
         assert!(error.contains("expects 1 arguments, got 2"));
     }
 
-
     #[test]
     fn actor_method_signatures_are_materialised() {
         let file = parse(
@@ -3962,7 +4237,9 @@ func main() -> i32 { 0 }
             .expect("run");
         assert_eq!(sig.params.len(), 1);
         assert_eq!(sig.ret, "i32");
-        assert!(program.actor("Worker").is_some_and(|a| a.methods.iter().any(|m| m == "run")));
+        assert!(program
+            .actor("Worker")
+            .is_some_and(|a| a.methods.iter().any(|m| m == "run")));
         let interp = crate::interp::Interpreter::from_checked(&program);
         assert_eq!(
             interp.resolved_actor_method_signature("Worker", "run"),
@@ -4006,7 +4283,6 @@ func main() -> i32 { 0 }
             Some(vec!["Io".into()])
         );
     }
-
 
     #[test]
     fn trait_and_impl_method_signatures_are_materialised() {
@@ -4056,7 +4332,6 @@ func main() -> i32 { 0 }
         );
     }
 
-
     #[test]
     fn protocol_payloads_and_transition_records_are_materialised() {
         let file = parse(
@@ -4078,11 +4353,17 @@ func main() -> i32 { 0 }
         let records = program
             .protocol_transition_records("Sensor")
             .expect("records");
-        assert!(records.iter().any(|t| t.event == "start" && t.from_state == "Idle"));
-        assert!(records.iter().any(|t| t.event == "stop" && t.from_state == "Active"));
+        assert!(records
+            .iter()
+            .any(|t| t.event == "start" && t.from_state == "Idle"));
+        assert!(records
+            .iter()
+            .any(|t| t.event == "stop" && t.from_state == "Active"));
         let interp = crate::interp::Interpreter::from_checked(&program);
         assert_eq!(
-            interp.resolved_protocol_payload("Sensor", "Active").as_deref(),
+            interp
+                .resolved_protocol_payload("Sensor", "Active")
+                .as_deref(),
             Some("i32")
         );
         assert_eq!(
@@ -4099,7 +4380,9 @@ func main() -> i32 { 0 }
         let mut verifier = crate::verifier::Verifier::new().expect("z3");
         let _ = verifier.verify_checked(&program);
         assert_eq!(
-            verifier.checked_protocol_payload("Sensor", "Active").as_deref(),
+            verifier
+                .checked_protocol_payload("Sensor", "Active")
+                .as_deref(),
             Some("i32")
         );
         assert_eq!(
@@ -4114,7 +4397,9 @@ func main() -> i32 { 0 }
         let mut codegen = crate::codegen::CodeGenerator::new(&context, "proto");
         codegen.compile_checked(&program).expect("compile");
         assert_eq!(
-            codegen.resolved_protocol_payload("Sensor", "Active").as_deref(),
+            codegen
+                .resolved_protocol_payload("Sensor", "Active")
+                .as_deref(),
             Some("i32")
         );
         assert_eq!(
@@ -4127,7 +4412,6 @@ func main() -> i32 { 0 }
         );
     }
 
-
     #[test]
     fn session_body_display_is_materialised() {
         let file = parse(
@@ -4137,21 +4421,26 @@ func main() -> i32 { 0 }
 "#,
         );
         let program = crate::core::check_program(&file).expect("check");
+        assert_eq!(program.session_body_display("Ping"), Some("!i32.?i32.end"));
+        let interp = crate::interp::Interpreter::from_checked(&program);
         assert_eq!(
-            program.session_body_display("Ping"),
+            interp.resolved_session_display("Ping"),
             Some("!i32.?i32.end")
         );
-        let interp = crate::interp::Interpreter::from_checked(&program);
-        assert_eq!(interp.resolved_session_display("Ping"), Some("!i32.?i32.end"));
         let mut verifier = crate::verifier::Verifier::new().expect("z3");
         let _ = verifier.verify_checked(&program);
-        assert_eq!(verifier.checked_session_display("Ping"), Some("!i32.?i32.end"));
+        assert_eq!(
+            verifier.checked_session_display("Ping"),
+            Some("!i32.?i32.end")
+        );
         let context = inkwell::context::Context::create();
         let mut codegen = crate::codegen::CodeGenerator::new(&context, "sess");
         codegen.compile_checked(&program).expect("compile");
-        assert_eq!(codegen.resolved_session_display("Ping"), Some("!i32.?i32.end"));
+        assert_eq!(
+            codegen.resolved_session_display("Ping"),
+            Some("!i32.?i32.end")
+        );
     }
-
 
     #[test]
     fn type_def_fields_and_variants_are_materialised() {
@@ -4191,7 +4480,6 @@ func main() -> i32 { 0 }
             .is_some_and(|fields| fields.iter().any(|(n, _)| n == "y")));
     }
 
-
     #[test]
     fn capability_combined_with_is_installed() {
         let file = parse(
@@ -4224,7 +4512,6 @@ func main() -> i32 { 0 }
             Some("A + B")
         );
     }
-
 
     #[test]
     fn flow_state_payloads_are_installed() {
@@ -4282,7 +4569,6 @@ func main() -> i32 { 0 }
         assert_eq!(codegen.resolved_item_kind("main"), Some("function"));
     }
 
-
     #[test]
     fn actor_fields_are_installed() {
         let file = parse(
@@ -4301,8 +4587,12 @@ func main() -> i32 { 0 }
         assert!(fields.iter().any(|(n, _, m)| n == "flag" && *m));
         let interp = crate::interp::Interpreter::from_checked(&program);
         let installed = interp.resolved_actor_fields("Worker").expect("fields");
-        assert!(installed.iter().any(|(n, ty, m)| n == "count" && ty == "i32" && !*m));
-        assert!(installed.iter().any(|(n, ty, m)| n == "flag" && ty == "bool" && *m));
+        assert!(installed
+            .iter()
+            .any(|(n, ty, m)| n == "count" && ty == "i32" && !*m));
+        assert!(installed
+            .iter()
+            .any(|(n, ty, m)| n == "flag" && ty == "bool" && *m));
         let mut verifier = crate::verifier::Verifier::new().expect("z3");
         let _ = verifier.verify_checked(&program);
         assert!(verifier
@@ -4315,7 +4605,6 @@ func main() -> i32 { 0 }
             .resolved_actor_fields("Worker")
             .is_some_and(|fs| fs.iter().any(|(n, ty, _)| n == "count" && ty == "i32")));
     }
-
 
     #[test]
     fn extern_block_flags_are_installed() {
@@ -4400,9 +4689,7 @@ func main() -> i32 { N }
         let program = crate::core::check_program(&file).expect("check");
         let context = inkwell::context::Context::create();
         let mut codegen = crate::codegen::CodeGenerator::new(&context, "dir_test");
-        codegen
-            .compile_checked(&program)
-            .expect("compile_checked");
+        codegen.compile_checked(&program).expect("compile_checked");
         // Public API is limited; compile success with populated CheckedProgram is the gate.
         assert!(program.capability("Io").is_some());
         assert!(program.protocol("Sensor").is_some());
@@ -4410,7 +4697,6 @@ func main() -> i32 { N }
         assert!(program.actor("A").is_some());
         assert!(program.constant("N").is_some());
     }
-
 
     #[test]
     fn verifier_verify_checked_records_function_names() {
