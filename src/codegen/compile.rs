@@ -92,7 +92,34 @@ impl<'ctx> CodeGenerator<'ctx> {
         for list in transitions_by_flow.values_mut() {
             list.sort();
         }
+        let mut transitions_by_event: std::collections::HashMap<
+            String,
+            Vec<(String, String, String, bool, bool, usize)>,
+        > = std::collections::HashMap::new();
+        for transition in program.transitions().values() {
+            let flow = transition.id.flow.0.clone();
+            let event = transition.id.event.clone();
+            let source = transition.id.source.name.clone();
+            let targets = transition
+                .targets
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+                .join("|");
+            transitions_by_event.entry(event).or_default().push((
+                flow,
+                source,
+                targets,
+                transition.is_fallback,
+                transition.is_ffi_pinned,
+                transition.params.len(),
+            ));
+        }
+        for list in transitions_by_event.values_mut() {
+            list.sort();
+        }
         self.resolved_transitions_by_flow = Some(transitions_by_flow);
+        self.resolved_transitions_by_event = Some(transitions_by_event);
         let mut arity = std::collections::HashMap::new();
         let mut effects = std::collections::HashMap::new();
         let mut returns = std::collections::HashMap::new();
@@ -306,6 +333,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             node_meta_precision.insert(node_id.0.clone(), precision.to_string());
         }
         self.resolved_node_meta_precision = Some(node_meta_precision);
+        let mut node_meta_spans = std::collections::HashMap::new();
+        for (node_id, meta) in program.node_meta() {
+            let span = meta.origin.user_span();
+            node_meta_spans.insert(
+                node_id.0.clone(),
+                (span.start_line, span.start_col, span.end_line, span.end_col),
+            );
+        }
+        self.resolved_node_meta_spans = Some(node_meta_spans);
         let mut type_kinds = std::collections::HashMap::new();
         let mut type_fields = std::collections::HashMap::new();
         let mut type_variants = std::collections::HashMap::new();
