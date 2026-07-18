@@ -7,7 +7,9 @@ use mimi::ast::{self, File, Item};
 use mimi::core::BackendProfile;
 use mimi::{ffi, lexer, parser};
 
-pub(crate) fn validate_component_input(file: &File) -> Result<(), String> {
+pub(crate) fn checked_component_input<'a>(
+    file: &'a File,
+) -> Result<mimi::core::CheckedProgram<'a>, String> {
     let checked = mimi::core::check_program(file).map_err(|diagnostics| {
         let messages = diagnostics
             .iter()
@@ -25,12 +27,50 @@ pub(crate) fn validate_component_input(file: &File) -> Result<(), String> {
                 .collect::<Vec<_>>()
                 .join("; ");
             format!("component backend rejected input: {messages}")
-        })
+        })?;
+    Ok(checked)
+}
+
+pub(crate) fn resolved_extern_funcs(
+    checked: &mimi::core::CheckedProgram<'_>,
+) -> Result<Vec<ast::ExternFunc>, String> {
+    let mut symbols = std::collections::HashSet::new();
+    let mut blocks = checked.extern_blocks().values().collect::<Vec<_>>();
+    blocks.sort_by(|left, right| left.qualified_name.cmp(&right.qualified_name));
+    let mut funcs = Vec::new();
+    for block in blocks {
+        for signature in &block.signatures {
+            if !symbols.insert(signature.name.clone()) {
+                return Err(format!(
+                    "component extern symbol '{}' is declared more than once",
+                    signature.name
+                ));
+            }
+            funcs.push(ast::ExternFunc {
+                name: signature.name.clone(),
+                params: signature
+                    .typed_params
+                    .iter()
+                    .map(|(name, ty, cap_mode)| ast::ExternParam {
+                        name: name.clone(),
+                        ty: ty.clone(),
+                        cap_mode: *cap_mode,
+                    })
+                    .collect(),
+                ret: signature.ret_type.clone(),
+                requires: signature.requires.clone(),
+                ensures: signature.ensures.clone(),
+                variadic: signature.variadic,
+                no_panic: signature.no_panic || block.no_panic,
+            });
+        }
+    }
+    Ok(funcs)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::validate_component_input;
+    use super::{checked_component_input, resolved_extern_funcs};
 
     fn parse(source: &str) -> mimi::ast::File {
         let tokens = mimi::lexer::Lexer::new(source).tokenize().expect("lex");
@@ -46,7 +86,7 @@ extern "C" {
 }
 "#,
         );
-        let error = validate_component_input(&file).expect_err("must reject unresolved type");
+        let error = checked_component_input(&file).expect_err("must reject unresolved type");
         assert!(error.contains("type checking"));
     }
 
@@ -63,8 +103,40 @@ flow Choice {
 func main() -> i32 { 0 }
 "#,
         );
-        let error = validate_component_input(&file).expect_err("component must reject multi-target");
+        let error = checked_component_input(&file).expect_err("component must reject multi-target");
         assert!(error.contains("flow.multi_target"));
+    }
+
+    #[test]
+    fn resolved_extern_catalog_preserves_checked_signature_metadata() {
+        let file = parse(
+            r#"
+#[no_panic]
+extern "C" {
+    func read(&buf: c_borrow u8) -> i32
+}
+"#,
+        );
+        let checked = checked_component_input(&file).expect("checked component");
+        let funcs = resolved_extern_funcs(&checked).expect("resolved extern catalog");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].name, "read");
+        assert_eq!(funcs[0].params[0].name, "buf");
+        assert_eq!(funcs[0].params[0].cap_mode, Some(mimi::ast::CapMode::Borrow));
+        assert!(funcs[0].no_panic);
+    }
+
+    #[test]
+    fn resolved_extern_catalog_rejects_duplicate_projected_symbols() {
+        let file = parse(
+            r#"
+module a { extern "C" { func collide(x: i32) -> i32 } }
+module b { extern "C" { func collide(x: i32) -> i32 } }
+"#,
+        );
+        let checked = checked_component_input(&file).expect("checked component");
+        let error = resolved_extern_funcs(&checked).expect_err("duplicate symbols must fail");
+        assert!(error.contains("collide"));
     }
 }
 
@@ -73,12 +145,11 @@ pub(crate) fn emit_c_headers(path: Option<&Path>, output: Option<&Path>) -> Resu
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
-    validate_component_input(&file)?;
+    let checked = checked_component_input(&file)?;
 
-    let mut extern_funcs = Vec::new();
+    let extern_funcs = resolved_extern_funcs(&checked)?;
     let mut exported_funcs = Vec::new();
     let mut type_defs = HashMap::new();
-    collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
     collect_exported_and_types(&file, &mut exported_funcs, &mut type_defs);
 
     let header = if exported_funcs.is_empty() {
@@ -109,12 +180,11 @@ pub(crate) fn emit_py_bindings(
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
-    validate_component_input(&file)?;
+    let checked = checked_component_input(&file)?;
 
-    let mut extern_funcs = Vec::new();
+    let mut extern_funcs = resolved_extern_funcs(&checked)?;
     let mut exported_funcs = Vec::new();
     let mut type_defs = HashMap::new();
-    collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
     collect_exported_and_types(&file, &mut exported_funcs, &mut type_defs);
     // Also include exported functions as extern-like declarations for Python bindings
     for ef in &exported_funcs {
@@ -188,12 +258,11 @@ pub(crate) fn emit_rust_bindings(path: Option<&Path>, output: Option<&Path>) -> 
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
-    validate_component_input(&file)?;
+    let checked = checked_component_input(&file)?;
 
-    let mut extern_funcs = Vec::new();
+    let extern_funcs = resolved_extern_funcs(&checked)?;
     let mut exported_funcs = Vec::new();
     let mut type_defs = HashMap::new();
-    collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
     collect_exported_and_types(&file, &mut exported_funcs, &mut type_defs);
 
     let pkg_name = path
@@ -222,11 +291,11 @@ pub(crate) fn emit_go_bindings(path: Option<&Path>, output: Option<&Path>) -> Re
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
-    validate_component_input(&file)?;
+    let checked = checked_component_input(&file)?;
 
-    let mut extern_funcs = Vec::new();
+    let extern_funcs = resolved_extern_funcs(&checked)?;
     let mut type_defs = HashMap::new();
-    collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
+    collect_types(&file, &mut type_defs);
 
     let pkg_name = path
         .file_stem()
@@ -258,11 +327,11 @@ pub(crate) fn emit_node_bindings(
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
-    validate_component_input(&file)?;
+    let checked = checked_component_input(&file)?;
 
-    let mut extern_funcs = Vec::new();
+    let extern_funcs = resolved_extern_funcs(&checked)?;
     let mut type_defs = HashMap::new();
-    collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
+    collect_types(&file, &mut type_defs);
 
     let pkg_name = path
         .file_stem()
@@ -304,11 +373,11 @@ pub(crate) fn emit_java_bindings(
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
-    validate_component_input(&file)?;
+    let checked = checked_component_input(&file)?;
 
-    let mut extern_funcs = Vec::new();
+    let extern_funcs = resolved_extern_funcs(&checked)?;
     let mut type_defs = HashMap::new();
-    collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
+    collect_types(&file, &mut type_defs);
 
     let pkg_name = path
         .file_stem()
@@ -341,27 +410,19 @@ pub(crate) fn emit_java_bindings(
     Ok(())
 }
 
-fn collect_extern_and_types(
-    file: &File,
-    extern_funcs: &mut Vec<ast::ExternFunc>,
-    type_defs: &mut HashMap<String, ast::TypeDef>,
-) {
+fn collect_types(file: &File, type_defs: &mut HashMap<String, ast::TypeDef>) {
     for item in &file.items {
         match item {
-            Item::ExternBlock(block) => {
-                extern_funcs.extend(block.funcs.iter().cloned());
-            }
             Item::Type(t) => {
                 type_defs.insert(t.name.clone(), t.clone());
             }
             Item::Module(m) => {
-                collect_extern_and_types(
+                collect_types(
                     &ast::File {
                         imports: Vec::new(),
                         items: m.items.clone(),
                         implicit_single: false,
                     },
-                    extern_funcs,
                     type_defs,
                 );
             }
@@ -407,11 +468,11 @@ pub(crate) fn emit_cpp_bindings(path: Option<&Path>, output: Option<&Path>) -> R
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = parser::Parser::new(tokens).parse_file()?;
-    validate_component_input(&file)?;
+    let checked = checked_component_input(&file)?;
 
-    let mut extern_funcs = Vec::new();
+    let extern_funcs = resolved_extern_funcs(&checked)?;
     let mut type_defs = HashMap::new();
-    collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
+    collect_types(&file, &mut type_defs);
 
     let pkg_name = path
         .file_stem()

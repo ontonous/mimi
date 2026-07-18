@@ -312,7 +312,13 @@ pub struct ResolvedTypeDef {
 pub struct ResolvedExternFunc {
     pub name: String,
     pub params: Vec<(String, String)>,
+    pub typed_params: Vec<(String, Type, Option<crate::ast::CapMode>)>,
     pub ret: String,
+    pub ret_type: Option<Type>,
+    pub requires: Option<Expr>,
+    pub ensures: Option<Expr>,
+    pub variadic: bool,
+    pub no_panic: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1256,11 +1262,23 @@ fn collect_items(
                             .iter()
                             .map(|param| (param.name.clone(), crate::core::fmt_type(&param.ty)))
                             .collect(),
+                        typed_params: func
+                            .params
+                            .iter()
+                            .map(|param| {
+                                (param.name.clone(), param.ty.clone(), param.cap_mode)
+                            })
+                            .collect(),
                         ret: func
                             .ret
                             .as_ref()
                             .map(crate::core::fmt_type)
                             .unwrap_or_else(|| "unit".into()),
+                        ret_type: func.ret.clone(),
+                        requires: func.requires.clone(),
+                        ensures: func.ensures.clone(),
+                        variadic: func.variadic,
+                        no_panic: func.no_panic,
                     });
                 }
                 extern_blocks.insert(
