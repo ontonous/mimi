@@ -132,3 +132,41 @@ func main() -> i32 {
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(3));
 }
+
+#[test]
+fn cap_move_through_aggregate_projection_is_consumed() {
+    let src = r#"
+cap FileCap;
+
+func consume(c: cap FileCap) -> i32 {
+    drop(c);
+    1
+}
+
+func main(c: cap FileCap) -> i32 {
+    let alias = c;
+    consume([alias][0])
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "unexpected errors: {result:?}");
+}
+
+#[test]
+fn cap_move_through_if_expression_is_consumed_once() {
+    let src = r#"
+cap FileCap;
+
+func consume(c: cap FileCap) -> i32 {
+    drop(c);
+    1
+}
+
+func main(c: cap FileCap, choose_left: bool) -> i32 {
+    let alias = c;
+    consume(if choose_left { alias } else { alias })
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "unexpected errors: {result:?}");
+}
