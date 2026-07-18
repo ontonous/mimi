@@ -3929,6 +3929,21 @@ func main() -> i32 {
             .is_some_and(|cs| cs.iter().any(|(owner, _, _)| owner == "function:main")));
     }
 
+    #[test]
+    fn checked_ffi_verifier_rejects_resolved_arity_mismatch_before_z3() {
+        let file = parse(
+            r#"
+extern "C" { func c_abs(x: i32) -> i32 }
+func main() -> i32 { c_abs(1, 2) }
+"#,
+        );
+        let program = CheckedProgram::from_checked_file(&file).expect("IR");
+        let error = crate::verifier::verify_ffi_checked(&program)
+            .expect_err("resolved arity mismatch must fail closed");
+        assert!(error.contains("TOOL-RESOLUTION-001"));
+        assert!(error.contains("expects 1 arguments, got 2"));
+    }
+
 
     #[test]
     fn actor_method_signatures_are_materialised() {
