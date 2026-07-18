@@ -2,7 +2,7 @@ use super::*;
 
 use crate::runtime::{
     actor_test_pause_after_pin, actor_test_pin_reached, mimi_actor_call, mimi_actor_drop,
-    mimi_actor_id, mimi_actor_spawn,
+    mimi_actor_id, mimi_actor_spawn, mimi_actor_spawn_detached, mimi_actor_system_kill,
 };
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -131,6 +131,91 @@ fn actor_call_drop_l3_stress() {
             caller.join().unwrap();
         }
     }
+}
+
+unsafe extern "C" fn lifecycle_dispatch(
+    method_id: i32,
+    _fields: *mut c_void,
+    _args: *const c_void,
+    _args_size: i64,
+    result: *mut c_void,
+    result_size: *mut i64,
+) {
+    unsafe {
+        let child_fields = 0u8;
+        let child = if method_id == 1 {
+            mimi_actor_spawn_detached(
+                &child_fields as *const u8 as *const c_void,
+                1,
+                Some(actor_dispatch),
+            )
+        } else {
+            mimi_actor_spawn(
+                &child_fields as *const u8 as *const c_void,
+                1,
+                Some(actor_dispatch),
+            )
+        };
+        *(result as *mut i64) = child as i64;
+        *result_size = std::mem::size_of::<i64>() as i64;
+    }
+}
+
+#[test]
+fn actor_system_kill_cascades_but_preserves_detached_child() {
+    let fields = 0u8;
+    let parent = mimi_actor_spawn(
+        &fields as *const u8 as *const c_void,
+        1,
+        Some(lifecycle_dispatch),
+    );
+    assert!(!parent.is_null());
+
+    let spawn_child = |method_id| {
+        let mut child = 0i64;
+        assert_eq!(
+            mimi_actor_call(
+                parent,
+                method_id,
+                std::ptr::null(),
+                0,
+                &mut child as *mut i64 as *mut c_void,
+            ),
+            8
+        );
+        child as *mut c_void
+    };
+    let child = spawn_child(0);
+    let detached = spawn_child(1);
+
+    mimi_actor_system_kill(parent);
+
+    let mut result = 0i64;
+    assert_eq!(mimi_actor_id(parent), 0);
+    assert_eq!(mimi_actor_id(child), 0);
+    assert_eq!(
+        mimi_actor_call(
+            child,
+            0,
+            std::ptr::null(),
+            0,
+            &mut result as *mut i64 as *mut c_void,
+        ),
+        0
+    );
+    assert_ne!(mimi_actor_id(detached), 0);
+    assert_eq!(
+        mimi_actor_call(
+            detached,
+            0,
+            std::ptr::null(),
+            0,
+            &mut result as *mut i64 as *mut c_void,
+        ),
+        8
+    );
+    assert_eq!(result, 42);
+    mimi_actor_drop(detached);
 }
 
 #[test]
