@@ -68,9 +68,63 @@ pub(crate) fn resolved_extern_funcs(
     Ok(funcs)
 }
 
+pub(crate) fn resolved_exported_funcs(
+    checked: &mimi::core::CheckedProgram<'_>,
+    extern_funcs: &[ast::ExternFunc],
+) -> Result<Vec<ast::FuncDef>, String> {
+    let mut symbols = extern_funcs
+        .iter()
+        .map(|func| func.name.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let mut functions = checked.functions().values().collect::<Vec<_>>();
+    functions.sort_by(|left, right| left.qualified_name.cmp(&right.qualified_name));
+    let mut exported = Vec::new();
+    for function in functions {
+        let Some(abi) = &function.extern_abi else {
+            continue;
+        };
+        if function.is_async || !function.generics.is_empty() || !function.where_clause.is_empty() {
+            return Err(format!(
+                "component export '{}' uses unsupported async/generic declaration",
+                function.qualified_name
+            ));
+        }
+        let symbol = function
+            .qualified_name
+            .rsplit("::")
+            .next()
+            .unwrap_or(&function.qualified_name)
+            .to_string();
+        if !symbols.insert(symbol.clone()) {
+            return Err(format!(
+                "component symbol '{}' is declared more than once",
+                symbol
+            ));
+        }
+        exported.push(ast::FuncDef {
+            name: symbol,
+            pub_: function.pub_,
+            params: function.param_decls.clone(),
+            ret: Some(function.ret.clone()),
+            body: Vec::new(),
+            where_clause: function.where_clause.clone(),
+            generics: function.generics.clone(),
+            effects: function.effects.clone(),
+            is_comptime: function.is_comptime,
+            is_async: function.is_async,
+            extern_abi: Some(abi.clone()),
+            pos: {
+                let span = function.origin.user_span();
+                (span.start_line, span.start_col)
+            },
+        });
+    }
+    Ok(exported)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{checked_component_input, resolved_extern_funcs};
+    use super::{checked_component_input, resolved_exported_funcs, resolved_extern_funcs};
 
     fn parse(source: &str) -> mimi::ast::File {
         let tokens = mimi::lexer::Lexer::new(source).tokenize().expect("lex");
@@ -138,6 +192,22 @@ module b { extern "C" { func collide(x: i32) -> i32 } }
         let error = resolved_extern_funcs(&checked).expect_err("duplicate symbols must fail");
         assert!(error.contains("collide"));
     }
+
+    #[test]
+    fn resolved_export_catalog_preserves_checked_signature() {
+        let file = parse(
+            r#"
+extern "C" func exported(x: i32) -> i32 { x }
+"#,
+        );
+        let checked = checked_component_input(&file).expect("checked component");
+        let externs = resolved_extern_funcs(&checked).expect("extern catalog");
+        let exported = resolved_exported_funcs(&checked, &externs).expect("export catalog");
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].name, "exported");
+        assert_eq!(exported[0].params[0].name, "x");
+        assert_eq!(exported[0].extern_abi.as_deref(), Some("C"));
+    }
 }
 
 pub(crate) fn emit_c_headers(path: Option<&Path>, output: Option<&Path>) -> Result<(), String> {
@@ -148,9 +218,9 @@ pub(crate) fn emit_c_headers(path: Option<&Path>, output: Option<&Path>) -> Resu
     let checked = checked_component_input(&file)?;
 
     let extern_funcs = resolved_extern_funcs(&checked)?;
-    let mut exported_funcs = Vec::new();
+    let exported_funcs = resolved_exported_funcs(&checked, &extern_funcs)?;
     let mut type_defs = HashMap::new();
-    collect_exported_and_types(&file, &mut exported_funcs, &mut type_defs);
+    collect_types(&file, &mut type_defs);
 
     let header = if exported_funcs.is_empty() {
         ffi::c_header::generate_c_header(&extern_funcs, type_defs)?
@@ -183,9 +253,9 @@ pub(crate) fn emit_py_bindings(
     let checked = checked_component_input(&file)?;
 
     let mut extern_funcs = resolved_extern_funcs(&checked)?;
-    let mut exported_funcs = Vec::new();
+    let exported_funcs = resolved_exported_funcs(&checked, &extern_funcs)?;
     let mut type_defs = HashMap::new();
-    collect_exported_and_types(&file, &mut exported_funcs, &mut type_defs);
+    collect_types(&file, &mut type_defs);
     // Also include exported functions as extern-like declarations for Python bindings
     for ef in &exported_funcs {
         let extern_func = ast::ExternFunc {
@@ -261,9 +331,9 @@ pub(crate) fn emit_rust_bindings(path: Option<&Path>, output: Option<&Path>) -> 
     let checked = checked_component_input(&file)?;
 
     let extern_funcs = resolved_extern_funcs(&checked)?;
-    let mut exported_funcs = Vec::new();
+    let _exported_funcs = resolved_exported_funcs(&checked, &extern_funcs)?;
     let mut type_defs = HashMap::new();
-    collect_exported_and_types(&file, &mut exported_funcs, &mut type_defs);
+    collect_types(&file, &mut type_defs);
 
     let pkg_name = path
         .file_stem()
@@ -423,38 +493,6 @@ fn collect_types(file: &File, type_defs: &mut HashMap<String, ast::TypeDef>) {
                         items: m.items.clone(),
                         implicit_single: false,
                     },
-                    type_defs,
-                );
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Collect Mimi→C exported functions (marked `extern "C" func`) and type defs.
-fn collect_exported_and_types(
-    file: &File,
-    exported_funcs: &mut Vec<ast::FuncDef>,
-    type_defs: &mut HashMap<String, ast::TypeDef>,
-) {
-    for item in &file.items {
-        match item {
-            Item::Func(f) => {
-                if f.extern_abi.is_some() {
-                    exported_funcs.push(f.clone());
-                }
-            }
-            Item::Type(t) => {
-                type_defs.insert(t.name.clone(), t.clone());
-            }
-            Item::Module(m) => {
-                collect_exported_and_types(
-                    &ast::File {
-                        imports: Vec::new(),
-                        items: m.items.clone(),
-                        implicit_single: false,
-                    },
-                    exported_funcs,
                     type_defs,
                 );
             }

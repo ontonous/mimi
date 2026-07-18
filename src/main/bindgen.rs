@@ -17,9 +17,9 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
     let checked = crate::emit::checked_component_input(&file)?;
 
     let mut extern_funcs = crate::emit::resolved_extern_funcs(&checked)?;
-    let mut exported_funcs = Vec::new();
+    let exported_funcs = crate::emit::resolved_exported_funcs(&checked, &extern_funcs)?;
     let mut type_defs = HashMap::new();
-    collect_exported_and_types(&file, &mut exported_funcs, &mut type_defs);
+    collect_types(&file, &mut type_defs);
 
     if extern_funcs.is_empty() && exported_funcs.is_empty() {
         return Err("no extern or exported functions found in the file".to_string());
@@ -165,29 +165,19 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn collect_exported_and_types(
-    file: &ast::File,
-    exported_funcs: &mut Vec<ast::FuncDef>,
-    type_defs: &mut HashMap<String, ast::TypeDef>,
-) {
+fn collect_types(file: &ast::File, type_defs: &mut HashMap<String, ast::TypeDef>) {
     for item in &file.items {
         match item {
-            ast::Item::Func(f) => {
-                if f.extern_abi.is_some() {
-                    exported_funcs.push(f.clone());
-                }
-            }
             ast::Item::Type(t) => {
                 type_defs.insert(t.name.clone(), t.clone());
             }
             ast::Item::Module(m) => {
-                collect_exported_and_types(
+                collect_types(
                     &ast::File {
                         imports: Vec::new(),
                         items: m.items.clone(),
                         implicit_single: false,
                     },
-                    exported_funcs,
                     type_defs,
                 );
             }
