@@ -174,6 +174,10 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_traits: Option<HashMap<String, Vec<String>>>,
     /// Trait/impl method signatures: "Show.show" / "Show:for:Number.show" -> (arity, ret).
     pub(in crate::interp) resolved_method_signatures: Option<HashMap<String, (usize, String)>>,
+    /// Trait/impl method parameter directories: "TraitName.Method" -> [(param_name, type display)].
+    pub(in crate::interp) resolved_method_params: Option<HashMap<String, Vec<(String, String)>>>,
+    /// Trait/impl method effect directories: "TraitName.Method" -> [effect].
+    pub(in crate::interp) resolved_method_effects: Option<HashMap<String, Vec<String>>>,
     /// Impl directories materialised from CheckedProgram: "Trait:for:Type" -> methods.
     pub(in crate::interp) resolved_impls: Option<HashMap<String, Vec<String>>>,
     /// Ownership ledger owners materialised from CheckedProgram.
@@ -490,13 +494,18 @@ impl<'a> Interpreter<'a> {
         interp.resolved_constant_values = Some(constant_values);
         let mut traits = HashMap::new();
         let mut method_signatures = HashMap::new();
+        let mut method_params = HashMap::new();
+        let mut method_effects = HashMap::new();
         for trait_def in program.traits().values() {
             traits.insert(trait_def.qualified_name.clone(), trait_def.methods.clone());
             for method in &trait_def.method_signatures {
-                method_signatures.insert(
-                    format!("{}.{}", trait_def.qualified_name, method.name),
-                    (method.params.len(), method.ret.clone()),
+                let key = format!("{}.{}", trait_def.qualified_name, method.name);
+                method_signatures.insert(key.clone(), (method.params.len(), method.ret.clone()));
+                method_params.insert(
+                    key.clone(),
+                    method.params.clone(),
                 );
+                method_effects.insert(key, method.effects.clone());
             }
         }
         interp.resolved_traits = Some(traits);
@@ -504,14 +513,19 @@ impl<'a> Interpreter<'a> {
         for impl_def in program.impls().values() {
             impls.insert(impl_def.qualified_name.clone(), impl_def.methods.clone());
             for method in &impl_def.method_signatures {
-                method_signatures.insert(
-                    format!("{}.{}", impl_def.qualified_name, method.name),
-                    (method.params.len(), method.ret.clone()),
+                let key = format!("{}.{}", impl_def.qualified_name, method.name);
+                method_signatures.insert(key.clone(), (method.params.len(), method.ret.clone()));
+                method_params.insert(
+                    key.clone(),
+                    method.params.clone(),
                 );
+                method_effects.insert(key, method.effects.clone());
             }
         }
         interp.resolved_impls = Some(impls);
         interp.resolved_method_signatures = Some(method_signatures);
+        interp.resolved_method_params = Some(method_params);
+        interp.resolved_method_effects = Some(method_effects);
         interp.resolved_ownership_owners = Some(
             program
                 .ownership_ledgers()
@@ -935,6 +949,18 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn resolved_method_signature(&self, key: &str) -> Option<(usize, String)> {
         self.resolved_method_signatures
+            .as_ref()
+            .and_then(|map| map.get(key).cloned())
+    }
+
+    pub(crate) fn resolved_method_params(&self, key: &str) -> Option<Vec<(String, String)>> {
+        self.resolved_method_params
+            .as_ref()
+            .and_then(|map| map.get(key).cloned())
+    }
+
+    pub(crate) fn resolved_method_effects(&self, key: &str) -> Option<Vec<String>> {
+        self.resolved_method_effects
             .as_ref()
             .and_then(|map| map.get(key).cloned())
     }
@@ -1443,6 +1469,8 @@ impl<'a> Interpreter<'a> {
             resolved_constant_values: None,
             resolved_traits: None,
             resolved_method_signatures: None,
+            resolved_method_params: None,
+            resolved_method_effects: None,
             resolved_impls: None,
             resolved_ownership_owners: None,
             resolved_ownership_summaries: None,

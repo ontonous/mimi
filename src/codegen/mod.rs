@@ -326,6 +326,10 @@ pub struct CodeGenerator<'ctx> {
     resolved_actor_method_signatures: Option<HashMap<String, (usize, String)>>,
     resolved_actor_fields: Option<HashMap<String, Vec<(String, String, bool)>>>,
     resolved_method_signatures: Option<HashMap<String, (usize, String)>>,
+    /// Trait/impl method parameter directories: "TraitName.Method" -> [(param_name, type display)].
+    resolved_method_params: Option<HashMap<String, Vec<(String, String)>>>,
+    /// Trait/impl method effect directories: "TraitName.Method" -> [effect].
+    resolved_method_effects: Option<HashMap<String, Vec<String>>>,
     /// Capability names from CheckedProgram.
     resolved_capabilities: Option<std::collections::HashSet<String>>,
     resolved_capability_combined: Option<HashMap<String, String>>,
@@ -495,6 +499,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_actor_method_signatures: None,
             resolved_actor_fields: None,
             resolved_method_signatures: None,
+            resolved_method_params: None,
+            resolved_method_effects: None,
             resolved_capabilities: None,
             resolved_capability_combined: None,
             resolved_constants: None,
@@ -556,6 +562,18 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     pub(crate) fn resolved_method_signature(&self, key: &str) -> Option<(usize, String)> {
         self.resolved_method_signatures
+            .as_ref()
+            .and_then(|map| map.get(key).cloned())
+    }
+
+    pub(crate) fn resolved_method_params(&self, key: &str) -> Option<Vec<(String, String)>> {
+        self.resolved_method_params
+            .as_ref()
+            .and_then(|map| map.get(key).cloned())
+    }
+
+    pub(crate) fn resolved_method_effects(&self, key: &str) -> Option<Vec<String>> {
+        self.resolved_method_effects
             .as_ref()
             .and_then(|map| map.get(key).cloned())
     }

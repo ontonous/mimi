@@ -469,23 +469,27 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         self.resolved_actor_fields = Some(actor_fields);
         let mut method_signatures = std::collections::HashMap::new();
+        let mut method_params = std::collections::HashMap::new();
+        let mut method_effects = std::collections::HashMap::new();
         for trait_def in program.traits().values() {
             for method in &trait_def.method_signatures {
-                method_signatures.insert(
-                    format!("{}.{}", trait_def.qualified_name, method.name),
-                    (method.params.len(), method.ret.clone()),
-                );
+                let key = format!("{}.{}", trait_def.qualified_name, method.name);
+                method_signatures.insert(key.clone(), (method.params.len(), method.ret.clone()));
+                method_params.insert(key.clone(), method.params.clone());
+                method_effects.insert(key, method.effects.clone());
             }
         }
         for impl_def in program.impls().values() {
             for method in &impl_def.method_signatures {
-                method_signatures.insert(
-                    format!("{}.{}", impl_def.qualified_name, method.name),
-                    (method.params.len(), method.ret.clone()),
-                );
+                let key = format!("{}.{}", impl_def.qualified_name, method.name);
+                method_signatures.insert(key.clone(), (method.params.len(), method.ret.clone()));
+                method_params.insert(key.clone(), method.params.clone());
+                method_effects.insert(key, method.effects.clone());
             }
         }
         self.resolved_method_signatures = Some(method_signatures);
+        self.resolved_method_params = Some(method_params);
+        self.resolved_method_effects = Some(method_effects);
         if let Some(max_children) = program.flows().values().find_map(|flow| flow.max_children) {
             self.max_children = Some(max_children);
         }
