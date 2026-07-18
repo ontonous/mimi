@@ -2952,6 +2952,102 @@ func main() -> i32 { 0 }
             .resolved_impl_methods("Close", "Handle")
             .expect("Close for Handle");
         assert!(impl_methods.iter().any(|m| m == "close"));
+        // Trait/impl method params + effects directories.
+        assert_eq!(
+            interp.resolved_method_params("Close.close"),
+            Some(vec![])
+        );
+        assert_eq!(
+            interp.resolved_method_effects("Close.close"),
+            Some(vec![])
+        );
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert_eq!(
+            verifier.checked_method_params("Close.close"),
+            Some(vec![])
+        );
+        assert_eq!(
+            verifier.checked_method_effects("Close.close"),
+            Some(vec![])
+        );
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "trait_params");
+        codegen.compile_checked(&program).expect("compile");
+        assert_eq!(
+            codegen.resolved_method_params("Close.close"),
+            Some(vec![])
+        );
+        assert_eq!(
+            codegen.resolved_method_effects("Close.close"),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn consumers_install_trait_impl_method_params_and_effects() {
+        let file = parse(
+            r#"
+cap Io
+trait Writer {
+    func write(data: i32) -> i32
+}
+type Buffer { x: i32 }
+impl Writer for Buffer {
+    func write(data: i32) -> i32 with Io { data }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        // Trait method: params materialised; effects empty (trait decls carry no effect set).
+        assert_eq!(
+            interp.resolved_method_params("Writer.write"),
+            Some(vec![("data".into(), "i32".into())])
+        );
+        assert_eq!(
+            interp.resolved_method_effects("Writer.write"),
+            Some(vec![])
+        );
+        // Impl method: params + effects (Io) materialised under impl qualified name.
+        assert_eq!(
+            interp.resolved_method_params("Writer:for:Buffer.write"),
+            Some(vec![("data".into(), "i32".into())])
+        );
+        assert_eq!(
+            interp.resolved_method_effects("Writer:for:Buffer.write"),
+            Some(vec!["Io".to_string()])
+        );
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert_eq!(
+            verifier.checked_method_params("Writer.write"),
+            Some(vec![("data".into(), "i32".into())])
+        );
+        assert_eq!(
+            verifier.checked_method_effects("Writer.write"),
+            Some(vec![])
+        );
+        assert_eq!(
+            verifier.checked_method_params("Writer:for:Buffer.write"),
+            Some(vec![("data".into(), "i32".into())])
+        );
+        assert_eq!(
+            verifier.checked_method_effects("Writer:for:Buffer.write"),
+            Some(vec!["Io".to_string()])
+        );
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "trait_effects");
+        codegen.compile_checked(&program).expect("compile");
+        assert_eq!(
+            codegen.resolved_method_params("Writer.write"),
+            Some(vec![("data".into(), "i32".into())])
+        );
+        assert_eq!(
+            codegen.resolved_method_effects("Writer:for:Buffer.write"),
+            Some(vec!["Io".to_string()])
+        );
     }
 
 

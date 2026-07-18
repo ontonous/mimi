@@ -452,6 +452,10 @@ pub struct VerifierCtx {
     /// Trait names materialised from CheckedProgram.
     pub(crate) checked_traits: std::collections::HashSet<String>,
     pub(crate) checked_method_signatures: std::collections::HashMap<String, (usize, String)>,
+    /// Trait/impl method parameter directories: "TraitName.Method" -> [(param_name, type display)].
+    pub(crate) checked_method_params: std::collections::HashMap<String, Vec<(String, String)>>,
+    /// Trait/impl method effect directories: "TraitName.Method" -> [effect].
+    pub(crate) checked_method_effects: std::collections::HashMap<String, Vec<String>>,
     /// Actor names materialised from CheckedProgram.
     pub(crate) checked_actors: std::collections::HashSet<String>,
     pub(crate) checked_actor_method_signatures: std::collections::HashMap<String, (usize, String)>,
@@ -810,23 +814,27 @@ impl Verifier {
             .map(|trait_def| trait_def.qualified_name.clone())
             .collect();
         let mut method_signatures = std::collections::HashMap::new();
+        let mut method_params = std::collections::HashMap::new();
+        let mut method_effects = std::collections::HashMap::new();
         for trait_def in program.traits().values() {
             for method in &trait_def.method_signatures {
-                method_signatures.insert(
-                    format!("{}.{}", trait_def.qualified_name, method.name),
-                    (method.params.len(), method.ret.clone()),
-                );
+                let key = format!("{}.{}", trait_def.qualified_name, method.name);
+                method_signatures.insert(key.clone(), (method.params.len(), method.ret.clone()));
+                method_params.insert(key.clone(), method.params.clone());
+                method_effects.insert(key, method.effects.clone());
             }
         }
         for impl_def in program.impls().values() {
             for method in &impl_def.method_signatures {
-                method_signatures.insert(
-                    format!("{}.{}", impl_def.qualified_name, method.name),
-                    (method.params.len(), method.ret.clone()),
-                );
+                let key = format!("{}.{}", impl_def.qualified_name, method.name);
+                method_signatures.insert(key.clone(), (method.params.len(), method.ret.clone()));
+                method_params.insert(key.clone(), method.params.clone());
+                method_effects.insert(key, method.effects.clone());
             }
         }
         self.ctx.checked_method_signatures = method_signatures;
+        self.ctx.checked_method_params = method_params;
+        self.ctx.checked_method_effects = method_effects;
         self.ctx.checked_actors = program
             .actors()
             .values()
@@ -1291,6 +1299,14 @@ impl Verifier {
 
     pub(crate) fn checked_method_signature(&self, key: &str) -> Option<(usize, String)> {
         self.ctx.checked_method_signatures.get(key).cloned()
+    }
+
+    pub(crate) fn checked_method_params(&self, key: &str) -> Option<Vec<(String, String)>> {
+        self.ctx.checked_method_params.get(key).cloned()
+    }
+
+    pub(crate) fn checked_method_effects(&self, key: &str) -> Option<Vec<String>> {
+        self.ctx.checked_method_effects.get(key).cloned()
     }
 
     pub(crate) fn has_checked_actor(&self, name: &str) -> bool {
