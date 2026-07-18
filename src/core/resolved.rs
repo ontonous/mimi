@@ -3574,6 +3574,24 @@ func main() -> i32 { 0 }
             .is_some_and(|trs| trs.iter().any(|(e, _, targets, _, _, argc)| {
                 e == "open" && targets.contains("Open") && *argc == 1
             })));
+        let by_event = interp
+            .resolved_transitions_for_event("open")
+            .expect("open transitions");
+        assert!(by_event.iter().any(|(flow, source, targets, fallback, _pinned, argc)| {
+            flow == "Door"
+                && source == "Closed"
+                && targets.contains("Open")
+                && !*fallback
+                && *argc == 1
+        }));
+        assert!(verifier
+            .checked_transitions_for_event("open")
+            .is_some_and(|trs| trs.iter().any(|(f, s, _, _, _, _)| f == "Door" && s == "Closed")));
+        assert!(codegen
+            .resolved_transitions_for_event("open")
+            .is_some_and(|trs| trs.iter().any(|(f, _, targets, _, _, argc)| {
+                f == "Door" && targets.contains("Open") && *argc == 1
+            })));
     }
 
     #[test]
@@ -4462,6 +4480,26 @@ func main() -> i32 {
         assert_eq!(
             codegen.resolved_node_meta_precision("function:main/stmt:0"),
             Some("exact")
+        );
+        let let_span = interp
+            .resolved_node_meta_span("function:main/stmt:0")
+            .expect("let span");
+        assert!(let_span.0 > 0);
+        assert_eq!(
+            verifier.checked_node_meta_span("function:main/stmt:0"),
+            Some(let_span)
+        );
+        assert_eq!(
+            codegen.resolved_node_meta_span("function:main/stmt:0"),
+            Some(let_span)
+        );
+        let cond_span = interp
+            .resolved_node_meta_span("function:main/stmt:1/cond")
+            .expect("cond span");
+        assert!(cond_span.0 > 0);
+        assert_eq!(
+            verifier.checked_node_meta_span("function:main/stmt:1/cond"),
+            Some(cond_span)
         );
     }
 

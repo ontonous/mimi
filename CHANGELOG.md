@@ -66,6 +66,8 @@
 - ownership branch-merge 明细目录安装到 consumers。
 - Flow transitions-by-flow 明细目录安装到 consumers。
 - call-site by-callee 索引安装到 consumers。
+- Flow transitions-by-event 明细目录安装到 consumers。
+- NodeMeta span 目录安装到 consumers。
 - ResolvedFlow 与 consumers 安装 `impl Protocol` 列表。
 - ResolvedTransition 记录 is_fallback/is_ffi_pinned，并安装到 interpreter/codegen/verifier 目录。
 - interpreter 暴露 resolved transition targets 查询。

@@ -306,6 +306,8 @@ pub struct CodeGenerator<'ctx> {
     resolved_transition_param_arity: Option<HashMap<(String, String, String), usize>>,
     resolved_transition_params: Option<HashMap<(String, String, String), Vec<(String, String)>>>,
     resolved_transitions_by_flow: Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
+    resolved_transitions_by_event: Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
+    resolved_node_meta_spans: Option<HashMap<String, (usize, usize, usize, usize)>>,
     /// Function directory from CheckedProgram: qualified_name -> arity.
     resolved_function_arity: Option<HashMap<String, usize>>,
     resolved_function_effects: Option<HashMap<String, Vec<String>>>,
@@ -477,6 +479,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_transition_param_arity: None,
             resolved_transition_params: None,
             resolved_transitions_by_flow: None,
+            resolved_transitions_by_event: None,
+            resolved_node_meta_spans: None,
             resolved_function_arity: None,
             resolved_function_effects: None,
             resolved_function_returns: None,
@@ -856,6 +860,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_call_sites_by_callee
             .as_ref()
             .and_then(|map| map.get(callee).cloned())
+    }
+
+    pub(crate) fn resolved_transitions_for_event(
+        &self,
+        event: &str,
+    ) -> Option<Vec<(String, String, String, bool, bool, usize)>> {
+        self.resolved_transitions_by_event
+            .as_ref()
+            .and_then(|map| map.get(event).cloned())
+    }
+
+    pub(crate) fn resolved_node_meta_span(
+        &self,
+        path: &str,
+    ) -> Option<(usize, usize, usize, usize)> {
+        self.resolved_node_meta_spans
+            .as_ref()
+            .and_then(|map| map.get(path).copied())
     }
 
     pub fn gep(&self) -> gep::CheckedGepBuilder<'_, 'ctx> {

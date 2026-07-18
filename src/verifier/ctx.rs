@@ -430,6 +430,7 @@ pub struct VerifierCtx {
     pub(crate) checked_node_meta_count: usize,
     pub(crate) checked_node_meta_paths: std::collections::HashSet<String>,
     pub(crate) checked_node_meta_precision: std::collections::HashMap<String, String>,
+    pub(crate) checked_node_meta_spans: std::collections::HashMap<String, (usize, usize, usize, usize)>,
     /// Type definition names materialised from CheckedProgram.
     pub(crate) checked_type_defs: std::collections::HashSet<String>,
     pub(crate) checked_type_fields: std::collections::HashMap<String, Vec<(String, String)>>,
@@ -475,6 +476,7 @@ pub struct VerifierCtx {
     pub(crate) checked_transition_param_arity: std::collections::HashMap<String, usize>,
     pub(crate) checked_transition_params: std::collections::HashMap<String, Vec<(String, String)>>,
     pub(crate) checked_transitions_by_flow: std::collections::HashMap<String, Vec<(String, String, String, bool, bool, usize)>>,
+    pub(crate) checked_transitions_by_event: std::collections::HashMap<String, Vec<(String, String, String, bool, bool, usize)>>,
 }
 
 /// Backward-compatible verifier with its own solver session.
@@ -667,6 +669,15 @@ impl Verifier {
             node_meta_precision.insert(node_id.0.clone(), precision.to_string());
         }
         self.ctx.checked_node_meta_precision = node_meta_precision;
+        let mut node_meta_spans = std::collections::HashMap::new();
+        for (node_id, meta) in program.node_meta() {
+            let span = meta.origin.user_span();
+            node_meta_spans.insert(
+                node_id.0.clone(),
+                (span.start_line, span.start_col, span.end_line, span.end_col),
+            );
+        }
+        self.ctx.checked_node_meta_spans = node_meta_spans;
         self.ctx.checked_type_defs = program
             .type_defs()
             .values()
@@ -1030,8 +1041,35 @@ impl Verifier {
         for list in transitions_by_flow.values_mut() {
             list.sort();
         }
+        let mut transitions_by_event: std::collections::HashMap<
+            String,
+            Vec<(String, String, String, bool, bool, usize)>,
+        > = std::collections::HashMap::new();
+        for transition in program.transitions().values() {
+            let flow = transition.id.flow.0.clone();
+            let event = transition.id.event.clone();
+            let source = transition.id.source.name.clone();
+            let targets = transition
+                .targets
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+                .join("|");
+            transitions_by_event.entry(event).or_default().push((
+                flow,
+                source,
+                targets,
+                transition.is_fallback,
+                transition.is_ffi_pinned,
+                transition.params.len(),
+            ));
+        }
+        for list in transitions_by_event.values_mut() {
+            list.sort();
+        }
         self.ctx.checked_transitions_by_flow = transitions_by_flow;
-self.verify_file(program.file())
+        self.ctx.checked_transitions_by_event = transitions_by_event;
+        self.verify_file(program.file())
     }
 
     pub(crate) fn has_checked_function(&self, name: &str) -> bool {
@@ -1097,6 +1135,13 @@ self.verify_file(program.file())
 
     pub(crate) fn checked_node_meta_precision(&self, path: &str) -> Option<&str> {
         self.ctx.checked_node_meta_precision.get(path).map(String::as_str)
+    }
+
+    pub(crate) fn checked_node_meta_span(
+        &self,
+        path: &str,
+    ) -> Option<(usize, usize, usize, usize)> {
+        self.ctx.checked_node_meta_spans.get(path).copied()
     }
 
     pub(crate) fn requires_checked_capability(&self, capability: &str) -> bool {
@@ -1391,6 +1436,13 @@ self.verify_file(program.file())
         flow: &str,
     ) -> Option<Vec<(String, String, String, bool, bool, usize)>> {
         self.ctx.checked_transitions_by_flow.get(flow).cloned()
+    }
+
+    pub(crate) fn checked_transitions_for_event(
+        &self,
+        event: &str,
+    ) -> Option<Vec<(String, String, String, bool, bool, usize)>> {
+        self.ctx.checked_transitions_by_event.get(event).cloned()
     }
 
     pub(crate) fn checked_transition_params(

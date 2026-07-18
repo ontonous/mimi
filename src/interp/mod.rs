@@ -140,6 +140,8 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_transition_params: Option<HashMap<(String, String, String), Vec<(String, String)>>>,
     /// Transitions grouped by flow: flow -> [(event, source, targets, fallback, pinned, argc)].
     pub(in crate::interp) resolved_transitions_by_flow: Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
+    pub(in crate::interp) resolved_transitions_by_event: Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
+    pub(in crate::interp) resolved_node_meta_spans: Option<HashMap<String, (usize, usize, usize, usize)>>,
     /// Function signatures from CheckedProgram: qualified_name -> (param_count, ret_fmt, effects).
     pub(in crate::interp) resolved_functions: Option<HashMap<String, (usize, String, Vec<String>)>>,
     /// Function parameter directories: name -> [(param_name, type display)].
@@ -335,7 +337,32 @@ impl<'a> Interpreter<'a> {
         for list in transitions_by_flow.values_mut() {
             list.sort();
         }
+        let mut transitions_by_event: HashMap<String, Vec<(String, String, String, bool, bool, usize)>> =
+            HashMap::new();
+        for transition in program.transitions().values() {
+            let flow = transition.id.flow.0.clone();
+            let event = transition.id.event.clone();
+            let source = transition.id.source.name.clone();
+            let targets = transition
+                .targets
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+                .join("|");
+            transitions_by_event.entry(event).or_default().push((
+                flow,
+                source,
+                targets,
+                transition.is_fallback,
+                transition.is_ffi_pinned,
+                transition.params.len(),
+            ));
+        }
+        for list in transitions_by_event.values_mut() {
+            list.sort();
+        }
         interp.resolved_transitions_by_flow = Some(transitions_by_flow);
+        interp.resolved_transitions_by_event = Some(transitions_by_event);
         interp.resolved_transition_params = Some(param_lists);
         let mut functions = HashMap::new();
         let mut function_params = HashMap::new();
@@ -574,7 +601,16 @@ impl<'a> Interpreter<'a> {
             node_meta_precision.insert(node_id.0.clone(), precision.to_string());
         }
         interp.resolved_node_meta_precision = Some(node_meta_precision);
-                let mut type_kinds = HashMap::new();
+        let mut node_meta_spans = HashMap::new();
+        for (node_id, meta) in program.node_meta() {
+            let span = meta.origin.user_span();
+            node_meta_spans.insert(
+                node_id.0.clone(),
+                (span.start_line, span.start_col, span.end_line, span.end_col),
+            );
+        }
+        interp.resolved_node_meta_spans = Some(node_meta_spans);
+        let mut type_kinds = HashMap::new();
         let mut type_fields = HashMap::new();
         let mut type_variants = HashMap::new();
         let mut type_aliases = HashMap::new();
@@ -973,6 +1009,15 @@ impl<'a> Interpreter<'a> {
             .and_then(|map| map.get(path).map(String::as_str))
     }
 
+    pub(crate) fn resolved_node_meta_span(
+        &self,
+        path: &str,
+    ) -> Option<(usize, usize, usize, usize)> {
+        self.resolved_node_meta_spans
+            .as_ref()
+            .and_then(|map| map.get(path).copied())
+    }
+
     pub(crate) fn requires_resolved_capability(&self, capability: &str) -> bool {
         self.resolved_backend_requirements.as_ref().is_some_and(|reqs| {
             reqs.iter().any(|(cap, _)| cap == capability)
@@ -1151,6 +1196,15 @@ impl<'a> Interpreter<'a> {
         self.resolved_transitions_by_flow
             .as_ref()
             .and_then(|map| map.get(flow).cloned())
+    }
+
+    pub(crate) fn resolved_transitions_for_event(
+        &self,
+        event: &str,
+    ) -> Option<Vec<(String, String, String, bool, bool, usize)>> {
+        self.resolved_transitions_by_event
+            .as_ref()
+            .and_then(|map| map.get(event).cloned())
     }
 
     pub(crate) fn resolved_transition_params(
@@ -1370,6 +1424,8 @@ impl<'a> Interpreter<'a> {
             resolved_transition_param_arity: None,
             resolved_transition_params: None,
             resolved_transitions_by_flow: None,
+            resolved_transitions_by_event: None,
+            resolved_node_meta_spans: None,
             resolved_functions: None,
             resolved_function_params: None,
             resolved_comptime_functions: None,
