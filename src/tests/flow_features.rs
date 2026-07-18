@@ -6,6 +6,25 @@ fn user_transitions(f: &FlowDef) -> Vec<&TransitionDef> {
     f.transitions.iter().filter(|t| !t.is_fallback).collect()
 }
 
+#[test]
+fn transition_rejects_wrong_target_payload_field_type() {
+    let src = r#"
+flow Counter {
+    state Idle
+    state Active { count: i32, ready: bool }
+    transition start(Idle) -> Active {
+        do { return Active { count: true, ready: 1 } }
+    }
+}
+"#;
+    let err = check_source(src).expect_err("transition payload field types must be checked");
+    assert!(
+        err.iter()
+            .any(|d| d.message.contains("field") || d.message.contains("type mismatch")),
+        "expected payload field type error, got: {err:?}"
+    );
+}
+
 /// State names excluding the auto-injected Fault sink.
 fn user_states(f: &FlowDef) -> Vec<&str> {
     f.states

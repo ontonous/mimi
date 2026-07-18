@@ -2062,9 +2062,7 @@ impl<'a> Checker<'a> {
 
             for (arg, param) in args.iter().zip(params.iter()) {
                 if matches!(param, Type::Cap(_)) {
-                    if let Expr::Ident(name) = arg {
-                        self.consume_capability(name, crate::core::ResourceActionKind::Move);
-                    }
+                    self.consume_capabilities_in_expr(arg, crate::core::ResourceActionKind::Move);
                 }
             }
 
