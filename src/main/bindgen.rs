@@ -3,7 +3,6 @@
 //! Takes a `.mimi` file with `extern "C"` declarations and generates
 //! binding code for C, C++, Rust, Go, Node.js, Python, and Java.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -18,8 +17,7 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
 
     let mut extern_funcs = crate::emit::resolved_extern_funcs(&checked)?;
     let exported_funcs = crate::emit::resolved_exported_funcs(&checked, &extern_funcs)?;
-    let mut type_defs = HashMap::new();
-    collect_types(&file, &mut type_defs);
+    let type_defs = crate::emit::resolved_type_defs(&checked)?;
 
     if extern_funcs.is_empty() && exported_funcs.is_empty() {
         return Err("no extern or exported functions found in the file".to_string());
@@ -163,27 +161,6 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
     );
 
     Ok(())
-}
-
-fn collect_types(file: &ast::File, type_defs: &mut HashMap<String, ast::TypeDef>) {
-    for item in &file.items {
-        match item {
-            ast::Item::Type(t) => {
-                type_defs.insert(t.name.clone(), t.clone());
-            }
-            ast::Item::Module(m) => {
-                collect_types(
-                    &ast::File {
-                        imports: Vec::new(),
-                        items: m.items.clone(),
-                        implicit_single: false,
-                    },
-                    type_defs,
-                );
-            }
-            _ => {}
-        }
-    }
 }
 
 fn capitalize(s: &str) -> String {
