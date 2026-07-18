@@ -155,7 +155,7 @@ pub(crate) fn build(
     };
 
     if verify_ffi {
-        match verifier::flow_verify_ffi_call_sites_or_mock(&merged_file) {
+        match verifier::verify_ffi_checked(&checked_program) {
             Ok(ffi_results) => {
                 for res in &ffi_results {
                     match res.status {

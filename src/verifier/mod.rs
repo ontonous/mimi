@@ -53,7 +53,38 @@ pub fn verify_ffi_source(source: &str) -> Result<Vec<VerificationResult>, String
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
         .map_err(|e| e.message)?;
-    flow::flow_verify_ffi_call_sites_or_mock(&file)
+    let program = crate::core::check_program(&file).map_err(format_check_errors)?;
+    verify_ffi_checked(&program)
+}
+
+/// Verify extern call sites from a checked program.
+///
+/// Contract expressions still use the explicit legacy body adapter until
+/// typed Verification IR lands, but declaration identity and arity are
+/// authoritative from CheckedProgram and fail closed before that adapter.
+pub fn verify_ffi_checked(
+    program: &crate::core::CheckedProgram<'_>,
+) -> Result<Vec<VerificationResult>, String> {
+    for site in program.call_sites().values() {
+        if site.kind != crate::core::ResolvedCallKind::Extern {
+            continue;
+        }
+        let signature = program.extern_func_signature(&site.callee).ok_or_else(|| {
+            format!(
+                "TOOL-RESOLUTION-001: missing resolved extern signature for call '{}'",
+                site.callee
+            )
+        })?;
+        if site.argc != signature.params.len() {
+            return Err(format!(
+                "TOOL-RESOLUTION-001: extern call '{}' expects {} arguments, got {}",
+                site.callee,
+                signature.params.len(),
+                site.argc
+            ));
+        }
+    }
+    flow::flow_verify_ffi_call_sites_or_mock(program.legacy_body_file())
 }
 
 /// Check whether the Z3 solver is available at runtime.
