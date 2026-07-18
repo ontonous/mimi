@@ -89,11 +89,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // v0.29.37: Type.spawn_detached() — for codegen, use the same spawn path.
-        // The detached flag is a runtime concept; in codegen the actor handle
-        // is returned the same way as regular spawn.
+        // Type.spawn_detached() uses the runtime lifecycle adapter so it is
+        // excluded atomically from parent SystemKill cascades.
         if method_name == "spawn_detached" {
-            let spawn_name = format!("{}_spawn", obj_type);
+            let spawn_name = format!("{}_spawn_detached", obj_type);
             if let Some(spawn_fn) = self.module.get_function(&spawn_name) {
                 let call = self.build_call(spawn_fn, &[], "actor_spawn_detached")?;
                 return Ok(call_try_basic_value(&call)

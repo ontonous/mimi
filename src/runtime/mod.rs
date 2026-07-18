@@ -247,12 +247,6 @@ fn set_is_live(handle: i64) -> bool {
     g.contains(&handle)
 }
 
-fn actor_register_live(handle: usize, actor: std::sync::Arc<MimiActorRepr>) {
-    if handle != 0 {
-        let mut g = live_actors().lock().unwrap_or_else(|e| e.into_inner());
-        g.insert(handle, actor);
-    }
-}
 fn actor_take_live(handle: usize) -> Option<std::sync::Arc<MimiActorRepr>> {
     if handle == 0 {
         return None;
@@ -22545,6 +22539,11 @@ struct ActorMsgResult {
 struct MimiActorRepr {
     /// Unique actor ID for self-call deadlock avoidance.
     id: u64,
+    /// Parent actor captured from the spawning worker. Top-level and detached
+    /// actors have no parent.
+    parent_id: Option<u64>,
+    /// Detached actors are excluded from parent SystemKill cascades.
+    detached: bool,
     /// Reserved for future use: a heap-allocated field blob accessible from
     /// the handle side. Currently the worker thread owns the live field storage;
     /// all field access goes through the mailbox dispatch path.
@@ -22575,7 +22574,12 @@ impl Drop for MimiActorRepr {
             .unwrap_or_else(|e| e.into_inner())
             .take();
         if let Some(worker) = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            let _ = worker.join();
+            // SystemKill may be initiated by the actor itself. Dropping the
+            // JoinHandle detaches in that case; the closed mailbox lets the
+            // worker return immediately after the current dispatch.
+            if worker.thread().id() != std::thread::current().id() {
+                let _ = worker.join();
+            }
         }
     }
 }
@@ -22633,6 +22637,25 @@ pub extern "C" fn mimi_actor_spawn(
     fields_size: i64,
     dispatch_fn: Option<ActorDispatchFn>,
 ) -> *mut std::ffi::c_void {
+    mimi_actor_spawn_with_mode(fields_ptr, fields_size, dispatch_fn, false)
+}
+
+/// Spawn an actor that is not owned by the current actor's lifecycle.
+#[no_mangle]
+pub extern "C" fn mimi_actor_spawn_detached(
+    fields_ptr: *const std::ffi::c_void,
+    fields_size: i64,
+    dispatch_fn: Option<ActorDispatchFn>,
+) -> *mut std::ffi::c_void {
+    mimi_actor_spawn_with_mode(fields_ptr, fields_size, dispatch_fn, true)
+}
+
+fn mimi_actor_spawn_with_mode(
+    fields_ptr: *const std::ffi::c_void,
+    fields_size: i64,
+    dispatch_fn: Option<ActorDispatchFn>,
+    detached: bool,
+) -> *mut std::ffi::c_void {
     if fields_ptr.is_null() || dispatch_fn.is_none() {
         return std::ptr::null_mut();
     }
@@ -22647,6 +22670,14 @@ pub extern "C" fn mimi_actor_spawn(
     }
 
     let id = ACTOR_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let parent_id = if detached {
+        None
+    } else {
+        CURRENT_ACTOR_ID.with(|current| match current.get() {
+            0 => None,
+            id => Some(id),
+        })
+    };
     let fields_size = fields_size as usize;
 
     // SAFETY: `fields_ptr` is checked non-null; caller guarantees it points to
@@ -22750,6 +22781,8 @@ pub extern "C" fn mimi_actor_spawn(
 
     let repr = std::sync::Arc::new(MimiActorRepr {
         id,
+        parent_id,
+        detached,
         fields: Box::new([]), // handle doesn't own live fields; worker does
         mailbox_tx: std::sync::Mutex::new(Some(tx)),
         worker: std::sync::Mutex::new(Some(handle)),
@@ -22760,10 +22793,19 @@ pub extern "C" fn mimi_actor_spawn(
         method_names: std::sync::Mutex::new(Vec::new()),
     });
 
-    ACTOR_SPAWN_COUNT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     let raw = std::sync::Arc::as_ptr(&repr) as *mut std::ffi::c_void;
-    // R-C11: register live actor handle.
-    actor_register_live(raw as usize, repr);
+    // The topology lock makes parent validation and child insertion atomic
+    // relative to SystemKill. A child cannot appear after its parent was cut.
+    {
+        let mut actors = live_actors().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(parent_id) = parent_id {
+            if !actors.values().any(|actor| actor.id == parent_id) {
+                return std::ptr::null_mut();
+            }
+        }
+        actors.insert(raw as usize, repr);
+    }
+    ACTOR_SPAWN_COUNT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     raw
 }
 
@@ -22961,16 +23003,62 @@ pub extern "C" fn mimi_actor_drop(handle: *mut std::ffi::c_void) {
     drop(actor);
 }
 
+/// Terminate an actor and every transitively owned, non-detached child.
+/// Topology is removed under one lock; actor shutdown happens after unlock.
+#[no_mangle]
+pub extern "C" fn mimi_actor_system_kill(handle: *mut std::ffi::c_void) {
+    if handle.is_null() {
+        return;
+    }
+    let victims = {
+        let mut actors = live_actors().lock().unwrap_or_else(|e| e.into_inner());
+        let Some(root) = actors.get(&(handle as usize)).cloned() else {
+            return;
+        };
+        let mut ids = vec![root.id];
+        let mut cursor = 0;
+        while cursor < ids.len() {
+            let parent = ids[cursor];
+            for actor in actors.values() {
+                if actor.parent_id == Some(parent) && !actor.detached && !ids.contains(&actor.id) {
+                    ids.push(actor.id);
+                }
+            }
+            cursor += 1;
+        }
+        let keys: Vec<usize> = actors
+            .iter()
+            .filter_map(|(key, actor)| ids.contains(&actor.id).then_some(*key))
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| actors.remove(&key))
+            .collect::<Vec<_>>()
+    };
+    for actor in &victims {
+        actor
+            .faulted
+            .store(true, std::sync::atomic::Ordering::Release);
+        actor
+            .mailbox_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    }
+    let removed = victims.len() as u64;
+    let _ = ACTOR_SPAWN_COUNT.fetch_update(
+        std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Acquire,
+        |count| Some(count.saturating_sub(removed)),
+    );
+    drop(victims);
+}
+
 /// v0.29.11: Mark an actor as Faulted and short-circuit its mailbox (O(1)).
 /// Subsequent `mimi_actor_call` returns 0 without enqueueing; the worker drains
 /// any already-queued messages without dispatch.
 #[no_mangle]
 pub extern "C" fn mimi_actor_fault(handle: *mut std::ffi::c_void) {
-    let Some(repr) = actor_pin_handle(handle) else {
-        return;
-    };
-    repr.faulted
-        .store(true, std::sync::atomic::Ordering::Release);
+    mimi_actor_system_kill(handle);
 }
 
 /// v0.29.11: Query whether an actor's mailbox is short-circuited.

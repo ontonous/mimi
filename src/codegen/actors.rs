@@ -57,8 +57,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // 3. Generate the dispatch function: {Name}__dispatch
         self.compile_actor_dispatch(actor)?;
 
-        // 4. Generate spawn function: {Name}_spawn() -> i8* (actor handle)
-        self.compile_actor_spawn(actor)?;
+        // 4. Generate lifecycle-aware spawn adapters.
+        self.compile_actor_spawn(actor, false)?;
+        self.compile_actor_spawn(actor, true)?;
 
         Ok(())
     }
@@ -403,7 +404,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    fn compile_actor_spawn(&mut self, actor: &crate::ast::ActorDef) -> MimiResult<()> {
+    fn compile_actor_spawn(
+        &mut self,
+        actor: &crate::ast::ActorDef,
+        detached: bool,
+    ) -> MimiResult<()> {
         let actor_ty = *self.type_llvm.get(&actor.name).ok_or_else(|| {
             CompileError::TypeNotFound(format!("actor type '{}' not found", actor.name))
         })?;
@@ -413,7 +418,11 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // _spawn() -> i8* (actor handle)
         let spawn_fn_type = i8_ptr.fn_type(&[], false);
-        let spawn_name = format!("{}_spawn", actor.name);
+        let spawn_name = if detached {
+            format!("{}_spawn_detached", actor.name)
+        } else {
+            format!("{}_spawn", actor.name)
+        };
         let function = self.module.add_function(&spawn_name, spawn_fn_type, None);
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
@@ -511,7 +520,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Call mimi_actor_spawn(fields_ptr, fields_size, dispatch_fn) -> i8*
         // C5: raw_ptr is already heap-allocated (via malloc_or_abort), so it is
         // safe for cross-thread access. No stack-alloca + bitcast needed.
-        let spawn_rt = self.get_runtime_fn("mimi_actor_spawn")?;
+        let spawn_rt = self.get_runtime_fn(if detached {
+            "mimi_actor_spawn_detached"
+        } else {
+            "mimi_actor_spawn"
+        })?;
 
         let handle = self.build_call(
             spawn_rt,
