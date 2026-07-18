@@ -554,8 +554,8 @@ fn adv_parasteps_basic() {
 
 #[test]
 fn adv_quote_runtime_dep_produces_error() {
-    // v0.28.21 — quote! { x + 1 } with a runtime x now constructs
-    // a runtime MimiQuotedAst via mimi_quote_new_* (no error).
+    // ABI v1 rejects runtime-dependent quotes because compiled ast_eval only
+    // accepts already-folded evaluator results.
     let src = r#"
         func main() -> i64 {
             let x = 10
@@ -566,7 +566,12 @@ fn adv_quote_runtime_dep_produces_error() {
     let file = parse(src);
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
-    assert!(codegen.compile_file(&file).is_ok());
+    let err = codegen
+        .compile_file(&file)
+        .expect_err("runtime-dependent quote must be rejected");
+    assert!(err
+        .to_string()
+        .contains("runtime-dependent quote is unsupported by QuotedAst ABI v1"));
 }
 
 #[test]

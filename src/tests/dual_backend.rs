@@ -64,7 +64,6 @@ macro_rules! dual_assert {
     }};
 }
 
-
 /// TC-C2: dual_assert that hard-fails if typecheck fails.
 macro_rules! dual_assert_typed {
     ($src:expr, $expected:expr) => {{
@@ -933,7 +932,6 @@ fn dual_record_field() {
     );
 }
 
-
 #[test]
 fn dual_nested_record_field_assign() {
     if !can_link() {
@@ -973,7 +971,6 @@ fn dual_nested_func_captures_outer() {
         "10"
     );
 }
-
 
 #[test]
 fn dual_record_mut() {
@@ -10965,10 +10962,9 @@ fn dual_quote_comptime_let_fold() {
 }
 
 #[test]
-fn dual_quote_runtime_var_errors() {
-    // v0.28.21 — n is a runtime value; the quote block still compiles
-    // using the runtime QuotedAst construction path, producing an i8*
-    // pointer to a heap-allocated MimiQuotedAst tree. No error.
+fn dual_quote_runtime_var_is_rejected() {
+    // ABI v1 deliberately has no compiled evaluator. Codegen must reject a
+    // runtime-dependent quote instead of passing a tree through identity ast_eval.
     let src = r#"
         func main() -> i32 {
             let n = 7
@@ -10979,9 +10975,29 @@ fn dual_quote_runtime_var_errors() {
     let file = parse(src);
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
+    let err = codegen
+        .compile_file(&file)
+        .expect_err("runtime-dependent quote must be rejected");
     assert!(
-        codegen.compile_file(&file).is_ok(),
-        "runtime-dependent quote should compile with runtime QuotedAst construction"
+        err.to_string()
+            .contains("runtime-dependent quote is unsupported by QuotedAst ABI v1"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn dual_quote_cast() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            println(ast_eval(quote! { 41.9 as i32 }) + 1)
+            0
+        }
+        "#,
+        "42"
     );
 }
 
@@ -12212,8 +12228,6 @@ fn dual_result_option_map_set_product_tuple() {
     );
 }
 
-
-
 /// Option of Result of Set of product-tuple dual.
 #[test]
 fn dual_option_result_set_product_tuple() {
@@ -13430,7 +13444,6 @@ fn dual_from_json_map_list_set_map_product_tuple() {
         "{\"a\":[Set{{\"x\":(1, 2)}}]}\n{\"a\":[[{\"x\":[1,2]}]]}"
     );
 }
-
 
 /// from_json Map of Result of Set of Map of product dual.
 #[test]

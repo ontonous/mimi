@@ -296,9 +296,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     );
                 if is_list {
                     let i64_ty = self.context.i64_type();
-                    let size =
-                        self.llvm_type_size_bytes(BasicTypeEnum::StructType(sv.get_type()));
-                    let heap = self.malloc_or_abort(i64_ty.const_int(size, false), "map_set_list")?;
+                    let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sv.get_type()));
+                    let heap =
+                        self.malloc_or_abort(i64_ty.const_int(size, false), "map_set_list")?;
                     let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
                     let typed = self
                         .build_bit_cast(
@@ -355,13 +355,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Display/to_json can decode a uniform i64[n] layout.
                     let i64_ty = self.context.i64_type();
                     let fields = sv.get_type().get_field_types();
-                    let all_int = fields.iter().all(|f| matches!(f, BasicTypeEnum::IntType(_)));
+                    let all_int = fields
+                        .iter()
+                        .all(|f| matches!(f, BasicTypeEnum::IntType(_)));
                     if all_int && !fields.is_empty() {
                         let n = fields.len();
                         let size_val = i64_ty.const_int((n as u64) * 8, false);
                         let ptr = self.malloc_or_abort(size_val, "map_set_prod")?;
-                        let i8_ptr_ty =
-                            self.context.ptr_type(inkwell::AddressSpace::default());
+                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                         let base = self
                             .build_bit_cast(
                                 ptr.into(),
@@ -393,9 +394,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 i64_ty,
                                                 &format!("map_set_prod_trunc{}", i),
                                             )
-                                            .map_err(|e| {
-                                                format!("map_set product trunc: {}", e)
-                                            })?
+                                            .map_err(|e| format!("map_set product trunc: {}", e))?
                                     } else {
                                         iv
                                     }
@@ -417,12 +416,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.build_ptr_to_int(base, i64_ty, "map_set_prod_h")?
                     } else {
                         let struct_ty = sv.get_type();
-                        let size =
-                            self.llvm_type_size_bytes(BasicTypeEnum::StructType(struct_ty));
+                        let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(struct_ty));
                         let size_val = i64_ty.const_int(size, false);
                         let ptr = self.malloc_or_abort(size_val, "map_set_struct")?;
-                        let i8_ptr_ty =
-                            self.context.ptr_type(inkwell::AddressSpace::default());
+                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                         let typed_ptr = self
                             .build_bit_cast(
                                 ptr.into(),

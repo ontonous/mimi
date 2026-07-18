@@ -52,9 +52,7 @@ impl CapTable {
     /// Register a new capability and return its unique ID.
     pub fn register(&self, name: &str) -> i64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut entries = self
-            .entries
-            .lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.insert(
             id,
             CapEntry {
@@ -68,9 +66,7 @@ impl CapTable {
     /// Check whether the cap with the given ID exists, matches the name, and
     /// has not been consumed.  Does NOT consume the cap.
     pub fn check(&self, id: i64, name: &str) -> bool {
-        let entries = self
-            .entries
-            .lock().unwrap_or_else(|e| e.into_inner());
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         match entries.get(&id) {
             Some(entry) => !entry.consumed && entry.name == name,
             None => false,
@@ -81,9 +77,7 @@ impl CapTable {
     /// the name, and was not already consumed.  After this call the cap is
     /// marked as consumed and cannot be used again.
     pub fn consume(&self, id: i64, name: &str) -> bool {
-        let mut entries = self
-            .entries
-            .lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         match entries.get_mut(&id) {
             Some(entry) if !entry.consumed && entry.name == name => {
                 entry.consumed = true;
@@ -95,9 +89,7 @@ impl CapTable {
 
     /// Remove a consumed cap from the table (cleanup).
     pub fn remove(&self, id: i64) -> bool {
-        let mut entries = self
-            .entries
-            .lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.remove(&id).is_some()
     }
 }
@@ -148,31 +140,25 @@ impl SharedHandle {
     /// Execute a closure with a read-only reference to the inner value.
     /// Safe, scoped access — prefer this over raw pointer APIs.
     pub fn with_value<R>(&self, f: impl FnOnce(&Value) -> R) -> R {
-        let guard = self
-            .inner
-            .read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         f(&guard)
     }
 
     /// Execute a closure with a mutable reference to the inner value.
     /// Safe, scoped access — prefer this over raw pointer APIs.
     pub fn with_value_mut<R>(&self, f: impl FnOnce(&mut Value) -> R) -> R {
-        let mut guard = self
-            .inner
-            .write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         f(&mut guard)
     }
 
     /// Get a read guard for the inner value.
     pub fn borrow(&self) -> RwLockReadGuard<'_, Value> {
-        self.inner
-            .read().unwrap_or_else(|e| e.into_inner())
+        self.inner.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get a write guard for the inner value.
     pub fn borrow_mut(&self) -> RwLockWriteGuard<'_, Value> {
-        self.inner
-            .write().unwrap_or_else(|e| e.into_inner())
+        self.inner.write().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Retain: increment the C-side strong reference count.
@@ -241,9 +227,7 @@ impl SharedHandleTable {
     pub fn create(&self, inner: Arc<RwLock<Value>>) -> i64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let handle = Arc::new(SharedHandle::new(id, inner));
-        let mut handles = self
-            .handles
-            .lock().unwrap_or_else(|e| e.into_inner());
+        let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
         handles.insert(id, handle);
         id
     }
@@ -283,9 +267,7 @@ impl SharedHandleTable {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let handle = Arc::new(SharedHandle::new(id, inner));
         {
-            let mut handles = self
-                .handles
-                .lock().unwrap_or_else(|e| e.into_inner());
+            let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
             handles.insert(id, handle);
         }
         {
@@ -297,9 +279,7 @@ impl SharedHandleTable {
 
     /// Get a reference to the handle by ID.
     pub fn get(&self, id: i64) -> Option<Arc<SharedHandle>> {
-        let handles = self
-            .handles
-            .lock().unwrap_or_else(|e| e.into_inner());
+        let handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
         handles.get(&id).cloned()
     }
 
@@ -317,17 +297,13 @@ impl SharedHandleTable {
     /// removes the handle from the table and returns `true`.
     pub fn release(&self, id: i64) -> bool {
         let handle = {
-            let handles = self
-                .handles
-                .lock().unwrap_or_else(|e| e.into_inner());
+            let handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
             handles.get(&id).cloned()
         };
         if let Some(handle) = handle {
             if handle.release() {
                 let removed = {
-                    let mut handles = self
-                        .handles
-                        .lock().unwrap_or_else(|e| e.into_inner());
+                    let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
                     handles.remove(&id).is_some()
                 };
                 if removed {
@@ -348,9 +324,7 @@ impl SharedHandleTable {
     /// Also removes the corresponding dedup entry.
     pub fn remove(&self, id: i64) -> bool {
         let removed = {
-            let mut handles = self
-                .handles
-                .lock().unwrap_or_else(|e| e.into_inner());
+            let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
             handles.remove(&id).is_some()
         };
         if removed {
@@ -364,9 +338,7 @@ impl SharedHandleTable {
 
     /// Get the number of active handles (for diagnostics).
     pub fn len(&self) -> usize {
-        let handles = self
-            .handles
-            .lock().unwrap_or_else(|e| e.into_inner());
+        let handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
         handles.len()
     }
 
@@ -837,16 +809,12 @@ impl MimiThreadPool {
         for _ in 0..size {
             let receiver = std::sync::Arc::clone(&receiver);
             let worker = thread::spawn(move || loop {
-                let task = receiver
-                    .lock().unwrap_or_else(|e| e.into_inner())
-                    .recv();
+                let task = receiver.lock().unwrap_or_else(|e| e.into_inner()).recv();
                 match task {
                     Ok(task) => {
                         let _ = (task.func)(task.arg);
                         // Decrement pending count and notify waiters
-                        let mut count = task
-                            .pending
-                            .lock().unwrap_or_else(|e| e.into_inner());
+                        let mut count = task.pending.lock().unwrap_or_else(|e| e.into_inner());
                         *count -= 1;
                         if *count == 0 {
                             task.completion.notify_all();
@@ -867,9 +835,7 @@ impl MimiThreadPool {
     }
 
     pub fn submit_raw(&self, func: extern "C" fn(*mut u8) -> *mut u8, arg: *mut u8) {
-        let mut count = self
-            .pending
-            .lock().unwrap_or_else(|e| e.into_inner());
+        let mut count = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         *count += 1;
         if let Some(ref sender) = self.sender {
             if let Err(e) = sender.send(RawTask {
@@ -919,9 +885,7 @@ impl MimiThreadPool {
             drop(data);
             ret
         }
-        let mut count = self
-            .pending
-            .lock().unwrap_or_else(|e| e.into_inner());
+        let mut count = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         *count += 1;
         if let Some(ref sender) = self.sender {
             if let Err(e) = sender.send(RawTask {
@@ -937,10 +901,7 @@ impl MimiThreadPool {
 
     /// Wait until all submitted tasks have completed.
     pub fn join_all(&self) {
-        let mut count = self
-            .pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut count = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         while *count > 0 {
             count = self
                 .completion

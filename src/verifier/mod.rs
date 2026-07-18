@@ -85,7 +85,10 @@ pub fn verify_ffi_checked(
                 variadic: signature.variadic,
                 no_panic: signature.no_panic || block.no_panic,
             };
-            if externs.insert(signature.name.clone(), declaration).is_some() {
+            if externs
+                .insert(signature.name.clone(), declaration)
+                .is_some()
+            {
                 return Err(format!(
                     "TOOL-RESOLUTION-001: duplicate resolved extern symbol '{}'",
                     signature.name

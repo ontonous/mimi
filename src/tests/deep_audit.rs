@@ -428,11 +428,7 @@ fn ip_h2_sleep_negative_rejected() {
     // TC-H3: negative sleep must fail fast with an error (not hang, not succeed).
     let _ = check_source(src);
     let result = super::run_source_result(src);
-    assert!(
-        result.is_err(),
-        "sleep(-1) must Err; got {:?}",
-        result
-    );
+    assert!(result.is_err(), "sleep(-1) must Err; got {:?}", result);
 }
 
 #[test]
@@ -473,7 +469,10 @@ fn named_args_on_actor_method() {
             c.add(y = 3, x = 2)
         }
     "#;
-    assert!(check_source(src).is_ok(), "named method args should typecheck");
+    assert!(
+        check_source(src).is_ok(),
+        "named method args should typecheck"
+    );
     let v = super::run_source(src);
     assert_eq!(v, crate::interp::Value::Int(5));
 }

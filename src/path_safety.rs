@@ -107,10 +107,9 @@ pub fn validate_safe_path(base: &Path, input: &str) -> Result<PathBuf, PathError
     }
     let joined = base.join(input);
     // AU-H4: best-effort symlink escape check when paths exist.
-    if let (Ok(canon_base), Ok(canon_joined)) = (
-        std::fs::canonicalize(base),
-        std::fs::canonicalize(&joined),
-    ) {
+    if let (Ok(canon_base), Ok(canon_joined)) =
+        (std::fs::canonicalize(base), std::fs::canonicalize(&joined))
+    {
         if !canon_joined.starts_with(&canon_base) {
             return Err(PathError::SymlinkEscape);
         }
@@ -244,9 +243,7 @@ pub fn read_source_capped_limit(path: &Path, max_bytes: u64) -> Result<String, S
     let mut file = std::fs::File::open(path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
     // Read at most max_bytes + 1 to detect oversize without unbounded alloc.
-    let limit = max_bytes
-        .saturating_add(1)
-        .min(usize::MAX as u64) as usize;
+    let limit = max_bytes.saturating_add(1).min(usize::MAX as u64) as usize;
     let mut buf = Vec::new();
     file.by_ref()
         .take(limit as u64)

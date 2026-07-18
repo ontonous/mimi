@@ -56,11 +56,7 @@ fn resolve_git_dep(
 
     // P-H5: clone into a temp dir first so failures leave the old install intact.
     let parent = dst.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = parent.join(format!(
-        ".{}.git-tmp-{}",
-        dep.name,
-        std::process::id()
-    ));
+    let tmp = parent.join(format!(".{}.git-tmp-{}", dep.name, std::process::id()));
     if tmp.exists() {
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -141,8 +137,7 @@ fn resolve_registry_dep(
         .ok_or_else(|| format!("no matching version for '{}' {}", dep.name, version))?;
 
     let src = pkg_dir.join(&resolved);
-    install_dir_atomic(&src, dst)
-        .map_err(|e| format!("failed to install {}: {}", dep.name, e))?;
+    install_dir_atomic(&src, dst).map_err(|e| format!("failed to install {}: {}", dep.name, e))?;
 
     let checksum = pkg_registry::compute_dir_checksum(dst).ok();
     Ok(ResolvedDep {
@@ -152,7 +147,6 @@ fn resolve_registry_dep(
         checksum,
     })
 }
-
 
 /// P-H5: copy into a temporary sibling directory, then swap into place so a
 /// failed install never deletes a previously working cache entry first.
@@ -216,8 +210,7 @@ fn resolve_path_dep(
             src.display()
         ));
     }
-    install_dir_atomic(&src, dst)
-        .map_err(|e| format!("failed to install {}: {}", dep.name, e))?;
+    install_dir_atomic(&src, dst).map_err(|e| format!("failed to install {}: {}", dep.name, e))?;
 
     let checksum = pkg_registry::compute_dir_checksum(dst).ok();
     Ok(ResolvedDep {

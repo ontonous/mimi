@@ -3581,9 +3581,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
             "ast_eval" => {
-                // ast_eval on a compile-time folded quote block:
-                // quote! { 42 } evaluates directly to i64(42) at compile time,
-                // so ast_eval just returns the argument value unchanged.
+                // ABI v1 exposes ast_eval to codegen only after quote folding.
+                // Runtime-dependent quote construction is rejected in expr lowering,
+                // so this value is an evaluator result, never an AST pointer.
                 if args.len() == 1 {
                     Ok(match args[0] {
                         BasicMetadataValueEnum::IntValue(iv) => BasicValueEnum::IntValue(iv),

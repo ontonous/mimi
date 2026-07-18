@@ -15,14 +15,16 @@ fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
     (a - b).abs() < eps
 }
 
-
 /// TC-H4: run a pure float main() on both backends (interp Value + println codegen).
 fn dual_float_main(body: &str, expected: f64, eps: f64, label: &str) {
     let src = format!("func main() -> f64 {{ {} }}", body);
     assert_float_approx(run_source(&src), expected, eps, label);
     let cg = format!("func main() -> i32 {{ println({}); 0 }}", body);
     let out = compile_and_run(&cg).unwrap_or_else(|e| panic!("{} codegen: {}", label, e));
-    let v: f64 = out.trim().parse().unwrap_or_else(|_| panic!("{} parse: {}", label, out));
+    let v: f64 = out
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("{} parse: {}", label, out));
     assert!(
         (v - expected).abs() < eps,
         "{} codegen: expected ~{}, got {}",
@@ -220,7 +222,10 @@ fn stdlib_v02813_box_muller_in_range() {
             bad == 0
         }
     "#;
-    assert_eq!(run_with_stdlib("mymath.mimi", src), interp::Value::Bool(true));
+    assert_eq!(
+        run_with_stdlib("mymath.mimi", src),
+        interp::Value::Bool(true)
+    );
 }
 
 #[test]
@@ -238,7 +243,10 @@ fn stdlib_v02813_random_uniform_in_range_inline() {
             bad == 0
         }
     "#;
-    assert_eq!(run_with_stdlib("mymath.mimi", src), interp::Value::Bool(true));
+    assert_eq!(
+        run_with_stdlib("mymath.mimi", src),
+        interp::Value::Bool(true)
+    );
 }
 
 #[test]
@@ -256,7 +264,10 @@ fn stdlib_v02813_random_exponential_positive_inline() {
             bad == 0
         }
     "#;
-    assert_eq!(run_with_stdlib("mymath.mimi", src), interp::Value::Bool(true));
+    assert_eq!(
+        run_with_stdlib("mymath.mimi", src),
+        interp::Value::Bool(true)
+    );
 }
 
 #[test]
@@ -274,7 +285,10 @@ fn stdlib_v02813_random_int_range_via_random_int() {
             bad == 0
         }
     "#;
-    assert_eq!(run_with_stdlib("mymath.mimi", src), interp::Value::Bool(true));
+    assert_eq!(
+        run_with_stdlib("mymath.mimi", src),
+        interp::Value::Bool(true)
+    );
 }
 
 #[test]
@@ -451,7 +465,6 @@ fn stdlib_v02813_atan2_quadrants() {
 // =====================================================================
 // v0.28.13 — std/array.mimi (fixed-size helpers built on List<string>)
 // =====================================================================
-
 
 #[test]
 fn stdlib_v02813_array_new_default_len() {

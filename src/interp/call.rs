@@ -15,7 +15,9 @@ impl<'a> Interpreter<'a> {
                 if !has_defaults && args.len() != *arity {
                     return Err(InterpError::wrong_arg_count(format!(
                         "function '{}' expects {} arguments, got {} (checked directory)",
-                        func.name, arity, args.len()
+                        func.name,
+                        arity,
+                        args.len()
                     )));
                 }
             }
