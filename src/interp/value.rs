@@ -884,7 +884,19 @@ impl ActorHandle {
         // after actors drop without short_circuit_mailbox.
         if let Ok(mut map) = actor_handles().lock() {
             map.retain(|_, e| e.upgrade().is_some());
-            map.insert(id, WeakActorEntry::from_handle(&handle));
+            let parent_id = handle
+                .inner
+                .read()
+                .ok()
+                .and_then(|actor| actor.parent_id);
+            let parent_live = parent_id.map_or(true, |parent_id| map.contains_key(&parent_id));
+            if parent_live {
+                map.insert(id, WeakActorEntry::from_handle(&handle));
+            } else if let Ok(mut actor) = handle.inner.write() {
+                // Parent was cut by SystemKill before insertion completed.
+                actor.faulted = true;
+                actor.fields.clear();
+            }
         }
         handle
     }
@@ -993,6 +1005,7 @@ impl ActorHandle {
         if let Ok(mut map) = actor_handles().lock() {
             map.remove(&self.id);
         }
+        self.system_kill_children();
     }
 
     /// True when this actor has entered Fault absorption (mailbox short-circuited).
@@ -1093,13 +1106,59 @@ impl ActorHandle {
         if producers.is_empty() {
             return;
         }
-        let registry = actor_handles();
-        let Ok(map) = registry.lock() else {
-            return;
+        let handles: Vec<ActorHandle> = {
+            let registry = actor_handles();
+            let Ok(map) = registry.lock() else {
+                return;
+            };
+            producers
+                .iter()
+                .filter_map(|pid| map.get(pid).and_then(|entry| entry.upgrade()))
+                .collect()
         };
-        for pid in producers {
-            if let Some(handle) = map.get(&pid).and_then(|e| e.upgrade()) {
-                handle.bp.enter_mute();
+        for handle in handles {
+            handle.bp.enter_mute();
+        }
+    }
+
+    /// Remove the complete owned subtree from the registry before faulting it.
+    /// This snapshot-then-act protocol never holds the topology lock while
+    /// acquiring actor locks and is safe for cyclic peer/producer graphs.
+    fn system_kill_children(&self) {
+        let handles: Vec<ActorHandle> = {
+            let map = actor_handles().lock().unwrap_or_else(|e| e.into_inner());
+            map.values().filter_map(WeakActorEntry::upgrade).collect()
+        };
+        let mut parent_ids = vec![self.id];
+        let mut victims = Vec::new();
+        let mut cursor = 0;
+        while cursor < parent_ids.len() {
+            let parent_id = parent_ids[cursor];
+            for handle in &handles {
+                if parent_ids.contains(&handle.id) {
+                    continue;
+                }
+                let owned = handle.inner.read().map_or(false, |actor| {
+                    actor.parent_id == Some(parent_id) && !actor.is_detached
+                });
+                if owned {
+                    parent_ids.push(handle.id);
+                    victims.push(handle.clone());
+                }
+            }
+            cursor += 1;
+        }
+        {
+            let mut map = actor_handles().lock().unwrap_or_else(|e| e.into_inner());
+            for child in &victims {
+                map.remove(&child.id);
+            }
+        };
+        for child in victims {
+            if let Ok(mut actor) = child.inner.write() {
+                actor.faulted = true;
+                actor.fields.clear();
+                actor.peer_links.clear();
             }
         }
     }

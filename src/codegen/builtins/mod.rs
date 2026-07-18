@@ -3812,6 +3812,18 @@ fn register_actor_concurrency_rt<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    module.add_function(
+        "mimi_actor_spawn_detached",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_actor_id(handle: i8*) -> i64
     module.add_function(
         "mimi_actor_id",
@@ -3848,6 +3860,11 @@ fn register_actor_concurrency_rt<'ctx>(
     // mimi_actor_fault(handle: i8*) — v0.29.11 Fault absorption short-circuit
     module.add_function(
         "mimi_actor_fault",
+        void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_actor_system_kill",
         void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
