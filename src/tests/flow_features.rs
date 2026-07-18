@@ -1162,6 +1162,25 @@ func main() -> i32 { 0 }
 }
 
 #[test]
+fn flow_codegen_transactional_fails_closed() {
+    let src = r#"
+flow Tx {
+    @transactional persistent state Active { value: i32 }
+    transition stay(Active) -> Active {
+        do { return Active { value: self.value } }
+    }
+}
+func main() -> i32 { 0 }
+"#;
+    let error = compile_and_run(src).expect_err("native transactional Flow must fail closed");
+    assert!(
+        error.contains("native WAL codegen") || error.contains("flow.transactional"),
+        "unexpected native capability error: {}",
+        error
+    );
+}
+
+#[test]
 fn flow_check_no_payload_state_return_no_braces() {
     let src = r#"
 flow GoodFlow {
@@ -2564,6 +2583,56 @@ func main() -> i32 {
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "0");
+}
+
+#[test]
+fn flow_fault_recover_uses_faulting_persistent_draft() {
+    let src = r#"
+flow Svc {
+    persistent state Active { value: i32 }
+
+    transition crash(Active) -> Active {
+        do {
+            self.value = 99
+            let x = 1 / 0
+            return Active { value: self.value }
+        }
+    }
+}
+
+func main() -> i32 {
+    let active = Active { value: 7 }
+    let failed = Svc::crash(active)
+    let recovered = Svc::recover(failed)
+    recovered.value
+}
+"#;
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+}
+
+#[test]
+fn flow_fault_rolls_back_transactional_persistent_draft() {
+    let src = r#"
+flow Svc {
+    @transactional persistent state Active { value: i32 }
+
+    transition crash(Active) -> Active {
+        do {
+            self.value = 99
+            let x = 1 / 0
+            return Active { value: self.value }
+        }
+    }
+}
+
+func main() -> i32 {
+    let active = Active { value: 7 }
+    let failed = Svc::crash(active)
+    let recovered = Svc::recover(failed)
+    recovered.value
+}
+"#;
+    assert_eq!(run_source_result(src), Ok(interp::Value::Int(7)));
 }
 
 #[test]
