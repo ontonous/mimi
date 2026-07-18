@@ -246,6 +246,19 @@ pub fn flow_verify_ffi_call_sites_or_mock(file: &File) -> Result<Vec<Verificatio
     }
 }
 
+pub(crate) fn flow_verify_ffi_call_sites_with_externs_or_mock(
+    file: &File,
+    externs: &std::collections::HashMap<String, crate::ast::ExternFunc>,
+) -> Result<Vec<VerificationResult>, String> {
+    match SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS) {
+        Ok(mut session) => {
+            let mut ctx = VerifierCtx::default();
+            Ok(ctx.verify_ffi_call_sites_with_externs(&mut session, file, externs))
+        }
+        Err(_) => Ok(helpers::mock_verify_file(file)),
+    }
+}
+
 /// Entry for external callers that already have a file (e.g. build pipeline).
 /// Falls back to mock verification if Z3 is unavailable.
 pub fn flow_verify_file_or_mock(file: &File) -> Result<Vec<VerificationResult>, String> {

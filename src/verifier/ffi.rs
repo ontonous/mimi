@@ -15,9 +15,18 @@ impl VerifierCtx {
         session: &mut SolverSession,
         file: &File,
     ) -> Vec<VerificationResult> {
-        let mut results = Vec::new();
         let mut externs: HashMap<String, ExternFunc> = HashMap::new();
         Self::collect_externs(&file.items, &mut externs);
+        self.verify_ffi_call_sites_with_externs(session, file, &externs)
+    }
+
+    pub fn verify_ffi_call_sites_with_externs(
+        &mut self,
+        session: &mut SolverSession,
+        file: &File,
+        externs: &HashMap<String, ExternFunc>,
+    ) -> Vec<VerificationResult> {
+        let mut results = Vec::new();
         let extern_names: HashSet<String> = externs.keys().cloned().collect();
 
         for item in &file.items {

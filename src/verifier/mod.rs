@@ -65,6 +65,34 @@ pub fn verify_ffi_source(source: &str) -> Result<Vec<VerificationResult>, String
 pub fn verify_ffi_checked(
     program: &crate::core::CheckedProgram<'_>,
 ) -> Result<Vec<VerificationResult>, String> {
+    let mut externs = std::collections::HashMap::new();
+    for block in program.extern_blocks().values() {
+        for signature in &block.signatures {
+            let declaration = crate::ast::ExternFunc {
+                name: signature.name.clone(),
+                params: signature
+                    .typed_params
+                    .iter()
+                    .map(|(name, ty, cap_mode)| crate::ast::ExternParam {
+                        name: name.clone(),
+                        ty: ty.clone(),
+                        cap_mode: *cap_mode,
+                    })
+                    .collect(),
+                ret: signature.ret_type.clone(),
+                requires: signature.requires.clone(),
+                ensures: signature.ensures.clone(),
+                variadic: signature.variadic,
+                no_panic: signature.no_panic || block.no_panic,
+            };
+            if externs.insert(signature.name.clone(), declaration).is_some() {
+                return Err(format!(
+                    "TOOL-RESOLUTION-001: duplicate resolved extern symbol '{}'",
+                    signature.name
+                ));
+            }
+        }
+    }
     for site in program.call_sites().values() {
         if site.kind != crate::core::ResolvedCallKind::Extern {
             continue;
@@ -84,7 +112,7 @@ pub fn verify_ffi_checked(
             ));
         }
     }
-    flow::flow_verify_ffi_call_sites_or_mock(program.legacy_body_file())
+    flow::flow_verify_ffi_call_sites_with_externs_or_mock(program.legacy_body_file(), &externs)
 }
 
 /// Check whether the Z3 solver is available at runtime.

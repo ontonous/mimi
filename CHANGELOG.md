@@ -78,6 +78,7 @@
 - Component type 发现迁移到完整 ResolvedTypeDef declaration catalog，保留布局属性并拒绝投影冲突。
 - `CheckedProgram::file()` 收紧为 crate 内显式 `legacy_body_file()`，阻止新 declaration consumer 回退 raw AST。
 - `build --verify-ffi` 迁移到 checked API，并在 legacy 合约适配器前按 resolved extern/call-site 目录校验身份与 arity。
+- checked FFI verifier 的 extern 合约目录改由 ResolvedExternFunc 注入，raw adapter 仅保留函数体与调用实参表达式。
 - ResolvedFlow 与 consumers 安装 `impl Protocol` 列表。
 - ResolvedTransition 记录 is_fallback/is_ffi_pinned，并安装到 interpreter/codegen/verifier 目录。
 - interpreter 暴露 resolved transition targets 查询。
