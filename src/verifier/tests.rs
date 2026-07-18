@@ -1959,3 +1959,134 @@ func main() -> i32 { 0 }
         f.unwrap()
     );
 }
+
+#[test]
+fn verify_i32_add_requires_no_overflow_proof() {
+    require_z3!();
+    let src = r#"
+func increment(x: i32) -> i32 {
+    ensures: result == x + 1
+    x + 1
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert_eq!(results[0].status, VerifStatus::Failed);
+    assert!(results[0].message.contains("integer overflow"));
+}
+
+#[test]
+fn verify_i32_checked_add_sub_mul_when_bounded() {
+    require_z3!();
+    let src = r#"
+func arithmetic(x: i32) -> i32 {
+    requires: x >= -1000 && x <= 1000
+    ensures: result == (x + 7) * 3 - 2
+    (x + 7) * 3 - 2
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert_eq!(
+        results[0].status,
+        VerifStatus::Verified,
+        "{}",
+        results[0].message
+    );
+}
+
+#[test]
+fn verify_i32_mul_requires_no_overflow_proof() {
+    require_z3!();
+    let src = r#"
+func square(x: i32) -> i32 {
+    ensures: result == x * x
+    x * x
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert_eq!(results[0].status, VerifStatus::Failed);
+    assert!(results[0].message.contains("integer overflow"));
+}
+
+#[test]
+fn verify_i32_sub_requires_no_overflow_proof() {
+    require_z3!();
+    let src = r#"
+func decrement(x: i32) -> i32 {
+    ensures: result == x - 1
+    x - 1
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert_eq!(results[0].status, VerifStatus::Failed);
+    assert!(results[0].message.contains("integer overflow"));
+}
+
+#[test]
+fn verify_i32_div_rem_keep_truncation_toward_zero() {
+    require_z3!();
+    let src = r#"
+func quotient() -> i32 {
+    ensures: result == -2
+    -7 / 3
+}
+func remainder() -> i32 {
+    ensures: result == -1
+    -7 % 3
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert!(
+        results.iter().all(|r| r.status == VerifStatus::Verified),
+        "{results:?}"
+    );
+}
+
+#[test]
+fn verify_i32_div_rejects_zero_and_min_overflow() {
+    require_z3!();
+    let src = r#"
+func maybe_divide_by_zero(x: i32, y: i32) -> i32 {
+    ensures: result == x / y
+    x / y
+}
+func min_div_neg_one() -> i32 {
+    ensures: result == -2147483648 / -1
+    -2147483648 / -1
+}
+func min_rem_neg_one() -> i32 {
+    ensures: result == -2147483648 % -1
+    -2147483648 % -1
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert_eq!(results.len(), 3);
+    assert!(
+        results.iter().all(|r| r.status == VerifStatus::Failed),
+        "{results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|r| r.message.contains("integer operation is undefined")),
+        "{results:?}"
+    );
+}
+
+#[test]
+fn verify_i32_div_definedness_can_be_proven_separately() {
+    require_z3!();
+    let src = r#"
+func divide(x: i32, y: i32) -> i32 {
+    requires: y != 0 && (x != -2147483648 || y != -1)
+    ensures: result == x / y
+    x / y
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert_eq!(
+        results[0].status,
+        VerifStatus::Verified,
+        "{}",
+        results[0].message
+    );
+}
