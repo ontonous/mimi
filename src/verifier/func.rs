@@ -342,6 +342,10 @@ impl VerifierCtx {
             .ret
             .as_ref()
             .is_some_and(|t| matches!(t, Type::Name(n, _) if n == "bool" || n == "Bool"));
+        let returns_i32 = func
+            .ret
+            .as_ref()
+            .is_some_and(|t| matches!(t, Type::Name(n, _) if n == "i32" || n == "Int"));
 
         let mut vars = Z3VarMap::new();
         let mut old_names: Vec<String> = Vec::with_capacity(func.params.len());
@@ -397,6 +401,12 @@ impl VerifierCtx {
         } else {
             let z3_result = Z3Int::new_const("result");
             vars.insert_int("result", z3_result.clone());
+            if returns_i32 {
+                let lo = Z3Int::from_i64(i32::MIN as i64);
+                let hi = Z3Int::from_i64(i32::MAX as i64);
+                session.assert(z3_result.ge(&lo));
+                session.assert(z3_result.le(&hi));
+            }
         }
 
         for (i, p) in func.params.iter().enumerate() {
@@ -632,7 +642,65 @@ impl VerifierCtx {
                         "could not encode return expression — result may be unconstrained".into(),
                     );
                 }
-            } else if let Some(body_z3) = expr::expr_to_z3_int(return_expr, &mut vars) {
+            } else if !returns_i32 {
+                if let Some(body_z3) = expr::expr_to_z3_int(return_expr, &mut vars) {
+                    if let Some(i) = vars.get_int("result") {
+                        session.assert(i.eq(&body_z3));
+                    }
+                } else {
+                    parse_errors.push(
+                        "could not encode return expression — result may be unconstrained".into(),
+                    );
+                }
+            } else if let Some(obligations) =
+                expr::i32_definedness_obligations(return_expr, &mut vars)
+            {
+                for obligation in obligations {
+                    let (proof, _) = session.check_scope(obligation.condition.not());
+                    match proof {
+                        SatResult::Unsat => session.assert(obligation.condition),
+                        SatResult::Sat => {
+                            return VerificationResult {
+                                func_name: func.name.clone(),
+                                status: VerifStatus::Failed,
+                                message: obligation.failure.into(),
+                                diagnostic: Some(
+                                    Diagnostic::error(
+                                        obligation.failure,
+                                        Span::single(func.pos.0, func.pos.1),
+                                    )
+                                    .with_help("strengthen requires so the operation is defined"),
+                                ),
+                                duration_us: start.elapsed().as_micros() as u64,
+                                constraint_count: requires_exprs.len() + 1,
+                            };
+                        }
+                        SatResult::Unknown => {
+                            return VerificationResult {
+                                func_name: func.name.clone(),
+                                status: VerifStatus::Unknown,
+                                message: format!(
+                                    "solver could not prove integer definedness: {}",
+                                    obligation.failure
+                                ),
+                                diagnostic: None,
+                                duration_us: start.elapsed().as_micros() as u64,
+                                constraint_count: requires_exprs.len() + 1,
+                            };
+                        }
+                    }
+                }
+                let Some(body_z3) = expr::expr_to_z3_int(return_expr, &mut vars) else {
+                    return VerificationResult {
+                        func_name: func.name.clone(),
+                        status: VerifStatus::Unknown,
+                        message: "could not encode return expression — result may be unconstrained"
+                            .into(),
+                        diagnostic: None,
+                        duration_us: start.elapsed().as_micros() as u64,
+                        constraint_count: requires_exprs.len(),
+                    };
+                };
                 if let Some(i) = vars.get_int("result") {
                     session.assert(i.eq(&body_z3));
                 }
