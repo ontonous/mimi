@@ -154,7 +154,8 @@ use std::collections::HashSet;
 
 static LIVE_MAPS: std::sync::OnceLock<Mutex<HashSet<MapHandle>>> = std::sync::OnceLock::new();
 static LIVE_SETS: std::sync::OnceLock<Mutex<HashSet<i64>>> = std::sync::OnceLock::new();
-static LIVE_ACTORS: std::sync::OnceLock<Mutex<HashSet<usize>>> = std::sync::OnceLock::new();
+static LIVE_ACTORS: std::sync::OnceLock<Mutex<HashMap<usize, std::sync::Arc<MimiActorRepr>>>> =
+    std::sync::OnceLock::new();
 
 fn live_maps() -> &'static Mutex<HashSet<MapHandle>> {
     LIVE_MAPS.get_or_init(|| Mutex::new(HashSet::new()))
@@ -162,8 +163,8 @@ fn live_maps() -> &'static Mutex<HashSet<MapHandle>> {
 fn live_sets() -> &'static Mutex<HashSet<i64>> {
     LIVE_SETS.get_or_init(|| Mutex::new(HashSet::new()))
 }
-fn live_actors() -> &'static Mutex<HashSet<usize>> {
-    LIVE_ACTORS.get_or_init(|| Mutex::new(HashSet::new()))
+fn live_actors() -> &'static Mutex<HashMap<usize, std::sync::Arc<MimiActorRepr>>> {
+    LIVE_ACTORS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn map_register_live(handle: MapHandle) {
@@ -209,25 +210,25 @@ fn set_is_live(handle: i64) -> bool {
     g.contains(&handle)
 }
 
-fn actor_register_live(handle: usize) {
+fn actor_register_live(handle: usize, actor: std::sync::Arc<MimiActorRepr>) {
     if handle != 0 {
         let mut g = live_actors().lock().unwrap_or_else(|e| e.into_inner());
-        g.insert(handle);
+        g.insert(handle, actor);
     }
 }
-fn actor_take_live(handle: usize) -> bool {
+fn actor_take_live(handle: usize) -> Option<std::sync::Arc<MimiActorRepr>> {
     if handle == 0 {
-        return false;
+        return None;
     }
     let mut g = live_actors().lock().unwrap_or_else(|e| e.into_inner());
     g.remove(&handle)
 }
-fn actor_is_live(handle: usize) -> bool {
+fn actor_pin_live(handle: usize) -> Option<std::sync::Arc<MimiActorRepr>> {
     if handle == 0 {
-        return false;
+        return None;
     }
     let g = live_actors().lock().unwrap_or_else(|e| e.into_inner());
-    g.contains(&handle)
+    g.get(&handle).cloned()
 }
 
 // ---------------------------------------------------------------------------
@@ -22513,23 +22514,33 @@ struct MimiActorRepr {
     #[allow(dead_code)]
     fields: Box<[u8]>,
     /// Mailbox sender — clone retained by the handle; worker holds the receiver.
-    mailbox_tx: std::sync::mpsc::Sender<ActorMailboxMsg>,
+    mailbox_tx: std::sync::Mutex<Option<std::sync::mpsc::Sender<ActorMailboxMsg>>>,
     /// Worker thread join handle (joined on drop).
-    worker: Option<std::thread::JoinHandle<()>>,
+    worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     /// v0.29.11: Fault absorption — when set, mailbox is short-circuited (O(1)).
     /// Shared with the worker so both call and drain paths see the same flag.
     faulted: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// v0.29.21: mailbox high-water depth limit.
-    mailbox_depth_limit: usize,
+    mailbox_depth_limit: std::sync::atomic::AtomicUsize,
     /// v0.29.21: approximate in-flight message count.
     mailbox_depth: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// v0.29.21: muted under backpressure.
     muted: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// v0.29.25: method_id → method name for polymorphic broadcast name resolution.
     method_names: std::sync::Mutex<Vec<String>>,
-    /// C6: in-flight call counter. mimi_actor_call increments before using repr;
-    /// mimi_actor_drop waits for this to reach 0 before freeing.
-    in_flight_calls: std::sync::atomic::AtomicU32,
+}
+
+impl Drop for MimiActorRepr {
+    fn drop(&mut self) {
+        // Closing the final sender lets the worker drain queued messages and exit.
+        self.mailbox_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(worker) = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 // SAFETY: `MimiActorRepr` is shared between the caller thread (which holds the
@@ -22700,43 +22711,60 @@ pub extern "C" fn mimi_actor_spawn(
         }
     };
 
-    let repr = Box::new(MimiActorRepr {
+    let repr = std::sync::Arc::new(MimiActorRepr {
         id,
         fields: Box::new([]), // handle doesn't own live fields; worker does
-        mailbox_tx: tx,
-        worker: Some(handle),
+        mailbox_tx: std::sync::Mutex::new(Some(tx)),
+        worker: std::sync::Mutex::new(Some(handle)),
         faulted,
-        mailbox_depth_limit,
+        mailbox_depth_limit: std::sync::atomic::AtomicUsize::new(mailbox_depth_limit),
         mailbox_depth,
         muted,
         method_names: std::sync::Mutex::new(Vec::new()),
-        in_flight_calls: std::sync::atomic::AtomicU32::new(0),
     });
 
     ACTOR_SPAWN_COUNT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    let raw = Box::into_raw(repr) as *mut std::ffi::c_void;
+    let raw = std::sync::Arc::as_ptr(&repr) as *mut std::ffi::c_void;
     // R-C11: register live actor handle.
-    actor_register_live(raw as usize);
+    actor_register_live(raw as usize, repr);
     raw
 }
 
-/// R-C11: validate actor handle is non-null and still registered live.
-/// Returns false for null / double-dropped handles (callers treat as no-op or 0).
-fn actor_handle_live(handle: *mut std::ffi::c_void) -> bool {
-    !handle.is_null() && actor_is_live(handle as usize)
+/// Pin a live actor while holding the registry lock.
+///
+/// The returned Arc must be acquired before any actor state is accessed. Drop
+/// first detaches the handle from this registry, so no new pin can race with
+/// destruction while existing operations keep the control block alive.
+fn actor_pin_handle(handle: *mut std::ffi::c_void) -> Option<std::sync::Arc<MimiActorRepr>> {
+    if handle.is_null() {
+        None
+    } else {
+        actor_pin_live(handle as usize)
+    }
+}
+
+#[cfg(test)]
+static ACTOR_CALL_PAUSE_AFTER_PIN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static ACTOR_CALL_PIN_REACHED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) fn actor_test_pause_after_pin(pause: bool) {
+    ACTOR_CALL_PIN_REACHED.store(false, std::sync::atomic::Ordering::Release);
+    ACTOR_CALL_PAUSE_AFTER_PIN.store(pause, std::sync::atomic::Ordering::Release);
+}
+
+#[cfg(test)]
+pub(crate) fn actor_test_pin_reached() -> bool {
+    ACTOR_CALL_PIN_REACHED.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Get the actor ID from a handle. Used by codegen for self-call detection.
 #[no_mangle]
 pub extern "C" fn mimi_actor_id(handle: *mut std::ffi::c_void) -> u64 {
-    if !actor_handle_live(handle) {
-        return 0;
-    }
-    // SAFETY: handle is live and registered; created by mimi_actor_spawn.
-    unsafe {
-        let repr = &*(handle as *const MimiActorRepr);
-        repr.id
-    }
+    actor_pin_handle(handle).map_or(0, |actor| actor.id)
 }
 
 /// Get the current actor ID (thread-local). Returns 0 if not on an actor worker.
@@ -22744,26 +22772,6 @@ pub extern "C" fn mimi_actor_id(handle: *mut std::ffi::c_void) -> u64 {
 #[no_mangle]
 pub extern "C" fn mimi_actor_current_id() -> u64 {
     CURRENT_ACTOR_ID.with(|c| c.get())
-}
-
-/// C6: RAII guard that decrements an in-flight call counter on drop.
-/// Used by mimi_actor_call to prevent UAF during concurrent mimi_actor_drop.
-struct InFlightGuard<'a> {
-    counter: &'a std::sync::atomic::AtomicU32,
-}
-
-impl<'a> InFlightGuard<'a> {
-    fn new(counter: &'a std::sync::atomic::AtomicU32) -> Self {
-        counter.fetch_add(1, std::sync::atomic::Ordering::Acquire);
-        InFlightGuard { counter }
-    }
-}
-
-impl<'a> Drop for InFlightGuard<'a> {
-    fn drop(&mut self) {
-        self.counter
-            .fetch_sub(1, std::sync::atomic::Ordering::Release);
-    }
 }
 
 /// Call an actor method (blocking).
@@ -22790,21 +22798,16 @@ pub extern "C" fn mimi_actor_call(
     args_size: i64,
     result_ptr: *mut std::ffi::c_void,
 ) -> i64 {
-    if !actor_handle_live(handle) {
+    let Some(repr) = actor_pin_handle(handle) else {
         return 0;
-    }
+    };
 
-    // SAFETY: handle is live and registered from mimi_actor_spawn.
-    let repr = unsafe { &*(handle as *const MimiActorRepr) };
-
-    // C6: increment in-flight counter to prevent UAF during concurrent drop.
-    // mimi_actor_drop waits for this to reach 0 before freeing.
-    let _guard = InFlightGuard::new(&repr.in_flight_calls);
-
-    // Re-check liveness after increment: if mimi_actor_drop removed us from
-    // the live set between check and fetch_add, release and return 0.
-    if !actor_handle_live(handle) {
-        return 0;
+    #[cfg(test)]
+    if ACTOR_CALL_PAUSE_AFTER_PIN.load(std::sync::atomic::Ordering::Acquire) {
+        ACTOR_CALL_PIN_REACHED.store(true, std::sync::atomic::Ordering::Release);
+        while ACTOR_CALL_PAUSE_AFTER_PIN.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::yield_now();
+        }
     }
 
     // v0.29.11: O(1) mailbox short-circuit after Fault absorption.
@@ -22820,7 +22823,10 @@ pub extern "C" fn mimi_actor_call(
             .mailbox_depth
             .load(std::sync::atomic::Ordering::Acquire);
         let muted = repr.muted.load(std::sync::atomic::Ordering::Acquire);
-        let over = depth >= repr.mailbox_depth_limit;
+        let over = depth
+            >= repr
+                .mailbox_depth_limit
+                .load(std::sync::atomic::Ordering::Acquire);
         if !muted && !over {
             break;
         }
@@ -22855,11 +22861,22 @@ pub extern "C" fn mimi_actor_call(
         .mailbox_depth
         .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
         + 1;
-    if d > repr.mailbox_depth_limit {
+    if d > repr
+        .mailbox_depth_limit
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
         repr.muted.store(true, std::sync::atomic::Ordering::Release);
     }
     // Send to mailbox. If the channel is closed (actor dropped), return 0.
-    if repr.mailbox_tx.send(msg).is_err() {
+    let mailbox_tx = repr
+        .mailbox_tx
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if match mailbox_tx {
+        Some(tx) => tx.send(msg).is_err(),
+        None => true,
+    } {
         let _ = repr.mailbox_depth.fetch_update(
             std::sync::atomic::Ordering::AcqRel,
             std::sync::atomic::Ordering::Acquire,
@@ -22893,33 +22910,18 @@ pub extern "C" fn mimi_actor_call(
 /// mailbox sender) and joins it.
 #[no_mangle]
 pub extern "C" fn mimi_actor_drop(handle: *mut std::ffi::c_void) {
-    // R-C11: double drop is a no-op; only free if still live.
-    if !actor_take_live(handle as usize) {
+    // Detach under the registry lock. Existing operations own Arc pins; new
+    // operations cannot obtain one, and final destruction is delayed safely.
+    let Some(actor) = actor_take_live(handle as usize) else {
         return;
-    }
+    };
     // v0.29.24: free a spawn slot.
     let _ = ACTOR_SPAWN_COUNT.fetch_update(
         std::sync::atomic::Ordering::AcqRel,
         std::sync::atomic::Ordering::Acquire,
         |v| Some(v.saturating_sub(1)),
     );
-    // C6: wait for all in-flight calls to complete before freeing.
-    // actor_take_live prevents NEW calls; existing calls that started before
-    // our removal hold the in_flight counter and will decrement on return.
-    let repr = unsafe { &*(handle as *const MimiActorRepr) };
-    while repr.in_flight_calls.load(std::sync::atomic::Ordering::Acquire) > 0 {
-        std::thread::yield_now();
-    }
-    // SAFETY: handle was live and removed under lock; exclusive ownership restored.
-    // Drop closes mailbox_tx so worker recv() returns Err and exits; then join.
-    unsafe {
-        let mut repr = Box::from_raw(handle as *mut MimiActorRepr);
-        let worker = repr.worker.take();
-        drop(repr);
-        if let Some(w) = worker {
-            let _ = w.join();
-        }
-    }
+    drop(actor);
 }
 
 /// v0.29.11: Mark an actor as Faulted and short-circuit its mailbox (O(1)).
@@ -22927,11 +22929,9 @@ pub extern "C" fn mimi_actor_drop(handle: *mut std::ffi::c_void) {
 /// any already-queued messages without dispatch.
 #[no_mangle]
 pub extern "C" fn mimi_actor_fault(handle: *mut std::ffi::c_void) {
-    if !actor_handle_live(handle) {
+    let Some(repr) = actor_pin_handle(handle) else {
         return;
-    }
-    // SAFETY: handle is live and registered from mimi_actor_spawn.
-    let repr = unsafe { &*(handle as *const MimiActorRepr) };
+    };
     repr.faulted
         .store(true, std::sync::atomic::Ordering::Release);
 }
@@ -22940,11 +22940,9 @@ pub extern "C" fn mimi_actor_fault(handle: *mut std::ffi::c_void) {
 /// Returns 1 if faulted, 0 otherwise (or if handle is null).
 #[no_mangle]
 pub extern "C" fn mimi_actor_is_faulted(handle: *mut std::ffi::c_void) -> i32 {
-    if !actor_handle_live(handle) {
+    let Some(repr) = actor_pin_handle(handle) else {
         return 0;
-    }
-    // SAFETY: handle is live and registered from mimi_actor_spawn.
-    let repr = unsafe { &*(handle as *const MimiActorRepr) };
+    };
     if repr.faulted.load(std::sync::atomic::Ordering::Acquire) {
         1
     } else {
@@ -22955,21 +22953,22 @@ pub extern "C" fn mimi_actor_is_faulted(handle: *mut std::ffi::c_void) -> i32 {
 /// v0.29.21: set mailbox high-water depth limit for backpressure.
 #[no_mangle]
 pub extern "C" fn mimi_actor_set_mailbox_depth(handle: *mut std::ffi::c_void, depth: i64) {
-    if !actor_handle_live(handle) || depth <= 0 {
+    if depth <= 0 {
         return;
     }
-    // SAFETY: handle is live and registered from mimi_actor_spawn.
-    let repr = unsafe { &mut *(handle as *mut MimiActorRepr) };
-    repr.mailbox_depth_limit = depth as usize;
+    let Some(repr) = actor_pin_handle(handle) else {
+        return;
+    };
+    repr.mailbox_depth_limit
+        .store(depth as usize, std::sync::atomic::Ordering::Release);
 }
 
 /// v0.29.21: current approximate mailbox depth.
 #[no_mangle]
 pub extern "C" fn mimi_actor_mailbox_depth(handle: *mut std::ffi::c_void) -> i64 {
-    if !actor_handle_live(handle) {
+    let Some(repr) = actor_pin_handle(handle) else {
         return 0;
-    }
-    let repr = unsafe { &*(handle as *const MimiActorRepr) };
+    };
     repr.mailbox_depth
         .load(std::sync::atomic::Ordering::Acquire) as i64
 }
@@ -22977,10 +22976,9 @@ pub extern "C" fn mimi_actor_mailbox_depth(handle: *mut std::ffi::c_void) -> i64
 /// v0.29.21: 1 if actor is muted under backpressure, else 0.
 #[no_mangle]
 pub extern "C" fn mimi_actor_is_muted(handle: *mut std::ffi::c_void) -> i32 {
-    if !actor_handle_live(handle) {
+    let Some(repr) = actor_pin_handle(handle) else {
         return 0;
-    }
-    let repr = unsafe { &*(handle as *const MimiActorRepr) };
+    };
     if repr.muted.load(std::sync::atomic::Ordering::Acquire) {
         1
     } else {
@@ -23015,10 +23013,12 @@ pub extern "C" fn mimi_actor_set_method_names(
     names: *const *const std::os::raw::c_char,
     count: i64,
 ) {
-    if !actor_handle_live(handle) || names.is_null() || count <= 0 {
+    if names.is_null() || count <= 0 {
         return;
     }
-    let repr = unsafe { &*(handle as *const MimiActorRepr) };
+    let Some(repr) = actor_pin_handle(handle) else {
+        return;
+    };
     let slice = unsafe { std::slice::from_raw_parts(names, count as usize) };
     let mut v = Vec::with_capacity(count as usize);
     for &p in slice {
@@ -23033,7 +23033,7 @@ pub extern "C" fn mimi_actor_set_method_names(
     }
     if let Ok(mut g) = repr.method_names.lock() {
         *g = v;
-    }
+    };
 }
 
 /// Resolve method name to method_id for a handle; returns -1 if not found.
@@ -23042,10 +23042,12 @@ pub extern "C" fn mimi_actor_method_id(
     handle: *mut std::ffi::c_void,
     name: *const std::os::raw::c_char,
 ) -> i32 {
-    if !actor_handle_live(handle) || name.is_null() {
+    if name.is_null() {
         return -1;
     }
-    let repr = unsafe { &*(handle as *const MimiActorRepr) };
+    let Some(repr) = actor_pin_handle(handle) else {
+        return -1;
+    };
     let needle = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy();
     if let Ok(g) = repr.method_names.lock() {
         for (i, n) in g.iter().enumerate() {
