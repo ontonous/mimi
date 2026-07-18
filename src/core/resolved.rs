@@ -3888,8 +3888,9 @@ func main() -> i32 {
         let file = parse(
             r#"
 actor Worker {
-    func run(x: i32) -> i32 { x }
+    func run(x: i32) -> i32 with Io { x }
 }
+cap Io
 func main() -> i32 { 0 }
 "#,
         );
@@ -3905,11 +3906,27 @@ func main() -> i32 { 0 }
             interp.resolved_actor_method_signature("Worker", "run"),
             Some((1, "i32".into()))
         );
+        assert_eq!(
+            interp.resolved_actor_method_params("Worker", "run"),
+            Some(vec![("x".into(), "i32".into())])
+        );
+        assert_eq!(
+            interp.resolved_actor_method_effects("Worker", "run"),
+            Some(vec!["Io".into()])
+        );
         let mut verifier = crate::verifier::Verifier::new().expect("z3");
         let _ = verifier.verify_checked(&program);
         assert_eq!(
             verifier.checked_actor_method_signature("Worker", "run"),
             Some((1, "i32".into()))
+        );
+        assert_eq!(
+            verifier.checked_actor_method_params("Worker", "run"),
+            Some(vec![("x".into(), "i32".into())])
+        );
+        assert_eq!(
+            verifier.checked_actor_method_effects("Worker", "run"),
+            Some(vec!["Io".into()])
         );
         let context = inkwell::context::Context::create();
         let mut codegen = crate::codegen::CodeGenerator::new(&context, "actor_sig");
@@ -3917,6 +3934,14 @@ func main() -> i32 { 0 }
         assert_eq!(
             codegen.resolved_actor_method_signature("Worker", "run"),
             Some((1, "i32".into()))
+        );
+        assert_eq!(
+            codegen.resolved_actor_method_params("Worker", "run"),
+            Some(vec![("x".into(), "i32".into())])
+        );
+        assert_eq!(
+            codegen.resolved_actor_method_effects("Worker", "run"),
+            Some(vec!["Io".into()])
         );
     }
 

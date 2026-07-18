@@ -70,6 +70,8 @@
 - NodeMeta span 目录安装到 consumers。
 - trait/impl method 参数目录与 effects 目录安装到 consumers。
 - Protocol 状态名称与具名 payload 目录安装到 consumers。
+- Actor method 参数与 effects 目录安装到 consumers。
+- Actor method 参数与 effects 目录安装到 consumers。
 - ResolvedFlow 与 consumers 安装 `impl Protocol` 列表。
 - ResolvedTransition 记录 is_fallback/is_ffi_pinned，并安装到 interpreter/codegen/verifier 目录。
 - interpreter 暴露 resolved transition targets 查询。
