@@ -570,16 +570,21 @@ impl<'a> Interpreter<'a> {
             .resolved_persistent_fields(&flow.name)
             .unwrap_or_else(|| flow.persistent_fields.clone());
 
-        // v0.29.14: snapshot persistent fields at turn entry (WAL + dirty check).
-        if let Some(from_payload) = vals.first() {
-            self.begin_persistent_tx(&flow.name, flow, from_payload);
+        let is_recovery = (t.name == "reset" || t.name == "recover") && t.from_state == "Fault";
+
+        // A Fault owns the snapshot from the turn that produced it until reset/recover.
+        // Starting a recovery turn must not replace that snapshot with the Fault payload.
+        if !is_recovery {
+            if let Some(from_payload) = vals.first() {
+                self.begin_persistent_tx(&flow.name, flow, from_payload);
+            }
         }
 
         self.push_scope();
 
         // Bind self to the first argument (from-state payload)
         let self_val = vals.first().cloned().unwrap_or(Value::Unit);
-        self.bind("self", self_val)?;
+        self.bind_mut("self", self_val)?;
 
         // Bind transition params from remaining args
         for (i, param) in t.params.iter().enumerate() {
@@ -594,6 +599,7 @@ impl<'a> Interpreter<'a> {
         // Execute the transition body
         let result = self.eval_block(body);
         let call_stack = self.scope_env.call_stack.clone();
+        let draft = self.lookup("self").or_else(|| vals.first().cloned());
 
         self.pop_scope();
 
@@ -618,7 +624,7 @@ impl<'a> Interpreter<'a> {
                 let mut fault =
                     crate::flow_matrix::make_fault_value(&t.from_state, &event, &snapshot);
                 // Shadow persistent fields for recover (WAL-restored first).
-                if let Some(from_payload) = vals.first() {
+                if let Some(from_payload) = draft.as_ref() {
                     let restored = self.abort_persistent_tx_restore(&flow.name, from_payload, flow);
                     shadow_persistent_into_fault(&mut fault, &restored, &persistent_fields);
                     drop_fault_payload_except(&restored, &persistent_fields);
@@ -643,11 +649,11 @@ impl<'a> Interpreter<'a> {
 
         // Fault absorption: drop abandoned from-state payload (+ mailbox short-circuit).
         // v0.29.13: skip Drop on persistent fields (they live on as Fault shadows).
-        let enters_fault = t.is_fallback
+        let enters_fault = (t.is_fallback && !is_recovery)
             || t.to_states.iter().any(|s| s == "Fault")
             || matches!(&out, Value::Record(Some(n), _) if n == "Fault");
         if enters_fault {
-            if let Some(from_payload) = vals.first() {
+            if let Some(from_payload) = draft.as_ref() {
                 let restored = self.abort_persistent_tx_restore(&flow.name, from_payload, flow);
                 // Re-shadow Fault payload with WAL-restored values if the body
                 // already constructed a Fault record.
@@ -678,9 +684,6 @@ impl<'a> Interpreter<'a> {
             }
             self.current_flow_state = prev_flow_state;
             return Ok(out_fault);
-        } else {
-            // Success: commit (drop snapshot).
-            self.commit_persistent_tx(&flow.name);
         }
 
         // v0.29.13/14: reset / recover clear actor faulted flags.
@@ -693,7 +696,7 @@ impl<'a> Interpreter<'a> {
                     if self.persistent_dirty_for_recover(flow, from_payload) {
                         // Dirty non-transactional persistent data → degrade to reset
                         // by zeroing non-default persistent fields on the result.
-                        final_out = force_reset_persistent(&final_out, flow);
+                        final_out = force_reset_persistent(&final_out, &persistent_fields);
                     }
                 }
             }
@@ -703,6 +706,9 @@ impl<'a> Interpreter<'a> {
             clear_faulted_actors(&final_out);
             // Clear any residual tx state after recovery.
             self.flow_tx.remove(&flow.name);
+        } else {
+            // A successful ordinary turn publishes its result and releases the snapshot.
+            self.commit_persistent_tx(&flow.name);
         }
 
         self.current_flow_state = prev_flow_state;
@@ -754,10 +760,7 @@ impl<'a> Interpreter<'a> {
     }
 
     fn commit_persistent_tx(&mut self, flow_name: &str) {
-        if let Some(tx) = self.flow_tx.get_mut(flow_name) {
-            tx.snapshot.clear();
-            tx.committed = true;
-        }
+        self.flow_tx.remove(flow_name);
     }
 
     fn abort_persistent_tx(&mut self, flow_name: &str) {
@@ -778,7 +781,7 @@ impl<'a> Interpreter<'a> {
     ) -> Value {
         let _persistent_fields = self.effective_persistent_fields(flow);
         let transactional_fields = self.effective_transactional_fields(flow);
-        let tx = self.flow_tx.remove(flow_name);
+        let tx = self.flow_tx.get(flow_name).cloned();
         let mut restored = from_payload.clone();
         let Some(tx) = tx else {
             return restored;
@@ -826,7 +829,7 @@ impl<'a> Interpreter<'a> {
     /// snapshot metadata so persistent data is not silently lost.
     fn abort_persistent_tx_restore_or_empty(&mut self, flow_name: &str, flow: &FlowDef) -> Value {
         let _persistent_fields = self.effective_persistent_fields(flow);
-        let tx = self.flow_tx.remove(flow_name);
+        let tx = self.flow_tx.get(flow_name).cloned();
         let Some(tx) = tx else {
             return Value::Unit;
         };
@@ -890,12 +893,12 @@ impl<'a> Interpreter<'a> {
 }
 
 /// Zero persistent fields on a recovered root (degrade recover → reset).
-fn force_reset_persistent(val: &Value, flow: &FlowDef) -> Value {
+fn force_reset_persistent(val: &Value, persistent_fields: &[String]) -> Value {
     let Value::Record(name, fields) = val else {
         return val.clone();
     };
     let mut fields = fields.clone();
-    for pname in &flow.persistent_fields {
+    for pname in persistent_fields {
         if let Some(entry) = fields.get_mut(pname) {
             *entry = default_value_for_runtime(entry);
         }
