@@ -74,6 +74,7 @@
 - Extern 函数参数名称与类型目录安装到 consumers。
 - `emit-*` / `bindgen` 在生成任何外部接口前强制通过 CheckedProgram 与 Component capability gate。
 - `emit-*` / `bindgen` 的 extern 发现迁移到结构化 ResolvedExternFunc catalog，重复投影符号 fail-closed。
+- Component exported-function 发现迁移到 ResolvedFunction ABI catalog，异步/泛型导出 fail-closed。
 - ResolvedFlow 与 consumers 安装 `impl Protocol` 列表。
 - ResolvedTransition 记录 is_fallback/is_ffi_pinned，并安装到 interpreter/codegen/verifier 目录。
 - interpreter 暴露 resolved transition targets 查询。
