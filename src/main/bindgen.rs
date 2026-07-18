@@ -14,12 +14,11 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
     let source = mimi::path_safety::read_source_capped(path)?;
     let tokens = mimi::lexer::Lexer::new(&source).tokenize()?;
     let file = mimi::parser::Parser::new(tokens).parse_file()?;
-    crate::emit::validate_component_input(&file)?;
+    let checked = crate::emit::checked_component_input(&file)?;
 
-    let mut extern_funcs = Vec::new();
+    let mut extern_funcs = crate::emit::resolved_extern_funcs(&checked)?;
     let mut exported_funcs = Vec::new();
     let mut type_defs = HashMap::new();
-    collect_extern_and_types(&file, &mut extern_funcs, &mut type_defs);
     collect_exported_and_types(&file, &mut exported_funcs, &mut type_defs);
 
     if extern_funcs.is_empty() && exported_funcs.is_empty() {
@@ -164,35 +163,6 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
     );
 
     Ok(())
-}
-
-fn collect_extern_and_types(
-    file: &ast::File,
-    extern_funcs: &mut Vec<ast::ExternFunc>,
-    type_defs: &mut HashMap<String, ast::TypeDef>,
-) {
-    for item in &file.items {
-        match item {
-            ast::Item::ExternBlock(block) => {
-                extern_funcs.extend(block.funcs.iter().cloned());
-            }
-            ast::Item::Type(t) => {
-                type_defs.insert(t.name.clone(), t.clone());
-            }
-            ast::Item::Module(m) => {
-                collect_extern_and_types(
-                    &ast::File {
-                        imports: Vec::new(),
-                        items: m.items.clone(),
-                        implicit_single: false,
-                    },
-                    extern_funcs,
-                    type_defs,
-                );
-            }
-            _ => {}
-        }
-    }
 }
 
 fn collect_exported_and_types(
