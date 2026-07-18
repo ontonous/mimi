@@ -342,6 +342,60 @@ impl<'a> Checker<'a> {
         }
     }
 
+    pub(crate) fn consume_capabilities_in_expr(
+        &mut self,
+        expr: &Expr,
+        kind: super::ResourceActionKind,
+    ) {
+        fn collect(expr: &Expr, names: &mut HashSet<String>) {
+            match expr {
+                Expr::Ident(name) => {
+                    names.insert(name.clone());
+                }
+                Expr::Tuple(values) | Expr::List(values) | Expr::SetLiteral(values) => {
+                    for value in values {
+                        collect(value, names);
+                    }
+                }
+                Expr::TupleIndex(value, _)
+                | Expr::Field(value, _)
+                | Expr::Unary(_, value)
+                | Expr::Cast(value, _)
+                | Expr::NamedArg(_, value) => collect(value, names),
+                Expr::Index(value, index) => {
+                    collect(value, names);
+                    collect(index, names);
+                }
+                Expr::Record { fields, .. } => {
+                    for field in fields {
+                        collect(&field.value, names);
+                    }
+                }
+                Expr::If { then_, else_, .. } => {
+                    for block in std::iter::once(then_).chain(else_.iter()) {
+                        if let Some(Stmt::Expr(value) | Stmt::Return(Some(value))) = block.last() {
+                            collect(value, names);
+                        }
+                    }
+                }
+                Expr::Match(_, arms) => {
+                    for arm in arms {
+                        collect(&arm.body, names);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut names = HashSet::new();
+        collect(expr, &mut names);
+        for name in names {
+            if self.cap_info(&name).is_some() {
+                self.consume_capability(&name, kind.clone());
+            }
+        }
+    }
+
     pub(crate) fn begin_callable_ownership(
         &mut self,
         owner: super::NodeId,
