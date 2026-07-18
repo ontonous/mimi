@@ -157,6 +157,10 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_protocol_transitions: Option<HashMap<String, Vec<(String, String, String)>>>,
     /// Protocol state payloads: "Protocol.State" -> payload type display.
     pub(in crate::interp) resolved_protocol_payloads: Option<HashMap<String, String>>,
+    /// Protocol state name lists: "Protocol" -> [state_name].
+    pub(in crate::interp) resolved_protocol_states: Option<HashMap<String, Vec<String>>>,
+    /// Protocol state payload records: "Protocol.State" -> (payload_name, payload_type).
+    pub(in crate::interp) resolved_protocol_state_payloads: Option<HashMap<String, (String, String)>>,
     /// Actor method directories materialised from CheckedProgram: actor -> methods.
     pub(in crate::interp) resolved_actors: Option<HashMap<String, Vec<String>>>,
     /// Actor method signatures: "Actor.method" -> (arity, ret).
@@ -411,6 +415,8 @@ impl<'a> Interpreter<'a> {
         interp.resolved_protocols = Some(protocols);
         let mut protocol_transitions = HashMap::new();
         let mut protocol_payloads = HashMap::new();
+        let mut protocol_states = HashMap::new();
+        let mut protocol_state_payloads = HashMap::new();
         for protocol in program.protocols().values() {
             protocol_transitions.insert(
                 protocol.qualified_name.clone(),
@@ -426,17 +432,29 @@ impl<'a> Interpreter<'a> {
                     })
                     .collect(),
             );
+            let mut state_names: Vec<String> = protocol.states.clone();
+            state_names.sort();
+            protocol_states.insert(protocol.qualified_name.clone(), state_names);
             for state in &protocol.state_payloads {
                 if let Some(ty) = &state.payload_type {
                     protocol_payloads.insert(
                         format!("{}.{}", protocol.qualified_name, state.name),
                         ty.clone(),
                     );
+                    protocol_state_payloads.insert(
+                        format!("{}.{}", protocol.qualified_name, state.name),
+                        (
+                            state.payload_name.clone().unwrap_or_default(),
+                            ty.clone(),
+                        ),
+                    );
                 }
             }
         }
         interp.resolved_protocol_transitions = Some(protocol_transitions);
         interp.resolved_protocol_payloads = Some(protocol_payloads);
+        interp.resolved_protocol_states = Some(protocol_states);
+        interp.resolved_protocol_state_payloads = Some(protocol_state_payloads);
         let mut actors = HashMap::new();
         let mut actor_method_signatures = HashMap::new();
         let mut actor_fields = HashMap::new();
@@ -882,6 +900,22 @@ impl<'a> Interpreter<'a> {
         state: &str,
     ) -> Option<String> {
         self.resolved_protocol_payloads
+            .as_ref()
+            .and_then(|map| map.get(&format!("{protocol}.{state}")).cloned())
+    }
+
+    pub(crate) fn resolved_protocol_states(&self, protocol: &str) -> Option<Vec<String>> {
+        self.resolved_protocol_states
+            .as_ref()
+            .and_then(|map| map.get(protocol).cloned())
+    }
+
+    pub(crate) fn resolved_protocol_state_payload(
+        &self,
+        protocol: &str,
+        state: &str,
+    ) -> Option<(String, String)> {
+        self.resolved_protocol_state_payloads
             .as_ref()
             .and_then(|map| map.get(&format!("{protocol}.{state}")).cloned())
     }
@@ -1460,6 +1494,8 @@ impl<'a> Interpreter<'a> {
             resolved_protocols: None,
             resolved_protocol_transitions: None,
             resolved_protocol_payloads: None,
+            resolved_protocol_states: None,
+            resolved_protocol_state_payloads: None,
             resolved_actors: None,
             resolved_actor_method_signatures: None,
             resolved_actor_fields: None,
@@ -2593,5 +2629,4 @@ fn encode_resolved_const_value(value: &crate::core::ResolvedConstValue) -> Strin
         crate::core::ResolvedConstValue::Complex => "complex".into(),
     }
 }
-
 
