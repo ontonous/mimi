@@ -936,6 +936,7 @@ impl BodyLowerer<'_> {
                         "optional-chain field has no canonical declaration type",
                     )]
                 })?;
+                let field_type = self.instantiate_member_type(&node_id, &inner, &field_type)?;
                 ResolvedExprKind::OptionalChain {
                     receiver: Box::new(receiver),
                     field,
@@ -1247,12 +1248,13 @@ impl BodyLowerer<'_> {
                 )]
             })?;
             let field_id = self.resolve_field(node_id, ty, &declaration.name)?;
-            let target_ty = self.field_types.get(&field_id).ok_or_else(|| {
+            let declaration_ty = self.field_types.get(&field_id).ok_or_else(|| {
                 vec![ResolvedBodyError::new(
                     field_id.clone(),
                     "record field has no canonical declaration type",
                 )]
             })?;
+            let target_ty = self.instantiate_member_type(node_id, ty, declaration_ty)?;
             let value = self.lower_expr(
                 &value.value,
                 &format!(
@@ -1260,7 +1262,7 @@ impl BodyLowerer<'_> {
                     stable_id_fragment(&declaration.name)
                 ),
             )?;
-            let conversion = self.identity_conversion(node_id, &value.ty, target_ty)?;
+            let conversion = self.identity_conversion(node_id, &value.ty, &target_ty)?;
             lowered.push(ResolvedRecordField {
                 field: field_id,
                 value,
@@ -2148,13 +2150,15 @@ impl BodyLowerer<'_> {
                                     meta.map(|meta| meta.origin).unwrap_or(AstOrigin::User),
                                     &mut diagnostics,
                                 );
-                                let field_ty =
+                                let declaration_ty =
                                     self.field_types.get(&field).cloned().ok_or_else(|| {
                                         vec![ResolvedBodyError::new(
                                             field.clone(),
                                             "enum tuple payload has no canonical declaration type",
                                         )]
                                     })?;
+                                let field_ty =
+                                    self.instantiate_member_type(node_id, ty, &declaration_ty)?;
                                 declared.push((format!("_{index}"), field, field_ty));
                             }
                             declared
@@ -2170,13 +2174,15 @@ impl BodyLowerer<'_> {
                                     field.meta.origin,
                                     &mut diagnostics,
                                 );
-                                let field_ty =
+                                let declaration_ty =
                                     self.field_types.get(&field_id).cloned().ok_or_else(|| {
                                         vec![ResolvedBodyError::new(
                                             field_id.clone(),
                                             "enum record payload has no canonical declaration type",
                                         )]
                                     })?;
+                                let field_ty =
+                                    self.instantiate_member_type(node_id, ty, &declaration_ty)?;
                                 declared.push((field.name.clone(), field_id, field_ty));
                             }
                             declared
@@ -2495,6 +2501,166 @@ impl BodyLowerer<'_> {
             )]);
         }
         Ok(field_id)
+    }
+
+    fn instantiate_member_type(
+        &self,
+        node_id: &NodeId,
+        owner_ty: &ResolvedTypeId,
+        declaration_ty: &ResolvedTypeId,
+    ) -> Result<ResolvedTypeId, Vec<ResolvedBodyError>> {
+        let mut substitutions = BTreeMap::new();
+        if let Some(ResolvedType::Nominal { item, arguments }) = self.types.get(owner_ty) {
+            let owner = NodeId(item.as_str().to_string());
+            if let Some(definition) = self.type_defs.get(&owner) {
+                if definition.declaration.generics.len() != arguments.len() {
+                    return Err(vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        format!(
+                            "nominal owner '{}' has {} canonical arguments for {} generic binders",
+                            owner.0,
+                            arguments.len(),
+                            definition.declaration.generics.len()
+                        ),
+                    )]);
+                }
+                for (generic, argument) in definition.declaration.generics.iter().zip(arguments) {
+                    let mut diagnostics = Vec::new();
+                    let binder = self.ids.anonymous(
+                        &owner,
+                        "decl.generic_parameter",
+                        &format!("generic.{}", stable_id_fragment(&generic.name)),
+                        usable_span(generic.meta.span),
+                        generic.meta.origin,
+                        &mut diagnostics,
+                    );
+                    if !diagnostics.is_empty() || !self.node_meta.contains_key(&binder) {
+                        return Err(vec![ResolvedBodyError::new(
+                            node_id.clone(),
+                            format!(
+                                "generic binder '{}' has no stable declaration identity",
+                                generic.name
+                            ),
+                        )]);
+                    }
+                    substitutions.insert(binder, argument.clone());
+                }
+            }
+        }
+        self.substitute_member_type(node_id, declaration_ty, &substitutions)
+    }
+
+    fn substitute_member_type(
+        &self,
+        node_id: &NodeId,
+        declaration_ty: &ResolvedTypeId,
+        substitutions: &BTreeMap<NodeId, ResolvedTypeId>,
+    ) -> Result<ResolvedTypeId, Vec<ResolvedBodyError>> {
+        let declaration = self.types.get(declaration_ty).ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "member references missing canonical type '{}'",
+                    declaration_ty.as_str()
+                ),
+            )]
+        })?;
+        let substitute =
+            |child: &ResolvedTypeId| self.substitute_member_type(node_id, child, substitutions);
+        let resolved = match declaration {
+            ResolvedType::GenericParameter(parameter) => {
+                return substitutions.get(parameter).cloned().ok_or_else(|| {
+                    vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        format!(
+                            "member generic binder '{}' has no canonical instantiation",
+                            parameter.0
+                        ),
+                    )]
+                })
+            }
+            ResolvedType::Nominal { item, arguments } => ResolvedType::Nominal {
+                item: item.clone(),
+                arguments: arguments
+                    .iter()
+                    .map(substitute)
+                    .collect::<Result<Vec<_>, _>>()?,
+            },
+            ResolvedType::Reference {
+                lifetime,
+                mutable,
+                target,
+            } => ResolvedType::Reference {
+                lifetime: lifetime.clone(),
+                mutable: *mutable,
+                target: substitute(target)?,
+            },
+            ResolvedType::Option(inner) => ResolvedType::Option(substitute(inner)?),
+            ResolvedType::Result { ok, error } => ResolvedType::Result {
+                ok: substitute(ok)?,
+                error: substitute(error)?,
+            },
+            ResolvedType::Tuple(elements) => ResolvedType::Tuple(
+                elements
+                    .iter()
+                    .map(substitute)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            ResolvedType::Function {
+                abi,
+                parameters,
+                result,
+            } => ResolvedType::Function {
+                abi: *abi,
+                parameters: parameters
+                    .iter()
+                    .map(substitute)
+                    .collect::<Result<Vec<_>, _>>()?,
+                result: substitute(result)?,
+            },
+            ResolvedType::CBuffer(inner) => ResolvedType::CBuffer(substitute(inner)?),
+            ResolvedType::Ownership { kind, target } => ResolvedType::Ownership {
+                kind: *kind,
+                target: substitute(target)?,
+            },
+            ResolvedType::Newtype { item, inner } => ResolvedType::Newtype {
+                item: item.clone(),
+                inner: substitute(inner)?,
+            },
+            ResolvedType::Array { element, length } => ResolvedType::Array {
+                element: substitute(element)?,
+                length: *length,
+            },
+            ResolvedType::Slice(inner) => ResolvedType::Slice(substitute(inner)?),
+            ResolvedType::RawPointer { mutable, target } => ResolvedType::RawPointer {
+                mutable: *mutable,
+                target: substitute(target)?,
+            },
+            ResolvedType::CShared(inner) => ResolvedType::CShared(substitute(inner)?),
+            ResolvedType::CBorrow { mutable, target } => ResolvedType::CBorrow {
+                mutable: *mutable,
+                target: substitute(target)?,
+            },
+            ResolvedType::Primitive(_)
+            | ResolvedType::Capability(_)
+            | ResolvedType::Nothing
+            | ResolvedType::Allocator
+            | ResolvedType::Trait { .. }
+            | ResolvedType::RawString
+            | ResolvedType::DynamicAny { .. } => return Ok(declaration_ty.clone()),
+        };
+        if &resolved == declaration {
+            return Ok(declaration_ty.clone());
+        }
+        self.types
+            .iter()
+            .find_map(|(id, candidate)| (candidate == &resolved).then(|| id.clone()))
+            .ok_or_else(|| {
+                vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    "instantiated member type is absent from the canonical type table",
+                )]
+            })
     }
 
     fn place_type(
@@ -3583,6 +3749,70 @@ mod tests {
     }
 
     #[test]
+    fn generic_record_members_use_instantiated_canonical_types() {
+        let file = parse(
+            "type Box<T> { value: T }\nfunc main() -> i32 { let boxed = Box { value: 42 }; boxed.value }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower generic record");
+        let body = &bodies[&NodeId("function:main".into())];
+        let ResolvedStmtKind::Bind {
+            initializer: Some(initializer),
+            ..
+        } = &body.root.statements[0].kind
+        else {
+            panic!("generic record binding expected");
+        };
+        let ResolvedExprKind::Record { fields, .. } = &initializer.kind else {
+            panic!("generic record initializer expected");
+        };
+        let declaration_type = program
+            .resolved_field_type(&fields[0].field)
+            .expect("declaration field type");
+        assert!(matches!(
+            program.resolved_types().get(declaration_type),
+            Some(ResolvedType::GenericParameter(_))
+        ));
+        assert!(matches!(
+            program.resolved_types().get(&fields[0].conversion.to),
+            Some(ResolvedType::Primitive(crate::core::ir::PrimitiveType::I32))
+        ));
+        assert_ne!(declaration_type, &fields[0].conversion.to);
+        body.validate(program.resolved_types())
+            .expect("valid instantiated generic record");
+    }
+
+    #[test]
+    fn generic_enum_payload_patterns_use_instantiated_types() {
+        let file = parse(
+            "type Wrapper<T> { Wrap(T) }\nfunc unwrap<T>(input: Wrapper<T>) -> T { match input { Wrap(value) => value } }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower generic enum");
+        let body = &bodies[&NodeId("function:unwrap".into())];
+        let ResolvedExprKind::Match { arms, .. } = &body.root.result.as_ref().unwrap().kind else {
+            panic!("generic enum match expected");
+        };
+        let ResolvedPatternKind::Constructor { fields, .. } = &arms[0].pattern.kind else {
+            panic!("generic constructor pattern expected");
+        };
+        let declaration_type = program
+            .resolved_field_type(&fields[0].0)
+            .expect("payload declaration type");
+        assert!(matches!(
+            program.resolved_types().get(declaration_type),
+            Some(ResolvedType::GenericParameter(_))
+        ));
+        assert!(matches!(
+            program.resolved_types().get(&fields[0].1.ty),
+            Some(ResolvedType::GenericParameter(_))
+        ));
+        assert_ne!(declaration_type, &fields[0].1.ty);
+        body.validate(program.resolved_types())
+            .expect("valid instantiated generic pattern");
+    }
+
+    #[test]
     fn explicit_numeric_cast_records_checked_conversion() {
         let file = parse("func widen(value: i32) -> i64 { value as i64 }");
         let program = crate::core::check_program(&file).expect("check");
@@ -3844,6 +4074,29 @@ mod tests {
         assert_eq!(program.resolved_field_type(field), Some(field_type));
         body.validate(program.resolved_types())
             .expect("valid optional chain");
+    }
+
+    #[test]
+    fn optional_chain_instantiates_generic_field_type() {
+        let file = parse(
+            "type Box<T> { value: T }\nfunc project(value: Option<Box<i32>>) -> Option<i32> { value?.value }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower optional chain");
+        let body = &bodies[&NodeId("function:project".into())];
+        let ResolvedExprKind::OptionalChain {
+            field, field_type, ..
+        } = &body.root.result.as_ref().unwrap().kind
+        else {
+            panic!("optional chain expected");
+        };
+        assert_ne!(program.resolved_field_type(field), Some(field_type));
+        assert!(matches!(
+            program.resolved_types().get(field_type),
+            Some(ResolvedType::Primitive(crate::core::ir::PrimitiveType::I32))
+        ));
+        body.validate(program.resolved_types())
+            .expect("valid generic optional chain");
     }
 
     #[test]
