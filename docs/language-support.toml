@@ -1,7 +1,7 @@
 # Mimi implementation evidence for the normative requirements in
 # docs/language-requirements.toml.
 schema_version = 1
-implementation_version = "v0.31.3-dev"
+implementation_version = "v0.31.4-dev"
 
 # Every dimension uses:
 # unsupported | partial | complete | not_applicable
