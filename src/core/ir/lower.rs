@@ -14,8 +14,9 @@ use super::{
 };
 use crate::ast::{AstOrigin, BinOp, Expr, FuncDef, Lit, Pattern, PatternKind, Stmt, UnOp};
 use crate::core::resolved::{
-    expr_kind, expr_sibling_role, match_arm_role, pattern_kind, pattern_sibling_role,
-    stable_id_fragment, stmt_anchor, stmt_kind, stmt_sibling_role, NodeIdBuilder,
+    expr_kind, expr_sibling_role, map_entry_role, match_arm_role, pattern_kind,
+    pattern_sibling_role, stable_id_fragment, stmt_anchor, stmt_kind, stmt_sibling_role,
+    NodeIdBuilder,
 };
 use crate::core::{
     NodeId, NodeMeta, Origin, ResolvedCallKind, ResolvedCallSite, ResolvedFunction, ResolvedTypeDef,
@@ -449,8 +450,30 @@ impl BodyLowerer<'_> {
                 }
             }
             Expr::Record { fields, .. } => self.lower_record(&node_id, fields, role, &ty)?,
+            Expr::MapLiteral { entries } => {
+                let mut lowered = Vec::with_capacity(entries.len());
+                for index in 0..entries.len() {
+                    let entry_role = map_entry_role(&format!("{role}.entry"), entries, index);
+                    lowered.push((
+                        self.lower_expr(&entries[index].0, &format!("{entry_role}.key"))?,
+                        self.lower_expr(&entries[index].1, &format!("{entry_role}.value"))?,
+                    ));
+                }
+                ResolvedExprKind::Map(lowered)
+            }
+            Expr::Try(value) => ResolvedExprKind::Try {
+                value: Box::new(self.lower_expr(value, &format!("{role}.inner"))?),
+                propagation_target: self.owner.clone(),
+            },
+            Expr::Cast(value, _) => {
+                let value = self.lower_expr(value, &format!("{role}.inner"))?;
+                let conversion = self.checked_explicit_conversion(&node_id, &value.ty, &ty)?;
+                ResolvedExprKind::Cast {
+                    value: Box::new(value),
+                    conversion,
+                }
+            }
             Expr::Comprehension { .. }
-            | Expr::Try(_)
             | Expr::OptionalChain(_, _)
             | Expr::Quote(_)
             | Expr::QuoteInterpolate(_)
@@ -461,9 +484,7 @@ impl BodyLowerer<'_> {
             | Expr::Old(_)
             | Expr::Turbofish(_, _, _)
             | Expr::Arena(_)
-            | Expr::MapLiteral { .. }
-            | Expr::NamedArg(_, _)
-            | Expr::Cast(_, _) => return self.unsupported(&node_id, expr_kind(expr)),
+            | Expr::NamedArg(_, _) => return self.unsupported(&node_id, expr_kind(expr)),
             Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
         };
         let effects = match &kind {
@@ -1094,6 +1115,43 @@ impl BodyLowerer<'_> {
         })
     }
 
+    fn checked_explicit_conversion(
+        &self,
+        node_id: &NodeId,
+        from: &ResolvedTypeId,
+        to: &ResolvedTypeId,
+    ) -> Result<CheckedConversion, Vec<ResolvedBodyError>> {
+        if from == to {
+            return self.identity_conversion(node_id, from, to);
+        }
+        let numeric = |ty: &ResolvedTypeId| match self.types.get(ty) {
+            Some(ResolvedType::Primitive(primitive)) => numeric_width(*primitive),
+            _ => None,
+        };
+        let (from_width, to_width) = match (numeric(from), numeric(to)) {
+            (Some(from), Some(to)) => (from, to),
+            _ => {
+                return self.unsupported(
+                    node_id,
+                    &format!(
+                        "checked conversion from '{}' to '{}'",
+                        from.as_str(),
+                        to.as_str()
+                    ),
+                )
+            }
+        };
+        Ok(CheckedConversion {
+            kind: if to_width > from_width {
+                CheckedConversionKind::NumericWiden
+            } else {
+                CheckedConversionKind::NumericNarrowChecked
+            },
+            from: from.clone(),
+            to: to.clone(),
+        })
+    }
+
     fn insert_local(
         &mut self,
         name: String,
@@ -1224,6 +1282,24 @@ impl BodyLowerer<'_> {
 
 fn usable_span(span: Span) -> Option<Span> {
     (span.start_line > 0 && span.start_col > 0).then_some(span)
+}
+
+fn numeric_width(primitive: super::PrimitiveType) -> Option<u16> {
+    use super::PrimitiveType;
+    Some(match primitive {
+        PrimitiveType::I8 | PrimitiveType::U8 => 8,
+        PrimitiveType::I16 | PrimitiveType::U16 => 16,
+        PrimitiveType::I32 | PrimitiveType::U32 | PrimitiveType::F32 => 32,
+        PrimitiveType::I64
+        | PrimitiveType::U64
+        | PrimitiveType::Isize
+        | PrimitiveType::Usize
+        | PrimitiveType::F64 => 64,
+        PrimitiveType::I128 | PrimitiveType::U128 => 128,
+        PrimitiveType::Bool | PrimitiveType::Char | PrimitiveType::String | PrimitiveType::Unit => {
+            return None
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1573,5 +1649,31 @@ mod tests {
         assert_eq!(values, vec![1, 2]);
         body.validate(program.resolved_types())
             .expect("valid record");
+    }
+
+    #[test]
+    fn explicit_numeric_cast_records_checked_conversion() {
+        let file = parse("func widen(value: i32) -> i64 { value as i64 }");
+        let program = crate::core::check_program(&file).expect("check");
+        let resolved = program.function("widen").expect("resolved widen");
+        let body = lower_function_body(FunctionBodyInput {
+            function: function(&file, "widen"),
+            signature: program.resolved_signature(&resolved.node_id).unwrap(),
+            signatures: program.resolved_signatures(),
+            functions: program.functions(),
+            type_defs: program.type_defs(),
+            field_types: program.resolved_field_types(),
+            call_sites: program.call_sites(),
+            node_types: program.resolved_node_types(),
+            types: program.resolved_types(),
+            node_meta: program.node_meta(),
+            sources: &file.sources,
+        })
+        .expect("lower cast");
+        let ResolvedExprKind::Cast { conversion, .. } = &body.root.result.as_ref().unwrap().kind
+        else {
+            panic!("cast expected");
+        };
+        assert_eq!(conversion.kind, CheckedConversionKind::NumericWiden);
     }
 }
