@@ -111,3 +111,31 @@ fn checked_program_persists_validated_cfgs() {
     assert!(cfg.reachable.contains(&cfg.entry));
     cfg.validate().expect("persisted CFG validates");
 }
+
+#[test]
+fn nested_control_flow_roles_disambiguate_inherited_spans() {
+    let file = parse(
+        r#"
+func classify(value: i32) -> i32 {
+    if value > 10 {
+        2
+    } else {
+        if value > 0 { 1 } else { 0 }
+    }
+}
+"#,
+    );
+    let cfgs = lower_file(&file).expect("nested controls have distinct semantic roles");
+    let cfg = cfgs
+        .get(&crate::core::NodeId("function:classify".into()))
+        .expect("classify CFG");
+    cfg.validate().expect("nested CFG validates");
+    assert_eq!(
+        cfg.blocks.len(),
+        cfg.blocks.keys().collect::<BTreeSet<_>>().len()
+    );
+    assert_eq!(
+        cfg.edges.len(),
+        cfg.edges.keys().collect::<BTreeSet<_>>().len()
+    );
+}

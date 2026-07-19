@@ -532,19 +532,34 @@ impl<'a> Lowerer<'a> {
             &cond_block,
             cond.meta(),
             CfgPointKind::Condition,
-            "if.condition",
+            &format!("{role}.condition"),
         );
-        let then_block = self.new_block(then_.first().and_then(Stmt::meta).or(meta), "if.then");
+        let then_block = self.new_block(
+            then_.first().and_then(Stmt::meta).or(meta),
+            &format!("{role}.then"),
+        );
         let else_block = self.new_block(
             else_
                 .and_then(|block| block.first())
                 .and_then(Stmt::meta)
                 .or(meta),
-            "if.else",
+            &format!("{role}.else"),
         );
-        let join = self.new_block(meta, "if.join");
-        let then_edge = self.edge(&cond_block, &then_block, EdgeKind::Then, meta, "if.then");
-        let else_edge = self.edge(&cond_block, &else_block, EdgeKind::Else, meta, "if.else");
+        let join = self.new_block(meta, &format!("{role}.join"));
+        let then_edge = self.edge(
+            &cond_block,
+            &then_block,
+            EdgeKind::Then,
+            meta,
+            &format!("{role}.then"),
+        );
+        let else_edge = self.edge(
+            &cond_block,
+            &else_block,
+            EdgeKind::Else,
+            meta,
+            &format!("{role}.else"),
+        );
         self.terminate(
             &cond_block,
             Terminator::Branch {
@@ -561,11 +576,23 @@ impl<'a> Lowerer<'a> {
         };
         let mut falls_through = false;
         if let Some(end) = then_end {
-            self.goto(&end, &join, EdgeKind::Fallthrough, meta, "if.then.join");
+            self.goto(
+                &end,
+                &join,
+                EdgeKind::Fallthrough,
+                meta,
+                &format!("{role}.then.join"),
+            );
             falls_through = true;
         }
         if let Some(end) = else_end {
-            self.goto(&end, &join, EdgeKind::Fallthrough, meta, "if.else.join");
+            self.goto(
+                &end,
+                &join,
+                EdgeKind::Fallthrough,
+                meta,
+                &format!("{role}.else.join"),
+            );
             falls_through = true;
         }
         falls_through.then_some(join)
@@ -586,19 +613,19 @@ impl<'a> Lowerer<'a> {
             &dispatch,
             scrutinee.meta(),
             CfgPointKind::Condition,
-            "match.scrutinee",
+            &format!("{role}.scrutinee"),
         );
-        let join = self.new_block(meta, "match.join");
+        let join = self.new_block(meta, &format!("{role}.join"));
         let mut edges = Vec::new();
         let mut falls_through = false;
         for arm in arms {
-            let arm_block = self.new_block(Some(arm.meta), "match.arm");
+            let arm_block = self.new_block(Some(arm.meta), &format!("{role}.arm"));
             edges.push(self.edge(
                 &dispatch,
                 &arm_block,
                 EdgeKind::MatchArm,
                 Some(arm.meta),
-                "match.arm",
+                &format!("{role}.arm"),
             ));
             let end = self.lower_expr(&arm.body, arm_block, &format!("{role}.arm"));
             if let Some(end) = end {
@@ -607,7 +634,7 @@ impl<'a> Lowerer<'a> {
                     &join,
                     EdgeKind::Fallthrough,
                     Some(arm.meta),
-                    "match.arm.join",
+                    &format!("{role}.arm.join"),
                 );
                 falls_through = true;
             }
@@ -634,10 +661,19 @@ impl<'a> Lowerer<'a> {
         meta: Option<AstNodeMeta>,
         role: &str,
     ) -> Option<BasicBlockId> {
-        let header = self.new_block(meta, "loop.header");
-        let body_entry = self.new_block(body.first().and_then(Stmt::meta).or(meta), "loop.body");
-        let exit = self.new_block(meta, "loop.exit");
-        self.goto(&current, &header, EdgeKind::Fallthrough, meta, "loop.enter");
+        let header = self.new_block(meta, &format!("{role}.header"));
+        let body_entry = self.new_block(
+            body.first().and_then(Stmt::meta).or(meta),
+            &format!("{role}.body"),
+        );
+        let exit = self.new_block(meta, &format!("{role}.exit"));
+        self.goto(
+            &current,
+            &header,
+            EdgeKind::Fallthrough,
+            meta,
+            &format!("{role}.enter"),
+        );
         let cond_end = self
             .lower_expr(cond, header.clone(), &format!("{role}.condition"))
             .unwrap_or(header.clone());
@@ -645,16 +681,22 @@ impl<'a> Lowerer<'a> {
             &cond_end,
             cond.meta(),
             CfgPointKind::Condition,
-            "loop.condition",
+            &format!("{role}.condition"),
         );
         let body_edge = self.edge(
             &cond_end,
             &body_entry,
             EdgeKind::LoopBody,
             meta,
-            "loop.body",
+            &format!("{role}.body"),
         );
-        let exit_edge = self.edge(&cond_end, &exit, EdgeKind::LoopExit, meta, "loop.exit");
+        let exit_edge = self.edge(
+            &cond_end,
+            &exit,
+            EdgeKind::LoopExit,
+            meta,
+            &format!("{role}.exit"),
+        );
         self.terminate(
             &cond_end,
             Terminator::Branch {
@@ -671,7 +713,13 @@ impl<'a> Lowerer<'a> {
         let body_end = self.lower_block(body, Some(body_entry), &format!("{role}.body"));
         self.loops.pop();
         if let Some(end) = body_end {
-            self.goto(&end, &header, EdgeKind::Backedge, meta, "loop.backedge");
+            self.goto(
+                &end,
+                &header,
+                EdgeKind::Backedge,
+                meta,
+                &format!("{role}.backedge"),
+            );
         }
         Some(exit)
     }
@@ -683,9 +731,18 @@ impl<'a> Lowerer<'a> {
         meta: Option<AstNodeMeta>,
         role: &str,
     ) -> Option<BasicBlockId> {
-        let header = self.new_block(body.first().and_then(Stmt::meta).or(meta), "loop.header");
-        let exit = self.new_block(meta, "loop.exit");
-        self.goto(&current, &header, EdgeKind::Fallthrough, meta, "loop.enter");
+        let header = self.new_block(
+            body.first().and_then(Stmt::meta).or(meta),
+            &format!("{role}.header"),
+        );
+        let exit = self.new_block(meta, &format!("{role}.exit"));
+        self.goto(
+            &current,
+            &header,
+            EdgeKind::Fallthrough,
+            meta,
+            &format!("{role}.enter"),
+        );
         self.loops.push(LoopContext {
             break_target: exit.clone(),
             continue_target: header.clone(),
@@ -694,7 +751,13 @@ impl<'a> Lowerer<'a> {
         let body_end = self.lower_block(body, Some(header.clone()), &format!("{role}.body"));
         let break_seen = self.loops.pop().is_some_and(|loop_| loop_.break_seen);
         if let Some(end) = body_end {
-            self.goto(&end, &header, EdgeKind::Backedge, meta, "loop.backedge");
+            self.goto(
+                &end,
+                &header,
+                EdgeKind::Backedge,
+                meta,
+                &format!("{role}.backedge"),
+            );
         }
         break_seen.then_some(exit)
     }
