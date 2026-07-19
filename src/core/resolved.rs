@@ -102,6 +102,29 @@ pub(crate) fn stable_id_fragment(value: &str) -> String {
     escaped
 }
 
+pub(crate) fn builtin_record_schema(
+    owner: &str,
+) -> Option<&'static [(&'static str, &'static str)]> {
+    match owner {
+        "builtin:type:MemoryDump" => Some(&[("fields", "string"), ("count", "i32")]),
+        "builtin:type:PanicPayload" => Some(&[
+            ("error_type", "string"),
+            ("file", "string"),
+            ("line", "i32"),
+            ("stack", "string"),
+        ]),
+        "builtin:type:PeerFault" => Some(&[("peer_id", "string"), ("reason", "string")]),
+        "builtin:type:SystemTrace" => Some(&[
+            ("last_state_name", "string"),
+            ("unexpected_event", "string"),
+            ("snapshot", "string"),
+            ("memory_dump", "MemoryDump"),
+            ("panic_payload", "PanicPayload"),
+        ]),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedItemKind {
     Function,
@@ -616,6 +639,7 @@ impl CheckedProgram {
             ownership_ledgers,
             schemes,
             zonked_func_types,
+            zonked_nested_func_types,
             zonked_expr_types,
             callable_cfgs,
             resource_analyses,
@@ -628,8 +652,9 @@ impl CheckedProgram {
         // Override declaration snapshots only with mandatory-finalized checker
         // artifacts. Raw checker types are not a backend input.
         for func in program.functions.values_mut() {
-            if let Some((resolved_params, resolved_ret)) =
-                zonked_func_types.get(&func.qualified_name)
+            if let Some((resolved_params, resolved_ret)) = zonked_nested_func_types
+                .get(&func.node_id)
+                .or_else(|| zonked_func_types.get(&func.qualified_name))
             {
                 if resolved_params.len() != func.params.len() {
                     errors.push(Diagnostic::error(
@@ -1454,6 +1479,14 @@ fn collect_items(
                         origin,
                     },
                 );
+                collect_nested_function_records(
+                    &function.body,
+                    &node_id,
+                    &qualified,
+                    node_meta,
+                    functions,
+                    errors,
+                );
             }
             Item::Type(type_def) => {
                 let qualified = qualify(module, &type_def.name);
@@ -1844,6 +1877,14 @@ fn collect_items(
                                 .unwrap_or_else(|| Origin::User(method.meta.span)),
                         },
                     );
+                    collect_nested_function_records(
+                        &method.body,
+                        &method_id,
+                        &format!("{}_{}", impl_def.type_name, method.name),
+                        node_meta,
+                        functions,
+                        errors,
+                    );
                 }
                 impls.insert(
                     node_id.clone(),
@@ -2112,6 +2153,14 @@ fn collect_items(
                                 .unwrap_or_else(|| Origin::User(method.meta.span)),
                         },
                     );
+                    collect_nested_function_records(
+                        &method.body,
+                        &method_id,
+                        &format!("{qualified}::{}", method.name),
+                        node_meta,
+                        functions,
+                        errors,
+                    );
                 }
                 actors.insert(
                     node_id.clone(),
@@ -2240,6 +2289,108 @@ fn collect_items(
                     },
                 );
             }
+        }
+    }
+}
+
+fn collect_nested_function_records(
+    block: &[Stmt],
+    owner: &NodeId,
+    parent_qualified: &str,
+    node_meta: &HashMap<NodeId, NodeMeta>,
+    functions: &mut HashMap<NodeId, ResolvedFunction>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    for statement in block {
+        match statement.unlocated() {
+            Stmt::Func(function) => {
+                let node_id = nested_function_owner(owner, function);
+                let qualified_name = format!("{parent_qualified}::{}", function.name);
+                let params = function
+                    .params
+                    .iter()
+                    .map(|parameter| (parameter.name.clone(), parameter.ty.clone()))
+                    .collect::<Vec<_>>();
+                let ret = function
+                    .ret
+                    .clone()
+                    .unwrap_or_else(|| Type::Name("unit".into(), Vec::new()));
+                let record = ResolvedFunction {
+                    node_id: node_id.clone(),
+                    qualified_name: qualified_name.clone(),
+                    params,
+                    param_decls: function.params.clone(),
+                    ret,
+                    effects: function.effects.clone(),
+                    pub_: function.pub_,
+                    is_comptime: function.is_comptime,
+                    is_async: function.is_async,
+                    extern_abi: function.extern_abi.clone(),
+                    generics: function.generics.clone(),
+                    where_clause: function.where_clause.clone(),
+                    origin: node_meta
+                        .get(&node_id)
+                        .map(|meta| meta.origin.clone())
+                        .unwrap_or_else(|| Origin::User(function.meta.span)),
+                };
+                if functions.insert(node_id.clone(), record).is_some() {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: duplicate nested callable identity '{}'",
+                            node_id.0
+                        ),
+                        function.meta.span,
+                    ));
+                }
+                collect_nested_function_records(
+                    &function.body,
+                    &node_id,
+                    &qualified_name,
+                    node_meta,
+                    functions,
+                    errors,
+                );
+            }
+            Stmt::If { then_, else_, .. } => {
+                collect_nested_function_records(
+                    then_,
+                    owner,
+                    parent_qualified,
+                    node_meta,
+                    functions,
+                    errors,
+                );
+                if let Some(else_) = else_ {
+                    collect_nested_function_records(
+                        else_,
+                        owner,
+                        parent_qualified,
+                        node_meta,
+                        functions,
+                        errors,
+                    );
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::WhileLet { body, .. }
+            | Stmt::Loop(body)
+            | Stmt::For { body, .. }
+            | Stmt::Block(body)
+            | Stmt::Arena(body)
+            | Stmt::Unsafe(body)
+            | Stmt::OnFailure(body)
+            | Stmt::Do(body)
+            | Stmt::Parasteps(body)
+            | Stmt::Alloc { body, .. }
+            | Stmt::Pinned { body, .. } => collect_nested_function_records(
+                body,
+                owner,
+                parent_qualified,
+                node_meta,
+                functions,
+                errors,
+            ),
+            _ => {}
         }
     }
 }
@@ -6852,7 +7003,13 @@ fn build_canonical_function_signatures(
             .filter_map(|(node_id, meta)| {
                 meta.type_operand
                     .as_ref()
-                    .filter(|_| node_id.0.starts_with(&owner_prefix))
+                    .filter(|_| {
+                        node_id.0.starts_with(&owner_prefix)
+                            && !program.functions.keys().any(|nested| {
+                                nested != &function.node_id
+                                    && node_id.0.starts_with(&format!("{}/", nested.0))
+                            })
+                    })
                     .map(|annotation| (node_id.clone(), annotation.clone()))
             })
             .collect::<Vec<_>>();
@@ -7535,6 +7692,36 @@ fn build_canonical_function_signatures(
                         state.origin.user_span(),
                     )),
                 }
+            }
+        }
+    }
+
+    for owner in [
+        "builtin:type:MemoryDump",
+        "builtin:type:PanicPayload",
+        "builtin:type:PeerFault",
+        "builtin:type:SystemTrace",
+    ] {
+        let Some(schema) = builtin_record_schema(owner) else {
+            continue;
+        };
+        let mut resolve_name = |name: &str| {
+            crate::core::ResolvedTypeName::primitive(name)
+                .or_else(|| builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal))
+        };
+        for (field, type_name) in schema {
+            let zonked = ZonkedTy::from_resolved(Type::Name((*type_name).into(), Vec::new()))
+                .expect("builtin record schemas contain finalized type names");
+            match types.intern_zonked(&zonked, &capabilities, &mut resolve_name) {
+                Ok(ty) => {
+                    field_types.insert(NodeId(format!("{owner}/field:{field}")), ty);
+                }
+                Err(error) => errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: builtin field '{owner}.{field}' is not canonical: {error}"
+                    ),
+                    Span::UNKNOWN,
+                )),
             }
         }
     }

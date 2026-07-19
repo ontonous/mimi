@@ -67,6 +67,7 @@ pub(crate) struct Checker<'a> {
     pub(crate) mut_vars: Vec<HashMap<String, bool>>,
     /// Track generic parameters per function: func_name -> generic params
     pub(crate) func_generics: HashMap<String, Vec<GenericParam>>,
+    pub(crate) nested_func_params: HashMap<String, Vec<Param>>,
     /// Track generic parameters per type def: type_name -> generic params
     pub(crate) type_generics: HashMap<String, Vec<GenericParam>>,
     /// Track methods available on types via traits: type_name -> list of (trait_name, method_name)
@@ -126,6 +127,15 @@ pub(crate) struct Checker<'a> {
     /// v0.31.2: Typed artifacts — resolved function signatures packed as ZonkedTy.
     pub(crate) zonked_func_types: HashMap<
         String,
+        (
+            Vec<crate::core::phase::ZonkedTy>,
+            crate::core::phase::ZonkedTy,
+        ),
+    >,
+    /// Nested callable signatures retain their stable owner instead of using
+    /// the legacy global name directory, where local names can collide.
+    pub(crate) zonked_nested_func_types: HashMap<
+        super::NodeId,
         (
             Vec<crate::core::phase::ZonkedTy>,
             crate::core::phase::ZonkedTy,
@@ -218,6 +228,7 @@ impl<'a> Checker<'a> {
             var_scopes: vec![HashMap::new()],
             mut_vars: vec![HashMap::new()],
             func_generics: HashMap::new(),
+            nested_func_params: HashMap::new(),
             type_generics: HashMap::new(),
             type_methods: HashMap::new(),
             trait_method_sigs: HashMap::new(),
@@ -244,6 +255,7 @@ impl<'a> Checker<'a> {
             ownership_control_path: Vec::new(),
             schemes: HashMap::new(),
             zonked_func_types: HashMap::new(),
+            zonked_nested_func_types: HashMap::new(),
             current_expr_types: None,
             zonked_expr_types: std::collections::BTreeMap::new(),
         }
@@ -285,6 +297,38 @@ impl<'a> Checker<'a> {
             }
         }
         self.zonked_expr_types.insert(owner, zonked);
+    }
+
+    pub(crate) fn record_nested_function_signature(
+        &mut self,
+        owner: super::NodeId,
+        parameters: &[Type],
+        result: &Type,
+    ) {
+        let finalized = (|| {
+            let parameters = parameters
+                .iter()
+                .map(|parameter| {
+                    self.unification
+                        .zonk(parameter)
+                        .and_then(crate::core::phase::ZonkedTy::from_resolved)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let result = self
+                .unification
+                .zonk(result)
+                .and_then(crate::core::phase::ZonkedTy::from_resolved)?;
+            Ok::<_, crate::core::unification::ResolveError>((parameters, result))
+        })();
+        match finalized {
+            Ok(signature) => {
+                self.zonked_nested_func_types.insert(owner, signature);
+            }
+            Err(error) => self.errors.push(Diagnostic::error(
+                format!("TOOL-RESOLUTION-001: nested callable signature is not zonked: {error}"),
+                self.diagnostic_span(),
+            )),
+        }
     }
 
     pub(crate) fn record_expression_type(&mut self, expr: &Expr, ty: &Type) {

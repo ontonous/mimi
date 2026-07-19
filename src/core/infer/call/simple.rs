@@ -1849,17 +1849,18 @@ impl<'a> Checker<'a> {
         let has_named_args = args
             .iter()
             .any(|a| matches!(a.unlocated(), Expr::NamedArg(_, _)));
-        if has_named_args || (!args.is_empty() && args.len() != params.len()) {
+        if has_named_args || args.len() != params.len() {
             // Check if the function definition has param names (for named args) or defaults
-            let func_def_params: Option<&[Param]> = self
+            let func_def_params: Option<Vec<Param>> = self
                 .file
                 .items
                 .iter()
                 .filter_map(|item| match item {
-                    Item::Func(f) if f.name == name => Some(f.params.as_slice()),
+                    Item::Func(f) if f.name == name => Some(f.params.clone()),
                     _ => None,
                 })
-                .next();
+                .next()
+                .or_else(|| self.nested_func_params.get(name).cloned());
             if let Some(func_params) = func_def_params {
                 if func_params.len() == params.len() {
                     let mut reordered: Vec<&Expr> = vec![&Expr::Literal(Lit::Unit); params.len()];
