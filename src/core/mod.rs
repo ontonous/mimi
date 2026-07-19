@@ -24,9 +24,14 @@ pub(crate) use helpers::{is_bool, is_numeric_coercion, is_trait_coercion};
 #[cfg(test)]
 pub(crate) use helpers::{is_int, is_numeric, is_string, same_type};
 pub use ir::{
-    FunctionTypeAbi, NominalTypeId, OwnershipTypeKind, PrimitiveType, ResolvedType,
-    ResolvedTypeCapabilities, ResolvedTypeError, ResolvedTypeId, ResolvedTypeName,
-    ResolvedTypeTable, TraitTypeKind, RESOLVED_TYPE_SCHEMA_VERSION,
+    BackendRequirement, BuiltinId, CheckedConversion, CheckedConversionKind, EffectId,
+    FunctionTypeAbi, MethodId, NominalTypeId, OwnershipTypeKind, Permission, PrimitiveType,
+    ResolvedArgument, ResolvedBlock, ResolvedBody, ResolvedBodyError, ResolvedCall, ResolvedCallee,
+    ResolvedExpr, ResolvedExprKind, ResolvedIndex, ResolvedLiteral, ResolvedLocal, ResolvedLocalId,
+    ResolvedParameterId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedProjection,
+    ResolvedStmt, ResolvedStmtKind, ResolvedType, ResolvedTypeCapabilities, ResolvedTypeError,
+    ResolvedTypeId, ResolvedTypeName, ResolvedTypeTable, SessionResidualId, SessionTransition,
+    TraitTypeKind, RESOLVED_TYPE_SCHEMA_VERSION,
 };
 pub use ownership::{
     Availability, BranchMerge, CanonicalActionKind, CanonicalResourceAction, CfgLocation,
