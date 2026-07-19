@@ -444,6 +444,8 @@ pub struct ResolvedActor {
     pub node_id: NodeId,
     pub qualified_name: String,
     pub fields: Vec<(String, Type, bool)>,
+    /// Stable declaration identity for every actor field, keyed by source name.
+    pub field_ids: BTreeMap<String, NodeId>,
     pub methods: Vec<String>,
     pub method_signatures: Vec<ResolvedActorMethod>,
     pub origin: Origin,
@@ -1911,6 +1913,21 @@ fn collect_items(
                     .iter()
                     .map(|field| (field.name.clone(), field.ty.clone(), field.mut_))
                     .collect::<Vec<_>>();
+                let field_ids = actor
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        let field_id = ids.anonymous(
+                            &node_id,
+                            "decl.actor_field",
+                            &format!("field.{}", stable_id_fragment(&field.name)),
+                            usable_span(field.meta.span),
+                            field.meta.origin,
+                            errors,
+                        );
+                        (field.name.clone(), field_id)
+                    })
+                    .collect();
                 for (name, ty, _) in &fields {
                     if contains_unresolved_type(ty) {
                         errors.push(Diagnostic::error(
@@ -2031,6 +2048,7 @@ fn collect_items(
                         node_id: node_id.clone(),
                         qualified_name: qualified.clone(),
                         fields,
+                        field_ids,
                         methods,
                         method_signatures,
                         origin: resolve_named_origin(
@@ -6704,6 +6722,85 @@ fn build_canonical_function_signatures(
                         field.name, definition.qualified_name
                     ),
                     definition.origin.user_span(),
+                )),
+            }
+        }
+    }
+
+    let mut actors = program.actors.values().collect::<Vec<_>>();
+    actors.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    for actor in actors {
+        let module = actor
+            .qualified_name
+            .rsplit_once("::")
+            .map(|(module, _)| module);
+        let mut resolve_name = |name: &str| {
+            if let Some(primitive) = crate::core::ResolvedTypeName::primitive(name) {
+                return Some(primitive);
+            }
+            if let Some(module) = module {
+                let qualified = format!("{module}::{name}");
+                if let Some(candidates) = nominal_catalog.get(&qualified) {
+                    if candidates.len() == 1 {
+                        return crate::core::NominalTypeId::new(candidates.iter().next()?.clone())
+                            .ok()
+                            .map(crate::core::ResolvedTypeName::Nominal);
+                    }
+                }
+            }
+            if let Some(candidates) = nominal_catalog.get(name) {
+                if candidates.len() == 1 {
+                    return crate::core::NominalTypeId::new(candidates.iter().next()?.clone())
+                        .ok()
+                        .map(crate::core::ResolvedTypeName::Nominal);
+                }
+            }
+            builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal)
+        };
+        for (name, field_type, _) in &actor.fields {
+            let Some(field_id) = actor.field_ids.get(name) else {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: actor '{}' field '{}' has no stable declaration identity",
+                        actor.qualified_name, name
+                    ),
+                    actor.origin.user_span(),
+                ));
+                continue;
+            };
+            if !program.node_meta.contains_key(field_id) {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: actor field '{}' is absent from NodeMeta",
+                        field_id.0
+                    ),
+                    actor.origin.user_span(),
+                ));
+                continue;
+            }
+            let zonked = match ZonkedTy::from_resolved(field_type.clone()) {
+                Ok(ty) => ty,
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: field '{}' in actor '{}' is not zonked: {error}",
+                            name, actor.qualified_name
+                        ),
+                        actor.origin.user_span(),
+                    ));
+                    continue;
+                }
+            };
+            match types.intern_zonked(&zonked, &capabilities, &mut resolve_name) {
+                Ok(ty) => {
+                    field_types.insert(field_id.clone(), ty);
+                }
+                Err(error) => errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: field '{}' in actor '{}' is not canonical: {error}",
+                        name, actor.qualified_name
+                    ),
+                    actor.origin.user_span(),
                 )),
             }
         }

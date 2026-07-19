@@ -21,8 +21,8 @@ use crate::core::resolved::{
     stmt_kind, stmt_sibling_role, NodeIdBuilder,
 };
 use crate::core::{
-    CheckedProgram, NodeId, NodeMeta, Origin, ResolvedCallKind, ResolvedCallSite, ResolvedConstant,
-    ResolvedExternBlock, ResolvedFunction, ResolvedTypeDef,
+    CheckedProgram, NodeId, NodeMeta, Origin, ResolvedActor, ResolvedCallKind, ResolvedCallSite,
+    ResolvedConstant, ResolvedExternBlock, ResolvedFunction, ResolvedTypeDef,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
@@ -37,6 +37,7 @@ pub struct FunctionBodyInput<'a> {
     pub signatures: &'a BTreeMap<NodeId, ResolvedSignature>,
     pub functions: &'a HashMap<NodeId, ResolvedFunction>,
     pub type_defs: &'a HashMap<NodeId, ResolvedTypeDef>,
+    pub actors: &'a HashMap<NodeId, ResolvedActor>,
     pub field_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     pub call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
     pub extern_blocks: &'a HashMap<NodeId, ResolvedExternBlock>,
@@ -71,6 +72,7 @@ pub fn lower_function_body(
         signatures: input.signatures,
         functions: input.functions,
         type_defs: input.type_defs,
+        actors: input.actors,
         field_types: input.field_types,
         call_sites: input.call_sites,
         extern_blocks: input.extern_blocks,
@@ -125,6 +127,7 @@ pub fn lower_checked_function_bodies(
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            actors: program.actors(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -208,6 +211,7 @@ struct BodyLowerer<'a> {
     signatures: &'a BTreeMap<NodeId, ResolvedSignature>,
     functions: &'a HashMap<NodeId, ResolvedFunction>,
     type_defs: &'a HashMap<NodeId, ResolvedTypeDef>,
+    actors: &'a HashMap<NodeId, ResolvedActor>,
     field_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
     extern_blocks: &'a HashMap<NodeId, ResolvedExternBlock>,
@@ -1339,43 +1343,56 @@ impl BodyLowerer<'_> {
             _ => return self.unsupported(node_id, "field projection on non-nominal type"),
         };
         let owner = NodeId(nominal.as_str().to_string());
-        let definition = self.type_defs.get(&owner).ok_or_else(|| {
-            vec![ResolvedBodyError::new(
-                node_id.clone(),
-                format!(
-                    "nominal owner '{}' has no resolved type definition",
-                    owner.0
-                ),
-            )]
-        })?;
-        let fields = match &definition.declaration.kind {
-            crate::ast::TypeDefKind::Record(fields) | crate::ast::TypeDefKind::Union(fields) => {
-                fields
+        let field_id = if let Some(definition) = self.type_defs.get(&owner) {
+            let fields = match &definition.declaration.kind {
+                crate::ast::TypeDefKind::Record(fields)
+                | crate::ast::TypeDefKind::Union(fields) => fields,
+                _ => {
+                    return self.unsupported(node_id, "field projection on non-record nominal type")
+                }
+            };
+            let field = fields
+                .iter()
+                .find(|field| field.name == name)
+                .ok_or_else(|| {
+                    vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        format!("field '{name}' is absent from nominal owner '{}'", owner.0),
+                    )]
+                })?;
+            let mut diagnostics = Vec::new();
+            let field_id = self.ids.anonymous(
+                &owner,
+                "decl.field",
+                &format!("field.{}", stable_id_fragment(name)),
+                usable_span(field.meta.span),
+                field.meta.origin,
+                &mut diagnostics,
+            );
+            if !diagnostics.is_empty() {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("field '{name}' has no stable declaration identity"),
+                )]);
             }
-            _ => return self.unsupported(node_id, "field projection on non-record nominal type"),
-        };
-        let field = fields
-            .iter()
-            .find(|field| field.name == name)
-            .ok_or_else(|| {
+            field_id
+        } else if let Some(actor) = self.actors.get(&owner) {
+            actor.field_ids.get(name).cloned().ok_or_else(|| {
                 vec![ResolvedBodyError::new(
                     node_id.clone(),
-                    format!("field '{name}' is absent from nominal owner '{}'", owner.0),
+                    format!("field '{name}' is absent from actor owner '{}'", owner.0),
                 )]
-            })?;
-        let mut diagnostics = Vec::new();
-        let field_id = self.ids.anonymous(
-            &owner,
-            "decl.field",
-            &format!("field.{}", stable_id_fragment(name)),
-            usable_span(field.meta.span),
-            field.meta.origin,
-            &mut diagnostics,
-        );
-        if !diagnostics.is_empty() || !self.node_meta.contains_key(&field_id) {
+            })?
+        } else {
             return Err(vec![ResolvedBodyError::new(
                 node_id.clone(),
-                format!("field '{name}' has no stable declaration identity"),
+                format!("nominal owner '{}' has no field catalog", owner.0),
+            )]);
+        };
+        if !self.node_meta.contains_key(&field_id) || !self.field_types.contains_key(&field_id) {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!("field '{name}' has no canonical declaration facts"),
             )]);
         }
         Ok(field_id)
@@ -1753,6 +1770,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            actors: program.actors(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -1789,6 +1807,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            actors: program.actors(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -1817,6 +1836,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            actors: program.actors(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -1859,6 +1879,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            actors: program.actors(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -1897,6 +1918,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            actors: program.actors(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -1951,6 +1973,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            actors: program.actors(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -1984,6 +2007,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            actors: program.actors(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -2023,6 +2047,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            actors: program.actors(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -2056,6 +2081,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            actors: program.actors(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -2093,6 +2119,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            actors: program.actors(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -2254,7 +2281,7 @@ mod tests {
     #[test]
     fn actor_method_body_has_canonical_self_parameter() {
         let file = parse(
-            "actor Counter { count: i32 func value() -> i32 { 1 } }\nfunc main() -> i32 { 0 }",
+            "actor Counter { count: i32 func value() -> i32 { self.count } }\nfunc main() -> i32 { 0 }",
         );
         let program = crate::core::check_program(&file).expect("check");
         let bodies = lower_checked_function_bodies(&file, &program).expect("lower actor method");
@@ -2265,5 +2292,14 @@ mod tests {
             .expect("method signature");
         assert_eq!(signature.parameters[0].name, "self");
         assert!(body.locals.keys().any(|local| local.0 .0.contains("self")));
+        let ResolvedExprKind::Load(place) = &body.root.result.as_ref().expect("field result").kind
+        else {
+            panic!("actor field must lower as a place load");
+        };
+        let ResolvedProjection::Field { field, ty } = &place.projections[0] else {
+            panic!("actor field projection expected");
+        };
+        assert!(field.0.starts_with("actor:Counter/node:decl.actor_field@"));
+        assert_eq!(program.resolved_field_type(field), Some(ty));
     }
 }
