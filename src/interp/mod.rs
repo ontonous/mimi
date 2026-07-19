@@ -323,7 +323,7 @@ fn global_stdout_slot(
 }
 
 impl<'a> Interpreter<'a> {
-    pub fn from_checked(program: &crate::core::CheckedProgram<'a>) -> Self {
+    pub fn from_checked(program: &'a crate::core::CheckedProgram) -> Self {
         let mut interp = Self::new(program.legacy_body_file());
         let mut resolved = HashMap::new();
         let mut fallbacks = std::collections::HashSet::new();

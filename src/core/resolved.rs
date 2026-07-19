@@ -541,8 +541,10 @@ pub struct ResolvedExternBlock {
 }
 
 #[derive(Debug)]
-pub struct CheckedProgram<'a> {
-    file: &'a File,
+pub struct CheckedProgram {
+    /// Owned normalized source retained only while legacy consumers migrate.
+    /// This field is deleted with the final raw-AST consumer in v0.31.5.
+    legacy_file: File,
     items: HashMap<NodeId, ResolvedItem>,
     node_meta: HashMap<NodeId, NodeMeta>,
     call_sites: HashMap<NodeId, ResolvedCallSite>,
@@ -566,16 +568,16 @@ pub struct CheckedProgram<'a> {
     resource_analyses: BTreeMap<NodeId, crate::core::ResourceAnalysis>,
 }
 
-impl<'a> CheckedProgram<'a> {
+impl CheckedProgram {
     #[cfg(test)]
-    pub(crate) fn from_checked_file(file: &'a File) -> Result<Self, Vec<Diagnostic>> {
+    pub(crate) fn from_checked_file(file: &File) -> Result<Self, Vec<Diagnostic>> {
         Self::from_checked_file_with_ownership(file, HashMap::new())
     }
 
     /// v0.31.2: Construct CheckedProgram from FlowAcc (typed artifacts + ownership).
     /// Uses checker-resolved function types for ResolvedFunction when available,
     /// falling back to AST clone for items the checker didn't process.
-    pub(crate) fn from_flow_acc(file: &'a File, acc: FlowAcc) -> Result<Self, Vec<Diagnostic>> {
+    pub(crate) fn from_flow_acc(file: &File, acc: FlowAcc) -> Result<Self, Vec<Diagnostic>> {
         let FlowAcc {
             ownership_ledgers,
             schemes,
@@ -648,7 +650,7 @@ impl<'a> CheckedProgram<'a> {
     }
 
     pub(crate) fn from_checked_file_with_ownership(
-        file: &'a File,
+        file: &File,
         ownership_ledgers: HashMap<NodeId, OwnershipLedger>,
     ) -> Result<Self, Vec<Diagnostic>> {
         let mut transitions = HashMap::new();
@@ -807,7 +809,7 @@ impl<'a> CheckedProgram<'a> {
             return Err(errors);
         }
         Ok(Self {
-            file,
+            legacy_file: file.clone(),
             items,
             node_meta,
             call_sites,
@@ -834,8 +836,8 @@ impl<'a> CheckedProgram<'a> {
 
     /// Transitional body source for backends that do not yet consume typed body IR.
     /// Declaration-only consumers must use the resolved catalogs instead.
-    pub(crate) fn legacy_body_file(&self) -> &'a File {
-        self.file
+    pub(crate) fn legacy_body_file(&self) -> &File {
+        &self.legacy_file
     }
 
     pub fn transitions(&self) -> &HashMap<TransitionId, ResolvedTransition> {
@@ -6035,7 +6037,7 @@ mod tests {
             .expect("parse")
     }
 
-    fn node_id_at(program: &CheckedProgram<'_>, kind: &str, line: usize, col: usize) -> NodeId {
+    fn node_id_at(program: &CheckedProgram, kind: &str, line: usize, col: usize) -> NodeId {
         let marker = format!("/node:{kind}@");
         program
             .node_meta()
@@ -6048,12 +6050,7 @@ mod tests {
             .unwrap_or_else(|| panic!("missing {kind} at {line}:{col}"))
     }
 
-    fn generated_node_id(
-        program: &CheckedProgram<'_>,
-        owner: &str,
-        kind: &str,
-        rule: &str,
-    ) -> NodeId {
+    fn generated_node_id(program: &CheckedProgram, owner: &str, kind: &str, rule: &str) -> NodeId {
         let generated_prefix = format!("{owner}/generated:{kind}:");
         let anchored_marker = format!("{owner}/node:{kind}@");
         program
@@ -6068,7 +6065,7 @@ mod tests {
             .unwrap_or_else(|| panic!("missing generated {kind} for {owner} ({rule})"))
     }
 
-    fn node_meta_ids(program: &CheckedProgram<'_>) -> std::collections::BTreeSet<String> {
+    fn node_meta_ids(program: &CheckedProgram) -> std::collections::BTreeSet<String> {
         program
             .node_meta()
             .keys()
@@ -6090,6 +6087,25 @@ mod tests {
         assert_eq!(ret.as_type(), &Type::Name("i32".into(), vec![]));
         assert_eq!(function.params[0].1, params[0].as_type().clone());
         assert_eq!(function.ret, ret.as_type().clone());
+    }
+
+    #[test]
+    fn checked_program_owns_its_migration_body_input() {
+        let program = {
+            let mut file = parse("func main() -> i32 { 42 }");
+            let program = crate::core::check_program(&file).expect("check");
+            file.items.clear();
+            assert!(file.items.is_empty());
+            program
+        };
+
+        assert!(program.function("main").is_some());
+        assert!(!program.legacy_body_file().items.is_empty());
+        let mut interpreter = crate::interp::Interpreter::from_checked(&program);
+        assert!(matches!(
+            interpreter.run().expect("run owned checked program"),
+            crate::interp::Value::Int(42)
+        ));
     }
 
     #[test]

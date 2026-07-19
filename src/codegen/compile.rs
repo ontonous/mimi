@@ -22,7 +22,7 @@ fn encode_resolved_const_value(value: &crate::core::ResolvedConstValue) -> Strin
 impl<'ctx> CodeGenerator<'ctx> {
     pub fn compile_checked(
         &mut self,
-        program: &crate::core::CheckedProgram<'_>,
+        program: &crate::core::CheckedProgram,
     ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
         let mut resolved = std::collections::HashMap::new();

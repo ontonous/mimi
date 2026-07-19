@@ -41,7 +41,7 @@ pub fn verify_source_with(
 
 /// Verify contracts in a type-checked program (supports pre-merged imports).
 pub fn verify_checked(
-    program: &crate::core::CheckedProgram<'_>,
+    program: &crate::core::CheckedProgram,
 ) -> Result<Vec<VerificationResult>, String> {
     program
         .validate_backend(crate::core::BackendProfile::Verifier)
@@ -62,7 +62,7 @@ pub fn verify_ffi_source(source: &str) -> Result<Vec<VerificationResult>, String
 /// typed Verification IR lands, but declaration identity and arity are
 /// authoritative from CheckedProgram and fail closed before that adapter.
 pub fn verify_ffi_checked(
-    program: &crate::core::CheckedProgram<'_>,
+    program: &crate::core::CheckedProgram,
 ) -> Result<Vec<VerificationResult>, String> {
     let mut externs = std::collections::HashMap::new();
     for block in program.extern_blocks().values() {
