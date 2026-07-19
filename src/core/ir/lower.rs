@@ -760,6 +760,58 @@ impl BodyLowerer<'_> {
             Expr::SetLiteral(values) => {
                 ResolvedExprKind::Set(self.lower_expr_list(values, &format!("{role}.element"))?)
             }
+            Expr::Comprehension {
+                expr,
+                var,
+                iter,
+                guard,
+            } => {
+                let iterable = self.lower_expr(iter, &format!("{role}.iterable"))?;
+                let element_ty = self.iterable_element_type(&node_id, &iterable.ty)?;
+                let pattern_id = NodeId(format!("{}/comprehension-pattern", node_id.0));
+                let local_id = ResolvedLocalId(NodeId(format!("{}/local", pattern_id.0)));
+                let pattern_origin = Origin::Desugared {
+                    parent: node_id.clone(),
+                    rule: "resolved_body.comprehension_binding".into(),
+                    span: origin.user_span(),
+                };
+                self.scopes.push(BTreeMap::new());
+                let lowered = (|| {
+                    self.insert_local(
+                        var.clone(),
+                        ResolvedLocal {
+                            id: local_id.clone(),
+                            display_name: var.clone(),
+                            ty: element_ty.clone(),
+                            mutable: false,
+                            origin: pattern_origin.clone(),
+                        },
+                        &pattern_id,
+                    )?;
+                    let value = self.lower_expr(expr, &format!("{role}.value"))?;
+                    let guard = guard
+                        .as_ref()
+                        .map(|guard| self.lower_expr(guard, &format!("{role}.guard")))
+                        .transpose()?;
+                    Ok::<_, Vec<ResolvedBodyError>>((value, guard))
+                })();
+                self.scopes.pop();
+                let (value, guard) = lowered?;
+                ResolvedExprKind::Comprehension {
+                    pattern: ResolvedPattern {
+                        node_id: pattern_id,
+                        origin: pattern_origin,
+                        ty: element_ty,
+                        kind: ResolvedPatternKind::Binding {
+                            local: local_id,
+                            by_reference: None,
+                        },
+                    },
+                    value: Box::new(value),
+                    iterable: Box::new(iterable),
+                    guard: guard.map(Box::new),
+                }
+            }
             Expr::Block(block) => ResolvedExprKind::Block(Box::new(self.lower_block(
                 block,
                 &format!("{role}.block"),
@@ -848,8 +900,7 @@ impl BodyLowerer<'_> {
                     conversion,
                 }
             }
-            Expr::Comprehension { .. }
-            | Expr::OptionalChain(_, _)
+            Expr::OptionalChain(_, _)
             | Expr::Quote(_)
             | Expr::QuoteInterpolate(_)
             | Expr::Comptime(_)
@@ -2944,6 +2995,47 @@ mod tests {
             .any(|requirement| requirement.capability == "verification.math"));
         body.validate(program.resolved_types())
             .expect("valid math block");
+    }
+
+    #[test]
+    fn comprehension_binding_is_typed_and_scoped_over_value_and_guard() {
+        let file = parse(
+            "func select(values: List<i32>) -> List<i32> { [value * 2 for value in values if value > 0] }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower comprehension");
+        let body = &bodies[&NodeId("function:select".into())];
+        let ResolvedExprKind::Comprehension {
+            pattern,
+            value,
+            guard: Some(guard),
+            ..
+        } = &body.root.result.as_ref().unwrap().kind
+        else {
+            panic!("comprehension expected");
+        };
+        let ResolvedPatternKind::Binding { local, .. } = &pattern.kind else {
+            panic!("comprehension binding expected");
+        };
+        let ResolvedExprKind::Binary { left, .. } = &value.kind else {
+            panic!("comprehension value expression expected");
+        };
+        let ResolvedExprKind::Load(value_place) = &left.kind else {
+            panic!("value must load binding");
+        };
+        let ResolvedExprKind::Binary {
+            left: guard_left, ..
+        } = &guard.kind
+        else {
+            panic!("guard expression expected");
+        };
+        let ResolvedExprKind::Load(guard_place) = &guard_left.kind else {
+            panic!("guard must load binding");
+        };
+        assert_eq!(&value_place.base, local);
+        assert_eq!(&guard_place.base, local);
+        body.validate(program.resolved_types())
+            .expect("valid comprehension");
     }
 
     #[test]

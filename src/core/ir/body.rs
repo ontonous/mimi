@@ -270,6 +270,12 @@ pub enum ResolvedExprKind {
     List(Vec<ResolvedExpr>),
     Map(Vec<(ResolvedExpr, ResolvedExpr)>),
     Set(Vec<ResolvedExpr>),
+    Comprehension {
+        pattern: ResolvedPattern,
+        value: Box<ResolvedExpr>,
+        iterable: Box<ResolvedExpr>,
+        guard: Option<Box<ResolvedExpr>>,
+    },
     Record {
         nominal: NominalTypeId,
         fields: Vec<ResolvedRecordField>,
@@ -792,6 +798,19 @@ impl BodyValidator<'_> {
                 for (key, value) in entries {
                     self.visit_expr(key);
                     self.visit_expr(value);
+                }
+            }
+            ResolvedExprKind::Comprehension {
+                pattern,
+                value,
+                iterable,
+                guard,
+            } => {
+                self.visit_pattern(pattern);
+                self.visit_expr(value);
+                self.visit_expr(iterable);
+                if let Some(guard) = guard {
+                    self.visit_expr(guard);
                 }
             }
             ResolvedExprKind::Record { nominal, fields } => {
