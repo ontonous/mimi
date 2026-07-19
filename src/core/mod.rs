@@ -14,6 +14,7 @@ pub mod unification;
 mod check_stmt;
 mod infer;
 mod infer_expr;
+pub mod ir;
 mod ownership;
 pub mod resolved;
 
@@ -22,6 +23,11 @@ pub use helpers::{fmt_type, is_type_param, subst_type_params};
 pub(crate) use helpers::{is_bool, is_numeric_coercion, is_trait_coercion};
 #[cfg(test)]
 pub(crate) use helpers::{is_int, is_numeric, is_string, same_type};
+pub use ir::{
+    FunctionTypeAbi, NominalTypeId, OwnershipTypeKind, PrimitiveType, ResolvedType,
+    ResolvedTypeCapabilities, ResolvedTypeError, ResolvedTypeId, ResolvedTypeName,
+    ResolvedTypeTable, TraitTypeKind, RESOLVED_TYPE_SCHEMA_VERSION,
+};
 pub use ownership::{
     Availability, BranchMerge, CanonicalActionKind, CanonicalResourceAction, CfgLocation,
     IndexProjection, Loan, LoanId, LoanKind, LocalId, OwnershipLedger, Place, PlaceProjection,
