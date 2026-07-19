@@ -4,6 +4,7 @@ use crate::diagnostic::Diagnostic;
 pub(crate) use std::collections::HashMap;
 
 mod borrow;
+pub mod builtins;
 pub mod cfg;
 mod checker;
 pub(crate) mod helpers;

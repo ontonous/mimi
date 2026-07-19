@@ -161,6 +161,7 @@ pub(crate) struct ExpressionTypeKey {
 pub enum ResolvedCallKind {
     Function,
     Extern,
+    Builtin,
     Method,
     Unknown,
 }
@@ -6012,6 +6013,14 @@ fn resolve_named_call_callee(
             Some(*arity),
             Vec::new(),
             Some(ret.clone()),
+        )
+    } else if crate::core::builtins::is_builtin_callable(name) {
+        (
+            name.to_string(),
+            ResolvedCallKind::Builtin,
+            None,
+            Vec::new(),
+            None,
         )
     } else if let Some((arity, effects, ret)) = methods.get(name) {
         (

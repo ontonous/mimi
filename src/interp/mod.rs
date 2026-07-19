@@ -748,6 +748,7 @@ impl<'a> Interpreter<'a> {
                     match site.kind {
                         crate::core::ResolvedCallKind::Function => "function".into(),
                         crate::core::ResolvedCallKind::Extern => "extern".into(),
+                        crate::core::ResolvedCallKind::Builtin => "builtin".into(),
                         crate::core::ResolvedCallKind::Method => "method".into(),
                         crate::core::ResolvedCallKind::Unknown => "unknown".into(),
                     },
