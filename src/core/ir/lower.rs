@@ -510,12 +510,46 @@ impl BodyLowerer<'_> {
                     initializer: Some(initializer),
                 }
             }
+            Stmt::Delegate { kind, expr, target } => {
+                let source = self.lower_place(expr, &format!("{role}.expression"))?;
+                let target = if let Some(local) = self.lookup_local(target) {
+                    super::DelegateTarget::Local(local)
+                } else {
+                    let candidates = self
+                        .functions
+                        .values()
+                        .filter(|function| {
+                            function.qualified_name == *target
+                                || function
+                                    .qualified_name
+                                    .rsplit_once("::")
+                                    .is_some_and(|(_, short)| short == target)
+                        })
+                        .collect::<Vec<_>>();
+                    let [function] = candidates.as_slice() else {
+                        return Err(vec![ResolvedBodyError::new(
+                            node_id.clone(),
+                            format!(
+                                "delegate target '{target}' does not resolve to exactly one local or callable"
+                            ),
+                        )]);
+                    };
+                    super::DelegateTarget::Callable(function.node_id.clone())
+                };
+                ResolvedStmtKind::Delegate {
+                    permission: match kind {
+                        crate::ast::DelegateKind::View => super::Permission::View,
+                        crate::ast::DelegateKind::Mutate => super::Permission::Mutate,
+                        crate::ast::DelegateKind::Consume => super::Permission::Consume,
+                    },
+                    source,
+                    target,
+                }
+            }
             Stmt::Desc(..) | Stmt::Rule(..) | Stmt::MmsBlock { .. } => return Ok(None),
-            Stmt::WhileLet { .. }
-            | Stmt::Math(_)
-            | Stmt::Delegate { .. }
-            | Stmt::Pinned { .. }
-            | Stmt::Ellipsis => return self.unsupported(&node_id, stmt_kind(stmt)),
+            Stmt::WhileLet { .. } | Stmt::Math(_) | Stmt::Pinned { .. } | Stmt::Ellipsis => {
+                return self.unsupported(&node_id, stmt_kind(stmt))
+            }
             Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
         };
         Ok(Some(ResolvedStmt {
@@ -2171,5 +2205,23 @@ mod tests {
         assert_eq!(conversion.to, pattern.ty);
         body.validate(program.resolved_types())
             .expect("valid shared body");
+    }
+
+    #[test]
+    fn delegate_target_is_closed_to_callable_identity() {
+        let file = parse(
+            "func child(value: i32) { println(value) }\nfunc main() { let value = 1; delegate view(value) to child }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower delegate");
+        let body = &bodies[&NodeId("function:main".into())];
+        let ResolvedStmtKind::Delegate { target, .. } = &body.root.statements[1].kind else {
+            panic!("delegate expected");
+        };
+        assert!(matches!(
+            target,
+            crate::core::ir::DelegateTarget::Callable(node)
+                if node == &NodeId("function:child".into())
+        ));
     }
 }
