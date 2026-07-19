@@ -1,7 +1,7 @@
 # Mimi 真实代码可用性评估结果
 
 **评估时间**：2026-07-19
-**Mimi 版本**：0.31.3-dev
+**Mimi 版本**：0.31.4-dev
 **最后更新**：2026-07-19
 **评估命令**：`cargo test real_world_cli_suite -- --test-threads=1` + 定向双后端 smoke
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
