@@ -6600,7 +6600,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .iter()
             .enumerate()
             .map(|(i, arg_expr)| {
-                if i < fdef.params.len() && matches!(fdef.params[i].ty.unlocated(), Type::Func(_, _)) {
+                if i < fdef.params.len()
+                    && matches!(fdef.params[i].ty.unlocated(), Type::Func(_, _))
+                {
                     if let Expr::Ident(fn_name) = arg_expr.unlocated() {
                         return Some(fn_name.clone());
                     }

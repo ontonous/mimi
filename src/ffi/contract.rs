@@ -333,8 +333,7 @@ impl FfiContract {
         let check_errno = matches!(
             func.ret.as_ref().map(Type::unlocated),
             Some(Type::Name(name, _)) if name == "i32" || name == "i64"
-        )
-            && ERRNO_CHECK_FUNC_NAMES.contains(&fname);
+        ) && ERRNO_CHECK_FUNC_NAMES.contains(&fname);
 
         Self {
             args,

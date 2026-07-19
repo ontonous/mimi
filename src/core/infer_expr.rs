@@ -117,11 +117,7 @@ impl<'a> Checker<'a> {
         result.into_unlocated()
     }
 
-    fn infer_expr_inner(
-        &mut self,
-        expr: &Expr,
-        scopes: &mut Vec<HashMap<String, Type>>,
-    ) -> Type {
+    fn infer_expr_inner(&mut self, expr: &Expr, scopes: &mut Vec<HashMap<String, Type>>) -> Type {
         match expr.unlocated() {
             Expr::Literal(l) => self.infer_literal(l),
             Expr::Ident(name) => self.lookup_var(name, scopes),

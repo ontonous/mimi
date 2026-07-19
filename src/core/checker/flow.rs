@@ -130,16 +130,14 @@ fn extract_acc(checker: &mut Checker) -> FlowAcc {
             BTreeMap::new()
         }
     };
-    let resource_analyses = match crate::core::cfg::analyze_cfgs(
-        &callable_cfgs,
-        &checker.ownership_ledgers,
-    ) {
-        Ok(analyses) => analyses,
-        Err(errors) => {
-            checker.errors.extend(errors);
-            BTreeMap::new()
-        }
-    };
+    let resource_analyses =
+        match crate::core::cfg::analyze_cfgs(&callable_cfgs, &checker.ownership_ledgers) {
+            Ok(analyses) => analyses,
+            Err(errors) => {
+                checker.errors.extend(errors);
+                BTreeMap::new()
+            }
+        };
     let mut seen: HashSet<super::DiagnosticDedupKey> = HashSet::new();
     let mut deduped: Vec<Diagnostic> = Vec::with_capacity(checker.errors.len());
     for e in std::mem::take(&mut checker.errors) {

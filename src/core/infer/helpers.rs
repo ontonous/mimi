@@ -58,24 +58,26 @@ impl<'a> Checker<'a> {
         block: &Block,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        self.process_block_expr(block, scopes, |this, last, scopes, ret| match last.unlocated() {
-            Stmt::Expr(e) => this.infer_expr(e, scopes),
-            Stmt::Return(Some(e)) => {
-                let t = this.infer_expr(e, scopes);
-                this.check_stmt(last, ret, scopes);
-                t
-            }
-            Stmt::Return(None) => {
-                this.check_stmt(last, ret, scopes);
-                Type::Name("unit".into(), vec![])
-            }
-            Stmt::If { cond, then_, else_ } => {
-                this.infer_if_expr(cond, then_, else_.as_ref(), scopes)
-            }
-            Stmt::Block(inner) => this.infer_block_expr(inner, scopes),
-            _ => {
-                this.check_stmt(last, ret, scopes);
-                Type::Name("unit".into(), vec![])
+        self.process_block_expr(block, scopes, |this, last, scopes, ret| {
+            match last.unlocated() {
+                Stmt::Expr(e) => this.infer_expr(e, scopes),
+                Stmt::Return(Some(e)) => {
+                    let t = this.infer_expr(e, scopes);
+                    this.check_stmt(last, ret, scopes);
+                    t
+                }
+                Stmt::Return(None) => {
+                    this.check_stmt(last, ret, scopes);
+                    Type::Name("unit".into(), vec![])
+                }
+                Stmt::If { cond, then_, else_ } => {
+                    this.infer_if_expr(cond, then_, else_.as_ref(), scopes)
+                }
+                Stmt::Block(inner) => this.infer_block_expr(inner, scopes),
+                _ => {
+                    this.check_stmt(last, ret, scopes);
+                    Type::Name("unit".into(), vec![])
+                }
             }
         })
     }
@@ -87,29 +89,31 @@ impl<'a> Checker<'a> {
         expected: &Type,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        self.process_block_expr(block, scopes, |this, last, scopes, ret| match last.unlocated() {
-            Stmt::Expr(e) => this.check_expr(expected, e, scopes),
-            Stmt::Return(Some(e)) => {
-                let t = this.check_expr(expected, e, scopes);
-                this.check_stmt(last, ret, scopes);
-                t
-            }
-            Stmt::Return(None) => {
-                this.check_stmt(last, ret, scopes);
-                Type::Name("unit".into(), vec![])
-            }
-            Stmt::If { cond, then_, else_ } => {
-                let if_expr = Expr::If {
-                    cond: Box::new(cond.clone()),
-                    then_: then_.clone(),
-                    else_: else_.clone(),
-                };
-                this.check_expr(expected, &if_expr, scopes)
-            }
-            Stmt::Block(inner) => this.check_block_expr(inner, expected, scopes),
-            _ => {
-                this.check_stmt(last, ret, scopes);
-                Type::Name("unit".into(), vec![])
+        self.process_block_expr(block, scopes, |this, last, scopes, ret| {
+            match last.unlocated() {
+                Stmt::Expr(e) => this.check_expr(expected, e, scopes),
+                Stmt::Return(Some(e)) => {
+                    let t = this.check_expr(expected, e, scopes);
+                    this.check_stmt(last, ret, scopes);
+                    t
+                }
+                Stmt::Return(None) => {
+                    this.check_stmt(last, ret, scopes);
+                    Type::Name("unit".into(), vec![])
+                }
+                Stmt::If { cond, then_, else_ } => {
+                    let if_expr = Expr::If {
+                        cond: Box::new(cond.clone()),
+                        then_: then_.clone(),
+                        else_: else_.clone(),
+                    };
+                    this.check_expr(expected, &if_expr, scopes)
+                }
+                Stmt::Block(inner) => this.check_block_expr(inner, expected, scopes),
+                _ => {
+                    this.check_stmt(last, ret, scopes);
+                    Type::Name("unit".into(), vec![])
+                }
             }
         })
     }

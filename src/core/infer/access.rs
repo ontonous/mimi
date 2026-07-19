@@ -20,9 +20,7 @@ fn subst_with_depth(ty: &Type, subst: &HashMap<String, Type>, depth: u32) -> Typ
     }
     let next = depth + 1;
     match ty {
-        Type::Located { meta, ty } => {
-            subst_with_depth(ty, subst, next).with_meta(*meta)
-        }
+        Type::Located { meta, ty } => subst_with_depth(ty, subst, next).with_meta(*meta),
         Type::Name(name, args) if args.is_empty() && subst.contains_key(name) => {
             subst[name].clone()
         }
