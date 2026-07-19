@@ -113,6 +113,8 @@ pub struct CfgLocation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CanonicalActionKind {
+    Read,
+    Write,
     Introduce,
     Move,
     Drop,

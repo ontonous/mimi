@@ -15,8 +15,8 @@ use crate::span::Span;
 
 use super::NodeId;
 
-pub use lower::lower_file;
 pub use dataflow::analyze_cfgs;
+pub use lower::lower_file;
 pub use validate::validate_cfg;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -46,8 +46,14 @@ pub enum CfgPointKind {
 pub struct CfgPoint {
     pub source: CfgSource,
     pub kind: CfgPointKind,
+    /// Root binding names used by backwards liveness.
     pub uses: Vec<String>,
+    /// Root binding names defined by this point.
     pub defs: Vec<String>,
+    /// Stable structured place spellings read at this point.
+    pub reads: Vec<String>,
+    /// Stable structured place spellings written at this point.
+    pub writes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
