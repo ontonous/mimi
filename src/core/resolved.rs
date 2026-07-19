@@ -143,6 +143,8 @@ pub struct NodeMeta {
     /// Ephemeral checker correlation key. Cleared before `CheckedProgram`
     /// crosses its construction boundary and never used as semantic identity.
     expression_key: Option<ExpressionTypeKey>,
+    /// Ephemeral explicit type operand consumed while constructing canonical IR.
+    type_operand: Option<Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -587,6 +589,7 @@ pub struct CheckedProgram {
     resolved_types: crate::core::ResolvedTypeTable,
     resolved_signatures: BTreeMap<NodeId, crate::core::ResolvedSignature>,
     resolved_node_types: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    resolved_type_operands: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     resolved_field_types: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     callable_cfgs: BTreeMap<NodeId, crate::core::cfg::CallableCfg>,
     resource_analyses: BTreeMap<NodeId, crate::core::ResourceAnalysis>,
@@ -673,11 +676,20 @@ impl CheckedProgram {
         }
         program.type_schemes = schemes;
         program.zonked_function_types = zonked_by_node;
-        let (resolved_types, resolved_signatures, resolved_node_types, resolved_field_types) =
-            build_canonical_function_signatures(&program, &stable_expression_types)?;
+        let (
+            resolved_types,
+            resolved_signatures,
+            resolved_node_types,
+            resolved_type_operands,
+            resolved_field_types,
+        ) = build_canonical_function_signatures(&program, &stable_expression_types)?;
+        for meta in program.node_meta.values_mut() {
+            meta.type_operand = None;
+        }
         program.resolved_types = resolved_types;
         program.resolved_signatures = resolved_signatures;
         program.resolved_node_types = resolved_node_types;
+        program.resolved_type_operands = resolved_type_operands;
         program.resolved_field_types = resolved_field_types;
         program.callable_cfgs = callable_cfgs;
         program.resource_analyses = resource_analyses;
@@ -868,6 +880,7 @@ impl CheckedProgram {
             resolved_types: crate::core::ResolvedTypeTable::new(),
             resolved_signatures: BTreeMap::new(),
             resolved_node_types: BTreeMap::new(),
+            resolved_type_operands: BTreeMap::new(),
             resolved_field_types: BTreeMap::new(),
             callable_cfgs: BTreeMap::new(),
             resource_analyses: BTreeMap::new(),
@@ -1128,6 +1141,14 @@ impl CheckedProgram {
 
     pub fn resolved_node_type(&self, node: &NodeId) -> Option<&crate::core::ResolvedTypeId> {
         self.resolved_node_types.get(node)
+    }
+
+    pub fn resolved_type_operands(&self) -> &BTreeMap<NodeId, crate::core::ResolvedTypeId> {
+        &self.resolved_type_operands
+    }
+
+    pub fn resolved_type_operand(&self, node: &NodeId) -> Option<&crate::core::ResolvedTypeId> {
+        self.resolved_type_operands.get(node)
     }
 
     pub fn resolved_field_types(&self) -> &BTreeMap<NodeId, crate::core::ResolvedTypeId> {
@@ -4143,6 +4164,17 @@ fn collect_expr_meta(
                 exact.unwrap_or(fallback),
             ));
         }
+        if let Expr::TypeInfo(ty) = expr.unlocated() {
+            if node_meta.type_operand.replace(ty.clone()).is_some() {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: expression NodeId '{}' has more than one explicit type operand",
+                        node_id.0
+                    ),
+                    exact.unwrap_or(fallback),
+                ));
+            }
+        }
     }
     match expr.unlocated() {
         Expr::Literal(lit) => {
@@ -4700,6 +4732,7 @@ fn insert_node_meta(
             origin,
             precision,
             expression_key: None,
+            type_operand: None,
         },
     );
 }
@@ -6276,6 +6309,7 @@ type CanonicalFunctionArtifacts = (
     BTreeMap<NodeId, crate::core::ResolvedSignature>,
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    BTreeMap<NodeId, crate::core::ResolvedTypeId>,
 );
 
 fn stabilize_expression_types(
@@ -6449,6 +6483,7 @@ fn build_canonical_function_signatures(
     let ids = NodeIdBuilder::new(&program.legacy_file.sources);
     let mut signatures = BTreeMap::new();
     let mut node_types = BTreeMap::new();
+    let mut type_operands = BTreeMap::new();
     let mut field_types = BTreeMap::new();
     let mut errors = Vec::new();
     let mut functions = program.functions.values().collect::<Vec<_>>();
@@ -6589,6 +6624,37 @@ fn build_canonical_function_signatures(
                             .map(|meta| meta.origin.user_span())
                             .unwrap_or_else(|| function.origin.user_span()),
                     )),
+                }
+                if let Some(type_operand) = program
+                    .node_meta
+                    .get(node_id)
+                    .and_then(|meta| meta.type_operand.as_ref())
+                {
+                    match ZonkedTy::from_resolved(type_operand.clone()) {
+                        Ok(operand) => match types.intern_zonked(
+                            &operand,
+                            &capabilities,
+                            &mut resolve_name,
+                        ) {
+                            Ok(operand) => {
+                                type_operands.insert(node_id.clone(), operand);
+                            }
+                            Err(error) => errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: explicit type operand '{}' is not canonical: {error}",
+                                    node_id.0
+                                ),
+                                program.node_meta[node_id].origin.user_span(),
+                            )),
+                        },
+                        Err(error) => errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: explicit type operand '{}' is not zonked: {error}",
+                                node_id.0
+                            ),
+                            program.node_meta[node_id].origin.user_span(),
+                        )),
+                    }
                 }
             }
         }
@@ -6892,7 +6958,7 @@ fn build_canonical_function_signatures(
         }));
     }
     if errors.is_empty() {
-        Ok((types, signatures, node_types, field_types))
+        Ok((types, signatures, node_types, type_operands, field_types))
     } else {
         Err(errors)
     }
@@ -7162,6 +7228,10 @@ mod tests {
             .node_meta()
             .values()
             .all(|meta| meta.expression_key.is_none()));
+        assert!(program
+            .node_meta()
+            .values()
+            .all(|meta| meta.type_operand.is_none()));
     }
 
     #[test]

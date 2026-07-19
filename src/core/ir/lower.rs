@@ -46,6 +46,7 @@ pub struct FunctionBodyInput<'a> {
     pub extern_blocks: &'a HashMap<NodeId, ResolvedExternBlock>,
     pub constants: &'a HashMap<NodeId, ResolvedConstant>,
     pub node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
+    pub type_operands: &'a BTreeMap<NodeId, ResolvedTypeId>,
     pub types: &'a ResolvedTypeTable,
     pub node_meta: &'a HashMap<NodeId, NodeMeta>,
     pub sources: &'a SourceRegistry,
@@ -83,6 +84,7 @@ pub fn lower_function_body(
         extern_blocks: input.extern_blocks,
         constants: input.constants,
         node_types: input.node_types,
+        type_operands: input.type_operands,
         types: input.types,
         node_meta: input.node_meta,
         ids: NodeIdBuilder::new(input.sources),
@@ -140,6 +142,7 @@ pub fn lower_checked_function_bodies(
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
             node_types: program.resolved_node_types(),
+            type_operands: program.resolved_type_operands(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -226,6 +229,7 @@ struct BodyLowerer<'a> {
     extern_blocks: &'a HashMap<NodeId, ResolvedExternBlock>,
     constants: &'a HashMap<NodeId, ResolvedConstant>,
     node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
+    type_operands: &'a BTreeMap<NodeId, ResolvedTypeId>,
     types: &'a ResolvedTypeTable,
     node_meta: &'a HashMap<NodeId, NodeMeta>,
     ids: NodeIdBuilder<'a>,
@@ -885,6 +889,14 @@ impl BodyLowerer<'_> {
             Expr::TypeOf(value) => ResolvedExprKind::TypeOf(Box::new(
                 self.lower_expr(value, &format!("{role}.inner"))?,
             )),
+            Expr::TypeInfo(_) => ResolvedExprKind::TypeValue(
+                self.type_operands.get(&node_id).cloned().ok_or_else(|| {
+                    vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        "type_info has no checker-resolved canonical type operand",
+                    )]
+                })?,
+            ),
             Expr::Old(value) => {
                 ResolvedExprKind::Old(Box::new(self.lower_expr(value, &format!("{role}.inner"))?))
             }
@@ -979,7 +991,6 @@ impl BodyLowerer<'_> {
             Expr::Quote(_)
             | Expr::QuoteInterpolate(_)
             | Expr::Comptime(_)
-            | Expr::TypeInfo(_)
             | Expr::Lambda { .. }
             | Expr::Turbofish(_, _, _)
             | Expr::Arena(_)
@@ -994,6 +1005,10 @@ impl BodyLowerer<'_> {
             ResolvedExprKind::TypeOf(_) => Some(super::BackendRequirement {
                 requirement_id: "COMPTIME-PURE-001".into(),
                 capability: "reflection.type_name".into(),
+            }),
+            ResolvedExprKind::TypeValue(_) => Some(super::BackendRequirement {
+                requirement_id: "COMPTIME-PURE-001".into(),
+                capability: "reflection.type_info".into(),
             }),
             ResolvedExprKind::Old(_) => Some(super::BackendRequirement {
                 requirement_id: "LANG-CONTRACT-001".into(),
@@ -2496,6 +2511,7 @@ mod tests {
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
             node_types: program.resolved_node_types(),
+            type_operands: program.resolved_type_operands(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2535,6 +2551,7 @@ mod tests {
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
             node_types: &empty,
+            type_operands: program.resolved_type_operands(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2566,6 +2583,7 @@ mod tests {
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
             node_types: program.resolved_node_types(),
+            type_operands: program.resolved_type_operands(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2611,6 +2629,7 @@ mod tests {
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
             node_types: program.resolved_node_types(),
+            type_operands: program.resolved_type_operands(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2652,6 +2671,7 @@ mod tests {
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
             node_types: program.resolved_node_types(),
+            type_operands: program.resolved_type_operands(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2709,6 +2729,7 @@ mod tests {
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
             node_types: program.resolved_node_types(),
+            type_operands: program.resolved_type_operands(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2745,6 +2766,7 @@ mod tests {
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
             node_types: program.resolved_node_types(),
+            type_operands: program.resolved_type_operands(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2787,6 +2809,7 @@ mod tests {
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
             node_types: program.resolved_node_types(),
+            type_operands: program.resolved_type_operands(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2886,6 +2909,7 @@ mod tests {
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
             node_types: program.resolved_node_types(),
+            type_operands: program.resolved_type_operands(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2926,6 +2950,7 @@ mod tests {
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
             node_types: program.resolved_node_types(),
+            type_operands: program.resolved_type_operands(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -3195,7 +3220,7 @@ mod tests {
     #[test]
     fn type_name_and_old_retain_typed_operands_and_requirements() {
         let file = parse(
-            "func type_name_of(value: i32) { type_name(value); () }\nfunc preserve(value: i32) -> i32 { ensures: result == old(value); value }",
+            "func type_name_of(value: i32) { type_name(value); () }\nfunc inspect() { type_info(i32); () }\nfunc preserve(value: i32) -> i32 { ensures: result == old(value); value }",
         );
         let program = crate::core::check_program(&file).expect("check");
         let bodies =
@@ -3216,6 +3241,23 @@ mod tests {
             .backend_requirements
             .iter()
             .any(|requirement| requirement.capability == "reflection.type_name"));
+
+        let ResolvedStmtKind::Expr(type_info) =
+            &bodies[&NodeId("function:inspect".into())].root.statements[0].kind
+        else {
+            panic!("type-info expression expected");
+        };
+        let ResolvedExprKind::TypeValue(operand) = &type_info.kind else {
+            panic!("canonical type value expected");
+        };
+        assert!(matches!(
+            program.resolved_types().get(operand),
+            Some(ResolvedType::Primitive(crate::core::ir::PrimitiveType::I32))
+        ));
+        assert!(type_info
+            .backend_requirements
+            .iter()
+            .any(|requirement| requirement.capability == "reflection.type_info"));
 
         let preserve = &bodies[&NodeId("function:preserve".into())];
         let ResolvedStmtKind::Contract { condition, .. } = &preserve.root.statements[0].kind else {
