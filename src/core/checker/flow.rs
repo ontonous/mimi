@@ -28,6 +28,11 @@ pub struct FlowAcc {
     pub schemes: HashMap<crate::core::NodeId, TypeScheme>,
     /// v0.31.2: Zonked function signatures for backend consumption.
     pub zonked_func_types: HashMap<String, (Vec<ZonkedTy>, ZonkedTy)>,
+    /// Checker-finalized expression types keyed by callable and clone-stable
+    /// source identity. `CheckedProgram::from_flow_acc` replaces every key with
+    /// a stable NodeId before returning the owned artifact.
+    pub(crate) zonked_expr_types:
+        BTreeMap<crate::core::NodeId, BTreeMap<crate::core::resolved::ExpressionTypeKey, ZonkedTy>>,
     /// v0.31.3: Stable CFGs for every callable body.
     pub callable_cfgs: BTreeMap<crate::core::NodeId, crate::core::cfg::CallableCfg>,
     /// v0.31.3: Canonical fixed-point resource and loan facts.
@@ -152,6 +157,7 @@ fn extract_acc(checker: &mut Checker) -> FlowAcc {
         ownership_ledgers: std::mem::take(&mut checker.ownership_ledgers),
         schemes: std::mem::take(&mut checker.schemes),
         zonked_func_types: std::mem::take(&mut checker.zonked_func_types),
+        zonked_expr_types: std::mem::take(&mut checker.zonked_expr_types),
         callable_cfgs,
         resource_analyses,
     }

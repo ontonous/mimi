@@ -15,6 +15,7 @@ impl<'a> Checker<'a> {
         let previous_span = self.replace_span(expr.meta().map(|meta| meta.span));
         let result = self.check_expr_inner(expected, expr, scopes);
         self.set_span(previous_span);
+        self.record_expression_type(expr, &result);
         result
     }
 
@@ -31,11 +32,53 @@ impl<'a> Checker<'a> {
             }
             // C3: bare None (parsed as Ident "None") in Option context
             Expr::Ident(name) if name == "None" => {
-                if let Type::Option(_) = expected.unlocated() {
+                let is_option = match expected.unlocated() {
+                    Type::Option(_) => true,
+                    Type::Name(name, arguments) => name == "Option" && arguments.len() == 1,
+                    _ => false,
+                };
+                if is_option {
                     expected.clone()
                 } else {
                     self.infer_expr(expr, scopes)
                 }
+            }
+            Expr::Call(callee, args) => {
+                if let Expr::Ident(name) = callee.unlocated() {
+                    let option_inner = match expected.unlocated() {
+                        Type::Option(inner) => Some(inner.as_ref()),
+                        Type::Name(name, arguments) if name == "Option" && arguments.len() == 1 => {
+                            arguments.first()
+                        }
+                        _ => None,
+                    };
+                    let result_parts = match expected.unlocated() {
+                        Type::Result(ok, error) => Some((ok.as_ref(), error.as_ref())),
+                        Type::Name(name, arguments) if name == "Result" && arguments.len() == 2 => {
+                            Some((&arguments[0], &arguments[1]))
+                        }
+                        _ => None,
+                    };
+                    if name == "Some" && args.len() == 1 {
+                        if let Some(inner) = option_inner {
+                            self.check_expr(inner, &args[0], scopes);
+                            return expected.clone();
+                        }
+                    } else if name == "None" && args.is_empty() && option_inner.is_some() {
+                        return expected.clone();
+                    } else if name == "Ok" && args.len() == 1 {
+                        if let Some((ok, _)) = result_parts {
+                            self.check_expr(ok, &args[0], scopes);
+                            return expected.clone();
+                        }
+                    } else if name == "Err" && args.len() == 1 {
+                        if let Some((_, error)) = result_parts {
+                            self.check_expr(error, &args[0], scopes);
+                            return expected.clone();
+                        }
+                    }
+                }
+                self.infer_expr(expr, scopes)
             }
             // List literal in List / List<T> context:
             // empty → expected; non-empty List<T> → check each elem against T.
@@ -114,7 +157,9 @@ impl<'a> Checker<'a> {
         // Inference results are consumed by `matches!` and `unify` which expect
         // kind variants; strip the wrapper so downstream type discrimination
         // (len/sort/is_empty/...) sees the underlying Type::Name directly.
-        result.into_unlocated()
+        let result = result.into_unlocated();
+        self.record_expression_type(expr, &result);
+        result
     }
 
     fn infer_expr_inner(&mut self, expr: &Expr, scopes: &mut Vec<HashMap<String, Type>>) -> Type {

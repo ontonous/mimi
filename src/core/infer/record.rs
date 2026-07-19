@@ -227,7 +227,7 @@ impl<'a> Checker<'a> {
         elems: &[Expr],
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        let mut elem_ty = Type::Name("unknown".into(), vec![]);
+        let mut elem_ty = Type::TypeVar(self.unification.fresh_var());
         for (i, e) in elems.iter().enumerate() {
             let t = self.infer_expr(e, scopes);
             if i == 0 {
@@ -276,7 +276,7 @@ impl<'a> Checker<'a> {
         elems: &[Expr],
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        let mut elem_ty = Type::Name("unknown".into(), vec![]);
+        let mut elem_ty = Type::TypeVar(self.unification.fresh_var());
         for (i, e) in elems.iter().enumerate() {
             let t = self.infer_expr(e, scopes);
             if i == 0 {

@@ -217,8 +217,15 @@ impl<'a> Checker<'a> {
                 if args.len() != 2 {
                     self.emit_code(crate::diagnostic::codes::E0242, "push expects 2 arguments");
                 } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                    let list_ty = self.infer_expr(&args[0], scopes);
+                    let value_ty = self.infer_expr(&args[1], scopes);
+                    if let Type::Name(name, elements) = list_ty.unlocated() {
+                        if name == "List" && elements.len() == 1 {
+                            // Preserve the existing runtime-polymorphic push
+                            // surface while still constraining empty-list vars.
+                            let _ = self.unification.unify(&elements[0], &value_ty);
+                        }
+                    }
                 }
                 // push mutates in place; returns Unit (not List) so block-ending
                 // push() doesn't propagate the list as the block's return value.

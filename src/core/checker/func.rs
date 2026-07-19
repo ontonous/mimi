@@ -23,6 +23,7 @@ impl<'a> Checker<'a> {
         };
         let owner = crate::core::NodeId(format!("function:{}", owner_name));
         self.current_ownership_owner = Some(owner.clone());
+        self.begin_expression_type_capture(owner.clone());
         self.ownership_ledgers
             .entry(owner.clone())
             .or_insert_with(|| crate::core::OwnershipLedger::new(owner));
@@ -172,6 +173,7 @@ impl<'a> Checker<'a> {
         self.available_effects.pop();
         self.var_scopes.pop();
         self.cap_vars.pop();
+        self.finish_expression_type_capture();
         self.current_ret = None;
         self.current_ownership_owner = None;
         self.generic_scope.truncate(generic_scope_len);

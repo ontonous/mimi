@@ -140,6 +140,21 @@ pub struct NodeMeta {
     pub node_id: NodeId,
     pub origin: Origin,
     pub precision: SpanPrecision,
+    /// Ephemeral checker correlation key. Cleared before `CheckedProgram`
+    /// crosses its construction boundary and never used as semantic identity.
+    expression_key: Option<ExpressionTypeKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct ExpressionTypeKey {
+    source_id: u32,
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+    origin_kind: &'static str,
+    origin_rule: Option<&'static str>,
+    expression_kind: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -566,6 +581,7 @@ pub struct CheckedProgram {
     zonked_function_types: HashMap<NodeId, (Vec<ZonkedTy>, ZonkedTy)>,
     resolved_types: crate::core::ResolvedTypeTable,
     resolved_signatures: BTreeMap<NodeId, crate::core::ResolvedSignature>,
+    resolved_node_types: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     callable_cfgs: BTreeMap<NodeId, crate::core::cfg::CallableCfg>,
     resource_analyses: BTreeMap<NodeId, crate::core::ResourceAnalysis>,
 }
@@ -584,6 +600,7 @@ impl CheckedProgram {
             ownership_ledgers,
             schemes,
             zonked_func_types,
+            zonked_expr_types,
             callable_cfgs,
             resource_analyses,
             ..
@@ -644,11 +661,17 @@ impl CheckedProgram {
         if !errors.is_empty() {
             return Err(errors);
         }
+        let stable_expression_types = stabilize_expression_types(&program, &zonked_expr_types)?;
+        for meta in program.node_meta.values_mut() {
+            meta.expression_key = None;
+        }
         program.type_schemes = schemes;
         program.zonked_function_types = zonked_by_node;
-        let (resolved_types, resolved_signatures) = build_canonical_function_signatures(&program)?;
+        let (resolved_types, resolved_signatures, resolved_node_types) =
+            build_canonical_function_signatures(&program, &stable_expression_types)?;
         program.resolved_types = resolved_types;
         program.resolved_signatures = resolved_signatures;
+        program.resolved_node_types = resolved_node_types;
         program.callable_cfgs = callable_cfgs;
         program.resource_analyses = resource_analyses;
         Ok(program)
@@ -836,6 +859,7 @@ impl CheckedProgram {
             zonked_function_types: HashMap::new(),
             resolved_types: crate::core::ResolvedTypeTable::new(),
             resolved_signatures: BTreeMap::new(),
+            resolved_node_types: BTreeMap::new(),
             callable_cfgs: BTreeMap::new(),
             resource_analyses: BTreeMap::new(),
         })
@@ -1087,6 +1111,14 @@ impl CheckedProgram {
 
     pub fn resolved_signature(&self, owner: &NodeId) -> Option<&crate::core::ResolvedSignature> {
         self.resolved_signatures.get(owner)
+    }
+
+    pub fn resolved_node_types(&self) -> &BTreeMap<NodeId, crate::core::ResolvedTypeId> {
+        &self.resolved_node_types
+    }
+
+    pub fn resolved_node_type(&self, node: &NodeId) -> Option<&crate::core::ResolvedTypeId> {
+        self.resolved_node_types.get(node)
     }
 
     pub fn callable_cfgs(&self) -> &BTreeMap<NodeId, crate::core::cfg::CallableCfg> {
@@ -3886,6 +3918,22 @@ fn expr_kind(expr: &Expr) -> &'static str {
     }
 }
 
+pub(crate) fn expression_type_key(expr: &Expr) -> ExpressionTypeKey {
+    let meta = expr
+        .meta()
+        .unwrap_or_else(|| AstNodeMeta::synthetic(AstOrigin::User));
+    ExpressionTypeKey {
+        source_id: meta.span.source_id.raw(),
+        start_line: meta.span.start_line,
+        start_col: meta.span.start_col,
+        end_line: meta.span.end_line,
+        end_col: meta.span.end_col,
+        origin_kind: meta.origin.kind(),
+        origin_rule: meta.origin.rule(),
+        expression_kind: expr_kind(expr),
+    }
+}
+
 fn collect_expr_meta(
     expr: &Expr,
     owner: &NodeId,
@@ -3901,7 +3949,7 @@ fn collect_expr_meta(
     let ast_origin = meta.map(|meta| meta.origin).unwrap_or(AstOrigin::User);
     let node_id = ids.anonymous(owner, expr_kind(expr), role, exact, ast_origin, errors);
     insert_node_meta(
-        node_id,
+        node_id.clone(),
         ast_origin,
         meta.map(|meta| meta.parent).unwrap_or(AstParentHint::None),
         anchor,
@@ -3911,6 +3959,18 @@ fn collect_expr_meta(
         out,
         errors,
     );
+    if let Some(node_meta) = out.get_mut(&node_id) {
+        let key = expression_type_key(expr);
+        if node_meta.expression_key.replace(key).is_some() {
+            errors.push(Diagnostic::error(
+                format!(
+                    "TOOL-RESOLUTION-001: expression NodeId '{}' has more than one type key",
+                    node_id.0
+                ),
+                exact.unwrap_or(fallback),
+            ));
+        }
+    }
     match expr.unlocated() {
         Expr::Literal(lit) => {
             if let crate::ast::Lit::FString(parts) = lit {
@@ -4466,6 +4526,7 @@ fn insert_node_meta(
             node_id,
             origin,
             precision,
+            expression_key: None,
         },
     );
 }
@@ -6004,15 +6065,71 @@ fn materialize_const_value(expr: &crate::ast::Expr) -> ResolvedConstValue {
     }
 }
 
+type EphemeralExpressionTypes = BTreeMap<NodeId, BTreeMap<ExpressionTypeKey, ZonkedTy>>;
+type StableExpressionTypes = BTreeMap<NodeId, BTreeMap<NodeId, ZonkedTy>>;
+type CanonicalFunctionArtifacts = (
+    crate::core::ResolvedTypeTable,
+    BTreeMap<NodeId, crate::core::ResolvedSignature>,
+    BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+);
+
+fn stabilize_expression_types(
+    program: &CheckedProgram,
+    ephemeral: &EphemeralExpressionTypes,
+) -> Result<StableExpressionTypes, Vec<Diagnostic>> {
+    let mut errors = Vec::new();
+    let mut stable = BTreeMap::new();
+    for (owner, expression_types) in ephemeral {
+        let owner_prefix = format!("{}/", owner.0);
+        let mut keys = BTreeMap::new();
+        for meta in program
+            .node_meta
+            .values()
+            .filter(|meta| meta.node_id.0.starts_with(&owner_prefix))
+        {
+            if let Some(key) = &meta.expression_key {
+                if let Some(previous) = keys.insert(key.clone(), meta.node_id.clone()) {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: callable '{}' expression key maps to both '{}' and '{}'",
+                            owner.0, previous.0, meta.node_id.0
+                        ),
+                        meta.origin.user_span(),
+                    ));
+                }
+            }
+        }
+        let mut owner_types = BTreeMap::new();
+        for (key, ty) in expression_types {
+            let Some(node_id) = keys.get(key) else {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: checker expression in '{}' has no stable NodeId",
+                        owner.0
+                    ),
+                    program
+                        .node_meta
+                        .get(owner)
+                        .map(|meta| meta.origin.user_span())
+                        .unwrap_or(Span::UNKNOWN),
+                ));
+                continue;
+            };
+            owner_types.insert(node_id.clone(), ty.clone());
+        }
+        stable.insert(owner.clone(), owner_types);
+    }
+    if errors.is_empty() {
+        Ok(stable)
+    } else {
+        Err(errors)
+    }
+}
+
 fn build_canonical_function_signatures(
     program: &CheckedProgram,
-) -> Result<
-    (
-        crate::core::ResolvedTypeTable,
-        BTreeMap<NodeId, crate::core::ResolvedSignature>,
-    ),
-    Vec<Diagnostic>,
-> {
+    expression_types: &StableExpressionTypes,
+) -> Result<CanonicalFunctionArtifacts, Vec<Diagnostic>> {
     fn register_nominal(
         catalog: &mut BTreeMap<String, std::collections::BTreeSet<String>>,
         qualified_name: &str,
@@ -6035,7 +6152,10 @@ fn build_canonical_function_signatures(
             "Future",
             "List",
             "Map",
+            "MemoryDump",
             "Option",
+            "PanicPayload",
+            "PeerFault",
             "Range",
             "Record",
             "Result",
@@ -6107,9 +6227,12 @@ fn build_canonical_function_signatures(
     }
 
     let mut types = crate::core::ResolvedTypeTable::new();
-    let capabilities = crate::core::ResolvedTypeCapabilities::default();
+    let capabilities =
+        crate::core::ResolvedTypeCapabilities::with_dynamic_any("type.dynamic_value")
+            .map_err(|error| vec![Diagnostic::error(error.to_string(), Span::UNKNOWN)])?;
     let ids = NodeIdBuilder::new(&program.legacy_file.sources);
     let mut signatures = BTreeMap::new();
+    let mut node_types = BTreeMap::new();
     let mut errors = Vec::new();
     let mut functions = program.functions.values().collect::<Vec<_>>();
     functions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
@@ -6232,6 +6355,27 @@ fn build_canonical_function_signatures(
             continue;
         }
 
+        if let Some(expressions) = expression_types.get(&function.node_id) {
+            for (node_id, ty) in expressions {
+                match types.intern_zonked(ty, &capabilities, &mut resolve_name) {
+                    Ok(ty) => {
+                        node_types.insert(node_id.clone(), ty);
+                    }
+                    Err(error) => errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: expression '{}' type is not canonical: {}",
+                            node_id.0, error
+                        ),
+                        program
+                            .node_meta
+                            .get(node_id)
+                            .map(|meta| meta.origin.user_span())
+                            .unwrap_or_else(|| function.origin.user_span()),
+                    )),
+                }
+            }
+        }
+
         let parameters = function
             .param_decls
             .iter()
@@ -6308,7 +6452,7 @@ fn build_canonical_function_signatures(
         }));
     }
     if errors.is_empty() {
-        Ok((types, signatures))
+        Ok((types, signatures, node_types))
     } else {
         Err(errors)
     }
@@ -6507,6 +6651,30 @@ mod tests {
             );
             assert_eq!(first_signature.result, second_signature.result);
         }
+    }
+
+    #[test]
+    fn checker_expression_types_use_stable_resolved_node_ids() {
+        let file = parse(
+            "func maximum(left: i32, right: i32) -> i32 { if left > right { left } else { right } }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let function = program.function("maximum").expect("function");
+        let prefix = format!("{}/", function.node_id.0);
+        let expression_nodes = program
+            .node_meta()
+            .keys()
+            .filter(|node| node.0.starts_with(&prefix) && node.0.contains("/node:expr."))
+            .collect::<Vec<_>>();
+
+        assert!(!expression_nodes.is_empty());
+        assert!(expression_nodes
+            .iter()
+            .all(|node| program.resolved_node_type(node).is_some()));
+        assert!(program
+            .node_meta()
+            .values()
+            .all(|meta| meta.expression_key.is_none()));
     }
 
     #[test]
