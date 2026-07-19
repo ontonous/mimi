@@ -574,6 +574,22 @@ impl<'a> Interpreter<'a> {
                             }
                         }
                     }
+                    Value::PlaceRefMut { owner, projections } => {
+                        if !self.is_mutable(&owner) {
+                            return Err(InterpError::new(format!(
+                                "cannot assign through borrowed projection of immutable variable '{}'",
+                                owner
+                            )));
+                        }
+                        let mut owner_value = self.lookup(&owner).ok_or_else(|| {
+                            InterpError::new(format!(
+                                "borrowed variable '{}' is no longer available",
+                                owner
+                            ))
+                        })?;
+                        write_runtime_place(&mut owner_value, &projections, v)?;
+                        self.assign(&owner, owner_value)?;
+                    }
                     _ => {
                         return Err(InterpError::new(format!(
                             "cannot assign through non-mutable reference (type: {})",
@@ -1028,4 +1044,31 @@ impl<'a> Interpreter<'a> {
 
         Ok(last_value)
     }
+}
+
+fn write_runtime_place(
+    value: &mut Value,
+    projections: &[RuntimeProjection],
+    replacement: Value,
+) -> Result<(), InterpError> {
+    let Some((projection, rest)) = projections.split_first() else {
+        *value = replacement;
+        return Ok(());
+    };
+    let child = match (value, projection) {
+        (Value::Record(_, fields), RuntimeProjection::Field(field)) => fields
+            .get_mut(field)
+            .ok_or_else(|| InterpError::new(format!("record has no field '{}'", field)))?,
+        (Value::Tuple(values), RuntimeProjection::Tuple(index)) => {
+            values.get_mut(*index).ok_or_else(|| {
+                InterpError::index_out_of_bounds(format!("tuple index {} is out of bounds", index))
+            })?
+        }
+        _ => {
+            return Err(InterpError::new(
+                "borrowed mutable projection does not match its runtime value",
+            ))
+        }
+    };
+    write_runtime_place(child, rest, replacement)
 }

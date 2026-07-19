@@ -125,6 +125,34 @@ func main() -> i32 {
 }
 
 #[test]
+fn borrow_projected_field_mutates_original_record_in_interpreter() {
+    let src = r#"
+type Inner { value: i32 }
+type Outer { inner: Inner }
+func main() -> i32 {
+    let mut item = Outer { inner: Inner { value: 7 } }
+    let value = &mut item.inner.value
+    *value = 12
+    item.inner.value
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(12));
+}
+
+#[test]
+fn borrow_projected_tuple_mutates_original_tuple_in_interpreter() {
+    let src = r#"
+func main() -> i32 {
+    let mut pair = (4, 8)
+    let value = &mut pair.1
+    *value = 11
+    pair.1
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(11));
+}
+
+#[test]
 fn borrow_nll_release_after_last_use() {
     let src = r#"
 func read(x: &i32) -> i32 { *x }

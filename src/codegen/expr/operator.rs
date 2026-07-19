@@ -87,6 +87,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         inner: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        if matches!(op, UnOp::Ref | UnOp::RefMut)
+            && matches!(
+                inner.unlocated(),
+                Expr::Ident(_)
+                    | Expr::Field(..)
+                    | Expr::TupleIndex(..)
+                    | Expr::Index(..)
+                    | Expr::Unary(UnOp::Deref, _)
+            )
+        {
+            return self
+                .compile_place_addr(inner, vars)
+                .map(|(pointer, _)| pointer.into());
+        }
         let v = self.compile_expr(inner, vars)?;
         match op {
             UnOp::Neg => {
@@ -135,21 +149,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             UnOp::Ref | UnOp::RefMut => {
-                // Borrowed index: for scalar lists, return a pointer directly into
-                // the list's data slot rather than copying the element value.
-                if let Expr::Index(obj, idx_expr) = inner.unlocated() {
-                    let obj_type = self.infer_object_type(obj, vars);
-                    let is_scalar_list = obj_type
-                        .strip_prefix("List<")
-                        .and_then(|rest| rest.strip_suffix('>'))
-                        .map(|elem| matches!(elem, "i32" | "i64" | "bool"))
-                        .unwrap_or(false);
-                    if is_scalar_list {
-                        return self
-                            .compile_index_addr(obj, idx_expr, vars)
-                            .map(|p| p.into());
-                    }
-                }
                 let ty = v.get_type();
                 let alloca = self.build_alloca(ty, "ref")?;
                 self.build_store(alloca, v)?;
@@ -159,13 +158,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if let BasicValueEnum::PointerValue(ptr) = v {
                     // Try to determine the pointee type from the inner expression's variable entry
                     let pointee_ty = match inner.unlocated() {
-                        Expr::Ident(name) => {
-                            if let Some(&(_, ty)) = vars.get(name) {
-                                ty
-                            } else {
-                                BasicTypeEnum::IntType(self.context.i64_type())
-                            }
-                        }
+                        Expr::Ident(name) => self
+                            .var_types
+                            .get(name)
+                            .and_then(|ty| self.llvm_type_for(ty))
+                            .or_else(|| {
+                                vars.get(name).map(|(_, ty)| match ty {
+                                    BasicTypeEnum::PointerType(_) => {
+                                        BasicTypeEnum::IntType(self.context.i64_type())
+                                    }
+                                    ty => *ty,
+                                })
+                            })
+                            .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type())),
                         _ => BasicTypeEnum::IntType(self.context.i64_type()),
                     };
                     Ok(self.build_load(pointee_ty, ptr, "deref")?)

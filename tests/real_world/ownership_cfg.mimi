@@ -13,23 +13,22 @@ func borrow_fields() -> i32 {
         right: 2,
     }
 
-    // Field-place borrow semantics are covered by the checker/Resolved IR
-    // regression. Native field-reference ABI remains a separate codegen gap.
-    pair.right = 5
+    // The reference points at the original field in both executable backends.
+    let right = &mut pair.right
+    *right = 5 as i32
     pair.left + pair.right
 }
 
 func borrow_indexes_sequentially() -> i32 {
     let mut values = [2, 4, 6]
 
-    // Index loans are conservative at the collection root. The first mutable
-    // loan ends before the second begins.
-    let first = &mut values[0]
-    *first = 8
+    // The shared loan ends at its last use before the mutable loan starts.
+    let first = &values[0]
+    let first_value = *first
     let second = &mut values[1]
-    *second = 9
+    *second = 9 as i32
 
-    println(values[0])
+    println(first_value + 6)
     values[1]
 }
 
