@@ -70,6 +70,18 @@ pub struct FunctionBodyInput<'a> {
 pub fn lower_function_body(
     input: FunctionBodyInput<'_>,
 ) -> Result<ResolvedBody, Vec<ResolvedBodyError>> {
+    lower_function_body_with_captures(input, BTreeMap::new()).map(|lowered| lowered.body)
+}
+
+struct LoweredFunctionBody {
+    body: ResolvedBody,
+    nested_environments: BTreeMap<NodeId, BTreeMap<String, ResolvedLocalId>>,
+}
+
+fn lower_function_body_with_captures(
+    input: FunctionBodyInput<'_>,
+    captures: BTreeMap<String, ResolvedLocal>,
+) -> Result<LoweredFunctionBody, Vec<ResolvedBodyError>> {
     let unit = input
         .types
         .iter()
@@ -82,6 +94,18 @@ pub fn lower_function_body(
                 "canonical type table has no unit type",
             )]
         })?;
+    let capture_ids = captures
+        .values()
+        .map(|local| local.id.clone())
+        .collect::<Vec<_>>();
+    let capture_scope = captures
+        .iter()
+        .map(|(name, local)| (name.clone(), local.id.clone()))
+        .collect();
+    let capture_locals = captures
+        .into_values()
+        .map(|local| (local.id.clone(), local))
+        .collect();
     let mut lowerer = BodyLowerer {
         owner: input.signature.owner.clone(),
         fallback: input.function.meta.span,
@@ -105,11 +129,12 @@ pub fn lower_function_body(
         node_meta: input.node_meta,
         ids: NodeIdBuilder::new(input.sources),
         unit,
-        locals: BTreeMap::new(),
+        locals: capture_locals,
         place_inputs: BTreeMap::new(),
         default_values: BTreeMap::new(),
         lambda_contexts: Vec::new(),
-        scopes: vec![BTreeMap::new()],
+        scopes: vec![capture_scope],
+        nested_environments: BTreeMap::new(),
     };
     lowerer.install_parameters()?;
     lowerer.lower_default_values()?;
@@ -122,12 +147,16 @@ pub fn lower_function_body(
     let body = ResolvedBody {
         owner: input.signature.owner.clone(),
         locals: lowerer.locals,
+        captures: capture_ids,
         place_inputs: lowerer.place_inputs,
         default_values: lowerer.default_values,
         root,
     };
     body.validate(input.types)?;
-    Ok(body)
+    Ok(LoweredFunctionBody {
+        body,
+        nested_environments: lowerer.nested_environments,
+    })
 }
 
 /// Lower every function currently represented by the canonical signature
@@ -139,6 +168,7 @@ pub fn lower_checked_function_bodies(
     let mut syntax = BTreeMap::new();
     collect_function_syntax(&file.items, "", &mut syntax);
     let mut bodies = BTreeMap::new();
+    let mut environments = BTreeMap::<NodeId, BTreeMap<String, ResolvedLocal>>::new();
     let mut errors = Vec::new();
     let mut owners = program.functions().keys().collect::<Vec<_>>();
     owners.sort();
@@ -157,29 +187,52 @@ pub fn lower_checked_function_bodies(
             ));
             continue;
         };
-        match lower_function_body(FunctionBodyInput {
-            function,
-            signature,
-            signatures: program.resolved_signatures(),
-            functions: program.functions(),
-            type_defs: program.type_defs(),
-            actors: program.actors(),
-            flows: program.flows(),
-            traits: program.traits(),
-            impls: program.impls(),
-            field_types: program.resolved_field_types(),
-            call_sites: program.call_sites(),
-            extern_blocks: program.extern_blocks(),
-            constants: program.constants(),
-            node_types: program.resolved_node_types(),
-            type_operands: program.resolved_type_operands(),
-            type_arguments: program.resolved_type_arguments(),
-            types: program.resolved_types(),
-            node_meta: program.node_meta(),
-            sources: &file.sources,
-        }) {
-            Ok(body) => {
-                bodies.insert(owner.clone(), body);
+        let captures = environments.remove(owner).unwrap_or_default();
+        match lower_function_body_with_captures(
+            FunctionBodyInput {
+                function,
+                signature,
+                signatures: program.resolved_signatures(),
+                functions: program.functions(),
+                type_defs: program.type_defs(),
+                actors: program.actors(),
+                flows: program.flows(),
+                traits: program.traits(),
+                impls: program.impls(),
+                field_types: program.resolved_field_types(),
+                call_sites: program.call_sites(),
+                extern_blocks: program.extern_blocks(),
+                constants: program.constants(),
+                node_types: program.resolved_node_types(),
+                type_operands: program.resolved_type_operands(),
+                type_arguments: program.resolved_type_arguments(),
+                types: program.resolved_types(),
+                node_meta: program.node_meta(),
+                sources: &file.sources,
+            },
+            captures,
+        ) {
+            Ok(lowered) => {
+                for (nested, environment) in &lowered.nested_environments {
+                    let mut captures = BTreeMap::new();
+                    for (name, local) in environment {
+                        let Some(local) = lowered.body.locals.get(local) else {
+                            errors.push(ResolvedBodyError::new(
+                                nested.clone(),
+                                format!("captured local '{name}' is absent from enclosing body"),
+                            ));
+                            continue;
+                        };
+                        captures.insert(name.clone(), local.clone());
+                    }
+                    if environments.insert(nested.clone(), captures).is_some() {
+                        errors.push(ResolvedBodyError::new(
+                            nested.clone(),
+                            "nested callable received more than one lexical environment",
+                        ));
+                    }
+                }
+                bodies.insert(owner.clone(), lowered.body);
             }
             Err(mut body_errors) => errors.append(&mut body_errors),
         }
@@ -307,7 +360,9 @@ fn collect_function_syntax<'a>(
                 } else {
                     format!("{module}::{}", function.name)
                 };
-                out.insert(NodeId(format!("function:{qualified}")), function);
+                let owner = NodeId(format!("function:{qualified}"));
+                out.insert(owner.clone(), function);
+                collect_nested_function_syntax(&function.body, &owner, out);
             }
             Item::Actor(actor) => {
                 let qualified = if module.is_empty() {
@@ -316,10 +371,9 @@ fn collect_function_syntax<'a>(
                     format!("{module}::{}", actor.name)
                 };
                 for method in &actor.methods {
-                    out.insert(
-                        NodeId(format!("function:{qualified}::{}", method.name)),
-                        method,
-                    );
+                    let owner = NodeId(format!("function:{qualified}::{}", method.name));
+                    out.insert(owner.clone(), method);
+                    collect_nested_function_syntax(&method.body, &owner, out);
                 }
             }
             Item::Impl(impl_def) => {
@@ -332,9 +386,46 @@ fn collect_function_syntax<'a>(
                     )
                 };
                 for method in &impl_def.methods {
-                    out.insert(impl_method_owner(&qualified, method), method);
+                    let owner = impl_method_owner(&qualified, method);
+                    out.insert(owner.clone(), method);
+                    collect_nested_function_syntax(&method.body, &owner, out);
                 }
             }
+            _ => {}
+        }
+    }
+}
+
+fn collect_nested_function_syntax<'a>(
+    block: &'a [Stmt],
+    owner: &NodeId,
+    out: &mut BTreeMap<NodeId, &'a FuncDef>,
+) {
+    for statement in block {
+        match statement.unlocated() {
+            Stmt::Func(function) => {
+                let nested = nested_function_owner(owner, function);
+                out.insert(nested.clone(), function);
+                collect_nested_function_syntax(&function.body, &nested, out);
+            }
+            Stmt::If { then_, else_, .. } => {
+                collect_nested_function_syntax(then_, owner, out);
+                if let Some(else_) = else_ {
+                    collect_nested_function_syntax(else_, owner, out);
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::WhileLet { body, .. }
+            | Stmt::Loop(body)
+            | Stmt::For { body, .. }
+            | Stmt::Block(body)
+            | Stmt::Arena(body)
+            | Stmt::Unsafe(body)
+            | Stmt::OnFailure(body)
+            | Stmt::Do(body)
+            | Stmt::Parasteps(body)
+            | Stmt::Alloc { body, .. }
+            | Stmt::Pinned { body, .. } => collect_nested_function_syntax(body, owner, out),
             _ => {}
         }
     }
@@ -407,6 +498,7 @@ struct BodyLowerer<'a> {
     default_values: BTreeMap<super::ResolvedParameterId, ResolvedExpr>,
     lambda_contexts: Vec<LambdaCaptureContext>,
     scopes: Vec<BTreeMap<String, ResolvedLocalId>>,
+    nested_environments: BTreeMap<NodeId, BTreeMap<String, ResolvedLocalId>>,
 }
 
 struct LambdaCaptureContext {
@@ -730,7 +822,26 @@ impl BodyLowerer<'_> {
                 body: self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?,
             },
             Stmt::Func(function) => {
-                ResolvedStmtKind::NestedCallable(nested_function_owner(&self.owner, function))
+                let nested = nested_function_owner(&self.owner, function);
+                let mut environment = BTreeMap::new();
+                for scope in &self.scopes {
+                    environment.extend(
+                        scope
+                            .iter()
+                            .map(|(name, local)| (name.clone(), local.clone())),
+                    );
+                }
+                if self
+                    .nested_environments
+                    .insert(nested.clone(), environment)
+                    .is_some()
+                {
+                    return Err(vec![ResolvedBodyError::new(
+                        nested,
+                        "nested callable environment identity collision",
+                    )]);
+                }
+                ResolvedStmtKind::NestedCallable(nested)
             }
             Stmt::Requires(expr, _) => ResolvedStmtKind::Contract {
                 kind: super::ContractKind::Requires,
@@ -964,7 +1075,7 @@ impl BodyLowerer<'_> {
     ) -> Result<ResolvedExpr, Vec<ResolvedBodyError>> {
         let node_id = self.expr_id(expr, role)?;
         let origin = self.origin(&node_id)?;
-        let ty = self.node_types.get(&node_id).cloned().ok_or_else(|| {
+        let mut ty = self.node_types.get(&node_id).cloned().ok_or_else(|| {
             vec![ResolvedBodyError::new(
                 node_id.clone(),
                 "expression has no checker-finalized canonical type",
@@ -1313,6 +1424,21 @@ impl BodyLowerer<'_> {
             ResolvedExprKind::Call(call) => call.effects.clone(),
             _ => Vec::new(),
         };
+        if let ResolvedExprKind::Load(place) = &kind {
+            ty = self.place_type(&node_id, place)?.clone();
+        }
+        if let ResolvedExprKind::Call(call) = &kind {
+            if call.result != ty {
+                if self.is_system_fault_refinement(&call.result, &ty) {
+                    ty = call.result.clone();
+                } else {
+                    return Err(vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        "call result type disagrees with its closed callable signature",
+                    )]);
+                }
+            }
+        }
         let backend_requirements = match &kind {
             ResolvedExprKind::TypeOf(_) => Some(super::BackendRequirement {
                 requirement_id: "COMPTIME-PURE-001".into(),
@@ -1452,6 +1578,8 @@ impl BodyLowerer<'_> {
                 }
                 _ => return self.unsupported(node_id, "non-record nominal construction"),
             }
+        } else if let Some(schema) = crate::core::resolved::builtin_record_schema(&owner.0) {
+            schema.iter().map(|(name, _)| (*name).to_string()).collect()
         } else {
             let states = self
                 .flows
@@ -1676,6 +1804,7 @@ impl BodyLowerer<'_> {
             }
             return Ok(ResolvedCall {
                 callee: ResolvedCallee::Builtin(builtin),
+                result: self.expression_type(node_id)?,
                 type_arguments: Vec::new(),
                 arguments: lowered,
                 permission: None,
@@ -1738,6 +1867,7 @@ impl BodyLowerer<'_> {
             }
             return Ok(ResolvedCall {
                 callee: ResolvedCallee::Extern(function.node_id.clone()),
+                result: self.expression_type(node_id)?,
                 type_arguments: Vec::new(),
                 arguments: lowered,
                 permission: None,
@@ -1954,6 +2084,7 @@ impl BodyLowerer<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ResolvedCall {
             callee: ResolvedCallee::Function(function.node_id.clone()),
+            result: call_result.clone(),
             type_arguments,
             arguments: lowered,
             permission: None,
@@ -2023,10 +2154,36 @@ impl BodyLowerer<'_> {
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| left.0.cmp(&right.0));
         let [(_owner, signature, qualified_flow, source_state)] = candidates.as_slice() else {
+            let available = self
+                .signatures
+                .iter()
+                .filter_map(|(owner, signature)| {
+                    let (candidate_flow, candidate_event, source_state) =
+                        parse_transition_owner(owner)?;
+                    (candidate_event == event
+                        && (candidate_flow == flow
+                            || candidate_flow
+                                .rsplit_once("::")
+                                .is_some_and(|(_, short)| short == flow)))
+                    .then(|| {
+                        format!(
+                            "{}:{}",
+                            source_state,
+                            signature
+                                .parameters
+                                .first()
+                                .map(|parameter| parameter.ty.as_str())
+                                .unwrap_or("missing")
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(vec![ResolvedBodyError::new(
                 node_id.clone(),
                 format!(
-                    "transition call '{flow}::{event}' does not resolve to exactly one source-state overload"
+                    "transition call '{flow}::{event}' with source '{}' does not resolve to exactly one source-state overload (available: {available})",
+                    source.ty.as_str()
                 ),
             )]);
         };
@@ -2103,7 +2260,11 @@ impl BodyLowerer<'_> {
                 "transition call has no checker-finalized result type",
             )]
         })?;
-        self.identity_conversion(node_id, &signature.result, call_result)?;
+        if signature.result != *call_result
+            && !self.is_system_fault_refinement(&signature.result, call_result)
+        {
+            self.identity_conversion(node_id, &signature.result, call_result)?;
+        }
         let flow_id = crate::core::FlowId(qualified_flow.clone());
         Ok(ResolvedCall {
             callee: ResolvedCallee::Transition(crate::core::TransitionId {
@@ -2114,6 +2275,7 @@ impl BodyLowerer<'_> {
                     name: source_state.clone(),
                 },
             }),
+            result: signature.result.clone(),
             type_arguments: Vec::new(),
             arguments: lowered,
             permission: Some(super::Permission::Consume),
@@ -2206,6 +2368,7 @@ impl BodyLowerer<'_> {
         }
         Ok(ResolvedCall {
             callee: ResolvedCallee::LocalClosure(local),
+            result: call_result.clone(),
             type_arguments: Vec::new(),
             arguments: lowered,
             permission: None,
@@ -2222,28 +2385,44 @@ impl BodyLowerer<'_> {
         role: &str,
         type_arguments: &[ResolvedTypeId],
     ) -> Result<ResolvedCall, Vec<ResolvedBodyError>> {
-        if !type_arguments.is_empty() || !function.generics.is_empty() {
-            return self.unsupported(node_id, "generic nested function call");
-        }
-        if arguments.len() != function.params.len() {
+        let owner = nested_function_owner(&self.owner, function);
+        let signature = self.signatures.get(&owner).cloned().ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!("nested callable '{}' has no canonical signature", owner.0),
+            )]
+        })?;
+        if !type_arguments.is_empty() && type_arguments.len() != signature.generic_parameters.len()
+        {
             return Err(vec![ResolvedBodyError::new(
                 node_id.clone(),
                 format!(
-                    "nested function argument count {} does not match declaration count {}",
-                    arguments.len(),
-                    function.params.len()
+                    "nested call supplies {} type arguments for {} generic parameters",
+                    type_arguments.len(),
+                    signature.generic_parameters.len()
                 ),
             )]);
         }
-        let owner = nested_function_owner(&self.owner, function);
-        let mut slots = vec![None; function.params.len()];
+        if arguments.len() > signature.parameters.len() {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "nested call has more arguments than canonical parameters",
+            )]);
+        }
+        let mut substitutions = signature
+            .generic_parameters
+            .iter()
+            .cloned()
+            .zip(type_arguments.iter().cloned())
+            .collect::<BTreeMap<_, _>>();
+        let mut slots = vec![None; signature.parameters.len()];
         let mut next_positional = 0;
         for index in 0..arguments.len() {
             let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
             let (slot, value, value_role) = match arguments[index].unlocated() {
                 Expr::NamedArg(name, value) => {
-                    let slot = function
-                        .params
+                    let slot = signature
+                        .parameters
                         .iter()
                         .position(|parameter| parameter.name == *name)
                         .ok_or_else(|| {
@@ -2268,67 +2447,93 @@ impl BodyLowerer<'_> {
                     node_id.clone(),
                     format!(
                         "nested parameter '{}' is supplied more than once",
-                        function.params[slot].name
+                        signature.parameters[slot].name
                     ),
                 )]);
             }
-            let value = self.lower_expr(value, &value_role)?;
-            slots[slot] = Some(value);
+            slots[slot] = Some((value, value_role));
         }
         let mut lowered = Vec::with_capacity(slots.len());
-        for (parameter, value) in function.params.iter().zip(slots) {
-            if parameter.default_value.is_some() {
-                return self.unsupported(node_id, "nested function default argument");
-            }
-            let value = value.ok_or_else(|| {
-                vec![ResolvedBodyError::new(
+        for (parameter, slot) in signature.parameters.iter().zip(slots) {
+            let value = if let Some((value, value_role)) = slot {
+                self.lower_expr(value, &value_role)?
+            } else if parameter.has_default {
+                if !signature.generic_parameters.is_empty() {
+                    return self.unsupported(node_id, "generic nested callable default argument");
+                }
+                ResolvedExpr {
+                    node_id: NodeId(format!(
+                        "{}/default-argument:{}",
+                        node_id.0,
+                        stable_id_fragment(&parameter.name)
+                    )),
+                    origin: Origin::Desugared {
+                        parent: node_id.clone(),
+                        rule: "resolved_body.default_argument".into(),
+                        span: self.origin(node_id)?.user_span(),
+                    },
+                    ty: parameter.ty.clone(),
+                    effects: Vec::new(),
+                    backend_requirements: Vec::new(),
+                    kind: ResolvedExprKind::DefaultArgument {
+                        callable: owner.clone(),
+                        parameter: parameter.id.clone(),
+                    },
+                }
+            } else {
+                return Err(vec![ResolvedBodyError::new(
                     node_id.clone(),
                     format!("nested parameter '{}' has no argument", parameter.name),
-                )]
-            })?;
-            let mut diagnostics = Vec::new();
-            let parameter_id = self.ids.anonymous(
-                &owner,
-                "decl.parameter",
-                &format!("parameter.{}", stable_id_fragment(&parameter.name)),
-                usable_span(parameter.meta.span),
-                parameter.meta.origin,
-                &mut diagnostics,
-            );
-            if !diagnostics.is_empty() || !self.node_meta.contains_key(&parameter_id) {
+                )]);
+            };
+            let target = if signature.generic_parameters.is_empty() {
+                parameter.ty.clone()
+            } else if self.collect_instantiation(&parameter.ty, &value.ty, &mut substitutions) {
+                value.ty.clone()
+            } else {
                 return Err(vec![ResolvedBodyError::new(
                     node_id.clone(),
                     format!(
-                        "nested parameter '{}' has no stable identity",
+                        "nested argument for '{}' disagrees with its generic instantiation",
                         parameter.name
                     ),
                 )]);
-            }
+            };
             lowered.push(ResolvedArgument {
-                parameter: super::ResolvedParameterId(parameter_id),
-                conversion: CheckedConversion {
-                    kind: CheckedConversionKind::Identity,
-                    from: value.ty.clone(),
-                    to: value.ty.clone(),
-                },
+                parameter: parameter.id.clone(),
+                conversion: self.implicit_conversion(node_id, &value.ty, &target)?,
                 value,
             });
         }
-        let effects = function
-            .effects
+        let result = self.expression_type(node_id)?;
+        if !self.collect_instantiation(&signature.result, &result, &mut substitutions) {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "nested call result disagrees with its canonical instantiation",
+            )]);
+        }
+        let type_arguments = signature
+            .generic_parameters
             .iter()
-            .map(|effect| {
-                EffectId::new(effect.clone()).map_err(|error| {
-                    vec![ResolvedBodyError::new(node_id.clone(), error.to_string())]
+            .map(|parameter| {
+                substitutions.get(parameter).cloned().ok_or_else(|| {
+                    vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        format!(
+                            "nested generic parameter '{}' has no closed instantiation",
+                            parameter.0
+                        ),
+                    )]
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ResolvedCall {
             callee: ResolvedCallee::Function(owner),
-            type_arguments: Vec::new(),
+            result,
+            type_arguments,
             arguments: lowered,
             permission: None,
-            effects,
+            effects: signature.effects.clone(),
             session: Vec::new(),
         })
     }
@@ -2382,6 +2587,7 @@ impl BodyLowerer<'_> {
             callee: ResolvedCallee::Builtin(
                 super::BuiltinId::new(format!("actor.{operation}")).map_err(|error| vec![error])?,
             ),
+            result: result.clone(),
             type_arguments: vec![result],
             arguments: Vec::new(),
             permission: None,
@@ -2590,6 +2796,7 @@ impl BodyLowerer<'_> {
         let effects = signature.effects.clone();
         Ok(ResolvedCall {
             callee: resolved_callee,
+            result: signature.result.clone(),
             type_arguments: Vec::new(),
             arguments: lowered,
             permission,
@@ -3143,6 +3350,10 @@ impl BodyLowerer<'_> {
                 )]);
             }
             field_id
+        } else if crate::core::resolved::builtin_record_schema(&owner.0)
+            .is_some_and(|schema| schema.iter().any(|(field, _)| *field == name))
+        {
+            NodeId(format!("{}/field:{name}", owner.0))
         } else if let Some(actor) = self.actors.get(&owner) {
             actor.field_ids.get(name).cloned().ok_or_else(|| {
                 vec![ResolvedBodyError::new(
@@ -3170,7 +3381,10 @@ impl BodyLowerer<'_> {
                 )]
             })?
         };
-        if !self.node_meta.contains_key(&field_id) || !self.field_types.contains_key(&field_id) {
+        let builtin = field_id.0.starts_with("builtin:type:");
+        if (!builtin && !self.node_meta.contains_key(&field_id))
+            || !self.field_types.contains_key(&field_id)
+        {
             return Err(vec![ResolvedBodyError::new(
                 node_id.clone(),
                 format!("field '{name}' has no canonical declaration facts"),
@@ -3659,9 +3873,11 @@ impl BodyLowerer<'_> {
             return Err(vec![ResolvedBodyError::new(
                 node_id.clone(),
                 format!(
-                    "explicit checked conversion is required from '{}' to '{}'",
+                    "explicit checked conversion is required from '{}' ({:?}) to '{}' ({:?})",
                     from.as_str(),
-                    to.as_str()
+                    self.types.get(from),
+                    to.as_str(),
+                    self.types.get(to)
                 ),
             )]);
         }
@@ -3670,6 +3886,24 @@ impl BodyLowerer<'_> {
             from: from.clone(),
             to: to.clone(),
         })
+    }
+
+    fn is_system_fault_refinement(
+        &self,
+        expected: &ResolvedTypeId,
+        observed: &ResolvedTypeId,
+    ) -> bool {
+        matches!(
+            (self.types.get(expected), self.types.get(observed)),
+            (
+                Some(ResolvedType::Nominal { item: state, arguments }),
+                Some(ResolvedType::Nominal { item: builtin, arguments: builtin_arguments }),
+            ) if state.as_str().starts_with("state:")
+                && state.as_str().ends_with("::Fault")
+                && arguments.is_empty()
+                && builtin.as_str() == "builtin:type:Fault"
+                && builtin_arguments.is_empty()
+        )
     }
 
     fn implicit_conversion(
@@ -5468,5 +5702,73 @@ mod tests {
         ));
         body.validate(program.resolved_types())
             .expect("valid closed callable body");
+    }
+
+    #[test]
+    fn nested_callable_body_retains_lexical_captures_and_default_identity() {
+        let file = parse(
+            "func main(base: i32) -> i32 { func add(value: i32 = 2) -> i32 { base + value }; add() }",
+        );
+        let program = crate::core::check_program(&file).expect("check nested callable");
+        let outer = program
+            .resolved_body(&NodeId("function:main".into()))
+            .expect("outer body");
+        let ResolvedStmtKind::NestedCallable(nested_owner) = &outer.root.statements[0].kind else {
+            panic!("nested declaration expected");
+        };
+        let nested = program
+            .resolved_body(nested_owner)
+            .expect("nested body must be independently persisted");
+        assert_eq!(nested.captures.len(), 1);
+        assert_eq!(nested.locals[&nested.captures[0]].display_name, "base");
+        assert!(nested
+            .locals
+            .values()
+            .any(|local| local.display_name == "value"));
+        let signature = program
+            .resolved_signature(nested_owner)
+            .expect("nested signature");
+        assert!(nested
+            .default_values
+            .contains_key(&signature.parameters[0].id));
+
+        let ResolvedExprKind::Call(call) = &outer.root.result.as_ref().unwrap().kind else {
+            panic!("nested call expected");
+        };
+        assert!(matches!(
+            &call.callee,
+            ResolvedCallee::Function(owner) if owner == nested_owner
+        ));
+        assert!(matches!(
+            call.arguments[0].value.kind,
+            ResolvedExprKind::DefaultArgument { ref callable, .. }
+                if callable == nested_owner
+        ));
+        nested
+            .validate(program.resolved_types())
+            .expect("valid captured nested body");
+    }
+
+    #[test]
+    fn nested_generic_call_has_canonical_instantiation() {
+        let file =
+            parse("func main() -> i32 { func identity<T>(value: T) -> T { value }; identity(7) }");
+        let program = crate::core::check_program(&file).expect("check nested generic");
+        let outer = program
+            .resolved_body(&NodeId("function:main".into()))
+            .expect("outer body");
+        let ResolvedStmtKind::NestedCallable(nested_owner) = &outer.root.statements[0].kind else {
+            panic!("nested declaration expected");
+        };
+        assert!(program.resolved_body(nested_owner).is_some());
+        let ResolvedExprKind::Call(call) = &outer.root.result.as_ref().unwrap().kind else {
+            panic!("nested generic call expected");
+        };
+        assert_eq!(call.type_arguments.len(), 1);
+        assert_eq!(call.type_arguments[0], call.arguments[0].value.ty);
+        assert!(matches!(
+            &call.callee,
+            ResolvedCallee::Function(owner) if owner == nested_owner
+        ));
     }
 }

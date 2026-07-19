@@ -1536,6 +1536,9 @@ impl<'a> Checker<'a> {
             Stmt::Func(func) => {
                 // Register nested function signature then check body with
                 // enclosing scopes visible (I-H13 typecheck: free-var capture).
+                let generic_scope_len = self.generic_scope.len();
+                self.generic_scope
+                    .extend(func.generics.iter().map(|generic| generic.name.clone()));
                 let params: Vec<Type> = func
                     .params
                     .iter()
@@ -1547,7 +1550,11 @@ impl<'a> Checker<'a> {
                     .map(|t| self.resolve_type(t))
                     .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
                 self.funcs
-                    .insert(func.name.clone(), (params, nested_ret.clone()));
+                    .insert(func.name.clone(), (params.clone(), nested_ret.clone()));
+                self.func_generics
+                    .insert(func.name.clone(), func.generics.clone());
+                self.nested_func_params
+                    .insert(func.name.clone(), func.params.clone());
                 // Body sees outer locals (capture) plus its own params.
                 let mut nested_scopes = scopes.clone();
                 let mut param_scope = std::collections::HashMap::new();
@@ -1572,12 +1579,42 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|p| (p.name.clone(), self.resolve_type(&p.ty)))
                     .collect();
-                let previous_owner = self.begin_callable_ownership(nested_owner, &ownership_params);
+                let previous_owner =
+                    self.begin_callable_ownership(nested_owner.clone(), &ownership_params);
+                let outer_expression_types = self.current_expr_types.take();
+                self.begin_expression_type_capture(nested_owner.clone());
+                let outer_ret = self.current_ret.replace(nested_ret.clone());
+                let outer_view = std::mem::take(&mut self.view_params);
+                let outer_mutate = std::mem::take(&mut self.mutate_params);
+                for parameter in &func.params {
+                    match parameter.borrow {
+                        Some(crate::ast::ParamBorrow::View) => {
+                            self.view_params.insert(parameter.name.clone());
+                        }
+                        Some(crate::ast::ParamBorrow::Mutate) => {
+                            self.mutate_params.insert(parameter.name.clone());
+                        }
+                        None => {}
+                    }
+                }
+                for parameter in &func.params {
+                    if let Some(default) = &parameter.default_value {
+                        let expected = self.resolve_type(&parameter.ty);
+                        self.check_expr(&expected, default, &mut nested_scopes);
+                    }
+                }
                 self.check_block_with_implicit_return(&func.body, &nested_ret, &mut nested_scopes);
+                self.record_nested_function_signature(nested_owner, &params, &nested_ret);
+                self.finish_expression_type_capture();
+                self.current_expr_types = outer_expression_types;
+                self.current_ret = outer_ret;
+                self.view_params = outer_view;
+                self.mutate_params = outer_mutate;
                 self.check_unconsumed_caps();
                 self.end_callable_ownership(previous_owner);
                 self.cap_vars = outer_caps;
                 self.current_ownership_owner = outer_owner;
+                self.generic_scope.truncate(generic_scope_len);
             }
             Stmt::Do(body) => {
                 self.check_block(body, ret, scopes);

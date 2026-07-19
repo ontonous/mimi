@@ -165,6 +165,8 @@ pub struct ResolvedArgument {
 #[derive(Debug, Clone)]
 pub struct ResolvedCall {
     pub callee: ResolvedCallee,
+    /// Result type after generic/overload resolution.
+    pub result: ResolvedTypeId,
     /// Explicit or checker-inferred generic arguments in binder order.
     pub type_arguments: Vec<ResolvedTypeId>,
     /// Checker-sorted parameter order. Surface named/default arguments are gone.
@@ -503,6 +505,8 @@ pub struct ResolvedBlock {
 pub struct ResolvedBody {
     pub owner: NodeId,
     pub locals: BTreeMap<ResolvedLocalId, ResolvedLocal>,
+    /// Lexically captured locals owned by enclosing callable bodies.
+    pub captures: Vec<ResolvedLocalId>,
     /// Typed expressions evaluated to compute structured places. A place
     /// references these nodes by stable NodeId instead of retaining raw AST.
     pub place_inputs: BTreeMap<NodeId, ResolvedExpr>,
@@ -549,6 +553,15 @@ impl ResolvedBody {
         };
         if self.owner.0.trim().is_empty() {
             validator.error(&self.owner, "callable owner identity is empty");
+        }
+        let mut captures = BTreeSet::new();
+        for capture in &self.captures {
+            if !captures.insert(capture) {
+                validator.error(&capture.0, "capture identity is duplicated");
+            }
+            if !self.locals.contains_key(capture) {
+                validator.error(&capture.0, "capture is absent from the local catalog");
+            }
         }
         for (key, local) in &self.locals {
             if key != &local.id {
@@ -844,7 +857,18 @@ impl BodyValidator<'_> {
                     }
                 }
             }
-            ResolvedExprKind::Load(place) => self.visit_place(&expression.node_id, place),
+            ResolvedExprKind::Load(place) => {
+                self.visit_place(&expression.node_id, place);
+                if self
+                    .place_type(&expression.node_id, place)
+                    .is_some_and(|place_type| place_type != &expression.ty)
+                {
+                    self.error(
+                        &expression.node_id,
+                        "load type disagrees with its canonical place type",
+                    );
+                }
+            }
             ResolvedExprKind::Constant(item) | ResolvedExprKind::ComptimeValue(item) => {
                 if item.0.trim().is_empty() {
                     self.error(&expression.node_id, "resolved item identity is empty");
@@ -913,7 +937,15 @@ impl BodyValidator<'_> {
             ResolvedExprKind::Unary { operand, .. }
             | ResolvedExprKind::Spawn(operand)
             | ResolvedExprKind::Await(operand) => self.visit_expr(operand),
-            ResolvedExprKind::Call(call) => self.visit_call(&expression.node_id, call),
+            ResolvedExprKind::Call(call) => {
+                self.visit_call(&expression.node_id, call);
+                if call.result != expression.ty {
+                    self.error(
+                        &expression.node_id,
+                        "call result disagrees with expression type",
+                    );
+                }
+            }
             ResolvedExprKind::Tuple(values)
             | ResolvedExprKind::List(values)
             | ResolvedExprKind::Set(values) => {
@@ -1059,6 +1091,7 @@ impl BodyValidator<'_> {
 
     fn visit_call(&mut self, owner: &NodeId, call: &ResolvedCall) {
         self.validate_callee(owner, &call.callee);
+        self.require_type(owner, &call.result);
         for argument in &call.type_arguments {
             self.require_type(owner, argument);
         }
@@ -1272,6 +1305,7 @@ mod tests {
         ResolvedBody {
             owner: node("func.main"),
             locals: BTreeMap::from([(local.id.clone(), local)]),
+            captures: Vec::new(),
             place_inputs: BTreeMap::new(),
             default_values: BTreeMap::new(),
             root: ResolvedBlock {
@@ -1389,6 +1423,7 @@ mod tests {
                 backend_requirements: Vec::new(),
                 kind: ResolvedExprKind::Call(ResolvedCall {
                     callee: ResolvedCallee::Builtin(BuiltinId::new("test.identity").unwrap()),
+                    result: i32_ty.clone(),
                     type_arguments: Vec::new(),
                     arguments: vec![argument("expr.arg-a"), argument("expr.arg-b")],
                     permission: None,

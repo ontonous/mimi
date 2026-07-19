@@ -28,6 +28,7 @@ pub struct FlowAcc {
     pub schemes: HashMap<crate::core::NodeId, TypeScheme>,
     /// v0.31.2: Zonked function signatures for backend consumption.
     pub zonked_func_types: HashMap<String, (Vec<ZonkedTy>, ZonkedTy)>,
+    pub zonked_nested_func_types: HashMap<crate::core::NodeId, (Vec<ZonkedTy>, ZonkedTy)>,
     /// Checker-finalized expression types keyed by callable and clone-stable
     /// source identity. `CheckedProgram::from_flow_acc` replaces every key with
     /// a stable NodeId before returning the owned artifact.
@@ -157,6 +158,7 @@ fn extract_acc(checker: &mut Checker) -> FlowAcc {
         ownership_ledgers: std::mem::take(&mut checker.ownership_ledgers),
         schemes: std::mem::take(&mut checker.schemes),
         zonked_func_types: std::mem::take(&mut checker.zonked_func_types),
+        zonked_nested_func_types: std::mem::take(&mut checker.zonked_nested_func_types),
         zonked_expr_types: std::mem::take(&mut checker.zonked_expr_types),
         callable_cfgs,
         resource_analyses,
