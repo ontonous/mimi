@@ -6,12 +6,20 @@
 **评估命令**：`cargo test real_world_cli_suite -- --test-threads=1` + 定向双后端 smoke
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
 
-## v0.31.2 收口 / v0.31.3 启动门禁
+## v0.31.3 CFG / ownership 收口门禁
 
 - Cargo 自动发现的 real-world 套件全绿；每个非 interpreter-only 程序均执行 `mimi run`、`mimi build`、native executable 与 stdout 等价检查。
-- `hm_core.mimi` 覆盖 canonical HM instantiate/constraint/zonk；`ownership_cfg.mimi` 覆盖 0.31.3 borrow place、NLL end 与 branch path MCDD。
+- `hm_core.mimi` 持续覆盖 canonical HM instantiate/constraint/zonk；`ownership_cfg.mimi` 已扩展到 branch/terminal CFG、nested field place、shared→mutable index NLL 与循环内 dynamic-index loan。
+- `ownership_cfg.mimi` 实测 interpreter/native stdout 一致：`8` / `42`；native 定向 ABI 同时覆盖 nested field、tuple、constant index 与 dynamic index 真地址 write-back。
+- CFG/resource L2 实测覆盖 stable block/edge identity、terminal predecessor、reachable join、partial consume、multiple shared loans、mutable read/write conflict、sibling place separation、edge-specific BorrowEnd 与 back-edge loan 拒绝。
 - `flow_test_macros.mimi` 的 `assert_state`/`inject_fault` 契约保持 interpreter-only，Cargo runner 与 Python runner 均显式跳过 native build。
 - 收口期间修复 nested-generic `>>` 导致 Flow parser 跳过下一 `pub`、generic body binder scope、lambda 尾 `if`、CheckedProgram bare-name method arity collision，以及 codegen intrinsic 未剥离 `Located`。
+
+### 收口门禁状态
+
+- 通过：`cargo fmt --check`、`cargo test --no-run`、language docs 31/31、CFG/core/ownership/borrow 聚焦测试、Z3 `v1_2_verification` 26/26（1 ignored）、`real_world_cli_suite`。
+- 首次全量：3826 passed / 101 failed / 10 ignored。其中 stdlib JSON loader 失败由 nested CFG role 碰撞引起，已修复并增加回归；代表性复测确认余下失败分属既有 native if assignment、named-argument fail-closed、JSON 容器 ABI 和 verifier overflow/call-contract 基线。
+- 未通过：Clippy 1.93 `--all-targets -D warnings` 在跨 runtime/codegen/resolved 既有代码上报 181 项 lint；未用全局 `allow` 掩盖。因此版本保持 `0.31.3-dev`，待这两项独立门禁清零后再执行 0.31.4-dev 切换。
 
 ## Flow 范式 MCDD — 阶段二+三 (v0.29.9–0.29.41)
 

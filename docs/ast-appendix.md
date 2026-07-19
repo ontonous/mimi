@@ -198,7 +198,9 @@ The normative requirement `TOOL-RESOLUTION-001` requires a typed resolved IR lay
 - Function/Flow/state/transition declarations use canonical, module-qualified `NodeId`/`FlowId`/`StateId`/`TransitionId`; process-local dense numeric IDs are not yet materialized.
 - Checker unification produces fail-closed `ZonkedTy` function signatures, persisted by `CheckedProgram` under canonical function `NodeId`; body expression types and checked conversions remain incomplete.
 - Effect names and declared Session bodies are persisted in resolved directories, but effect capability resolution and per-local Session residuals remain checker-internal.
-- Capability Introduce/Move/Drop/Return summaries are persisted per callable; general place/resource/loan identity awaits the CFG/ownership milestones.
+- Every function, nested function, actor/impl method, and transition now owns a validated stable-ID `CallableCfg`; `CheckedProgram` persists it together with canonical `ResourceAnalysis`.
+- Capability/session/delegate and borrow actions carry `ResourceId`, structured `Place`, CFG point/edge, `NodeId`, `Span`, and `Origin`. Shared/mutable loans use independent `LoanId`, with end edges derived by backwards CFG liveness.
+- `OwnershipLedger` remains a compatibility extraction/projection layer for current raw-body consumers; complete typed body actions and removal of that adapter remain 0.31.4–0.31.5 work.
 
 ### 4.2 Target State
 
@@ -228,6 +230,8 @@ Checker becomes the sole resolver of stable semantics. Interp/codegen must not r
 | Capability checking | `src/core/checker/vars.rs:175` | `is_cap_var` boolean |
 | Session residual | `src/core/checker.rs:93` | `HashMap<String, Residual>` |
 | Borrow mode | `src/core/checker/borrow.rs` | `ParamBorrow::{View, Mutate}` |
+| Callable CFG | `src/core/cfg/` | semantic block/edge IDs, exact terminators, reachability, fixed-point resource facts |
+| Resource/loan identity | `src/core/ownership.rs` | `LocalId`, `ResourceId`, `LoanId`, structured `Place` projections |
 
 ### 5.2 Gaps to Target
 
@@ -236,7 +240,7 @@ Checker becomes the sole resolver of stable semantics. Interp/codegen must not r
 | No resolved transition ID | Codegen may re-guess; non-unique | P0 |
 | No resolved effect set | Effect inference is incomplete | P1 |
 | No IR-level Session residual | Residual lost between checker and backend | P1 |
-| No IR-level resource tracking | No exactly-once proof | P0 |
+| Compatibility ledger still extracts canonical body actions | Typed consumers cannot yet discard raw bodies | P0 |
 | No backend capability gate | Unsupported semantics deferred to codegen warning | P0 |
 
 ---

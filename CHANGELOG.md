@@ -48,7 +48,7 @@
 
 > `TOOL-RESOLUTION-001` 仍为 partial：v0.31.5 前 interpreter/native/verifier 的部分函数体 lowering 继续通过显式 `legacy_body_file` 适配器。
 
-### v0.31.3-dev — CFG / ownership ledger（首个垂直切片）
+### v0.31.3-dev — CFG / ownership ledger（实现收口，门禁待清零）
 
 - `CheckedProgram` 持久化 per-callable 线性 `cap` 的 Introduce/Move/Drop/Return 动作与 branch merge 状态。
 - 语句/表达式 `if` 与 `match` 路径敏感：单路径消耗 → `MaybeConsumed`/`E0304`；双路径一致 → 合并为 `Consumed`。
@@ -57,7 +57,13 @@
 - Codegen 移除 flow transition 同名首候选 fallback；`flow_file_system` 固件避开保留字 `fault` 绑定。
 - `RESOURCE-LINEAR-001` / `OWN-PERMISSION-001` support 证据升为 `partial`。
 - ownership ledger 新增 `borrow_shared` / `borrow_mut` / `borrow_end`，记录 root/field/tuple/index place 与 NLL/词法结束点，并由 interpreter/native/verifier consumer 统一安装。
-- 复合 tuple/record 的 capability return/drop 按源码顺序确定性转移；新增 `ownership_cfg.mimi` 双后端 MCDD。native 字段引用与 immutable-index→mutable-index 组合仍登记为后续 ABI 缺口。
+- 复合 tuple/record 的 capability return/drop 按源码顺序确定性转移；新增 `ownership_cfg.mimi` 双后端 MCDD。
+- 新增 `core::cfg`：为 function/nested function/actor/impl/transition 生成 stable-ID `CallableCfg`，覆盖 if/match/return/loop/break/continue/unreachable；validator 检查单 terminator、edge 一致性、可达性与 Span/Origin 溯源。
+- 新增结构化 `LocalId`/`ResourceId`/`LoanId`/`Place`；field/tuple sibling 及不同常量 index 可分离，dynamic index/deref 保守冲突。`CheckedProgram` 持久化 CFG 与 canonical `ResourceAnalysis`。
+- ownership 使用确定性 worklist fixed point；join 仅合并 reachable predecessor，terminal arm 不污染 successor，路径 Available/Consumed 分歧给出稳定诊断，回边上仍活跃的 loan fail-closed。
+- borrow 开始使用独立 LoanId，反向 CFG liveness 产生 point/edge-specific BorrowEnd；支持多 shared loan、reborrow parent、overlap read/write/move/drop 冲突与 sibling place 分离。
+- interpreter/native 将 nested field、tuple、constant/dynamic list index place 递归 lowering 为真实地址，去除临时副本 write-back；`ownership_cfg.mimi` 双后端实测一致。
+- 收口边界：`OwnershipLedger` 暂作 canonical action extraction 与 consumer 兼容投影；完整 typed body consumer 迁移属于 0.31.4–0.31.5，跨 turn exactly-once 闭环属于 0.31.12。
 
 ### v0.31.4-dev — CheckedProgram consumer 硬化（transition 表 + 目录扩展）
 
