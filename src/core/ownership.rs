@@ -15,6 +15,23 @@ pub enum ResourceActionKind {
     Move,
     Drop,
     Return,
+    BorrowShared,
+    BorrowMut,
+    BorrowEnd,
+}
+
+impl ResourceActionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Introduce => "introduce",
+            Self::Move => "move",
+            Self::Drop => "drop",
+            Self::Return => "return",
+            Self::BorrowShared => "borrow_shared",
+            Self::BorrowMut => "borrow_mut",
+            Self::BorrowEnd => "borrow_end",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

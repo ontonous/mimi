@@ -9336,6 +9336,102 @@ func main() -> i32 { 0 }
     }
 
     #[test]
+    fn ownership_ledger_records_borrow_places_and_lifetime_end() {
+        let file = parse(
+            r#"
+type Pair { left: i32, right: i32 }
+func inspect() -> i32 {
+    let mut p = Pair { left: 1, right: 2 }
+    let xs = [3, 4]
+    let left = &p.left
+    let right = &mut p.right
+    let item = &xs[0]
+    *left + *right + *item
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("borrow program checks");
+        let ledger = program
+            .ownership_ledger(&NodeId("function:inspect".to_string()))
+            .expect("inspect ownership ledger");
+        let actions: Vec<_> = ledger
+            .actions
+            .iter()
+            .map(|action| (action.kind, action.resource.as_str()))
+            .collect();
+        assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowShared, "p.left")));
+        assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowMut, "p.right")));
+        assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowShared, "xs[*]")));
+        assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowEnd, "p.left")));
+        assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowEnd, "p.right")));
+        assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowEnd, "xs")));
+
+        let interp = crate::interp::Interpreter::from_checked(&program);
+        assert!(interp
+            .resolved_ownership_actions("function:inspect")
+            .is_some_and(|actions| actions
+                .iter()
+                .any(|(kind, place)| kind == "borrow_mut" && place == "p.right")));
+        let mut verifier = crate::verifier::Verifier::new().expect("z3");
+        let _ = verifier.verify_checked(&program);
+        assert!(verifier
+            .checked_ownership_actions("function:inspect")
+            .is_some_and(|actions| actions
+                .iter()
+                .any(|(kind, place)| kind == "borrow_end" && place == "p.left")));
+    }
+
+    #[test]
+    fn ownership_checker_transfers_compound_capability_returns_in_order() {
+        let file = parse(
+            r#"
+cap Token
+func pair(a: cap Token, b: cap Token) -> (cap Token, cap Token) {
+    return (a, b)
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("compound return transfers caps");
+        let ledger = program
+            .ownership_ledger(&NodeId("function:pair".to_string()))
+            .expect("pair ownership ledger");
+        let returned: Vec<_> = ledger
+            .actions
+            .iter()
+            .filter(|action| action.kind == crate::core::ResourceActionKind::Return)
+            .map(|action| action.resource.as_str())
+            .collect();
+        assert_eq!(returned, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn ownership_checker_drops_compound_capabilities_in_order() {
+        let file = parse(
+            r#"
+cap Token
+func close(a: cap Token, b: cap Token) -> i32 {
+    drop((a, b))
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("compound drop consumes caps");
+        let ledger = program
+            .ownership_ledger(&NodeId("function:close".to_string()))
+            .expect("close ownership ledger");
+        let dropped: Vec<_> = ledger
+            .actions
+            .iter()
+            .filter(|action| action.kind == crate::core::ResourceActionKind::Drop)
+            .map(|action| action.resource.as_str())
+            .collect();
+        assert_eq!(dropped, vec!["a", "b"]);
+    }
+
+    #[test]
     fn ownership_checker_rejects_one_branch_consumption() {
         let file = parse(
             r#"

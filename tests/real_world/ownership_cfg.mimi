@@ -1,0 +1,52 @@
+// v0.31.3 MCDD: borrow places, NLL end points, and branch control paths.
+// The checker persists these operations in the ownership ledger while both
+// executable backends must preserve the same observable result.
+
+type Pair {
+    left: i32,
+    right: i32,
+}
+
+func borrow_fields() -> i32 {
+    let mut pair = Pair {
+        left: 1,
+        right: 2,
+    }
+
+    // Field-place borrow semantics are covered by the checker/Resolved IR
+    // regression. Native field-reference ABI remains a separate codegen gap.
+    pair.right = 5
+    pair.left + pair.right
+}
+
+func borrow_indexes_sequentially() -> i32 {
+    let mut values = [2, 4, 6]
+
+    // Index loans are conservative at the collection root. The first mutable
+    // loan ends before the second begins.
+    let first = &mut values[0]
+    *first = 8
+    let second = &mut values[1]
+    *second = 9
+
+    println(values[0])
+    values[1]
+}
+
+func branch_borrow(flag: bool) -> i32 {
+    let value = 7
+    if flag {
+        value
+    } else {
+        value
+    }
+}
+
+func main() -> i32 {
+    let field_total = borrow_fields()
+    let index_total = borrow_indexes_sequentially()
+    let branch_total = branch_borrow(true)
+    let total = field_total + index_total + branch_total
+    println(total)
+    0
+}

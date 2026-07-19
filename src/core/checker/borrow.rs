@@ -13,8 +13,23 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn pop_borrow_scope(&mut self) {
-        self.borrows.pop();
-        self.field_borrows.pop();
+        let mut ended = Vec::new();
+        if let Some(scope) = self.borrows.pop() {
+            ended.extend(scope.into_iter().filter_map(|(name, state)| {
+                (!matches!(state, BorrowState::Unborrowed)).then_some(name)
+            }));
+        }
+        if let Some(scope) = self.field_borrows.pop() {
+            ended.extend(scope.into_iter().filter_map(|((root, path), state)| {
+                (!matches!(state, BorrowState::Unborrowed))
+                    .then(|| format!("{}.{}", root, path.join(".")))
+            }));
+        }
+        ended.sort();
+        ended.dedup();
+        for place in ended {
+            self.record_resource_action(crate::core::ResourceActionKind::BorrowEnd, &place);
+        }
     }
 
     // ─── Whole-variable borrow tracking ──────────────────────
@@ -35,16 +50,33 @@ impl<'a> Checker<'a> {
 
     /// Release a borrow (set back to Unborrowed) — NLL last-use release
     pub(crate) fn release_borrow(&mut self, name: &str) {
+        let mut ended = false;
         if let Some(scope) = self.borrows.last_mut() {
-            scope.insert(name.into(), BorrowState::Unborrowed);
+            if matches!(scope.get(name), Some(state) if !matches!(state, BorrowState::Unborrowed)) {
+                scope.insert(name.into(), BorrowState::Unborrowed);
+                ended = true;
+            }
+        }
+        if ended {
+            self.record_resource_action(crate::core::ResourceActionKind::BorrowEnd, name);
         }
     }
 
     /// E5: Release a field-level borrow — NLL last-use release.
     pub(crate) fn release_field_borrow(&mut self, var: &str, field: &str) {
+        let mut ended = false;
         if let Some(scope) = self.field_borrows.last_mut() {
             let key = (var.to_string(), vec![field.to_string()]);
-            scope.insert(key, BorrowState::Unborrowed);
+            if matches!(scope.get(&key), Some(state) if !matches!(state, BorrowState::Unborrowed)) {
+                scope.insert(key, BorrowState::Unborrowed);
+                ended = true;
+            }
+        }
+        if ended {
+            self.record_resource_action(
+                crate::core::ResourceActionKind::BorrowEnd,
+                &format!("{}.{}", var, field),
+            );
         }
     }
 
@@ -325,7 +357,7 @@ impl<'a> Checker<'a> {
     /// borrow reference variable is NOT used in the current or any later statement.
     pub(crate) fn release_borrows_at_last_use(&mut self, block: &[Stmt], current_idx: usize) {
         // Collect currently borrowed variables and their borrow reference names
-        let borrows: Vec<(String, Option<String>)> = {
+        let mut borrows: Vec<(String, Option<String>)> = {
             if let Some(scope) = self.borrows.last() {
                 scope
                     .iter()
@@ -333,7 +365,7 @@ impl<'a> Checker<'a> {
                     .map(|(name, _)| {
                         // Find the borrow reference variable name
                         // It's typically: let r = &x  -> borrow_ref = "r", borrowed_var = "x"
-                        let borrow_ref = self.find_borrow_ref(name, block, current_idx);
+                        let borrow_ref = self.find_borrow_ref(name, None, block, current_idx);
                         (name.clone(), borrow_ref)
                     })
                     .collect()
@@ -341,6 +373,7 @@ impl<'a> Checker<'a> {
                 vec![]
             }
         };
+        borrows.sort_by(|left, right| left.0.cmp(&right.0));
 
         for (borrowed_var, borrow_ref_opt) in &borrows {
             if matches!(
@@ -371,14 +404,15 @@ impl<'a> Checker<'a> {
         }
 
         // E5: Also release field-level borrows at their last use.
-        let field_borrows: Vec<(String, String, Option<String>)> = {
+        let mut field_borrows: Vec<(String, String, Option<String>)> = {
             if let Some(scope) = self.field_borrows.last() {
                 scope
                     .iter()
                     .filter(|(_, state)| !matches!(state, BorrowState::Unborrowed))
                     .map(|((var, path), _)| {
                         let field = path.last().cloned().unwrap_or_default();
-                        let borrow_ref = self.find_borrow_ref(var, block, current_idx);
+                        let borrow_ref =
+                            self.find_borrow_ref(var, Some(field.as_str()), block, current_idx);
                         (var.clone(), field, borrow_ref)
                     })
                     .collect()
@@ -386,12 +420,10 @@ impl<'a> Checker<'a> {
                 vec![]
             }
         };
+        field_borrows
+            .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
 
         for (borrowed_var, field, borrow_ref_opt) in &field_borrows {
-            if self.is_field_borrowed(borrowed_var, field, false).is_none() {
-                continue;
-            }
-            // Bug-4 fix: if borrow_ref is None, skip NLL release for this field borrow
             let Some(borrow_ref) = borrow_ref_opt else {
                 continue;
             };
@@ -413,6 +445,7 @@ impl<'a> Checker<'a> {
     pub(crate) fn find_borrow_ref(
         &self,
         borrowed_var: &str,
+        borrowed_field: Option<&str>,
         block: &[Stmt],
         current_idx: usize,
     ) -> Option<String> {
@@ -426,13 +459,19 @@ impl<'a> Checker<'a> {
                 let Expr::Unary(UnOp::Ref | UnOp::RefMut, inner) = init.unlocated() else {
                     continue;
                 };
-                let borrowed_name = match inner.unlocated() {
-                    Expr::Ident(name) => Some(name.as_str()),
+                let borrowed_name = match (borrowed_field, inner.unlocated()) {
+                    (None, Expr::Ident(name)) => Some(name.as_str()),
                     // Borrowed index: let r = &xs[i] / &mut xs[i]
-                    Expr::Index(obj, _) => match obj.unlocated() {
+                    (None, Expr::Index(obj, _)) => match obj.unlocated() {
                         Expr::Ident(name) => Some(name.as_str()),
                         _ => None,
                     },
+                    (Some(expected), Expr::Field(obj, actual)) if expected == actual => {
+                        match obj.unlocated() {
+                            Expr::Ident(name) => Some(name.as_str()),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 };
                 if let Some(name) = borrowed_name {

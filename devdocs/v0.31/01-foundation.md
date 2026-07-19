@@ -19,6 +19,7 @@
 ## 当前进度
 
 - **0.31.2 已收口**：canonical unification、binder-aware traversal、mandatory zonk、泛型 fresh instantiate 与 zonked function artifacts 已通过聚焦门禁；raw-body consumer 迁移按路线留给 0.31.4–0.31.5。
+- **0.31.3 进行中**：capability action/branch merge/loop back-edge ledger 已具备；borrow start/end place、复合 capability return/drop 与双后端 MCDD 已接入。固定点 CFG、nested place overlap 与完整 native reference ABI 仍未完成。
 
 ## 不变量
 

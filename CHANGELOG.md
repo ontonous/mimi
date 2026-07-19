@@ -56,6 +56,8 @@
 - 嵌套函数 / actor / impl / transition 使用独立 ownership owner；禁止隐式捕获外层 `cap`。
 - Codegen 移除 flow transition 同名首候选 fallback；`flow_file_system` 固件避开保留字 `fault` 绑定。
 - `RESOURCE-LINEAR-001` / `OWN-PERMISSION-001` support 证据升为 `partial`。
+- ownership ledger 新增 `borrow_shared` / `borrow_mut` / `borrow_end`，记录 root/field/tuple/index place 与 NLL/词法结束点，并由 interpreter/native/verifier consumer 统一安装。
+- 复合 tuple/record 的 capability return/drop 按源码顺序确定性转移；新增 `ownership_cfg.mimi` 双后端 MCDD。native 字段引用与 immutable-index→mutable-index 组合仍登记为后续 ABI 缺口。
 
 ### v0.31.4-dev — CheckedProgram consumer 硬化（transition 表 + 目录扩展）
 
