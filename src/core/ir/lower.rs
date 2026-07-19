@@ -509,10 +509,47 @@ impl BodyLowerer<'_> {
                 kind: super::ContractKind::Requires,
                 condition: self.lower_expr(expr, &format!("{role}.expression"))?,
             },
-            Stmt::Ensures(expr, _) => ResolvedStmtKind::Contract {
-                kind: super::ContractKind::Ensures,
-                condition: self.lower_expr(expr, &format!("{role}.expression"))?,
-            },
+            Stmt::Ensures(expr, _) => {
+                self.scopes.push(BTreeMap::new());
+                let result_id = NodeId(format!("{}/contract-result", self.owner.0));
+                let local_id = ResolvedLocalId(NodeId(format!("{}/local", result_id.0)));
+                let result_origin = Origin::Desugared {
+                    parent: node_id.clone(),
+                    rule: "resolved_body.contract_result".into(),
+                    span: origin.user_span(),
+                };
+                let lowered = (|| {
+                    if self.locals.contains_key(&local_id) {
+                        self.scopes
+                            .last_mut()
+                            .ok_or_else(|| {
+                                vec![ResolvedBodyError::new(
+                                    result_id.clone(),
+                                    "contract result has no lexical scope",
+                                )]
+                            })?
+                            .insert("result".into(), local_id.clone());
+                    } else {
+                        self.insert_local(
+                            "result".into(),
+                            ResolvedLocal {
+                                id: local_id.clone(),
+                                display_name: "result".into(),
+                                ty: self.signature.result.clone(),
+                                mutable: false,
+                                origin: result_origin,
+                            },
+                            &result_id,
+                        )?;
+                    }
+                    self.lower_expr(expr, &format!("{role}.expression"))
+                })();
+                self.scopes.pop();
+                ResolvedStmtKind::Contract {
+                    kind: super::ContractKind::Ensures,
+                    condition: lowered?,
+                }
+            }
             Stmt::Invariant(expr, _) => ResolvedStmtKind::Contract {
                 kind: super::ContractKind::Invariant,
                 condition: self.lower_expr(expr, &format!("{role}.expression"))?,
@@ -845,6 +882,12 @@ impl BodyLowerer<'_> {
                     field_type,
                 }
             }
+            Expr::TypeOf(value) => ResolvedExprKind::TypeOf(Box::new(
+                self.lower_expr(value, &format!("{role}.inner"))?,
+            )),
+            Expr::Old(value) => {
+                ResolvedExprKind::Old(Box::new(self.lower_expr(value, &format!("{role}.inner"))?))
+            }
             Expr::Block(block) => ResolvedExprKind::Block(Box::new(self.lower_block(
                 block,
                 &format!("{role}.block"),
@@ -936,10 +979,8 @@ impl BodyLowerer<'_> {
             Expr::Quote(_)
             | Expr::QuoteInterpolate(_)
             | Expr::Comptime(_)
-            | Expr::TypeOf(_)
             | Expr::TypeInfo(_)
             | Expr::Lambda { .. }
-            | Expr::Old(_)
             | Expr::Turbofish(_, _, _)
             | Expr::Arena(_)
             | Expr::NamedArg(_, _) => return self.unsupported(&node_id, expr_kind(expr)),
@@ -949,12 +990,25 @@ impl BodyLowerer<'_> {
             ResolvedExprKind::Call(call) => call.effects.clone(),
             _ => Vec::new(),
         };
+        let backend_requirements = match &kind {
+            ResolvedExprKind::TypeOf(_) => Some(super::BackendRequirement {
+                requirement_id: "COMPTIME-PURE-001".into(),
+                capability: "reflection.type_name".into(),
+            }),
+            ResolvedExprKind::Old(_) => Some(super::BackendRequirement {
+                requirement_id: "LANG-CONTRACT-001".into(),
+                capability: "contract.old_snapshot".into(),
+            }),
+            _ => None,
+        }
+        .into_iter()
+        .collect();
         Ok(ResolvedExpr {
             node_id,
             origin,
             ty,
             effects,
-            backend_requirements: Vec::new(),
+            backend_requirements,
             kind,
         })
     }
@@ -3136,6 +3190,49 @@ mod tests {
         ));
         body.validate(program.resolved_types())
             .expect("valid formatted string");
+    }
+
+    #[test]
+    fn type_name_and_old_retain_typed_operands_and_requirements() {
+        let file = parse(
+            "func type_name_of(value: i32) { type_name(value); () }\nfunc preserve(value: i32) -> i32 { ensures: result == old(value); value }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies =
+            lower_checked_function_bodies(&file, &program).expect("lower semantic wrappers");
+        let ResolvedStmtKind::Expr(type_name) = &bodies[&NodeId("function:type_name_of".into())]
+            .root
+            .statements[0]
+            .kind
+        else {
+            panic!("type-name expression expected");
+        };
+        assert!(matches!(
+            type_name.kind,
+            ResolvedExprKind::TypeOf(ref value)
+                if matches!(value.kind, ResolvedExprKind::Load(_))
+        ));
+        assert!(type_name
+            .backend_requirements
+            .iter()
+            .any(|requirement| requirement.capability == "reflection.type_name"));
+
+        let preserve = &bodies[&NodeId("function:preserve".into())];
+        let ResolvedStmtKind::Contract { condition, .. } = &preserve.root.statements[0].kind else {
+            panic!("ensures contract expected");
+        };
+        let ResolvedExprKind::Binary { left, right, .. } = &condition.kind else {
+            panic!("contract comparison expected");
+        };
+        assert!(matches!(left.kind, ResolvedExprKind::Load(_)));
+        assert!(matches!(right.kind, ResolvedExprKind::Old(_)));
+        assert!(right
+            .backend_requirements
+            .iter()
+            .any(|requirement| requirement.capability == "contract.old_snapshot"));
+        preserve
+            .validate(program.resolved_types())
+            .expect("valid old expression");
     }
 
     #[test]

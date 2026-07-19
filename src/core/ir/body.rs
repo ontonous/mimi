@@ -288,6 +288,8 @@ pub enum ResolvedExprKind {
         field: NodeId,
         field_type: ResolvedTypeId,
     },
+    TypeOf(Box<ResolvedExpr>),
+    Old(Box<ResolvedExpr>),
     Record {
         nominal: NominalTypeId,
         fields: Vec<ResolvedRecordField>,
@@ -845,6 +847,9 @@ impl BodyValidator<'_> {
                     );
                 }
                 self.require_type(&expression.node_id, field_type);
+            }
+            ResolvedExprKind::TypeOf(value) | ResolvedExprKind::Old(value) => {
+                self.visit_expr(value);
             }
             ResolvedExprKind::Record { nominal, fields } => {
                 if nominal.as_str().trim().is_empty() {

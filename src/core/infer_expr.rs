@@ -239,7 +239,10 @@ impl<'a> Checker<'a> {
             Expr::Quote(_) => Type::Name("AST".into(), vec![]),
             Expr::QuoteInterpolate(inner) => self.infer_expr(inner, scopes),
             Expr::Comptime(block) => self.infer_comptime(block, scopes),
-            Expr::TypeOf(_) => Type::Name("Type".into(), vec![]),
+            Expr::TypeOf(inner) => {
+                self.infer_expr(inner, scopes);
+                Type::Name("Type".into(), vec![])
+            }
             Expr::SliceExpr { target, start, end } => {
                 self.infer_slice(target, start.as_deref(), end.as_deref(), scopes)
             }
