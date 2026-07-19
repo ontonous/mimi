@@ -599,7 +599,15 @@ impl<'a> Checker<'a> {
                     self.generic_scope.extend(generic_names.iter().cloned());
                     // Add implicit self parameter as first param
                     let self_type = Type::Name(actor.name.clone(), vec![]);
-                    let mut params = vec![self_type];
+                    let has_explicit_self = method
+                        .params
+                        .first()
+                        .is_some_and(|param| param.name == "self");
+                    let mut params = if has_explicit_self {
+                        Vec::new()
+                    } else {
+                        vec![self_type]
+                    };
                     params.extend(method.params.iter().map(|p| self.resolve_type(&p.ty)));
                     let ret = method
                         .ret
@@ -608,7 +616,7 @@ impl<'a> Checker<'a> {
                         .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
                     for (i, p) in method.params.iter().enumerate() {
                         self.check_type_well_formed(
-                            &params[i + 1],
+                            &params[i + usize::from(!has_explicit_self)],
                             &format!("parameter '{}' of actor method '{}'", p.name, method.name),
                         );
                     }
@@ -686,10 +694,18 @@ impl<'a> Checker<'a> {
                     let generic_names: Vec<String> =
                         method.generics.iter().map(|g| g.name.clone()).collect();
                     self.generic_scope.extend(generic_names.iter().cloned());
-                    let mut params = vec![Type::Name(
-                        impl_def.type_name.clone(),
-                        impl_def.type_args.clone(),
-                    )];
+                    let has_explicit_self = method
+                        .params
+                        .first()
+                        .is_some_and(|param| param.name == "self");
+                    let mut params = if has_explicit_self {
+                        Vec::new()
+                    } else {
+                        vec![Type::Name(
+                            impl_def.type_name.clone(),
+                            impl_def.type_args.clone(),
+                        )]
+                    };
                     params.extend(method.params.iter().map(|p| self.resolve_type(&p.ty)));
                     let ret = method
                         .ret
@@ -698,7 +714,7 @@ impl<'a> Checker<'a> {
                         .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
                     for (i, p) in method.params.iter().enumerate() {
                         self.check_type_well_formed(
-                            &params[i + 1],
+                            &params[i + usize::from(!has_explicit_self)],
                             &format!("parameter '{}' of impl method '{}'", p.name, method.name),
                         );
                     }
@@ -1103,6 +1119,10 @@ impl<'a> Checker<'a> {
                         crate::core::NodeId(format!("function:{}::{}", actor_name, method.name)),
                         &ownership_params,
                     );
+                    let method_owner =
+                        crate::core::NodeId(format!("function:{}::{}", actor_name, method.name));
+                    self.unification.reset();
+                    self.begin_expression_type_capture(method_owner);
                     let implicit_return =
                         self.check_block_with_implicit_return(&method.body, &ret, &mut scopes);
                     self.check_method_implicit_return(
@@ -1111,6 +1131,7 @@ impl<'a> Checker<'a> {
                         implicit_return,
                     );
                     self.check_unconsumed_caps();
+                    self.finish_expression_type_capture();
                     self.end_callable_ownership(previous_owner);
                     self.cap_vars.pop();
                     self.var_scopes.pop();
@@ -1303,6 +1324,10 @@ impl<'a> Checker<'a> {
                         crate::core::resolved::impl_method_owner(&impl_qualified_name, method),
                         &ownership_params,
                     );
+                    let method_owner =
+                        crate::core::resolved::impl_method_owner(&impl_qualified_name, method);
+                    self.unification.reset();
+                    self.begin_expression_type_capture(method_owner);
                     let implicit_return =
                         self.check_block_with_implicit_return(&method.body, &ret, &mut scopes);
                     self.check_method_implicit_return(
@@ -1314,6 +1339,7 @@ impl<'a> Checker<'a> {
                         implicit_return,
                     );
                     self.check_unconsumed_caps();
+                    self.finish_expression_type_capture();
                     self.end_callable_ownership(previous_owner);
                     self.var_scopes.pop();
                     self.cap_vars.pop();

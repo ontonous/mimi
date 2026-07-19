@@ -16,9 +16,9 @@ use crate::ast::{
     AstOrigin, BinOp, Expr, File, FuncDef, Item, Lit, Pattern, PatternKind, Stmt, UnOp,
 };
 use crate::core::resolved::{
-    expr_kind, expr_sibling_role, map_entry_role, match_arm_role, nested_function_owner,
-    pattern_kind, pattern_sibling_role, stable_id_fragment, stmt_anchor, stmt_kind,
-    stmt_sibling_role, NodeIdBuilder,
+    expr_kind, expr_sibling_role, impl_method_owner, map_entry_role, match_arm_role,
+    nested_function_owner, pattern_kind, pattern_sibling_role, stable_id_fragment, stmt_anchor,
+    stmt_kind, stmt_sibling_role, NodeIdBuilder,
 };
 use crate::core::{
     CheckedProgram, NodeId, NodeMeta, Origin, ResolvedCallKind, ResolvedCallSite, ResolvedConstant,
@@ -169,6 +169,32 @@ fn collect_function_syntax<'a>(
                     format!("{module}::{}", function.name)
                 };
                 out.insert(NodeId(format!("function:{qualified}")), function);
+            }
+            Item::Actor(actor) => {
+                let qualified = if module.is_empty() {
+                    actor.name.clone()
+                } else {
+                    format!("{module}::{}", actor.name)
+                };
+                for method in &actor.methods {
+                    out.insert(
+                        NodeId(format!("function:{qualified}::{}", method.name)),
+                        method,
+                    );
+                }
+            }
+            Item::Impl(impl_def) => {
+                let qualified = if module.is_empty() {
+                    format!("{}:for:{}", impl_def.trait_name, impl_def.type_name)
+                } else {
+                    format!(
+                        "{module}::{}:for:{}",
+                        impl_def.trait_name, impl_def.type_name
+                    )
+                };
+                for method in &impl_def.methods {
+                    out.insert(impl_method_owner(&qualified, method), method);
+                }
             }
             _ => {}
         }
@@ -2223,5 +2249,21 @@ mod tests {
             crate::core::ir::DelegateTarget::Callable(node)
                 if node == &NodeId("function:child".into())
         ));
+    }
+
+    #[test]
+    fn actor_method_body_has_canonical_self_parameter() {
+        let file = parse(
+            "actor Counter { count: i32 func value() -> i32 { 1 } }\nfunc main() -> i32 { 0 }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower actor method");
+        let owner = NodeId("function:Counter::value".into());
+        let body = &bodies[&owner];
+        let signature = program
+            .resolved_signature(&owner)
+            .expect("method signature");
+        assert_eq!(signature.parameters[0].name, "self");
+        assert!(body.locals.keys().any(|local| local.0 .0.contains("self")));
     }
 }
