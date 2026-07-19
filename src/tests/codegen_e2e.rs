@@ -4,6 +4,74 @@
 
 use super::*;
 
+#[test]
+fn e2e_projected_field_reference_writes_back_to_original_storage() {
+    if !can_link() {
+        return;
+    }
+    let stdout = compile_and_run(
+        r#"
+type Inner { value: i32 }
+type Outer { inner: Inner, other: i32 }
+func bump(value: &mut i32) { *value = 12 as i32 }
+func main() -> i32 {
+    let mut item = Outer { inner: Inner { value: 7 }, other: 2 }
+    let value = &mut item.inner.value
+    bump(value)
+    println(item.inner.value)
+    0
+}
+"#,
+    )
+    .expect("compile and run nested field reference");
+    assert_eq!(stdout.trim(), "12");
+}
+
+#[test]
+fn e2e_projected_tuple_reference_writes_back_to_original_storage() {
+    if !can_link() {
+        return;
+    }
+    let stdout = compile_and_run(
+        r#"
+func bump(value: &mut i32) { *value = 11 as i32 }
+func main() -> i32 {
+    let mut pair = (4, 8)
+    let value = &mut pair.1
+    bump(value)
+    println(pair.1)
+    0
+}
+"#,
+    )
+    .expect("compile and run tuple reference");
+    assert_eq!(stdout.trim(), "11");
+}
+
+#[test]
+fn e2e_index_reference_shared_then_mutable_uses_original_list_slot() {
+    if !can_link() {
+        return;
+    }
+    let stdout = compile_and_run(
+        r#"
+func read(value: &i32) -> i32 { *value }
+func bump(value: &mut i32) { *value = 13 as i32 }
+func main() -> i32 {
+    let mut values = [5, 9]
+    let first = &values[0]
+    println(read(first))
+    let second = &mut values[1]
+    bump(second)
+    println(values[1])
+    0
+}
+"#,
+    )
+    .expect("compile and run list index references");
+    assert_eq!(stdout.trim(), "5\n13");
+}
+
 fn can_link() -> bool {
     crate::tests::can_link()
 }

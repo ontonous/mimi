@@ -8,6 +8,138 @@ use inkwell::values::BasicValueEnum;
 use std::collections::HashMap;
 
 impl<'ctx> CodeGenerator<'ctx> {
+    /// Lower an assignable Mimi place to its actual backing address.
+    ///
+    /// Unlike `compile_expr` + spill, this preserves field/index write-back and
+    /// gives view/mutate references the same ABI for nested projections.
+    pub(in crate::codegen) fn compile_place_addr(
+        &mut self,
+        expr: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<(inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>), CompileError> {
+        match expr.unlocated() {
+            Expr::Ident(name) => {
+                let (storage, storage_ty) = vars
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| CompileError::Generic(format!("unknown place '{}'", name)))?;
+                if matches!(storage_ty, BasicTypeEnum::PointerType(_)) {
+                    let object_name = self.infer_object_type(expr, vars);
+                    let base_name = Self::strip_generic_params(&object_name);
+                    if let Some(BasicTypeEnum::StructType(struct_ty)) =
+                        self.type_llvm.get(base_name).copied()
+                    {
+                        let pointer = self
+                            .build_load(
+                                BasicTypeEnum::PointerType(
+                                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                                ),
+                                storage,
+                                &format!("{}_place", name),
+                            )?
+                            .into_pointer_value();
+                        return Ok((pointer, BasicTypeEnum::StructType(struct_ty)));
+                    }
+                }
+                Ok((storage, storage_ty))
+            }
+            Expr::Field(base, field) => {
+                let (base_ptr, base_ty) = self.compile_place_addr(base, vars)?;
+                let base_type_name = self.infer_object_type(base, vars);
+                let base_name = Self::strip_generic_params(&base_type_name);
+                let struct_ty = match base_ty {
+                    BasicTypeEnum::StructType(struct_ty) => struct_ty,
+                    BasicTypeEnum::PointerType(_) => self.expect_struct_type(base_name)?,
+                    _ => {
+                        return Err(CompileError::Generic(format!(
+                            "field place '{}' has non-struct base",
+                            field
+                        )))
+                    }
+                };
+                let (index, declared_ty) = if let Some(type_def) = self.type_defs.get(base_name) {
+                    if let TypeDefKind::Record(fields) = &type_def.kind {
+                        let index = fields
+                            .iter()
+                            .position(|candidate| candidate.name == *field)
+                            .ok_or_else(|| {
+                                CompileError::Generic(format!(
+                                    "field '{}' not found on type '{}'",
+                                    field, base_name
+                                ))
+                            })?;
+                        (index as u32, Some(fields[index].ty.clone()))
+                    } else {
+                        return Err(format!("type '{}' is not a record", base_name).into());
+                    }
+                } else if let Ok(index) = field.parse::<u32>() {
+                    struct_ty.get_field_type_at_index(index).ok_or_else(|| {
+                        CompileError::Generic(format!("tuple field '{}' is out of bounds", field))
+                    })?;
+                    (index, None)
+                } else {
+                    return Err(
+                        format!("field '{}' not found on type '{}'", field, base_name).into(),
+                    );
+                };
+                let pointer = self
+                    .gep()
+                    .build_struct_gep(struct_ty, base_ptr, index, &format!("{}_addr", field))
+                    .map_err(|error| CompileError::LlvmError(format!("gep error: {error}")))?;
+                let storage_ty = struct_ty.get_field_type_at_index(index).ok_or_else(|| {
+                    CompileError::Generic(format!("field '{}' storage type is missing", field))
+                })?;
+                if let Some(Type::Name(nested_name, _)) = declared_ty.as_ref().map(Type::unlocated)
+                {
+                    if let Some(BasicTypeEnum::StructType(nested_struct)) =
+                        self.type_llvm.get(nested_name).copied()
+                    {
+                        if let BasicTypeEnum::IntType(storage_int) = storage_ty {
+                            let encoded = self
+                                .build_load(storage_int, pointer, "nested_place_ptr")?
+                                .into_int_value();
+                            let nested_ptr = self.build_int_to_ptr(
+                                encoded,
+                                self.context.ptr_type(inkwell::AddressSpace::default()),
+                                "nested_place",
+                            )?;
+                            return Ok((nested_ptr, BasicTypeEnum::StructType(nested_struct)));
+                        }
+                    }
+                }
+                Ok((pointer, storage_ty))
+            }
+            Expr::TupleIndex(base, index) => {
+                let (base_ptr, base_ty) = self.compile_place_addr(base, vars)?;
+                let BasicTypeEnum::StructType(struct_ty) = base_ty else {
+                    return Err("tuple projection requires an addressable tuple".into());
+                };
+                let field_ty = struct_ty
+                    .get_field_type_at_index(*index as u32)
+                    .ok_or_else(|| {
+                        CompileError::Generic(format!("tuple index {} is out of bounds", index))
+                    })?;
+                let pointer = self
+                    .gep()
+                    .build_struct_gep(struct_ty, base_ptr, *index as u32, "tuple_addr")
+                    .map_err(|error| CompileError::LlvmError(format!("gep error: {error}")))?;
+                Ok((pointer, field_ty))
+            }
+            Expr::Index(base, index) => {
+                let pointer = self.compile_index_addr(base, index, vars)?;
+                Ok((pointer, BasicTypeEnum::IntType(self.context.i64_type())))
+            }
+            Expr::Unary(UnOp::Deref, pointer) => {
+                let value = self.compile_expr(pointer, vars)?;
+                let BasicValueEnum::PointerValue(pointer) = value else {
+                    return Err("dereference place requires a pointer".into());
+                };
+                Ok((pointer, BasicTypeEnum::IntType(self.context.i64_type())))
+            }
+            _ => Err("expression is not an addressable place".into()),
+        }
+    }
+
     /// After loading a list element as i64, check if the element type is a
     /// compound type (stored as ptrtoint). If so, inttoptr + load the struct.
     fn convert_list_elem_from_i64(
@@ -499,19 +631,38 @@ impl<'ctx> CodeGenerator<'ctx> {
         idx_expr: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
-        let obj_val = self.compile_expr(obj, vars)?;
         let idx_val = self.compile_expr(idx_expr, vars)?;
         let idx_iv = require_int_index(idx_val)?;
 
-        let list_ptr = match obj_val {
-            BasicValueEnum::PointerValue(pv) => pv,
-            BasicValueEnum::StructValue(sv) => {
-                let list_ty = self.standard_list_type();
-                let list_alloca = self.build_alloca(list_ty, "list_tmp")?;
-                self.build_store(list_alloca, sv)?;
-                list_alloca
+        let list_ptr = if let Expr::Ident(name) = obj.unlocated() {
+            let (storage, storage_ty) = vars
+                .get(name)
+                .copied()
+                .ok_or_else(|| CompileError::Generic(format!("unknown list place '{}'", name)))?;
+            if matches!(storage_ty, BasicTypeEnum::PointerType(_)) {
+                self.build_load(
+                    BasicTypeEnum::PointerType(
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                    ),
+                    storage,
+                    &format!("{}_list_place", name),
+                )?
+                .into_pointer_value()
+            } else {
+                storage
             }
-            _ => return Err("borrowed index requires a list value".into()),
+        } else {
+            let obj_val = self.compile_expr(obj, vars)?;
+            match obj_val {
+                BasicValueEnum::PointerValue(pv) => pv,
+                BasicValueEnum::StructValue(sv) => {
+                    let list_ty = self.standard_list_type();
+                    let list_alloca = self.build_alloca(list_ty, "list_tmp")?;
+                    self.build_store(list_alloca, sv)?;
+                    list_alloca
+                }
+                _ => return Err("borrowed index requires a list value".into()),
+            }
         };
 
         self.check_list_bounds(list_ptr, idx_iv, "borrowed index")?;

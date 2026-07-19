@@ -2192,6 +2192,8 @@ impl<'a> Interpreter<'a> {
             Value::RefMut(_) => "ref_mut".into(),
             Value::IndexRef { .. } => "borrowed_index".into(),
             Value::IndexRefMut { .. } => "borrowed_index_mut".into(),
+            Value::PlaceRef { .. } => "borrowed_place".into(),
+            Value::PlaceRefMut { .. } => "borrowed_place_mut".into(),
             Value::Cap(_) => "cap".into(),
             Value::Actor(_) => "actor".into(),
             Value::Future(_) => "future".into(),

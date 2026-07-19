@@ -84,6 +84,9 @@ impl<'a> Interpreter<'a> {
                         return self.eval_borrowed_index(obj_expr, idx_expr, owner, false);
                     }
                 }
+                if let Some((owner, projections)) = runtime_place(e) {
+                    return Ok(Value::PlaceRef { owner, projections });
+                }
                 Ok(Value::Ref(Arc::new(RwLock::new(v))))
             }
             UnOp::RefMut => {
@@ -91,6 +94,9 @@ impl<'a> Interpreter<'a> {
                     if let Expr::Ident(owner) = obj_expr.unlocated() {
                         return self.eval_borrowed_index(obj_expr, idx_expr, owner, true);
                     }
+                }
+                if let Some((owner, projections)) = runtime_place(e) {
+                    return Ok(Value::PlaceRefMut { owner, projections });
                 }
                 Ok(Value::RefMut(Arc::new(RwLock::new(v))))
             }
@@ -136,6 +142,16 @@ impl<'a> Interpreter<'a> {
                             type_name(&owner_val)
                         ))),
                     }
+                }
+                Value::PlaceRef { owner, projections }
+                | Value::PlaceRefMut { owner, projections } => {
+                    let value = self.lookup(&owner).ok_or_else(|| {
+                        InterpError::new(format!(
+                            "borrowed variable '{}' is no longer available",
+                            owner
+                        ))
+                    })?;
+                    read_runtime_place(&value, &projections)
                 }
                 _ => Err(InterpError::new(format!(
                     "cannot dereference {}",
@@ -1890,4 +1906,51 @@ impl<'a> Interpreter<'a> {
             ))),
         }
     }
+}
+
+fn runtime_place(expr: &Expr) -> Option<(String, Vec<RuntimeProjection>)> {
+    fn collect(expr: &Expr, projections: &mut Vec<RuntimeProjection>) -> Option<String> {
+        match expr.unlocated() {
+            Expr::Ident(owner) => Some(owner.clone()),
+            Expr::Field(base, field) => {
+                let owner = collect(base, projections)?;
+                projections.push(RuntimeProjection::Field(field.clone()));
+                Some(owner)
+            }
+            Expr::TupleIndex(base, index) => {
+                let owner = collect(base, projections)?;
+                projections.push(RuntimeProjection::Tuple(*index));
+                Some(owner)
+            }
+            _ => None,
+        }
+    }
+    let mut projections = Vec::new();
+    let owner = collect(expr, &mut projections)?;
+    (!projections.is_empty()).then_some((owner, projections))
+}
+
+pub(in crate::interp) fn read_runtime_place(
+    value: &Value,
+    projections: &[RuntimeProjection],
+) -> Result<Value, InterpError> {
+    let Some((projection, rest)) = projections.split_first() else {
+        return Ok(value.clone());
+    };
+    let child = match (value, projection) {
+        (Value::Record(_, fields), RuntimeProjection::Field(field)) => fields
+            .get(field)
+            .ok_or_else(|| InterpError::new(format!("record has no field '{}'", field)))?,
+        (Value::Tuple(values), RuntimeProjection::Tuple(index)) => {
+            values.get(*index).ok_or_else(|| {
+                InterpError::index_out_of_bounds(format!("tuple index {} is out of bounds", index))
+            })?
+        }
+        _ => {
+            return Err(InterpError::new(
+                "borrowed projection does not match its runtime value",
+            ))
+        }
+    };
+    read_runtime_place(child, rest)
 }

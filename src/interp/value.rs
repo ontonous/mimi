@@ -220,6 +220,12 @@ pub struct MatchArmQuoted {
     pub body: QuotedAst,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeProjection {
+    Field(String),
+    Tuple(usize),
+}
+
 #[derive(Debug, Clone)]
 pub enum Value {
     Int(i64),
@@ -264,6 +270,16 @@ pub enum Value {
     IndexRefMut {
         owner: String,
         index: usize,
+    },
+    /// Borrowed record/tuple projection that aliases its root variable.
+    PlaceRef {
+        owner: String,
+        projections: Vec<RuntimeProjection>,
+    },
+    /// Mutable record/tuple projection that writes back to its root variable.
+    PlaceRefMut {
+        owner: String,
+        projections: Vec<RuntimeProjection>,
     },
     /// Type descriptor for comptime reflection
     Type(String),
@@ -1418,6 +1434,12 @@ impl std::fmt::Display for Value {
             }
             Value::IndexRef { owner, index } => write!(f, "&{}[{}]", owner, index),
             Value::IndexRefMut { owner, index } => write!(f, "&mut {}[{}]", owner, index),
+            Value::PlaceRef { owner, projections } => {
+                write!(f, "&{}{}", owner, display_projections(projections))
+            }
+            Value::PlaceRefMut { owner, projections } => {
+                write!(f, "&mut {}{}", owner, display_projections(projections))
+            }
             Value::Type(name) => write!(f, "{}", name),
             Value::Allocator(kind) => write!(f, "Allocator({:?})", kind),
             Value::Array(vs) => {
@@ -1793,6 +1815,8 @@ pub(crate) fn type_name(val: &Value) -> &'static str {
         Value::RefMut(_) => "ref_mut",
         Value::IndexRef { .. } => "borrowed_index",
         Value::IndexRefMut { .. } => "borrowed_index_mut",
+        Value::PlaceRef { .. } => "borrowed_place",
+        Value::PlaceRefMut { .. } => "borrowed_place_mut",
         Value::Cap(_) => "cap",
         Value::Actor(_) => "actor",
         Value::Future(_) => "future",
@@ -1805,6 +1829,23 @@ pub(crate) fn type_name(val: &Value) -> &'static str {
         Value::CBuffer(_) => "c_buffer",
         Value::DynTrait { .. } => "dyn_trait",
     }
+}
+
+fn display_projections(projections: &[RuntimeProjection]) -> String {
+    let mut value = String::new();
+    for projection in projections {
+        match projection {
+            RuntimeProjection::Field(field) => {
+                value.push('.');
+                value.push_str(field);
+            }
+            RuntimeProjection::Tuple(index) => {
+                value.push('.');
+                value.push_str(&index.to_string());
+            }
+        }
+    }
+    value
 }
 
 impl PartialEq for Value {
