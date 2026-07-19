@@ -906,6 +906,21 @@ impl BodyLowerer<'_> {
                 ty.clone(),
                 true,
             )?)),
+            Expr::Arena(block) => ResolvedExprKind::Scope {
+                kind: super::ResolvedScopeKind::Arena,
+                body: Box::new(self.lower_block(
+                    block,
+                    &format!("{role}.block"),
+                    ty.clone(),
+                    true,
+                )?),
+            },
+            Expr::Comptime(block) => ResolvedExprKind::Comptime(Box::new(self.lower_block(
+                block,
+                &format!("{role}.block"),
+                ty.clone(),
+                true,
+            )?)),
             Expr::If { cond, then_, else_ } => {
                 let else_ = else_.as_ref().ok_or_else(|| {
                     vec![ResolvedBodyError::new(
@@ -990,10 +1005,8 @@ impl BodyLowerer<'_> {
             }
             Expr::Quote(_)
             | Expr::QuoteInterpolate(_)
-            | Expr::Comptime(_)
             | Expr::Lambda { .. }
             | Expr::Turbofish(_, _, _)
-            | Expr::Arena(_)
             | Expr::NamedArg(_, _) => return self.unsupported(&node_id, expr_kind(expr)),
             Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
         };
@@ -1013,6 +1026,17 @@ impl BodyLowerer<'_> {
             ResolvedExprKind::Old(_) => Some(super::BackendRequirement {
                 requirement_id: "LANG-CONTRACT-001".into(),
                 capability: "contract.old_snapshot".into(),
+            }),
+            ResolvedExprKind::Comptime(_) => Some(super::BackendRequirement {
+                requirement_id: "COMPTIME-PURE-001".into(),
+                capability: "comptime.evaluate".into(),
+            }),
+            ResolvedExprKind::Scope {
+                kind: super::ResolvedScopeKind::Arena,
+                ..
+            } => Some(super::BackendRequirement {
+                requirement_id: "RESOURCE-LINEAR-001".into(),
+                capability: "allocator.arena".into(),
             }),
             _ => None,
         }
@@ -3275,6 +3299,51 @@ mod tests {
         preserve
             .validate(program.resolved_types())
             .expect("valid old expression");
+    }
+
+    #[test]
+    fn arena_and_comptime_expressions_retain_typed_scopes() {
+        let file = parse(
+            "func arena_value() -> i32 { let result = arena { let value = 4; value }; result }\nfunc static_value() -> i32 { comptime { 5 + 1 } }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies =
+            lower_checked_function_bodies(&file, &program).expect("lower scoped expressions");
+        let ResolvedStmtKind::Bind {
+            initializer: Some(arena),
+            ..
+        } = &bodies[&NodeId("function:arena_value".into())]
+            .root
+            .statements[0]
+            .kind
+        else {
+            panic!("arena binding expected");
+        };
+        assert!(matches!(
+            arena.kind,
+            ResolvedExprKind::Scope {
+                kind: crate::core::ir::ResolvedScopeKind::Arena,
+                ..
+            }
+        ));
+        assert!(arena
+            .backend_requirements
+            .iter()
+            .any(|requirement| requirement.capability == "allocator.arena"));
+
+        let comptime = bodies[&NodeId("function:static_value".into())]
+            .root
+            .result
+            .as_ref()
+            .unwrap();
+        assert!(matches!(comptime.kind, ResolvedExprKind::Comptime(_)));
+        assert!(comptime
+            .backend_requirements
+            .iter()
+            .any(|requirement| requirement.capability == "comptime.evaluate"));
+        bodies[&NodeId("function:static_value".into())]
+            .validate(program.resolved_types())
+            .expect("valid comptime body");
     }
 
     #[test]
