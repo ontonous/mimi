@@ -114,6 +114,7 @@ pub enum CheckedConversionKind {
     DynamicDowncastChecked,
     NewtypeWrap,
     NewtypeUnwrap,
+    OwnershipWrap,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
