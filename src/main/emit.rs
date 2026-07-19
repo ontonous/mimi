@@ -7,9 +7,7 @@ use mimi::ast::{self, File};
 use mimi::core::BackendProfile;
 use mimi::{ffi, lexer};
 
-pub(crate) fn checked_component_input<'a>(
-    file: &'a File,
-) -> Result<mimi::core::CheckedProgram<'a>, String> {
+pub(crate) fn checked_component_input(file: &File) -> Result<mimi::core::CheckedProgram, String> {
     let checked = mimi::core::check_program(file).map_err(|diagnostics| {
         let messages = diagnostics
             .iter()
@@ -32,7 +30,7 @@ pub(crate) fn checked_component_input<'a>(
 }
 
 pub(crate) fn resolved_extern_funcs(
-    checked: &mimi::core::CheckedProgram<'_>,
+    checked: &mimi::core::CheckedProgram,
 ) -> Result<Vec<ast::ExternFunc>, String> {
     let mut symbols = std::collections::HashSet::new();
     let mut blocks = checked.extern_blocks().values().collect::<Vec<_>>();
@@ -77,7 +75,7 @@ pub(crate) fn resolved_extern_funcs(
 }
 
 pub(crate) fn resolved_exported_funcs(
-    checked: &mimi::core::CheckedProgram<'_>,
+    checked: &mimi::core::CheckedProgram,
     extern_funcs: &[ast::ExternFunc],
 ) -> Result<Vec<ast::FuncDef>, String> {
     let mut symbols = extern_funcs
@@ -131,7 +129,7 @@ pub(crate) fn resolved_exported_funcs(
 }
 
 pub(crate) fn resolved_type_defs(
-    checked: &mimi::core::CheckedProgram<'_>,
+    checked: &mimi::core::CheckedProgram,
 ) -> Result<HashMap<String, ast::TypeDef>, String> {
     let mut definitions = checked.type_defs().values().collect::<Vec<_>>();
     definitions.sort_by(|left, right| left.qualified_name.cmp(&right.qualified_name));

@@ -56,12 +56,12 @@ pub fn check_strict(file: &File) -> Result<(), Vec<Diagnostic>> {
     check_program_strict(file).map(|_| ())
 }
 
-pub fn check_program(file: &File) -> Result<CheckedProgram<'_>, Vec<Diagnostic>> {
+pub fn check_program(file: &File) -> Result<CheckedProgram, Vec<Diagnostic>> {
     let acc = checker::flow::flow_check_with_artifacts(file)?;
     CheckedProgram::from_flow_acc(file, acc)
 }
 
-pub fn check_program_strict(file: &File) -> Result<CheckedProgram<'_>, Vec<Diagnostic>> {
+pub fn check_program_strict(file: &File) -> Result<CheckedProgram, Vec<Diagnostic>> {
     let acc = checker::flow::flow_check_strict_with_artifacts(file)?;
     CheckedProgram::from_flow_acc(file, acc)
 }

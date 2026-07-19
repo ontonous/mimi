@@ -45,7 +45,7 @@ fn owned_diagnostic_origin(origin: &crate::core::Origin) -> DiagnosticOrigin {
 /// HashMap iteration order is never used as a tie-breaker: conflicting exact
 /// candidates deliberately produce no origin.
 fn verification_diagnostic_origin(
-    program: &crate::core::CheckedProgram<'_>,
+    program: &crate::core::CheckedProgram,
     function_name: &str,
     function_span: crate::span::Span,
     diagnostic_span: crate::span::Span,

@@ -544,7 +544,7 @@ impl Verifier {
 
     pub fn verify_checked(
         &mut self,
-        program: &crate::core::CheckedProgram<'_>,
+        program: &crate::core::CheckedProgram,
     ) -> Vec<VerificationResult> {
         self.ctx.checked_function_names = program
             .functions()
