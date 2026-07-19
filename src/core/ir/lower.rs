@@ -22,7 +22,8 @@ use crate::core::resolved::{
 };
 use crate::core::{
     CheckedProgram, NodeId, NodeMeta, Origin, ResolvedActor, ResolvedCallKind, ResolvedCallSite,
-    ResolvedConstant, ResolvedExternBlock, ResolvedFunction, ResolvedTypeDef,
+    ResolvedConstant, ResolvedExternBlock, ResolvedFunction, ResolvedImpl, ResolvedTrait,
+    ResolvedTypeDef,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
@@ -38,6 +39,8 @@ pub struct FunctionBodyInput<'a> {
     pub functions: &'a HashMap<NodeId, ResolvedFunction>,
     pub type_defs: &'a HashMap<NodeId, ResolvedTypeDef>,
     pub actors: &'a HashMap<NodeId, ResolvedActor>,
+    pub traits: &'a HashMap<NodeId, ResolvedTrait>,
+    pub impls: &'a HashMap<NodeId, ResolvedImpl>,
     pub field_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     pub call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
     pub extern_blocks: &'a HashMap<NodeId, ResolvedExternBlock>,
@@ -73,6 +76,8 @@ pub fn lower_function_body(
         functions: input.functions,
         type_defs: input.type_defs,
         actors: input.actors,
+        traits: input.traits,
+        impls: input.impls,
         field_types: input.field_types,
         call_sites: input.call_sites,
         extern_blocks: input.extern_blocks,
@@ -128,6 +133,8 @@ pub fn lower_checked_function_bodies(
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            traits: program.traits(),
+            impls: program.impls(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -212,6 +219,8 @@ struct BodyLowerer<'a> {
     functions: &'a HashMap<NodeId, ResolvedFunction>,
     type_defs: &'a HashMap<NodeId, ResolvedTypeDef>,
     actors: &'a HashMap<NodeId, ResolvedActor>,
+    traits: &'a HashMap<NodeId, ResolvedTrait>,
+    impls: &'a HashMap<NodeId, ResolvedImpl>,
     field_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
     extern_blocks: &'a HashMap<NodeId, ResolvedExternBlock>,
@@ -1011,7 +1020,7 @@ impl BodyLowerer<'_> {
             });
         }
         if site.kind == ResolvedCallKind::Method {
-            return self.lower_actor_method_call(node_id, callee, arguments, role, site);
+            return self.lower_method_call(node_id, callee, arguments, role);
         }
         if site.kind != ResolvedCallKind::Function {
             return self.unsupported(node_id, &format!("closed {:?} call target", site.kind));
@@ -1120,60 +1129,130 @@ impl BodyLowerer<'_> {
         })
     }
 
-    fn lower_actor_method_call(
+    fn lower_method_call(
         &mut self,
         node_id: &NodeId,
         callee: &Expr,
         arguments: &[Expr],
         role: &str,
-        site: &ResolvedCallSite,
     ) -> Result<ResolvedCall, Vec<ResolvedBodyError>> {
         let Expr::Field(receiver, method_name) = callee.unlocated() else {
             return self.unsupported(node_id, "method call without a receiver projection");
         };
         let receiver = self.lower_expr(receiver, &format!("{role}.callee.inner"))?;
         let actor_id = match self.types.get(&receiver.ty) {
-            Some(ResolvedType::Nominal { item, .. }) => NodeId(item.as_str().to_string()),
-            _ => return self.unsupported(node_id, "method call on a non-nominal receiver"),
+            Some(ResolvedType::Nominal { item, .. }) => {
+                let item = NodeId(item.as_str().to_string());
+                self.actors.contains_key(&item).then_some(item)
+            }
+            _ => None,
         };
-        let actor = self.actors.get(&actor_id).ok_or_else(|| {
+        let (function_id, resolved_callee) = if let Some(actor_id) = actor_id {
+            let actor = &self.actors[&actor_id];
+            let function_id = NodeId(format!(
+                "function:{}::{}",
+                actor.qualified_name, method_name
+            ));
+            if !self.functions.contains_key(&function_id) {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "actor method '{}::{}' has no callable identity",
+                        actor.qualified_name, method_name
+                    ),
+                )]);
+            }
+            let method =
+                super::MethodId::new(function_id.0.clone()).map_err(|error| vec![error])?;
+            (
+                function_id,
+                ResolvedCallee::ActorMethod {
+                    actor: actor_id,
+                    method,
+                },
+            )
+        } else {
+            let mut candidates = Vec::new();
+            for impl_def in self.impls.values() {
+                if !impl_def.methods.iter().any(|name| name == method_name) {
+                    continue;
+                }
+                let prefix = format!("function:{}::{}:", impl_def.qualified_name, method_name);
+                for function in self
+                    .functions
+                    .values()
+                    .filter(|function| function.node_id.0.starts_with(&prefix))
+                {
+                    let Some(signature) = self.signatures.get(&function.node_id) else {
+                        continue;
+                    };
+                    if signature
+                        .parameters
+                        .first()
+                        .is_some_and(|parameter| parameter.ty == receiver.ty)
+                    {
+                        candidates.push((impl_def, function));
+                    }
+                }
+            }
+            candidates.sort_by(|(_, left), (_, right)| left.node_id.cmp(&right.node_id));
+            let [(impl_def, function)] = candidates.as_slice() else {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "method '{method_name}' does not resolve to exactly one impl callable for receiver type '{}'",
+                        receiver.ty.as_str()
+                    ),
+                )]);
+            };
+            let mut protocols = self
+                .traits
+                .values()
+                .filter(|trait_def| {
+                    trait_def.qualified_name == impl_def.trait_name
+                        || trait_def
+                            .qualified_name
+                            .rsplit_once("::")
+                            .is_some_and(|(_, short)| short == impl_def.trait_name)
+                })
+                .collect::<Vec<_>>();
+            protocols.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+            let [protocol] = protocols.as_slice() else {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "impl '{}' does not resolve to exactly one protocol identity",
+                        impl_def.qualified_name
+                    ),
+                )]);
+            };
+            let function_id = function.node_id.clone();
+            let method =
+                super::MethodId::new(function_id.0.clone()).map_err(|error| vec![error])?;
+            (
+                function_id,
+                ResolvedCallee::ProtocolMethod {
+                    protocol: protocol.node_id.clone(),
+                    method,
+                },
+            )
+        };
+        let signature = self.signatures.get(&function_id).ok_or_else(|| {
             vec![ResolvedBodyError::new(
                 node_id.clone(),
-                format!("method receiver '{}' is not a canonical actor", actor_id.0),
-            )]
-        })?;
-        let function_id = NodeId(format!(
-            "function:{}::{}",
-            actor.qualified_name, method_name
-        ));
-        let function = self.functions.get(&function_id).ok_or_else(|| {
-            vec![ResolvedBodyError::new(
-                node_id.clone(),
-                format!(
-                    "actor method '{}::{}' has no callable identity",
-                    actor.qualified_name, method_name
-                ),
-            )]
-        })?;
-        let signature = self.signatures.get(&function.node_id).ok_or_else(|| {
-            vec![ResolvedBodyError::new(
-                node_id.clone(),
-                format!(
-                    "actor method '{}' has no canonical signature",
-                    function_id.0
-                ),
+                format!("method '{}' has no canonical signature", function_id.0),
             )]
         })?;
         let Some(receiver_parameter) = signature.parameters.first() else {
             return Err(vec![ResolvedBodyError::new(
                 node_id.clone(),
-                "actor method signature has no receiver parameter",
+                "method signature has no receiver parameter",
             )]);
         };
         if receiver_parameter.name != "self" {
             return Err(vec![ResolvedBodyError::new(
                 node_id.clone(),
-                "actor method receiver parameter is not canonical self",
+                "method receiver parameter is not canonical self",
             )]);
         }
         let explicit_parameters = &signature.parameters[1..];
@@ -1246,22 +1325,12 @@ impl BodyLowerer<'_> {
                 conversion,
             });
         }
-        let effects = site
-            .effects
-            .iter()
-            .map(|effect| {
-                EffectId::new(effect.clone()).map_err(|error| {
-                    vec![ResolvedBodyError::new(node_id.clone(), error.to_string())]
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let permission = receiver_parameter.permission;
+        let effects = signature.effects.clone();
         Ok(ResolvedCall {
-            callee: ResolvedCallee::ActorMethod {
-                actor: actor_id,
-                method: super::MethodId::new(function_id.0).map_err(|error| vec![error])?,
-            },
+            callee: resolved_callee,
             arguments: lowered,
-            permission: None,
+            permission,
             effects,
             session: Vec::new(),
         })
@@ -1922,6 +1991,8 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            traits: program.traits(),
+            impls: program.impls(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -1959,6 +2030,8 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            traits: program.traits(),
+            impls: program.impls(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -1988,6 +2061,8 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            traits: program.traits(),
+            impls: program.impls(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -2031,6 +2106,8 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            traits: program.traits(),
+            impls: program.impls(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -2070,6 +2147,8 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            traits: program.traits(),
+            impls: program.impls(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -2125,6 +2204,8 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            traits: program.traits(),
+            impls: program.impls(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -2159,6 +2240,8 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            traits: program.traits(),
+            impls: program.impls(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -2199,6 +2282,8 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            traits: program.traits(),
+            impls: program.impls(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -2233,6 +2318,8 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            traits: program.traits(),
+            impls: program.impls(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -2271,6 +2358,8 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            traits: program.traits(),
+            impls: program.impls(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
@@ -2485,5 +2574,33 @@ mod tests {
         bodies[&NodeId("function:Counter::next".into())]
             .validate(program.resolved_types())
             .expect("valid actor method call");
+    }
+
+    #[test]
+    fn impl_method_call_closes_protocol_and_impl_callable_identities() {
+        let file = parse(
+            "trait Desc { func describe() -> string }\ntype Dog { name: string }\nimpl Desc for Dog { func describe() -> string { self.name } }\nfunc main() -> string { let dog = Dog { name: \"Rex\" }; dog.describe() }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower impl call");
+        let main = &bodies[&NodeId("function:main".into())];
+        let result = main.root.result.as_ref().expect("method result");
+        let ResolvedExprKind::Call(call) = &result.kind else {
+            panic!("resolved protocol method call expected");
+        };
+        assert!(matches!(
+            &call.callee,
+            ResolvedCallee::ProtocolMethod { protocol, method }
+                if protocol == &NodeId("trait:Desc".into())
+                    && method.as_str().starts_with("function:Desc:for:Dog::describe:")
+        ));
+        assert_eq!(call.arguments.len(), 1);
+        assert!(call.arguments[0].parameter.0 .0.contains("parameter.self"));
+        assert!(matches!(
+            call.arguments[0].value.kind,
+            ResolvedExprKind::Load(_)
+        ));
+        main.validate(program.resolved_types())
+            .expect("valid protocol method call");
     }
 }

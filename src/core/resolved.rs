@@ -781,6 +781,7 @@ impl CheckedProgram {
             &functions,
             &extern_blocks,
             &actors,
+            &impls,
             &transitions,
             &mut call_sites,
             &mut errors,
@@ -4924,6 +4925,7 @@ fn collect_program_call_sites(
     functions: &HashMap<NodeId, ResolvedFunction>,
     extern_blocks: &HashMap<NodeId, ResolvedExternBlock>,
     actors: &HashMap<NodeId, ResolvedActor>,
+    impls: &HashMap<NodeId, ResolvedImpl>,
     _transitions: &HashMap<TransitionId, ResolvedTransition>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
     errors: &mut Vec<Diagnostic>,
@@ -4965,6 +4967,26 @@ fn collect_program_call_sites(
             );
             method_info.insert(
                 format!("{}.{}", actor.qualified_name, method.name),
+                (
+                    method.params.len(),
+                    method.effects.clone(),
+                    method.ret.clone(),
+                ),
+            );
+        }
+    }
+    for impl_def in impls.values() {
+        for method in &impl_def.method_signatures {
+            method_info.insert(
+                method.name.clone(),
+                (
+                    method.params.len(),
+                    method.effects.clone(),
+                    method.ret.clone(),
+                ),
+            );
+            method_info.insert(
+                format!("{}.{}", impl_def.type_name, method.name),
                 (
                     method.params.len(),
                     method.effects.clone(),
