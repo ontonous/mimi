@@ -12,14 +12,17 @@ use super::{
     ResolvedRecordField, ResolvedSignature, ResolvedStmt, ResolvedStmtKind, ResolvedType,
     ResolvedTypeId, ResolvedTypeTable, ResolvedUnaryOp,
 };
-use crate::ast::{AstOrigin, BinOp, Expr, FuncDef, Lit, Pattern, PatternKind, Stmt, UnOp};
+use crate::ast::{
+    AstOrigin, BinOp, Expr, File, FuncDef, Item, Lit, Pattern, PatternKind, Stmt, UnOp,
+};
 use crate::core::resolved::{
     expr_kind, expr_sibling_role, map_entry_role, match_arm_role, pattern_kind,
     pattern_sibling_role, stable_id_fragment, stmt_anchor, stmt_kind, stmt_sibling_role,
     NodeIdBuilder,
 };
 use crate::core::{
-    NodeId, NodeMeta, Origin, ResolvedCallKind, ResolvedCallSite, ResolvedFunction, ResolvedTypeDef,
+    CheckedProgram, NodeId, NodeMeta, Origin, ResolvedCallKind, ResolvedCallSite, ResolvedFunction,
+    ResolvedTypeDef,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
@@ -92,6 +95,78 @@ pub fn lower_function_body(
     };
     body.validate(input.types)?;
     Ok(body)
+}
+
+/// Lower every function currently represented by the canonical signature
+/// catalog. The operation is transactional: no partial body map is returned.
+pub fn lower_checked_function_bodies(
+    file: &File,
+    program: &CheckedProgram,
+) -> Result<BTreeMap<NodeId, ResolvedBody>, Vec<ResolvedBodyError>> {
+    let mut syntax = BTreeMap::new();
+    collect_function_syntax(&file.items, "", &mut syntax);
+    let mut bodies = BTreeMap::new();
+    let mut errors = Vec::new();
+    for (owner, signature) in program.resolved_signatures() {
+        let Some(function) = syntax.get(owner) else {
+            errors.push(ResolvedBodyError::new(
+                owner.clone(),
+                "canonical signature has no normalized function body",
+            ));
+            continue;
+        };
+        match lower_function_body(FunctionBodyInput {
+            function,
+            signature,
+            signatures: program.resolved_signatures(),
+            functions: program.functions(),
+            type_defs: program.type_defs(),
+            field_types: program.resolved_field_types(),
+            call_sites: program.call_sites(),
+            node_types: program.resolved_node_types(),
+            types: program.resolved_types(),
+            node_meta: program.node_meta(),
+            sources: &file.sources,
+        }) {
+            Ok(body) => {
+                bodies.insert(owner.clone(), body);
+            }
+            Err(mut body_errors) => errors.append(&mut body_errors),
+        }
+    }
+    if errors.is_empty() {
+        Ok(bodies)
+    } else {
+        Err(errors)
+    }
+}
+
+fn collect_function_syntax<'a>(
+    items: &'a [Item],
+    module: &str,
+    out: &mut BTreeMap<NodeId, &'a FuncDef>,
+) {
+    for item in items {
+        match item {
+            Item::Module(module_def) => {
+                let qualified = if module.is_empty() {
+                    module_def.name.clone()
+                } else {
+                    format!("{module}::{}", module_def.name)
+                };
+                collect_function_syntax(&module_def.items, &qualified, out);
+            }
+            Item::Func(function) => {
+                let qualified = if module.is_empty() {
+                    function.name.clone()
+                } else {
+                    format!("{module}::{}", function.name)
+                };
+                out.insert(NodeId(format!("function:{qualified}")), function);
+            }
+            _ => {}
+        }
+    }
 }
 
 struct BodyLowerer<'a> {
@@ -1675,5 +1750,25 @@ mod tests {
             panic!("cast expected");
         };
         assert_eq!(conversion.kind, CheckedConversionKind::NumericWiden);
+    }
+
+    #[test]
+    fn program_body_lowering_is_complete_and_transactional() {
+        let file = parse(
+            "func increment(value: i32) -> i32 { value + 1 }\nfunc main() -> i32 { increment(4) }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("all bodies lower");
+        assert_eq!(bodies.len(), program.resolved_signatures().len());
+        assert!(bodies.contains_key(&NodeId("function:increment".into())));
+        assert!(bodies.contains_key(&NodeId("function:main".into())));
+
+        let unsupported = parse("func main() { println(1) }");
+        let checked = crate::core::check_program(&unsupported).expect("checker accepts builtin");
+        let errors = lower_checked_function_bodies(&unsupported, &checked)
+            .expect_err("unsupported builtin prevents the whole map");
+        assert!(errors
+            .iter()
+            .any(|error| error.message.contains("closed Unknown call target")));
     }
 }
