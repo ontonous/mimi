@@ -5,18 +5,18 @@
 //! checker-finalized types.  It must never infer a type or resolve a name.
 
 use super::{
-    CheckedConversion, CheckedConversionKind, ResolvedBinaryOp, ResolvedBlock, ResolvedBody,
-    ResolvedBodyError, ResolvedExpr, ResolvedExprKind, ResolvedLiteral, ResolvedLocal,
-    ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedProjection,
-    ResolvedSignature, ResolvedStmt, ResolvedStmtKind, ResolvedType, ResolvedTypeId,
-    ResolvedTypeTable, ResolvedUnaryOp,
+    CheckedConversion, CheckedConversionKind, EffectId, ResolvedArgument, ResolvedBinaryOp,
+    ResolvedBlock, ResolvedBody, ResolvedBodyError, ResolvedCall, ResolvedCallee, ResolvedExpr,
+    ResolvedExprKind, ResolvedLiteral, ResolvedLocal, ResolvedLocalId, ResolvedPattern,
+    ResolvedPatternKind, ResolvedPlace, ResolvedProjection, ResolvedSignature, ResolvedStmt,
+    ResolvedStmtKind, ResolvedType, ResolvedTypeId, ResolvedTypeTable, ResolvedUnaryOp,
 };
 use crate::ast::{AstOrigin, BinOp, Expr, FuncDef, Lit, Pattern, PatternKind, Stmt, UnOp};
 use crate::core::resolved::{
     expr_kind, expr_sibling_role, pattern_kind, stmt_anchor, stmt_kind, stmt_sibling_role,
     NodeIdBuilder,
 };
-use crate::core::{NodeId, NodeMeta, Origin};
+use crate::core::{NodeId, NodeMeta, Origin, ResolvedCallKind, ResolvedCallSite, ResolvedFunction};
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
 use std::collections::{BTreeMap, HashMap};
@@ -27,6 +27,9 @@ const BLOCK_NORMALIZATION_RULE: &str = "resolved_body.structured_block";
 pub struct FunctionBodyInput<'a> {
     pub function: &'a FuncDef,
     pub signature: &'a ResolvedSignature,
+    pub signatures: &'a BTreeMap<NodeId, ResolvedSignature>,
+    pub functions: &'a HashMap<NodeId, ResolvedFunction>,
+    pub call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
     pub node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     pub types: &'a ResolvedTypeTable,
     pub node_meta: &'a HashMap<NodeId, NodeMeta>,
@@ -54,6 +57,9 @@ pub fn lower_function_body(
         owner: input.signature.owner.clone(),
         fallback: input.function.meta.span,
         signature: input.signature,
+        signatures: input.signatures,
+        functions: input.functions,
+        call_sites: input.call_sites,
         node_types: input.node_types,
         node_meta: input.node_meta,
         ids: NodeIdBuilder::new(input.sources),
@@ -83,6 +89,9 @@ struct BodyLowerer<'a> {
     owner: NodeId,
     fallback: Span,
     signature: &'a ResolvedSignature,
+    signatures: &'a BTreeMap<NodeId, ResolvedSignature>,
+    functions: &'a HashMap<NodeId, ResolvedFunction>,
+    call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
     node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     node_meta: &'a HashMap<NodeId, NodeMeta>,
     ids: NodeIdBuilder<'a>,
@@ -416,8 +425,10 @@ impl BodyLowerer<'_> {
             Expr::Await(value) => {
                 ResolvedExprKind::Await(Box::new(self.lower_expr(value, &format!("{role}.inner"))?))
             }
-            Expr::Call(_, _)
-            | Expr::Field(_, _)
+            Expr::Call(_, arguments) => {
+                ResolvedExprKind::Call(self.lower_call(&node_id, arguments, role)?)
+            }
+            Expr::Field(_, _)
             | Expr::Comprehension { .. }
             | Expr::Match(_, _)
             | Expr::Record { .. }
@@ -437,13 +448,136 @@ impl BodyLowerer<'_> {
             | Expr::Cast(_, _) => return self.unsupported(&node_id, expr_kind(expr)),
             Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
         };
+        let effects = match &kind {
+            ResolvedExprKind::Call(call) => call.effects.clone(),
+            _ => Vec::new(),
+        };
         Ok(ResolvedExpr {
             node_id,
             origin,
             ty,
-            effects: Vec::new(),
+            effects,
             backend_requirements: Vec::new(),
             kind,
+        })
+    }
+
+    fn lower_call(
+        &mut self,
+        node_id: &NodeId,
+        arguments: &[Expr],
+        role: &str,
+    ) -> Result<ResolvedCall, Vec<ResolvedBodyError>> {
+        let site = self.call_sites.get(node_id).ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "call has no checker-resolved call-site record",
+            )]
+        })?;
+        if site.kind != ResolvedCallKind::Function {
+            return self.unsupported(node_id, &format!("closed {:?} call target", site.kind));
+        }
+        let mut candidates = self
+            .functions
+            .values()
+            .filter(|function| function.qualified_name == site.callee)
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        let [function] = candidates.as_slice() else {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "function call '{}' does not resolve to exactly one callable identity",
+                    site.callee
+                ),
+            )]);
+        };
+        let signature = self.signatures.get(&function.node_id).ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!("callee '{}' has no canonical signature", function.node_id.0),
+            )]
+        })?;
+        if arguments.len() != signature.parameters.len() {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "call argument count {} does not match canonical parameter count {}",
+                    arguments.len(),
+                    signature.parameters.len()
+                ),
+            )]);
+        }
+
+        let mut slots = vec![None; signature.parameters.len()];
+        let mut next_positional = 0;
+        for index in 0..arguments.len() {
+            let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
+            let (slot, value, value_role) = match arguments[index].unlocated() {
+                Expr::NamedArg(name, value) => {
+                    let slot = signature
+                        .parameters
+                        .iter()
+                        .position(|parameter| parameter.name == *name)
+                        .ok_or_else(|| {
+                            vec![ResolvedBodyError::new(
+                                node_id.clone(),
+                                format!("named argument '{name}' has no canonical parameter"),
+                            )]
+                        })?;
+                    (slot, value.as_ref(), format!("{argument_role}.inner"))
+                }
+                _ => {
+                    while next_positional < slots.len() && slots[next_positional].is_some() {
+                        next_positional += 1;
+                    }
+                    let slot = next_positional;
+                    next_positional += 1;
+                    (slot, &arguments[index], argument_role)
+                }
+            };
+            if slots[slot].replace((value, value_role)).is_some() {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "parameter '{}' is supplied more than once",
+                        signature.parameters[slot].name
+                    ),
+                )]);
+            }
+        }
+
+        let mut lowered = Vec::with_capacity(slots.len());
+        for (parameter, slot) in signature.parameters.iter().zip(slots) {
+            let (value, value_role) = slot.ok_or_else(|| {
+                vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("parameter '{}' has no checked argument", parameter.name),
+                )]
+            })?;
+            let value = self.lower_expr(value, &value_role)?;
+            let conversion = self.identity_conversion(node_id, &value.ty, &parameter.ty)?;
+            lowered.push(ResolvedArgument {
+                parameter: parameter.id.clone(),
+                value,
+                conversion,
+            });
+        }
+        let effects = site
+            .effects
+            .iter()
+            .map(|effect| {
+                EffectId::new(effect.clone()).map_err(|error| {
+                    vec![ResolvedBodyError::new(node_id.clone(), error.to_string())]
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ResolvedCall {
+            callee: ResolvedCallee::Function(function.node_id.clone()),
+            arguments: lowered,
+            permission: None,
+            effects,
+            session: Vec::new(),
         })
     }
 
@@ -830,6 +964,9 @@ mod tests {
         let body = lower_function_body(FunctionBodyInput {
             function: function(&file, "add"),
             signature,
+            signatures: program.resolved_signatures(),
+            functions: program.functions(),
+            call_sites: program.call_sites(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -859,6 +996,9 @@ mod tests {
         let errors = lower_function_body(FunctionBodyInput {
             function: function(&file, "identity"),
             signature,
+            signatures: program.resolved_signatures(),
+            functions: program.functions(),
+            call_sites: program.call_sites(),
             node_types: &empty,
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -880,6 +1020,9 @@ mod tests {
             signature: program
                 .resolved_signature(&resolved.node_id)
                 .expect("signature"),
+            signatures: program.resolved_signatures(),
+            functions: program.functions(),
+            call_sites: program.call_sites(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -915,6 +1058,9 @@ mod tests {
             signature: program
                 .resolved_signature(&resolved.node_id)
                 .expect("signature"),
+            signatures: program.resolved_signatures(),
+            functions: program.functions(),
+            call_sites: program.call_sites(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -932,5 +1078,59 @@ mod tests {
         assert_ne!(conversion.to, body.locals[&target.base].ty);
         body.validate(program.resolved_types())
             .expect("indexed assignment validates");
+    }
+
+    #[test]
+    fn function_call_is_closed_and_named_arguments_use_parameter_order() {
+        let file = parse(
+            "func subtract(left: i32, right: i32) -> i32 { left - right }\nfunc main() -> i32 { subtract(right = 2, left = 7) }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let resolved = program.function("main").expect("resolved main");
+        let body = lower_function_body(FunctionBodyInput {
+            function: function(&file, "main"),
+            signature: program
+                .resolved_signature(&resolved.node_id)
+                .expect("signature"),
+            signatures: program.resolved_signatures(),
+            functions: program.functions(),
+            call_sites: program.call_sites(),
+            node_types: program.resolved_node_types(),
+            types: program.resolved_types(),
+            node_meta: program.node_meta(),
+            sources: &file.sources,
+        })
+        .expect("lower body");
+
+        let result = body.root.result.as_ref().expect("tail result");
+        let ResolvedExprKind::Call(call) = &result.kind else {
+            panic!("tail must be a resolved call");
+        };
+        assert_eq!(
+            call.arguments
+                .iter()
+                .map(|argument| argument.parameter.clone())
+                .collect::<Vec<_>>(),
+            program
+                .resolved_signature(&NodeId("function:subtract".into()))
+                .expect("callee signature")
+                .parameters
+                .iter()
+                .map(|parameter| parameter.id.clone())
+                .collect::<Vec<_>>()
+        );
+        let values = call
+            .arguments
+            .iter()
+            .map(|argument| match argument.value.kind {
+                ResolvedExprKind::Literal(ResolvedLiteral::Int(value)) => value,
+                _ => panic!("argument must be literal"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![7, 2]);
+        assert!(matches!(
+            call.callee,
+            ResolvedCallee::Function(ref node) if node == &NodeId("function:subtract".into())
+        ));
     }
 }
