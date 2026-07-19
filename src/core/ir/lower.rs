@@ -23,7 +23,7 @@ use crate::core::resolved::{
 use crate::core::{
     CheckedProgram, NodeId, NodeMeta, Origin, ResolvedActor, ResolvedCallKind, ResolvedCallSite,
     ResolvedConstant, ResolvedExternBlock, ResolvedFunction, ResolvedImpl, ResolvedTrait,
-    ResolvedTypeDef,
+    ResolvedTypeDef, ResolvedTypeKind,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
@@ -54,6 +54,7 @@ pub struct FunctionBodyInput<'a> {
     pub traits: &'a HashMap<NodeId, ResolvedTrait>,
     pub impls: &'a HashMap<NodeId, ResolvedImpl>,
     pub field_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
+    pub type_targets: &'a BTreeMap<NodeId, ResolvedTypeId>,
     pub call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
     pub extern_blocks: &'a HashMap<NodeId, ResolvedExternBlock>,
     pub constants: &'a HashMap<NodeId, ResolvedConstant>,
@@ -119,6 +120,7 @@ fn lower_function_body_with_captures(
         traits: input.traits,
         impls: input.impls,
         field_types: input.field_types,
+        type_targets: input.type_targets,
         call_sites: input.call_sites,
         extern_blocks: input.extern_blocks,
         constants: input.constants,
@@ -200,6 +202,7 @@ pub fn lower_checked_function_bodies(
                 traits: program.traits(),
                 impls: program.impls(),
                 field_types: program.resolved_field_types(),
+                type_targets: program.resolved_type_targets(),
                 call_sites: program.call_sites(),
                 extern_blocks: program.extern_blocks(),
                 constants: program.constants(),
@@ -291,6 +294,7 @@ pub fn lower_checked_transition_bodies(
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
+            type_targets: program.resolved_type_targets(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
@@ -483,6 +487,7 @@ struct BodyLowerer<'a> {
     traits: &'a HashMap<NodeId, ResolvedTrait>,
     impls: &'a HashMap<NodeId, ResolvedImpl>,
     field_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
+    type_targets: &'a BTreeMap<NodeId, ResolvedTypeId>,
     call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
     extern_blocks: &'a HashMap<NodeId, ResolvedExternBlock>,
     constants: &'a HashMap<NodeId, ResolvedConstant>,
@@ -587,16 +592,14 @@ impl BodyLowerer<'_> {
             let stmt_role = stmt_sibling_role(role, block, index);
             if Some(index) == tail_index {
                 let Stmt::Expr(expression) = block[index].unlocated() else {
-                    unreachable!("tail index only selects expression statements")
-                };
-                let lowered = self.lower_expr(expression, &format!("{stmt_role}.expression"))?;
-                if lowered.ty != block_ty {
                     self.scopes.pop();
                     return Err(vec![ResolvedBodyError::new(
-                        lowered.node_id,
-                        "tail expression type disagrees with checker-finalized block type",
+                        node_id.clone(),
+                        "tail expression selection does not reference an expression statement",
                     )]);
-                }
+                };
+                let lowered = self.lower_expr(expression, &format!("{stmt_role}.expression"))?;
+                let lowered = self.apply_implicit_conversion(&node_id, lowered, &block_ty)?;
                 result = Some(Box::new(lowered));
             } else if let Some(statement) = self.lower_stmt(&block[index], &stmt_role)? {
                 statements.push(statement);
@@ -1083,6 +1086,9 @@ impl BodyLowerer<'_> {
         })?;
         let kind = match expr.unlocated() {
             Expr::Literal(Lit::FString(parts)) => {
+                if let Some((_, target)) = self.instantiated_type_target(&node_id, &ty)? {
+                    ty = target;
+                }
                 let mut lowered = Vec::with_capacity(parts.len());
                 for (index, part) in parts.iter().enumerate() {
                     lowered.push(match part {
@@ -1100,6 +1106,9 @@ impl BodyLowerer<'_> {
                 ResolvedExprKind::FString(lowered)
             }
             Expr::Literal(literal) => {
+                if let Some((_, target)) = self.instantiated_type_target(&node_id, &ty)? {
+                    ty = target;
+                }
                 ResolvedExprKind::Literal(self.lower_literal(&node_id, literal)?)
             }
             Expr::Ident(name) => {
@@ -1745,6 +1754,11 @@ impl BodyLowerer<'_> {
         }
         if site.kind == ResolvedCallKind::Unknown {
             if let Expr::Ident(name) = callee.unlocated() {
+                if let Some(call) =
+                    self.lower_type_constructor_call(node_id, name, arguments, role)?
+                {
+                    return Ok(call);
+                }
                 if let Some(local) = self.lookup_local(name) {
                     return self.lower_local_closure_call(
                         node_id,
@@ -2536,6 +2550,68 @@ impl BodyLowerer<'_> {
             effects: signature.effects.clone(),
             session: Vec::new(),
         })
+    }
+
+    fn lower_type_constructor_call(
+        &mut self,
+        node_id: &NodeId,
+        name: &str,
+        arguments: &[Expr],
+        role: &str,
+    ) -> Result<Option<ResolvedCall>, Vec<ResolvedBodyError>> {
+        let mut definitions = self
+            .type_defs
+            .values()
+            .filter(|definition| {
+                definition.kind == ResolvedTypeKind::Newtype
+                    && (definition.qualified_name == name
+                        || definition
+                            .qualified_name
+                            .rsplit_once("::")
+                            .is_some_and(|(_, short)| short == name))
+            })
+            .collect::<Vec<_>>();
+        definitions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        let [definition] = definitions.as_slice() else {
+            return Ok(None);
+        };
+        let definition_id = definition.node_id.clone();
+        if arguments.len() != 1 || matches!(arguments[0].unlocated(), Expr::NamedArg(_, _)) {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!("newtype constructor '{name}' requires one positional argument"),
+            )]);
+        }
+        let result = self.expression_type(node_id)?;
+        let target = self
+            .instantiated_type_target(node_id, &result)?
+            .filter(|(kind, _)| *kind == ResolvedTypeKind::Newtype)
+            .map(|(_, target)| target)
+            .ok_or_else(|| {
+                vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("newtype constructor '{name}' has no instantiated target"),
+                )]
+            })?;
+        let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, 0);
+        let value = self.lower_expr(&arguments[0], &argument_role)?;
+        let conversion = self.implicit_conversion(node_id, &value.ty, &target)?;
+        Ok(Some(ResolvedCall {
+            callee: ResolvedCallee::Constructor(definition_id.clone()),
+            result,
+            type_arguments: Vec::new(),
+            arguments: vec![ResolvedArgument {
+                parameter: super::ResolvedParameterId(NodeId(format!(
+                    "{}/constructor-parameter",
+                    definition_id.0
+                ))),
+                value,
+                conversion,
+            }],
+            permission: None,
+            effects: Vec::new(),
+            session: Vec::new(),
+        }))
     }
 
     fn lower_actor_spawn_call(
@@ -3915,6 +3991,44 @@ impl BodyLowerer<'_> {
         if from == to {
             return self.identity_conversion(node_id, from, to);
         }
+        if let Some((kind, target)) = self.instantiated_type_target(node_id, to)? {
+            if &target == from {
+                let kind = match kind {
+                    ResolvedTypeKind::Alias => CheckedConversionKind::AliasWrap,
+                    ResolvedTypeKind::Newtype => CheckedConversionKind::NewtypeWrap,
+                    _ => {
+                        return Err(vec![ResolvedBodyError::new(
+                            node_id.clone(),
+                            "non-transparent type unexpectedly has a canonical target",
+                        )])
+                    }
+                };
+                return Ok(CheckedConversion {
+                    kind,
+                    from: from.clone(),
+                    to: to.clone(),
+                });
+            }
+        }
+        if let Some((kind, target)) = self.instantiated_type_target(node_id, from)? {
+            if &target == to {
+                let kind = match kind {
+                    ResolvedTypeKind::Alias => CheckedConversionKind::AliasUnwrap,
+                    ResolvedTypeKind::Newtype => CheckedConversionKind::NewtypeUnwrap,
+                    _ => {
+                        return Err(vec![ResolvedBodyError::new(
+                            node_id.clone(),
+                            "non-transparent type unexpectedly has a canonical target",
+                        )])
+                    }
+                };
+                return Ok(CheckedConversion {
+                    kind,
+                    from: from.clone(),
+                    to: to.clone(),
+                });
+            }
+        }
         let primitives = match (self.types.get(from), self.types.get(to)) {
             (Some(ResolvedType::Primitive(from)), Some(ResolvedType::Primitive(to))) => {
                 (*from, *to)
@@ -3951,6 +4065,38 @@ impl BodyLowerer<'_> {
             from: from.clone(),
             to: to.clone(),
         })
+    }
+
+    fn instantiated_type_target(
+        &self,
+        node_id: &NodeId,
+        nominal: &ResolvedTypeId,
+    ) -> Result<Option<(ResolvedTypeKind, ResolvedTypeId)>, Vec<ResolvedBodyError>> {
+        let item = match self.types.get(nominal) {
+            Some(ResolvedType::Nominal { item, .. }) => item,
+            Some(ResolvedType::Newtype { inner, .. }) => {
+                return Ok(Some((ResolvedTypeKind::Newtype, inner.clone())))
+            }
+            _ => return Ok(None),
+        };
+        let owner = NodeId(item.as_str().to_string());
+        let Some(definition) = self.type_defs.get(&owner) else {
+            return Ok(None);
+        };
+        if !matches!(
+            definition.kind,
+            ResolvedTypeKind::Alias | ResolvedTypeKind::Newtype
+        ) {
+            return Ok(None);
+        }
+        let target = self.type_targets.get(&owner).ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!("type '{}' has no canonical target", owner.0),
+            )]
+        })?;
+        let target = self.instantiate_member_type(node_id, nominal, target)?;
+        Ok(Some((definition.kind, target)))
     }
 
     fn apply_implicit_conversion(
@@ -4249,6 +4395,7 @@ mod tests {
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
+            type_targets: program.resolved_type_targets(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
@@ -4291,6 +4438,7 @@ mod tests {
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
+            type_targets: program.resolved_type_targets(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
@@ -4325,6 +4473,7 @@ mod tests {
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
+            type_targets: program.resolved_type_targets(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
@@ -4373,6 +4522,7 @@ mod tests {
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
+            type_targets: program.resolved_type_targets(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
@@ -4417,6 +4567,7 @@ mod tests {
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
+            type_targets: program.resolved_type_targets(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
@@ -4555,6 +4706,7 @@ mod tests {
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
+            type_targets: program.resolved_type_targets(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
@@ -4594,6 +4746,7 @@ mod tests {
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
+            type_targets: program.resolved_type_targets(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
@@ -4639,6 +4792,7 @@ mod tests {
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
+            type_targets: program.resolved_type_targets(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
@@ -4741,6 +4895,7 @@ mod tests {
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
+            type_targets: program.resolved_type_targets(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
@@ -4848,6 +5003,7 @@ mod tests {
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
+            type_targets: program.resolved_type_targets(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
             constants: program.constants(),
@@ -5461,6 +5617,64 @@ mod tests {
                 callee: ResolvedCallee::Builtin(_),
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn transparent_types_retain_targets_conversions_and_constructor_identity() {
+        let file = parse(
+            "type Count = i32\nnewtype UserId = i32\nfunc count() -> Count { 1 }\nfunc implicit_user_id() -> UserId { 2 }\nfunc user_id(value: i32) -> UserId { UserId(value) }",
+        );
+        let program = crate::core::check_program(&file).expect("check transparent types");
+        for definition in ["type:Count", "type:UserId"] {
+            let target = program
+                .resolved_type_target(&NodeId(definition.into()))
+                .unwrap_or_else(|| panic!("missing canonical target for {definition}"));
+            assert!(matches!(
+                program.resolved_types().get(target),
+                Some(ResolvedType::Primitive(crate::core::ir::PrimitiveType::I32))
+            ));
+        }
+
+        let count = program
+            .resolved_body(&NodeId("function:count".into()))
+            .expect("count body");
+        let count_result = count.root.result.as_deref().expect("count result");
+        assert!(matches!(count_result.kind, ResolvedExprKind::Literal(_)));
+        assert_eq!(
+            &count_result.ty,
+            program
+                .resolved_type_target(&NodeId("type:Count".into()))
+                .expect("Count target")
+        );
+
+        let implicit_user_id = program
+            .resolved_body(&NodeId("function:implicit_user_id".into()))
+            .expect("implicit_user_id body");
+        assert!(matches!(
+            implicit_user_id
+                .root
+                .result
+                .as_deref()
+                .map(|result| &result.kind),
+            Some(ResolvedExprKind::Cast {
+                conversion: CheckedConversion {
+                    kind: CheckedConversionKind::NewtypeWrap,
+                    ..
+                },
+                ..
+            })
+        ));
+
+        let user_id = program
+            .resolved_body(&NodeId("function:user_id".into()))
+            .expect("user_id body");
+        assert!(matches!(
+            user_id.root.result.as_deref().map(|result| &result.kind),
+            Some(ResolvedExprKind::Call(ResolvedCall {
+                callee: ResolvedCallee::Constructor(definition),
+                ..
+            })) if definition == &NodeId("type:UserId".into())
         ));
     }
 

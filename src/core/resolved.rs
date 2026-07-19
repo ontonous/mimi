@@ -620,6 +620,7 @@ pub struct CheckedProgram {
     resolved_type_operands: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     resolved_type_arguments: BTreeMap<NodeId, Vec<crate::core::ResolvedTypeId>>,
     resolved_field_types: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    resolved_type_targets: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     resolved_bodies: BTreeMap<NodeId, crate::core::ResolvedBody>,
     callable_cfgs: BTreeMap<NodeId, crate::core::cfg::CallableCfg>,
     resource_analyses: BTreeMap<NodeId, crate::core::ResourceAnalysis>,
@@ -714,6 +715,7 @@ impl CheckedProgram {
             resolved_node_types,
             resolved_type_operands,
             resolved_field_types,
+            resolved_type_targets,
             resolved_type_arguments,
         ) = build_canonical_function_signatures(&program, &stable_expression_types)?;
         for meta in program.node_meta.values_mut() {
@@ -725,6 +727,7 @@ impl CheckedProgram {
         program.resolved_node_types = resolved_node_types;
         program.resolved_type_operands = resolved_type_operands;
         program.resolved_field_types = resolved_field_types;
+        program.resolved_type_targets = resolved_type_targets;
         program.resolved_type_arguments = resolved_type_arguments;
         program.resolved_bodies =
             match crate::core::ir::lower::lower_checked_callable_bodies(file, &program) {
@@ -935,6 +938,7 @@ impl CheckedProgram {
             resolved_type_operands: BTreeMap::new(),
             resolved_type_arguments: BTreeMap::new(),
             resolved_field_types: BTreeMap::new(),
+            resolved_type_targets: BTreeMap::new(),
             resolved_bodies: BTreeMap::new(),
             callable_cfgs: BTreeMap::new(),
             resource_analyses: BTreeMap::new(),
@@ -1222,6 +1226,17 @@ impl CheckedProgram {
 
     pub fn resolved_field_type(&self, field: &NodeId) -> Option<&crate::core::ResolvedTypeId> {
         self.resolved_field_types.get(field)
+    }
+
+    pub fn resolved_type_targets(&self) -> &BTreeMap<NodeId, crate::core::ResolvedTypeId> {
+        &self.resolved_type_targets
+    }
+
+    pub fn resolved_type_target(
+        &self,
+        definition: &NodeId,
+    ) -> Option<&crate::core::ResolvedTypeId> {
+        self.resolved_type_targets.get(definition)
     }
 
     pub fn resolved_bodies(&self) -> &BTreeMap<NodeId, crate::core::ResolvedBody> {
@@ -6588,6 +6603,7 @@ type CanonicalFunctionArtifacts = (
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     BTreeMap<NodeId, Vec<crate::core::ResolvedTypeId>>,
 );
 
@@ -6777,6 +6793,7 @@ fn build_canonical_function_signatures(
     let mut type_operands = BTreeMap::new();
     let mut type_arguments = BTreeMap::new();
     let mut field_types = BTreeMap::new();
+    let mut type_targets = BTreeMap::new();
     let mut errors = Vec::new();
     let mut functions = program.functions.values().collect::<Vec<_>>();
     functions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
@@ -7533,7 +7550,33 @@ fn build_canonical_function_signatures(
                     }
                 }
             }
-            crate::ast::TypeDefKind::Alias(_) | crate::ast::TypeDefKind::Newtype(_) => {}
+            crate::ast::TypeDefKind::Alias(target) | crate::ast::TypeDefKind::Newtype(target) => {
+                let zonked = match ZonkedTy::from_resolved(target.clone()) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: type target '{}' is not zonked: {error}",
+                                definition.qualified_name
+                            ),
+                            definition.origin.user_span(),
+                        ));
+                        continue;
+                    }
+                };
+                match types.intern_zonked(&zonked, &capabilities, &mut resolve_name) {
+                    Ok(target) => {
+                        type_targets.insert(definition.node_id.clone(), target);
+                    }
+                    Err(error) => errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: type target '{}' is not canonical: {error}",
+                            definition.qualified_name
+                        ),
+                        definition.origin.user_span(),
+                    )),
+                }
+            }
         }
     }
 
@@ -7738,6 +7781,7 @@ fn build_canonical_function_signatures(
             node_types,
             type_operands,
             field_types,
+            type_targets,
             type_arguments,
         ))
     } else {

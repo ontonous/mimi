@@ -112,6 +112,8 @@ pub enum CheckedConversionKind {
     TraitUpcast,
     DynamicPack,
     DynamicDowncastChecked,
+    AliasWrap,
+    AliasUnwrap,
     NewtypeWrap,
     NewtypeUnwrap,
     OwnershipWrap,
@@ -134,6 +136,7 @@ pub enum Permission {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedCallee {
     Function(NodeId),
+    Constructor(NodeId),
     Extern(NodeId),
     Builtin(BuiltinId),
     LocalClosure(ResolvedLocalId),
@@ -1123,9 +1126,9 @@ impl BodyValidator<'_> {
 
     fn validate_callee(&mut self, owner: &NodeId, callee: &ResolvedCallee) {
         let valid = match callee {
-            ResolvedCallee::Function(item) | ResolvedCallee::Extern(item) => {
-                !item.0.trim().is_empty()
-            }
+            ResolvedCallee::Function(item)
+            | ResolvedCallee::Constructor(item)
+            | ResolvedCallee::Extern(item) => !item.0.trim().is_empty(),
             ResolvedCallee::Builtin(item) => !item.as_str().trim().is_empty(),
             ResolvedCallee::LocalClosure(local) => {
                 self.require_local(owner, local);
