@@ -276,6 +276,11 @@ pub enum ResolvedExprKind {
         iterable: Box<ResolvedExpr>,
         guard: Option<Box<ResolvedExpr>>,
     },
+    OptionalChain {
+        receiver: Box<ResolvedExpr>,
+        field: NodeId,
+        field_type: ResolvedTypeId,
+    },
     Record {
         nominal: NominalTypeId,
         fields: Vec<ResolvedRecordField>,
@@ -812,6 +817,20 @@ impl BodyValidator<'_> {
                 if let Some(guard) = guard {
                     self.visit_expr(guard);
                 }
+            }
+            ResolvedExprKind::OptionalChain {
+                receiver,
+                field,
+                field_type,
+            } => {
+                self.visit_expr(receiver);
+                if field.0.trim().is_empty() {
+                    self.error(
+                        &expression.node_id,
+                        "optional-chain field identity is empty",
+                    );
+                }
+                self.require_type(&expression.node_id, field_type);
             }
             ResolvedExprKind::Record { nominal, fields } => {
                 if nominal.as_str().trim().is_empty() {

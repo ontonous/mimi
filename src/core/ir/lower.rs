@@ -812,6 +812,22 @@ impl BodyLowerer<'_> {
                     guard: guard.map(Box::new),
                 }
             }
+            Expr::OptionalChain(receiver, name) => {
+                let receiver = self.lower_expr(receiver, &format!("{role}.inner"))?;
+                let inner = self.optional_success_type(&node_id, &receiver.ty)?;
+                let field = self.resolve_field(&node_id, &inner, name)?;
+                let field_type = self.field_types.get(&field).cloned().ok_or_else(|| {
+                    vec![ResolvedBodyError::new(
+                        field.clone(),
+                        "optional-chain field has no canonical declaration type",
+                    )]
+                })?;
+                ResolvedExprKind::OptionalChain {
+                    receiver: Box::new(receiver),
+                    field,
+                    field_type,
+                }
+            }
             Expr::Block(block) => ResolvedExprKind::Block(Box::new(self.lower_block(
                 block,
                 &format!("{role}.block"),
@@ -900,8 +916,7 @@ impl BodyLowerer<'_> {
                     conversion,
                 }
             }
-            Expr::OptionalChain(_, _)
-            | Expr::Quote(_)
+            Expr::Quote(_)
             | Expr::QuoteInterpolate(_)
             | Expr::Comptime(_)
             | Expr::TypeOf(_)
@@ -2045,6 +2060,28 @@ impl BodyLowerer<'_> {
         }
     }
 
+    fn optional_success_type(
+        &self,
+        node_id: &NodeId,
+        ty: &ResolvedTypeId,
+    ) -> Result<ResolvedTypeId, Vec<ResolvedBodyError>> {
+        match self.types.get(ty) {
+            Some(ResolvedType::Option(inner)) => Ok(inner.clone()),
+            Some(ResolvedType::Result { ok, .. }) => Ok(ok.clone()),
+            Some(ResolvedType::Nominal { item, arguments })
+                if item.as_str() == "builtin:type:Option" && arguments.len() == 1 =>
+            {
+                Ok(arguments[0].clone())
+            }
+            Some(ResolvedType::Nominal { item, arguments })
+                if item.as_str() == "builtin:type:Result" && arguments.len() == 2 =>
+            {
+                Ok(arguments[0].clone())
+            }
+            _ => self.unsupported(node_id, "optional chain on non-Option/Result type"),
+        }
+    }
+
     fn shared_binding_type(
         &self,
         node_id: &NodeId,
@@ -3036,6 +3073,29 @@ mod tests {
         assert_eq!(&guard_place.base, local);
         body.validate(program.resolved_types())
             .expect("valid comprehension");
+    }
+
+    #[test]
+    fn optional_chain_uses_canonical_inner_field_identity() {
+        let file = parse(
+            "type Point { x: i32 }\nfunc project(value: Option<Point>) -> Option<i32> { value?.x }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower optional chain");
+        let body = &bodies[&NodeId("function:project".into())];
+        let ResolvedExprKind::OptionalChain {
+            receiver,
+            field,
+            field_type,
+        } = &body.root.result.as_ref().unwrap().kind
+        else {
+            panic!("optional chain expected");
+        };
+        assert!(matches!(receiver.kind, ResolvedExprKind::Load(_)));
+        assert!(field.0.starts_with("type:Point/node:decl.field@"));
+        assert_eq!(program.resolved_field_type(field), Some(field_type));
+        body.validate(program.resolved_types())
+            .expect("valid optional chain");
     }
 
     #[test]

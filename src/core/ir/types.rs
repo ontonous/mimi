@@ -566,6 +566,18 @@ impl ResolvedTypeTable {
                 };
                 ResolvedType::DynamicAny { capability }
             }
+            Type::Name(name, arguments) if name == "Option" && arguments.len() == 1 => {
+                ResolvedType::Option(self.intern_type(&arguments[0], capabilities, resolve_name)?)
+            }
+            Type::Name(name, arguments) if name == "Result" && arguments.len() == 2 => {
+                ResolvedType::Result {
+                    ok: self.intern_type(&arguments[0], capabilities, resolve_name)?,
+                    error: self.intern_type(&arguments[1], capabilities, resolve_name)?,
+                }
+            }
+            Type::Name(name, arguments) if name == "Tuple" => {
+                ResolvedType::Tuple(self.intern_many(arguments, capabilities, resolve_name)?)
+            }
             Type::Name(name, arguments) => {
                 let Some(identity) = resolve_name(name) else {
                     return Err(ResolvedTypeError::UnknownTypeName(name.clone()));
@@ -786,6 +798,42 @@ mod tests {
             .intern_zonked(&located, &ResolvedTypeCapabilities::default(), resolve)
             .unwrap();
         assert_eq!(left_id, right_id);
+    }
+
+    #[test]
+    fn algebraic_builtin_spellings_share_one_canonical_shape() {
+        let mut table = ResolvedTypeTable::new();
+        let option_syntax = zonked(Type::Option(Box::new(Type::Name("i32".into(), Vec::new()))));
+        let option_name = zonked(Type::Name(
+            "Option".into(),
+            vec![Type::Name("i32".into(), Vec::new())],
+        ));
+        let structural = table
+            .intern_zonked(&option_syntax, &Default::default(), resolve)
+            .unwrap();
+        let named = table
+            .intern_zonked(&option_name, &Default::default(), resolve)
+            .unwrap();
+        assert_eq!(structural, named);
+
+        let result_syntax = zonked(Type::Result(
+            Box::new(Type::Name("i32".into(), Vec::new())),
+            Box::new(Type::Name("string".into(), Vec::new())),
+        ));
+        let result_name = zonked(Type::Name(
+            "Result".into(),
+            vec![
+                Type::Name("i32".into(), Vec::new()),
+                Type::Name("string".into(), Vec::new()),
+            ],
+        ));
+        let structural = table
+            .intern_zonked(&result_syntax, &Default::default(), resolve)
+            .unwrap();
+        let named = table
+            .intern_zonked(&result_name, &Default::default(), resolve)
+            .unwrap();
+        assert_eq!(structural, named);
     }
 
     #[test]
