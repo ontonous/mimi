@@ -414,6 +414,7 @@ pub enum ResolvedStmtKind {
         kind: ContractKind,
         condition: ResolvedExpr,
     },
+    Math(Vec<ResolvedExpr>),
     Scope {
         kind: ResolvedScopeKind,
         body: ResolvedBlock,
@@ -677,6 +678,11 @@ impl BodyValidator<'_> {
             }
             ResolvedStmtKind::Drop(place) => self.visit_place(&statement.node_id, place),
             ResolvedStmtKind::Contract { condition, .. } => self.visit_expr(condition),
+            ResolvedStmtKind::Math(expressions) => {
+                for expression in expressions {
+                    self.visit_expr(expression);
+                }
+            }
             ResolvedStmtKind::Scope { body, .. } => self.visit_block(body),
             ResolvedStmtKind::Delegate { source, target, .. } => {
                 self.visit_place(&statement.node_id, source);
