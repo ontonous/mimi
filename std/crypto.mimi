@@ -48,41 +48,31 @@ pub func hex_encode(s: string) -> string {
     result
 }
 
-func hex_code_utf8(code: i64) -> string {
-    let mut out = ""
-    let mut c: i64 = code
-    if c < 0 { c = 0 as i64 }
-    if c < 128 {
-        out = hex_byte(c)
-    } else {
-        if c < 2048 {
-            out = hex_byte(192 as i64 + c / 64) + hex_byte(128 as i64 + c % 64)
-        } else {
-            if c < 65536 {
-                out = hex_byte(224 as i64 + c / 4096) + hex_byte(128 as i64 + (c / 64) % 64) + hex_byte(128 as i64 + c % 64)
-            } else {
-                if c > 1114111 { c = 1114111 as i64 }
-                out = hex_byte(240 as i64 + c / 262144) + hex_byte(128 as i64 + (c / 4096) % 64) + hex_byte(128 as i64 + (c / 64) % 64) + hex_byte(128 as i64 + c % 64)
-            }
-        }
+// Encodes one Unicode scalar as UTF-8 hex bytes; exported until module-private dependency lowering is available.
+pub func hex_code_utf8(code: i64) -> string {
+    if code < 0 { return hex_byte(0 as i64) }
+    if code < 128 { return hex_byte(code) }
+    if code < 2048 {
+        return hex_byte(192 as i64 + code / 64) + hex_byte(128 as i64 + code % 64)
     }
-    out
+    if code < 65536 {
+        return hex_byte(224 as i64 + code / 4096) + hex_byte(128 as i64 + (code / 64) % 64) + hex_byte(128 as i64 + code % 64)
+    }
+    let c: i64 = if code > 1114111 { 1114111 as i64 } else { code }
+    hex_byte(240 as i64 + c / 262144) + hex_byte(128 as i64 + (c / 4096) % 64) + hex_byte(128 as i64 + (c / 64) % 64) + hex_byte(128 as i64 + c % 64)
 }
 
-func hex_byte(b: i64) -> string {
-    let mut v: i64 = b
-    if v < 0 { v = 0 as i64 }
-    if v > 255 { v = 255 as i64 }
-    hex_digit(v / 16) + hex_digit(v % 16)
+// Encodes one byte as two lowercase hex digits.
+pub func hex_byte(b: i64) -> string {
+    if b < 0 { return "00" }
+    if b > 255 { return "ff" }
+    hex_digit(b / 16) + hex_digit(b % 16)
 }
 
-func hex_digit(n: i64) -> string {
-    let mut d: i64 = n
-    if d < 0 { d = 0 as i64 }
-    if d > 15 { d = 15 as i64 }
+// Converts a clamped nibble to one lowercase hex digit.
+pub func hex_digit(n: i64) -> string {
+    if n < 0 { return "0" }
+    if n > 15 { return "f" }
     let digits = "0123456789abcdef"
-    str_substring(digits, d, d + 1)
+    str_substring(digits, n, n + 1)
 }
-
-
-

@@ -1,8 +1,7 @@
 use crate::ast::*;
 use crate::core::checker::Checker;
 use crate::core::helpers::{
-    fmt_type, is_bool, is_int, is_json_serializable, is_numeric, is_numeric_coercion,
-    subst_type_params, suggest_name,
+    fmt_type, is_bool, is_int, is_json_serializable, is_numeric, is_numeric_coercion, suggest_name,
 };
 use crate::diagnostic::Diagnostic;
 use std::collections::HashMap;
@@ -1922,20 +1921,79 @@ impl<'a> Checker<'a> {
                 ),
             );
         } else {
-            // Check if this is a generic function and build type param map
+            // Generic calls instantiate one fresh variable per declared binder,
+            // then feed every argument through the canonical unifier.
             let generics = self.func_generics.get(name).cloned().unwrap_or_default();
-            let mut type_map: HashMap<String, Type> = HashMap::new();
 
             if !generics.is_empty() {
-                // Infer type parameters from argument types (one pass)
-                let mut arg_tys: Vec<Type> = Vec::with_capacity(args.len());
-                for (arg, param) in args.iter().zip(params.iter()) {
-                    let at = self.infer_expr(arg, scopes);
-                    self.infer_type_params(param, &at, &generics, &mut type_map);
-                    arg_tys.push(at);
+                let (instantiated_params, instantiated_ret, generic_vars) =
+                    self.instantiate_generic_signature(&params, &ret, &generics);
+                let arg_tys: Vec<Type> = args
+                    .iter()
+                    .map(|argument| self.infer_expr(argument, scopes))
+                    .collect();
+
+                for (i, (actual, expected)) in
+                    arg_tys.iter().zip(instantiated_params.iter()).enumerate()
+                {
+                    let coerced = is_numeric_coercion(expected, actual);
+                    if !coerced && self.unification.constrain(expected, actual).is_err() {
+                        let expected = self
+                            .unification
+                            .resolve_infer(expected)
+                            .unwrap_or_else(|_| expected.clone());
+                        self.errors.push(
+                            Diagnostic::error_code(
+                                crate::diagnostic::codes::E0211,
+                                format!(
+                                    "argument {} of '{}' expected {}, found {}",
+                                    i + 1,
+                                    name,
+                                    fmt_type(&expected),
+                                    fmt_type(actual)
+                                ),
+                                self.diagnostic_span(),
+                            )
+                            .with_help(format!(
+                                "all occurrences of a generic parameter must resolve to one type; argument {} has type '{}'",
+                                i + 1,
+                                fmt_type(actual)
+                            )),
+                        );
+                    }
                 }
 
-                // Check where constraints (before substitution). CK-H6: all entries.
+                let mut type_map: HashMap<String, Type> = HashMap::new();
+                for generic in &generics {
+                    let variable = generic_vars
+                        .get(&generic.name)
+                        .expect("generic instantiation creates every declared binder");
+                    match self.unification.zonk(variable) {
+                        Ok(concrete) => {
+                            type_map.insert(generic.name.clone(), concrete);
+                        }
+                        Err(crate::core::unification::ResolveError::UnboundVar(_)) => {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0200,
+                                format!(
+                                    "cannot infer generic parameter '{}' of function '{}'",
+                                    generic.name, name
+                                ),
+                            );
+                        }
+                        Err(error) => {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0200,
+                                format!(
+                                    "failed to finalize generic parameter '{}' of function '{}': {}",
+                                    generic.name, name, error
+                                ),
+                            );
+                        }
+                    }
+                }
+
+                // Check where constraints against the canonical substitutions.
                 if let Some(clauses) = self.where_clauses.get(name).cloned() {
                     for (type_param, bounds) in clauses {
                         if let Some(concrete_type) = type_map.get(&type_param) {
@@ -1978,36 +2036,10 @@ impl<'a> Checker<'a> {
                     }
                 }
 
-                // Check arguments with substituted types (reuse cached types)
-                for (i, (at, param)) in arg_tys.iter().zip(params.iter()).enumerate() {
-                    let subst_param = subst_type_params(param, &generics, &type_map);
-                    // IF-C1: strict unify at call sites rejects Any/_/Infer escapes.
-                    let coerced = is_numeric_coercion(&subst_param, at);
-                    if !coerced && self.unification.unify(&subst_param, at).is_err() {
-                        self.errors.push(
-                            Diagnostic::error_code(
-                                crate::diagnostic::codes::E0211,
-                                format!(
-                                    "argument {} of '{}' expected {}, found {}",
-                                    i + 1,
-                                    name,
-                                    fmt_type(&subst_param),
-                                    fmt_type(at)
-                                ),
-                                self.diagnostic_span(),
-                            )
-                            .with_help(format!(
-                                "argument {} has type '{}', but '{}' expects type '{}'",
-                                i + 1,
-                                fmt_type(at),
-                                name,
-                                fmt_type(&subst_param)
-                            )),
-                        );
-                    }
-                }
-
-                ret = subst_type_params(&ret, &generics, &type_map);
+                ret = self
+                    .unification
+                    .resolve_infer(&instantiated_ret)
+                    .unwrap_or_else(|_| Type::Name("unknown".into(), vec![]));
             } else {
                 for (i, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
                     let at = self.infer_expr(arg, scopes);

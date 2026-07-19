@@ -31,6 +31,23 @@
 
 > `Span::UNKNOWN` 仅保留给无源码的 global/synthetic 或手工 legacy AST；生产 LSP 不会为这些节点伪造 URI 或 `(1,1)` 位置。
 
+### v0.31.2-dev — HM 核心统一
+
+- unification 使用支持嵌套 checkpoint 的 undo trail；失败约束与兼容性 probe 完整回滚，fresh variable、parent 与 root binding 不跨事务泄漏。
+- 新增 fallible `resolve_infer`/`zonk`，深度溢出、绑定环、未约束变量和 residual scheme fail-closed；strict `constrain` 与无副作用 `probe_compatible` 分离。旧 `resolve` 暂留给尚未迁移的 inference caller，mandatory finalize 不使用该兼容入口。
+- `SurfaceTy` / `InferTy` / `TypeScheme` / `ZonkedTy` / `BackendTy` 使用私有表示和校验转换；binder-aware TypeFolder 保持 nested binder hygiene 与 `ExternFunc` 等构造器身份。
+- 泛型调用删除 first-wins `infer_type_params` 生产路径，每个调用 fresh instantiate 后只走 canonical constraints；重复泛型参数冲突和未约束泛型给出确定诊断。
+- checker Flow 输出独立的 `TypeScheme` 与 mandatory-finalized `ZonkedTy` 函数签名；`CheckedProgram` 按 canonical function NodeId 持久化 zonked 签名并用其覆盖声明快照，zonk 失败不再静默丢弃。
+- `BackendTy` 对 `Any` 建立 profile 校验边界：Interpreter 可接收，尚无 tagged dynamic ABI 的 Native/Component/Verifier 拒绝直接转换；完整 pack/downcast artifact 仍待后续 typed body IR。
+- 新增 HM 性质/回滚/binder/泛型冲突测试及 `tests/real_world/hm_core.mimi` 整数泛型双后端 MCDD 回归。
+- 测试效率止血：昂贵的双后端差分 proptest 在普通测试中运行 8-case smoke，`PROPTEST_CASES` 仍可显式恢复高强度 fuzz；链接器可用性改为进程级缓存，消除 codegen/dual-backend 测试近 900 次重复 `cc --version` 子进程。
+- 0.31.2 收口门禁通过：HM/core/generics 聚焦回归、`hm_core.mimi` 双后端与语言文档一致性均通过；剩余 raw-body consumer 明确归入 0.31.4–0.31.5，不再扩张 HM 核心范围。
+- 收口回归修复：generic binder 在函数体局部类型标注中保持作用域，lambda 尾部 `if` 正确贡献返回类型；Flow parser 将临时拆分 `>>` 后的位置映射回原 token 流，不再静默跳过下一声明的 `pub`。
+- stdlib 的 exported function 依赖显式 compatibility export，避免扁平 `use std::xxx` 只导出 `pub` item 时丢失实现；crypto helper 改为 early-return 形式恢复 native string ABI，real-world Cargo 门禁与 Python runner 统一 `flow_test_macros.mimi` 的 interpreter-only 契约。
+- CheckedProgram bare-name arity 仅在与已选 FuncDef 一致时生效，避免顶层 wrapper 与 trait method 同名时误拒绝；codegen intrinsic 对参数先剥离 `Located`，恢复 reduce lambda 与 keys/values 真实程序。
+
+> `TOOL-RESOLUTION-001` 仍为 partial：v0.31.5 前 interpreter/native/verifier 的部分函数体 lowering 继续通过显式 `legacy_body_file` 适配器。
+
 ### v0.31.3-dev — CFG / ownership ledger（首个垂直切片）
 
 - `CheckedProgram` 持久化 per-callable 线性 `cap` 的 Introduce/Move/Drop/Return 动作与 branch merge 状态。

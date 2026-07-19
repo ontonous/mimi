@@ -1,4 +1,6 @@
 use crate::ast::*;
+use crate::core::phase::TypeScheme;
+use crate::core::phase::ZonkedTy;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use std::collections::HashMap;
@@ -21,6 +23,10 @@ pub struct FlowAcc {
     #[allow(dead_code)]
     pub warnings: Vec<Diagnostic>,
     pub ownership_ledgers: HashMap<crate::core::NodeId, crate::core::OwnershipLedger>,
+    /// v0.31.2: Type schemes recorded during generalization (NodeId -> scheme).
+    pub schemes: HashMap<crate::core::NodeId, TypeScheme>,
+    /// v0.31.2: Zonked function signatures for backend consumption.
+    pub zonked_func_types: HashMap<String, (Vec<ZonkedTy>, ZonkedTy)>,
 }
 
 /// Checker state machine — 宽松 Flow.
@@ -110,6 +116,8 @@ impl<'a> CheckerState<'a> {
 
 /// Extract deduplicated errors and warnings from the checker.
 fn extract_acc(checker: &mut Checker) -> FlowAcc {
+    // v0.31.2: Finalize zonked function types before extraction.
+    checker.finalize_zonked_func_types();
     let mut seen: HashSet<super::DiagnosticDedupKey> = HashSet::new();
     let mut deduped: Vec<Diagnostic> = Vec::with_capacity(checker.errors.len());
     for e in std::mem::take(&mut checker.errors) {
@@ -122,6 +130,8 @@ fn extract_acc(checker: &mut Checker) -> FlowAcc {
         errors: deduped,
         warnings: std::mem::take(&mut checker.warnings),
         ownership_ledgers: std::mem::take(&mut checker.ownership_ledgers),
+        schemes: std::mem::take(&mut checker.schemes),
+        zonked_func_types: std::mem::take(&mut checker.zonked_func_types),
     }
 }
 
@@ -143,9 +153,7 @@ pub fn flow_check(file: &File) -> Result<(), Vec<Diagnostic>> {
     flow_check_with_artifacts(file).map(|_| ())
 }
 
-pub(crate) fn flow_check_with_artifacts(
-    file: &File,
-) -> Result<HashMap<crate::core::NodeId, crate::core::OwnershipLedger>, Vec<Diagnostic>> {
+pub(crate) fn flow_check_with_artifacts(file: &File) -> Result<FlowAcc, Vec<Diagnostic>> {
     let state = CheckerState::new(file);
     let state = match run_to_done(state) {
         Ok(s) => s,
@@ -153,7 +161,7 @@ pub(crate) fn flow_check_with_artifacts(
     };
     let acc = state.into_output();
     if acc.errors.is_empty() {
-        Ok(acc.ownership_ledgers)
+        Ok(acc)
     } else {
         Err(acc.errors)
     }
@@ -166,9 +174,7 @@ pub fn flow_check_strict(file: &File) -> Result<(), Vec<Diagnostic>> {
     flow_check_strict_with_artifacts(file).map(|_| ())
 }
 
-pub(crate) fn flow_check_strict_with_artifacts(
-    file: &File,
-) -> Result<HashMap<crate::core::NodeId, crate::core::OwnershipLedger>, Vec<Diagnostic>> {
+pub(crate) fn flow_check_strict_with_artifacts(file: &File) -> Result<FlowAcc, Vec<Diagnostic>> {
     let state = CheckerState::new_strict(file);
     let state = match run_to_done(state) {
         Ok(s) => s,
@@ -176,7 +182,7 @@ pub(crate) fn flow_check_strict_with_artifacts(
     };
     let acc = state.into_output();
     if acc.errors.is_empty() {
-        Ok(acc.ownership_ledgers)
+        Ok(acc)
     } else {
         Err(acc.errors)
     }

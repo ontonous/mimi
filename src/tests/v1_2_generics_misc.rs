@@ -121,6 +121,69 @@ func main() -> i32 {
 }
 
 #[test]
+fn repeated_generic_parameter_conflict_is_rejected() {
+    let src = r#"
+func same<T>(left: T, right: T) -> T {
+    left
+}
+
+func main() -> i32 {
+    same(1, "not an integer")
+    0
+}
+"#;
+    let diagnostics = check_source(src).expect_err("T must have one canonical substitution");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0211)
+            && diagnostic.message.contains("expected i32, found string")
+    }));
+}
+
+#[test]
+fn unconstrained_generic_parameter_is_rejected() {
+    let src = r#"
+func phantom<T>() {}
+
+func main() {
+    phantom()
+}
+"#;
+    let diagnostics = check_source(src).expect_err("an unconstrained call cannot pick a monotype");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0200)
+            && diagnostic
+                .message
+                .contains("cannot infer generic parameter 'T'")
+    }));
+}
+
+#[test]
+fn generic_parameter_is_in_scope_for_local_type_annotations() {
+    let src = r#"
+func singleton<T>(value: T) -> List<T> {
+    let mut result: List<T> = []
+    push(result, value)
+    result
+}
+func main() -> i32 { len(singleton(1)) }
+"#;
+    assert!(check_source(src).is_ok());
+}
+
+#[test]
+fn lambda_last_if_expression_satisfies_declared_return_type() {
+    let src = r#"
+func main() -> i32 {
+    let choose = fn(flag: bool) -> i32 {
+        if flag { 1 } else { 2 }
+    }
+    choose(true)
+}
+"#;
+    assert!(check_source(src).is_ok());
+}
+
+#[test]
 fn generic_turbofish_wrong_type_arg_count() {
     let src = r#"
 func id<T>(x: T) -> T {

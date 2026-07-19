@@ -1,11 +1,12 @@
 use crate::ast::Type;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Error produced when two types cannot be unified.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnifyError {
     Mismatch(String),
     OccurCheck(u32, String),
+    Resolve(ResolveError),
 }
 
 impl std::fmt::Display for UnifyError {
@@ -15,8 +16,22 @@ impl std::fmt::Display for UnifyError {
             UnifyError::OccurCheck(var, ty) => {
                 write!(f, "infinite type: T{} occurs in {}", var, ty)
             }
+            UnifyError::Resolve(error) => error.fmt(f),
         }
     }
+}
+
+impl From<ResolveError> for UnifyError {
+    fn from(error: ResolveError) -> Self {
+        Self::Resolve(error)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Undo {
+    Parent { id: u32, previous: Option<u32> },
+    Binding { id: u32, previous: Option<Type> },
+    NextVar(u32),
 }
 
 /// Union-find based unification table for type inference variables.
@@ -33,6 +48,16 @@ pub struct UnificationTable {
     binding: HashMap<u32, Type>,
     /// Next fresh type variable ID
     next_var: u32,
+    /// Undo trail shared by nested transactions. Entries are retained until the
+    /// outermost transaction commits so an outer failure can undo inner success.
+    trail: Vec<Undo>,
+    transaction_depth: usize,
+}
+
+impl Default for UnificationTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl UnificationTable {
@@ -41,6 +66,8 @@ impl UnificationTable {
         self.parent.clear();
         self.binding.clear();
         self.next_var = 0;
+        self.trail.clear();
+        self.transaction_depth = 0;
     }
 
     /// Find the root TypeVar ID for a given variable (with path compression).
@@ -50,7 +77,7 @@ impl UnificationTable {
             id
         } else {
             let root = self.find(parent);
-            self.parent.insert(id, root);
+            self.set_parent(id, root);
             root
         }
     }
@@ -65,15 +92,70 @@ impl UnificationTable {
             parent: HashMap::new(),
             binding: HashMap::new(),
             next_var: 0,
+            trail: Vec::new(),
+            transaction_depth: 0,
         }
     }
 
     /// Allocate a fresh type variable.
     pub fn fresh_var(&mut self) -> u32 {
         let id = self.next_var;
+        if self.transaction_depth > 0 {
+            self.trail.push(Undo::NextVar(self.next_var));
+        }
         self.next_var += 1;
-        self.parent.insert(id, id);
+        self.set_parent(id, id);
         id
+    }
+
+    fn set_parent(&mut self, id: u32, parent: u32) {
+        if self.parent.get(&id) == Some(&parent) {
+            return;
+        }
+        if self.transaction_depth > 0 {
+            self.trail.push(Undo::Parent {
+                id,
+                previous: self.parent.get(&id).copied(),
+            });
+        }
+        self.parent.insert(id, parent);
+    }
+
+    fn set_binding(&mut self, id: u32, ty: Type) {
+        if self.binding.get(&id) == Some(&ty) {
+            return;
+        }
+        if self.transaction_depth > 0 {
+            self.trail.push(Undo::Binding {
+                id,
+                previous: self.binding.get(&id).cloned(),
+            });
+        }
+        self.binding.insert(id, ty);
+    }
+
+    fn rollback_to(&mut self, checkpoint: usize) {
+        while self.trail.len() > checkpoint {
+            match self.trail.pop().expect("trail length checked") {
+                Undo::Parent { id, previous } => match previous {
+                    Some(parent) => {
+                        self.parent.insert(id, parent);
+                    }
+                    None => {
+                        self.parent.remove(&id);
+                    }
+                },
+                Undo::Binding { id, previous } => match previous {
+                    Some(ty) => {
+                        self.binding.insert(id, ty);
+                    }
+                    None => {
+                        self.binding.remove(&id);
+                    }
+                },
+                Undo::NextVar(previous) => self.next_var = previous,
+            }
+        }
     }
 
     /// Check if a type variable occurs inside a type (for occur check).
@@ -121,99 +203,138 @@ impl UnificationTable {
         }
     }
 
-    /// Resolve a type: replace all TypeVars with their bindings.
-    /// Arch-6 fix: cache resolved types in the binding table (path compression for
-    /// type values) to avoid O(N²) repeated cloning when the same TypeVar is
-    /// resolved multiple times.
-    /// CO-H1: depth limit prevents stack overflow on deeply-nested/cyclic types.
-    const MAX_RESOLVE_DEPTH: u32 = 256;
-    pub fn resolve(&mut self, ty: &Type) -> Type {
-        self.resolve_with_depth(ty, 0)
+    /// Resolve a type for inference while preserving unbound variables.
+    ///
+    /// Unlike the legacy `resolve` compatibility wrapper this operation is
+    /// fail-closed for excessive nesting and binding cycles.
+    // Keep this below the default Rust test-thread stack limit even when every
+    // frame carries a large `Type` match. User-facing types this deep are
+    // rejected structurally instead of risking a process abort.
+    const MAX_RESOLVE_DEPTH: u32 = 64;
+    pub fn resolve_infer(&mut self, ty: &Type) -> Result<Type, ResolveError> {
+        self.resolve_with_depth(ty, 0, &mut HashSet::new())
     }
 
-    fn resolve_with_depth(&mut self, ty: &Type, depth: u32) -> Type {
+    /// Compatibility wrapper for inference code that has not yet been migrated
+    /// to structured resolution errors. Mandatory finalization uses `zonk`, not
+    /// this wrapper.
+    pub fn resolve(&mut self, ty: &Type) -> Type {
+        self.resolve_infer(ty).unwrap_or_else(|_| ty.clone())
+    }
+
+    fn resolve_with_depth(
+        &mut self,
+        ty: &Type,
+        depth: u32,
+        resolving: &mut HashSet<u32>,
+    ) -> Result<Type, ResolveError> {
         if depth >= Self::MAX_RESOLVE_DEPTH {
-            return ty.clone();
+            return Err(ResolveError::DepthOverflow(crate::core::helpers::fmt_type(
+                ty,
+            )));
         }
         let next = depth + 1;
-        match ty {
-            Type::Located { meta, ty } => {
-                self.resolve_with_depth(ty, next).with_meta(*meta)
-            }
+        let resolved = match ty {
+            Type::Located { meta, ty } => self
+                .resolve_with_depth(ty, next, resolving)?
+                .with_meta(*meta),
             Type::TypeVar(id) => {
                 let root = self.find(*id);
                 if let Some(bound) = self.binding.get(&root).cloned() {
-                    // Recursively resolve, then cache the result (path compression for type values)
-                    let resolved = self.resolve_with_depth(&bound, next);
-                    self.binding.insert(root, resolved.clone());
+                    if !resolving.insert(root) {
+                        return Err(ResolveError::BindingCycle(root));
+                    }
+                    let resolved = self.resolve_with_depth(&bound, next, resolving)?;
+                    resolving.remove(&root);
+                    self.set_binding(root, resolved.clone());
                     resolved
                 } else {
                     Type::TypeVar(root)
                 }
             }
-            Type::Option(inner) => Type::Option(Box::new(self.resolve_with_depth(inner, next))),
+            Type::Option(inner) => {
+                Type::Option(Box::new(self.resolve_with_depth(inner, next, resolving)?))
+            }
             Type::Result(ok, err) => Type::Result(
-                Box::new(self.resolve_with_depth(ok, next)),
-                Box::new(self.resolve_with_depth(err, next)),
+                Box::new(self.resolve_with_depth(ok, next, resolving)?),
+                Box::new(self.resolve_with_depth(err, next, resolving)?),
             ),
             Type::Tuple(elems) => Type::Tuple(
                 elems
                     .iter()
-                    .map(|e| self.resolve_with_depth(e, next))
-                    .collect(),
+                    .map(|e| self.resolve_with_depth(e, next, resolving))
+                    .collect::<Result<_, _>>()?,
             ),
             Type::Func(args, ret) => Type::Func(
                 args.iter()
-                    .map(|a| self.resolve_with_depth(a, next))
-                    .collect(),
-                Box::new(self.resolve_with_depth(ret, next)),
+                    .map(|a| self.resolve_with_depth(a, next, resolving))
+                    .collect::<Result<_, _>>()?,
+                Box::new(self.resolve_with_depth(ret, next, resolving)?),
             ),
             Type::ExternFunc(args, ret) => Type::ExternFunc(
                 args.iter()
-                    .map(|a| self.resolve_with_depth(a, next))
-                    .collect(),
-                Box::new(self.resolve_with_depth(ret, next)),
+                    .map(|a| self.resolve_with_depth(a, next, resolving))
+                    .collect::<Result<_, _>>()?,
+                Box::new(self.resolve_with_depth(ret, next, resolving)?),
             ),
-            Type::Ref(lt, inner) => {
-                Type::Ref(lt.clone(), Box::new(self.resolve_with_depth(inner, next)))
+            Type::Ref(lt, inner) => Type::Ref(
+                lt.clone(),
+                Box::new(self.resolve_with_depth(inner, next, resolving)?),
+            ),
+            Type::RefMut(lt, inner) => Type::RefMut(
+                lt.clone(),
+                Box::new(self.resolve_with_depth(inner, next, resolving)?),
+            ),
+            Type::Shared(inner) => {
+                Type::Shared(Box::new(self.resolve_with_depth(inner, next, resolving)?))
             }
-            Type::RefMut(lt, inner) => {
-                Type::RefMut(lt.clone(), Box::new(self.resolve_with_depth(inner, next)))
-            }
-            Type::Shared(inner) => Type::Shared(Box::new(self.resolve_with_depth(inner, next))),
             Type::LocalShared(inner) => {
-                Type::LocalShared(Box::new(self.resolve_with_depth(inner, next)))
+                Type::LocalShared(Box::new(self.resolve_with_depth(inner, next, resolving)?))
             }
-            Type::Weak(inner) => Type::Weak(Box::new(self.resolve_with_depth(inner, next))),
+            Type::Weak(inner) => {
+                Type::Weak(Box::new(self.resolve_with_depth(inner, next, resolving)?))
+            }
             Type::WeakLocal(inner) => {
-                Type::WeakLocal(Box::new(self.resolve_with_depth(inner, next)))
+                Type::WeakLocal(Box::new(self.resolve_with_depth(inner, next, resolving)?))
             }
-            Type::RawPtr(inner) => Type::RawPtr(Box::new(self.resolve_with_depth(inner, next))),
+            Type::RawPtr(inner) => {
+                Type::RawPtr(Box::new(self.resolve_with_depth(inner, next, resolving)?))
+            }
             Type::RawPtrMut(inner) => {
-                Type::RawPtrMut(Box::new(self.resolve_with_depth(inner, next)))
+                Type::RawPtrMut(Box::new(self.resolve_with_depth(inner, next, resolving)?))
             }
-            Type::CShared(inner) => Type::CShared(Box::new(self.resolve_with_depth(inner, next))),
-            Type::CBorrow(inner) => Type::CBorrow(Box::new(self.resolve_with_depth(inner, next))),
+            Type::CShared(inner) => {
+                Type::CShared(Box::new(self.resolve_with_depth(inner, next, resolving)?))
+            }
+            Type::CBorrow(inner) => {
+                Type::CBorrow(Box::new(self.resolve_with_depth(inner, next, resolving)?))
+            }
             Type::CBorrowMut(inner) => {
-                Type::CBorrowMut(Box::new(self.resolve_with_depth(inner, next)))
+                Type::CBorrowMut(Box::new(self.resolve_with_depth(inner, next, resolving)?))
             }
-            Type::CBuffer(inner) => Type::CBuffer(Box::new(self.resolve_with_depth(inner, next))),
-            Type::Array(inner, n) => {
-                Type::Array(Box::new(self.resolve_with_depth(inner, next)), *n)
+            Type::CBuffer(inner) => {
+                Type::CBuffer(Box::new(self.resolve_with_depth(inner, next, resolving)?))
             }
-            Type::Slice(inner) => Type::Slice(Box::new(self.resolve_with_depth(inner, next))),
-            Type::Newtype(name, inner) => {
-                Type::Newtype(name.clone(), Box::new(self.resolve_with_depth(inner, next)))
+            Type::Array(inner, n) => Type::Array(
+                Box::new(self.resolve_with_depth(inner, next, resolving)?),
+                *n,
+            ),
+            Type::Slice(inner) => {
+                Type::Slice(Box::new(self.resolve_with_depth(inner, next, resolving)?))
             }
+            Type::Newtype(name, inner) => Type::Newtype(
+                name.clone(),
+                Box::new(self.resolve_with_depth(inner, next, resolving)?),
+            ),
             Type::Name(name, args) => Type::Name(
                 name.clone(),
                 args.iter()
-                    .map(|a| self.resolve_with_depth(a, next))
-                    .collect(),
+                    .map(|a| self.resolve_with_depth(a, next, resolving))
+                    .collect::<Result<_, _>>()?,
             ),
             Type::ForAll(params, body) => Type::ForAll(
                 params.clone(),
-                Box::new(self.resolve_with_depth(body, next)),
+                Box::new(self.resolve_with_depth(body, next, resolving)?),
             ),
             // Leaf types — no TypeVars inside
             Type::Infer
@@ -223,22 +344,39 @@ impl UnificationTable {
             | Type::Cap(_)
             | Type::ImplTrait(_)
             | Type::DynTrait(_) => ty.clone(),
-        }
+        };
+        Ok(resolved)
+    }
+
+    /// Zonk a type: resolve all TypeVars and reject residual inference artifacts.
+    /// Returns Err(ResolveError) if any TypeVar remains unresolved or if the
+    /// type contains ForAll/Infer/`_` placeholders.
+    pub fn zonk(&mut self, ty: &Type) -> Result<Type, ResolveError> {
+        let resolved = self.resolve_infer(ty)?;
+        scan_residual(&resolved)?;
+        Ok(resolved)
     }
 
     /// Stable unification entrypoint. Escape placeholders are rejected here;
     /// callers at an explicit inference boundary must use `unify_inference`.
     pub fn unify(&mut self, a: &Type, b: &Type) -> Result<(), UnifyError> {
-        let a_resolved = self.resolve(a);
-        let b_resolved = self.resolve(b);
-        if is_escape_type(&a_resolved) || is_escape_type(&b_resolved) {
-            return Err(UnifyError::Mismatch(format!(
-                "checked unification rejects escape types {} and {}",
-                crate::core::helpers::fmt_type(&a_resolved),
-                crate::core::helpers::fmt_type(&b_resolved)
-            )));
-        }
-        self.transaction(|table| table.unify_inference_inner(&a_resolved, &b_resolved))
+        self.constrain(a, b)
+    }
+
+    /// Canonical checked constraint operation. All mutations are atomic.
+    pub fn constrain(&mut self, a: &Type, b: &Type) -> Result<(), UnifyError> {
+        self.transaction(|table| {
+            let a_resolved = table.resolve_infer(a)?;
+            let b_resolved = table.resolve_infer(b)?;
+            if is_escape_type(&a_resolved) || is_escape_type(&b_resolved) {
+                return Err(UnifyError::Mismatch(format!(
+                    "checked unification rejects escape types {} and {}",
+                    crate::core::helpers::fmt_type(&a_resolved),
+                    crate::core::helpers::fmt_type(&b_resolved)
+                )));
+            }
+            table.unify_inference_inner(&a_resolved, &b_resolved)
+        })
     }
 
     /// Permissive unification for explicit local inference boundaries only.
@@ -246,32 +384,50 @@ impl UnificationTable {
         self.transaction(|table| table.unify_inference_inner(a, b))
     }
 
+    /// Side-effect-free compatibility probe using the exact checked semantics.
+    pub fn probe_compatible(&mut self, a: &Type, b: &Type) -> bool {
+        let checkpoint = self.trail.len();
+        self.transaction_depth += 1;
+        let compatible = self.constrain(a, b).is_ok();
+        self.transaction_depth -= 1;
+        self.rollback_to(checkpoint);
+        if self.transaction_depth == 0 {
+            self.trail.clear();
+        }
+        compatible
+    }
+
     fn transaction(
         &mut self,
         operation: impl FnOnce(&mut Self) -> Result<(), UnifyError>,
     ) -> Result<(), UnifyError> {
-        let parent = self.parent.clone();
-        let binding = self.binding.clone();
-        match operation(self) {
+        let checkpoint = self.trail.len();
+        self.transaction_depth += 1;
+        let result = operation(self);
+        self.transaction_depth -= 1;
+        let result = match result {
             Ok(()) => Ok(()),
             Err(error) => {
-                self.parent = parent;
-                self.binding = binding;
+                self.rollback_to(checkpoint);
                 Err(error)
             }
+        };
+        if self.transaction_depth == 0 {
+            self.trail.clear();
         }
+        result
     }
 
     fn unify_inference_inner(&mut self, a: &Type, b: &Type) -> Result<(), UnifyError> {
-        let a_resolved = self.resolve(a);
-        let b_resolved = self.resolve(b);
+        let a_resolved = self.resolve_infer(a)?;
+        let b_resolved = self.resolve_infer(b)?;
 
         match (a_resolved.unlocated(), b_resolved.unlocated()) {
             (Type::TypeVar(a), Type::TypeVar(b)) => {
                 let a_root = self.find(*a);
                 let b_root = self.find(*b);
                 if a_root != b_root {
-                    self.parent.insert(a_root, b_root);
+                    self.set_parent(a_root, b_root);
                 }
                 Ok(())
             }
@@ -284,7 +440,7 @@ impl UnificationTable {
                     ));
                 }
                 let root = self.find(*id);
-                self.binding.insert(root, b_resolved.clone());
+                self.set_binding(root, b_resolved.clone());
                 Ok(())
             }
             (_, Type::TypeVar(id)) => {
@@ -295,7 +451,7 @@ impl UnificationTable {
                     ));
                 }
                 let root = self.find(*id);
-                self.binding.insert(root, a_resolved.clone());
+                self.set_binding(root, a_resolved.clone());
                 Ok(())
             }
 
@@ -458,7 +614,9 @@ fn is_escape_type(ty: &Type) -> bool {
     match ty {
         Type::Located { ty, .. } => is_escape_type(ty),
         Type::Infer => true,
-        Type::Name(name, args) => name == "Any" || name == "_" || args.iter().any(is_escape_type),
+        Type::Name(name, args) => {
+            name == "Any" || name == "_" || name == "unknown" || args.iter().any(is_escape_type)
+        }
         Type::Ref(_, inner)
         | Type::RefMut(_, inner)
         | Type::Option(inner)
@@ -474,8 +632,8 @@ fn is_escape_type(ty: &Type) -> bool {
         | Type::RawPtrMut(inner)
         | Type::CShared(inner)
         | Type::CBorrow(inner)
-        | Type::CBorrowMut(inner)
-        | Type::ForAll(_, inner) => is_escape_type(inner),
+        | Type::CBorrowMut(inner) => is_escape_type(inner),
+        Type::ForAll(_, _) => true,
         Type::Result(ok, err) => is_escape_type(ok) || is_escape_type(err),
         Type::Tuple(items) => items.iter().any(is_escape_type),
         Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
@@ -491,9 +649,87 @@ fn is_escape_type(ty: &Type) -> bool {
     }
 }
 
-impl Default for UnificationTable {
-    fn default() -> Self {
-        Self::new()
+/// Error produced when a type cannot be fully resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveError {
+    DepthOverflow(String),
+    UnboundVar(u32),
+    BindingCycle(u32),
+    ResidualType(String),
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolveError::DepthOverflow(msg) => write!(f, "resolve depth overflow: {}", msg),
+            ResolveError::UnboundVar(id) => write!(f, "unbound type variable T{}", id),
+            ResolveError::BindingCycle(id) => {
+                write!(f, "cyclic binding for type variable T{}", id)
+            }
+            ResolveError::ResidualType(msg) => write!(f, "residual type: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {}
+
+/// Scan a type for residual inference artifacts (TypeVar, ForAll, Infer, `_`).
+/// Returns Err(ResolveError) if any are found.
+pub fn scan_residual(ty: &Type) -> Result<(), ResolveError> {
+    match ty {
+        Type::Located { ty, .. } => scan_residual(ty),
+        Type::TypeVar(id) => Err(ResolveError::UnboundVar(*id)),
+        Type::ForAll(_, _) => Err(ResolveError::ResidualType(
+            "unresolved ForAll quantifier".into(),
+        )),
+        Type::Infer => Err(ResolveError::ResidualType("Infer placeholder".into())),
+        Type::Name(name, _) if name == "_" || name == "unknown" => Err(ResolveError::ResidualType(
+            format!("non-final type name '{name}'"),
+        )),
+        Type::Name(_, args) => {
+            for arg in args {
+                scan_residual(arg)?;
+            }
+            Ok(())
+        }
+        Type::Option(inner) => scan_residual(inner),
+        Type::Result(ok, err) => {
+            scan_residual(ok)?;
+            scan_residual(err)
+        }
+        Type::Tuple(elems) => {
+            for elem in elems {
+                scan_residual(elem)?;
+            }
+            Ok(())
+        }
+        Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
+            for arg in args {
+                scan_residual(arg)?;
+            }
+            scan_residual(ret)
+        }
+        Type::Ref(_, inner)
+        | Type::RefMut(_, inner)
+        | Type::Shared(inner)
+        | Type::LocalShared(inner)
+        | Type::Weak(inner)
+        | Type::WeakLocal(inner)
+        | Type::RawPtr(inner)
+        | Type::RawPtrMut(inner)
+        | Type::CShared(inner)
+        | Type::CBorrow(inner)
+        | Type::CBorrowMut(inner)
+        | Type::CBuffer(inner)
+        | Type::Array(inner, _)
+        | Type::Slice(inner)
+        | Type::Newtype(_, inner) => scan_residual(inner),
+        Type::Nothing
+        | Type::Allocator
+        | Type::RawString
+        | Type::Cap(_)
+        | Type::ImplTrait(_)
+        | Type::DynTrait(_) => Ok(()),
     }
 }
 
@@ -556,6 +792,67 @@ mod tests {
 
         assert!(table.unify(&left, &right).is_err());
         assert_eq!(table.resolve(&Type::TypeVar(var)), Type::TypeVar(var));
+    }
+
+    #[test]
+    fn failed_nested_transaction_rolls_back_fresh_variables() {
+        let mut table = UnificationTable::new();
+        let result = table.transaction(|outer| {
+            let first = outer.fresh_var();
+            assert_eq!(first, 0);
+            outer.transaction(|inner| {
+                let second = inner.fresh_var();
+                assert_eq!(second, 1);
+                Ok(())
+            })?;
+            Err(UnifyError::Mismatch("force outer rollback".into()))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(table.fresh_var(), 0);
+    }
+
+    #[test]
+    fn compatibility_probe_never_commits_bindings() {
+        let mut table = UnificationTable::new();
+        let var = table.fresh_var();
+
+        assert!(table.probe_compatible(&Type::TypeVar(var), &i32_ty()));
+        assert_eq!(
+            table.resolve_infer(&Type::TypeVar(var)).unwrap(),
+            Type::TypeVar(var)
+        );
+        assert!(!table.probe_compatible(&i32_ty(), &string_ty()));
+        assert_eq!(
+            table.resolve_infer(&Type::TypeVar(var)).unwrap(),
+            Type::TypeVar(var)
+        );
+    }
+
+    #[test]
+    fn fallible_resolution_rejects_binding_cycles() {
+        let mut table = UnificationTable::new();
+        let var = table.fresh_var();
+        table.binding.insert(var, Type::TypeVar(var));
+
+        assert_eq!(
+            table.resolve_infer(&Type::TypeVar(var)),
+            Err(ResolveError::BindingCycle(var))
+        );
+    }
+
+    #[test]
+    fn fallible_resolution_rejects_excessive_nesting() {
+        let mut table = UnificationTable::new();
+        let mut ty = i32_ty();
+        for _ in 0..=UnificationTable::MAX_RESOLVE_DEPTH {
+            ty = Type::Option(Box::new(ty));
+        }
+
+        assert!(matches!(
+            table.resolve_infer(&ty),
+            Err(ResolveError::DepthOverflow(_))
+        ));
     }
 
     #[test]
@@ -656,5 +953,27 @@ mod tests {
         assert_eq!(table.resolve(&Type::TypeVar(a)), i32_ty());
         assert_eq!(table.resolve(&Type::TypeVar(b)), i32_ty());
         assert_eq!(table.resolve(&Type::TypeVar(c)), i32_ty());
+    }
+
+    #[test]
+    fn zonk_preserves_extern_function_constructor() {
+        let mut table = UnificationTable::new();
+        let var = table.fresh_var();
+        table.unify(&Type::TypeVar(var), &i32_ty()).unwrap();
+        let extern_func = Type::ExternFunc(vec![Type::TypeVar(var)], Box::new(i32_ty()));
+
+        assert_eq!(
+            table.zonk(&extern_func).unwrap(),
+            Type::ExternFunc(vec![i32_ty()], Box::new(i32_ty()))
+        );
+    }
+
+    #[test]
+    fn zonk_rejects_unknown_cascade_placeholder() {
+        let mut table = UnificationTable::new();
+        assert!(matches!(
+            table.zonk(&Type::Name("unknown".into(), vec![])),
+            Err(ResolveError::ResidualType(_))
+        ));
     }
 }

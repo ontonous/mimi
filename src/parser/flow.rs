@@ -278,6 +278,7 @@ fn parse_one_item(
     source_id: SourceId,
 ) -> (Result<Item, ParseError>, Vec<ParseError>, usize) {
     let mut p = sub_parser(tokens, pos, mode, recovery, source_id);
+    let original_token_count = p.tokens.len();
     let result = p.parse_item().map_err(|error| error.with_source(source_id));
     let stmt_errors = if recovery {
         std::mem::take(&mut p.errors)
@@ -287,7 +288,14 @@ fn parse_one_item(
     } else {
         Vec::new()
     };
-    (result, stmt_errors, p.pos)
+    // Recursive descent may split a `>>` token into two `>` tokens while
+    // parsing nested generic types. The sub-parser owns a cloned token vector,
+    // so its dense position cannot be copied back to the original Flow token
+    // slice without removing those inserted slots. Otherwise the next item can
+    // start one token late and silently lose a modifier such as `pub`.
+    let inserted_tokens = p.tokens.len().saturating_sub(original_token_count);
+    let original_pos = p.pos.saturating_sub(inserted_tokens);
+    (result, stmt_errors, original_pos)
 }
 
 // ---------------------------------------------------------------------------
@@ -655,6 +663,14 @@ mod tests {
     #[test]
     fn test_multiline_params() {
         assert_parse_equivalent("func foo(\n    a: i32,\n    b: string,\n) -> i32 { a }\n");
+    }
+
+    #[test]
+    fn test_nested_generic_does_not_skip_next_item_modifier() {
+        assert_parse_equivalent(
+            "pub func nested() -> List<List<string>> { [] }\n\
+             pub func following() -> i32 { 1 }\n",
+        );
     }
 
     // ── Recovery ───────────────────────────────────────────────

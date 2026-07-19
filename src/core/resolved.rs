@@ -2,6 +2,8 @@ use crate::ast::{
     AstNodeMeta, AstOrigin, AstParentHint, Expr, FStringPart, File, FlowDef, Item, Pattern,
     PatternKind, Stmt, Type,
 };
+use crate::core::checker::flow::FlowAcc;
+use crate::core::phase::{TypeScheme, ZonkedTy};
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
 use std::collections::HashMap;
@@ -558,12 +560,67 @@ pub struct CheckedProgram<'a> {
     extern_blocks: HashMap<NodeId, ResolvedExternBlock>,
     backend_requirements: Vec<CapabilityRequirement>,
     ownership_ledgers: HashMap<NodeId, OwnershipLedger>,
+    type_schemes: HashMap<NodeId, TypeScheme>,
+    zonked_function_types: HashMap<NodeId, (Vec<ZonkedTy>, ZonkedTy)>,
 }
 
 impl<'a> CheckedProgram<'a> {
     #[cfg(test)]
     pub(crate) fn from_checked_file(file: &'a File) -> Result<Self, Vec<Diagnostic>> {
         Self::from_checked_file_with_ownership(file, HashMap::new())
+    }
+
+    /// v0.31.2: Construct CheckedProgram from FlowAcc (typed artifacts + ownership).
+    /// Uses checker-resolved function types for ResolvedFunction when available,
+    /// falling back to AST clone for items the checker didn't process.
+    pub(crate) fn from_flow_acc(file: &'a File, acc: FlowAcc) -> Result<Self, Vec<Diagnostic>> {
+        let FlowAcc {
+            ownership_ledgers,
+            schemes,
+            zonked_func_types,
+            ..
+        } = acc;
+        let mut program = Self::from_checked_file_with_ownership(file, ownership_ledgers)?;
+        let mut errors = Vec::new();
+        let mut zonked_by_node = HashMap::new();
+
+        // Override declaration snapshots only with mandatory-finalized checker
+        // artifacts. Raw checker types are not a backend input.
+        for func in program.functions.values_mut() {
+            if let Some((resolved_params, resolved_ret)) =
+                zonked_func_types.get(&func.qualified_name)
+            {
+                if resolved_params.len() != func.params.len() {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: zonked signature for '{}' has {} parameters, declaration has {}",
+                            func.qualified_name,
+                            resolved_params.len(),
+                            func.params.len()
+                        ),
+                        func.origin.user_span(),
+                    ));
+                    continue;
+                }
+                func.params = func
+                    .params
+                    .iter()
+                    .zip(resolved_params.iter())
+                    .map(|((name, _), resolved)| (name.clone(), resolved.as_type().clone()))
+                    .collect();
+                func.ret = resolved_ret.as_type().clone();
+                zonked_by_node.insert(
+                    func.node_id.clone(),
+                    (resolved_params.clone(), resolved_ret.clone()),
+                );
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        program.type_schemes = schemes;
+        program.zonked_function_types = zonked_by_node;
+        Ok(program)
     }
 
     pub(crate) fn from_checked_file_with_ownership(
@@ -744,6 +801,8 @@ impl<'a> CheckedProgram<'a> {
             extern_blocks,
             backend_requirements,
             ownership_ledgers,
+            type_schemes: HashMap::new(),
+            zonked_function_types: HashMap::new(),
         })
     }
 
@@ -969,6 +1028,18 @@ impl<'a> CheckedProgram<'a> {
 
     pub fn ownership_ledger(&self, owner: &NodeId) -> Option<&OwnershipLedger> {
         self.ownership_ledgers.get(owner)
+    }
+
+    pub fn type_schemes(&self) -> &HashMap<NodeId, TypeScheme> {
+        &self.type_schemes
+    }
+
+    pub fn zonked_function_types(&self) -> &HashMap<NodeId, (Vec<ZonkedTy>, ZonkedTy)> {
+        &self.zonked_function_types
+    }
+
+    pub fn zonked_function_type(&self, function: &NodeId) -> Option<&(Vec<ZonkedTy>, ZonkedTy)> {
+        self.zonked_function_types.get(function)
     }
 
     pub fn entry_span(&self) -> Option<Span> {
@@ -3321,9 +3392,7 @@ fn stmt_anchor(stmt: &Stmt, fallback: Span) -> Option<(Span, SpanPrecision)> {
             .first()
             .and_then(expr_span)
             .map(|span| (span, SpanPrecision::SourceAnchor)),
-        Stmt::Func(function) => {
-            anchored(function.meta.span.with_source(fallback.source_id))
-        }
+        Stmt::Func(function) => anchored(function.meta.span.with_source(fallback.source_id)),
         _ => None,
     }
 }
@@ -3641,8 +3710,7 @@ fn collect_stmt_meta(
         Stmt::MmsBlock { .. } => {}
         Stmt::Func(function) => {
             let nested_owner = nested_function_owner(owner, function);
-            let nested_fallback =
-                function.meta.span.with_source(fallback.source_id);
+            let nested_fallback = function.meta.span.with_source(fallback.source_id);
             collect_func_meta(
                 function,
                 nested_owner,
@@ -4845,10 +4913,7 @@ fn collect_item_call_sites(
             }
         }
         Item::Const {
-            meta,
-            name,
-            value,
-            ..
+            meta, name, value, ..
         } => {
             let owner = NodeId(format!("constant:{}", qualify(module, name)));
             collect_expr_call_sites(
@@ -5243,8 +5308,7 @@ fn collect_stmt_call_sites(
         }
         Stmt::Func(function) => {
             let nested_owner = nested_function_owner(owner, function);
-            let nested_fallback =
-                function.meta.span.with_source(fallback.source_id);
+            let nested_fallback = function.meta.span.with_source(fallback.source_id);
             collect_func_call_sites(
                 function,
                 &nested_owner,
@@ -5968,6 +6032,22 @@ mod tests {
             .keys()
             .map(|node_id| node_id.0.clone())
             .collect()
+    }
+
+    #[test]
+    fn checked_program_persists_zonked_function_signatures() {
+        let file = parse("func identity(value: i32) -> i32 { value }");
+        let program = crate::core::check_program(&file).expect("check");
+        let function = program.function("identity").expect("resolved function");
+        let (params, ret) = program
+            .zonked_function_type(&function.node_id)
+            .expect("checker zonked signature");
+
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].as_type(), &Type::Name("i32".into(), vec![]));
+        assert_eq!(ret.as_type(), &Type::Name("i32".into(), vec![]));
+        assert_eq!(function.params[0].1, params[0].as_type().clone());
+        assert_eq!(function.ret, ret.as_type().clone());
     }
 
     #[test]

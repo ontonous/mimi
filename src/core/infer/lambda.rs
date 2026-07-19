@@ -30,12 +30,19 @@ impl<'a> Checker<'a> {
             }
         }
         let mut body_type = Type::Name("unit".into(), vec![]);
-        for stmt in body {
+        for (index, stmt) in body.iter().enumerate() {
+            let is_last = index + 1 == body.len();
             match stmt.unlocated() {
                 Stmt::Expr(e) => body_type = self.infer_expr(e, scopes),
                 Stmt::Return(Some(e)) => {
                     body_type = self.infer_expr(e, scopes);
                     break;
+                }
+                Stmt::If { cond, then_, else_ } if is_last => {
+                    body_type = self.infer_if_expr(cond, then_, else_.as_ref(), scopes);
+                }
+                Stmt::Block(inner) if is_last => {
+                    body_type = self.infer_block_expr(inner, scopes);
                 }
                 _ => {
                     // Process let/if/while/for/match etc. for their side effects

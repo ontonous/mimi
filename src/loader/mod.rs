@@ -742,6 +742,7 @@ pub(crate) mod legacy {
 #[cfg(test)]
 mod source_registry_tests {
     use super::ModuleLoader;
+    use crate::ast::Item;
     use std::fs;
 
     #[test]
@@ -801,5 +802,24 @@ mod source_registry_tests {
         let merged = loader.merge_all().expect("merge cached modules");
         assert_eq!(merged.sources.len(), 2);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stdlib_import_preserves_public_sibling_calls() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let entry = root.join("tests/real_world/std_csv.mimi");
+        let mut loader = ModuleLoader::new(entry.parent().expect("entry parent").to_path_buf());
+        loader.load_main(&entry).expect("load std::csv fixture");
+        let merged = loader.merge_all().expect("merge std::csv fixture");
+        let functions: Vec<_> = merged
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Func(function) => Some(function.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(functions.contains(&"serialize_field"), "{functions:?}");
+        crate::core::check_program(&merged).expect("exported function may call exported sibling");
     }
 }

@@ -121,6 +121,16 @@ pub(crate) struct Checker<'a> {
     pub(crate) ownership_ledgers: HashMap<super::NodeId, super::OwnershipLedger>,
     pub(crate) current_ownership_owner: Option<super::NodeId>,
     pub(crate) ownership_control_path: Vec<String>,
+    /// v0.31.2: Typed artifacts — schemes recorded during generalization.
+    pub(crate) schemes: HashMap<super::NodeId, crate::core::phase::TypeScheme>,
+    /// v0.31.2: Typed artifacts — resolved function signatures packed as ZonkedTy.
+    pub(crate) zonked_func_types: HashMap<
+        String,
+        (
+            Vec<crate::core::phase::ZonkedTy>,
+            crate::core::phase::ZonkedTy,
+        ),
+    >,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -217,6 +227,8 @@ impl<'a> Checker<'a> {
             ownership_ledgers: HashMap::new(),
             current_ownership_owner: None,
             ownership_control_path: Vec::new(),
+            schemes: HashMap::new(),
+            zonked_func_types: HashMap::new(),
         }
     }
 
@@ -653,214 +665,48 @@ impl<'a> Checker<'a> {
     /// After solving a let binding, call this to make the type polymorphic.
     /// Free TypeVars (not bound in the environment) become universally quantified.
     ///
-    /// Bug 6 fix: single-traversal resolve-and-collect (previously resolve + collect
-    /// free vars were two separate O(N·D) tree walks; now done in one pass).
-    /// Bug 10 fix: remap free TypeVar IDs to sequential indices 0,1,2... in the
-    /// ForAll body so that `instantiate` (which substitutes TypeVar(i)→fresh) works correctly.
-    /// Called from `Stmt::Let` for immutable non-ref bindings (CO-C1 / H16).
+    /// v0.31.2: Uses `CollectVarsFolder` + `RemapFolder` from type_folder infrastructure.
+    /// Also records a `TypeScheme` in `self.schemes` for checker artifacts.
     pub(crate) fn generalize(&mut self, ty: &Type, env: &HashMap<String, Type>) -> Type {
-        // CK-H2: never nest ForAll. If already quantified, leave it alone
-        // (re-generalizing a ForAll body would re-bind TypeVar(0..n) and nest).
-        let (resolved, free_vars) = self.resolve_and_collect_free_vars(ty);
+        let resolved = self.unification.resolve(ty);
         if matches!(resolved.unlocated(), Type::ForAll(..)) {
             return resolved;
         }
+        // Collect free TypeVars using CollectVarsFolder.
+        let mut collector = crate::core::type_folder::CollectVarsFolder::new();
+        crate::core::type_folder::walk_type(resolved.clone(), &mut collector);
+        collector.vars.sort();
+        collector.vars.dedup();
         let env_vars = self.collect_env_type_vars(env);
-        let generalized: Vec<u32> = free_vars
+        let generalized: Vec<u32> = collector
+            .vars
             .into_iter()
             .filter(|v| !env_vars.contains(v))
             .collect();
         if generalized.is_empty() {
             resolved
         } else {
-            // Bug 10 fix: remap original TypeVar IDs to sequential indices 0,1,2,...
-            // so that instantiate() can correctly substitute TypeVar(i) → fresh_var.
+            // Remap original TypeVar IDs to sequential indices 0,1,2,...
             let mut remap: HashMap<u32, u32> = HashMap::new();
             for (i, old_id) in generalized.iter().enumerate() {
                 remap.insert(*old_id, i as u32);
             }
-            let remapped_body = self.remap_type_vars(&resolved, &remap);
+            let mut remapper = crate::core::type_folder::RemapFolder::new(remap);
+            let remapped_body = crate::core::type_folder::walk_type(resolved, &mut remapper);
             let param_names: Vec<String> =
                 (0..generalized.len()).map(|i| format!("T{}", i)).collect();
-            Type::ForAll(param_names, Box::new(remapped_body))
-        }
-    }
-
-    /// Remap TypeVar IDs in a type according to the given mapping (Bug 10 fix).
-    fn remap_type_vars(&self, ty: &Type, remap: &HashMap<u32, u32>) -> Type {
-        match ty {
-            Type::Located { meta, ty } => self.remap_type_vars(ty, remap).with_meta(*meta),
-            Type::TypeVar(id) => {
-                if let Some(&new_id) = remap.get(id) {
-                    Type::TypeVar(new_id)
-                } else {
-                    ty.clone()
-                }
-            }
-            Type::Option(inner) => Type::Option(Box::new(self.remap_type_vars(inner, remap))),
-            Type::Result(ok, err) => Type::Result(
-                Box::new(self.remap_type_vars(ok, remap)),
-                Box::new(self.remap_type_vars(err, remap)),
-            ),
-            Type::Tuple(elems) => Type::Tuple(
-                elems
-                    .iter()
-                    .map(|e| self.remap_type_vars(e, remap))
-                    .collect(),
-            ),
-            Type::Func(args, ret) | Type::ExternFunc(args, ret) => Type::Func(
-                args.iter()
-                    .map(|a| self.remap_type_vars(a, remap))
-                    .collect(),
-                Box::new(self.remap_type_vars(ret, remap)),
-            ),
-            Type::Ref(lt, inner) => {
-                Type::Ref(lt.clone(), Box::new(self.remap_type_vars(inner, remap)))
-            }
-            Type::RefMut(lt, inner) => {
-                Type::RefMut(lt.clone(), Box::new(self.remap_type_vars(inner, remap)))
-            }
-            Type::Shared(inner) => Type::Shared(Box::new(self.remap_type_vars(inner, remap))),
-            Type::LocalShared(inner) => {
-                Type::LocalShared(Box::new(self.remap_type_vars(inner, remap)))
-            }
-            Type::Weak(inner) => Type::Weak(Box::new(self.remap_type_vars(inner, remap))),
-            Type::WeakLocal(inner) => Type::WeakLocal(Box::new(self.remap_type_vars(inner, remap))),
-            Type::RawPtr(inner) => Type::RawPtr(Box::new(self.remap_type_vars(inner, remap))),
-            Type::RawPtrMut(inner) => Type::RawPtrMut(Box::new(self.remap_type_vars(inner, remap))),
-            Type::CShared(inner) => Type::CShared(Box::new(self.remap_type_vars(inner, remap))),
-            Type::CBorrow(inner) => Type::CBorrow(Box::new(self.remap_type_vars(inner, remap))),
-            Type::CBorrowMut(inner) => {
-                Type::CBorrowMut(Box::new(self.remap_type_vars(inner, remap)))
-            }
-            Type::CBuffer(inner) => Type::CBuffer(Box::new(self.remap_type_vars(inner, remap))),
-            Type::Array(inner, size) => {
-                Type::Array(Box::new(self.remap_type_vars(inner, remap)), *size)
-            }
-            Type::Slice(inner) => Type::Slice(Box::new(self.remap_type_vars(inner, remap))),
-            Type::Newtype(name, inner) => {
-                Type::Newtype(name.clone(), Box::new(self.remap_type_vars(inner, remap)))
-            }
-            Type::Name(name, args) => Type::Name(
-                name.clone(),
-                args.iter()
-                    .map(|a| self.remap_type_vars(a, remap))
-                    .collect(),
-            ),
-            Type::ForAll(params, body) => {
-                Type::ForAll(params.clone(), Box::new(self.remap_type_vars(body, remap)))
-            }
-            _ => ty.clone(),
-        }
-    }
-
-    /// Resolve a type and collect free TypeVars in a single traversal (Bug 6 fix).
-    fn resolve_and_collect_free_vars(&mut self, ty: &Type) -> (Type, Vec<u32>) {
-        let mut free_vars = Vec::new();
-        let resolved = self.resolve_and_collect_inner(ty, &mut free_vars);
-        free_vars.sort();
-        free_vars.dedup();
-        (resolved, free_vars)
-    }
-
-    /// Combined resolve + collect free TypeVars inner loop.
-    fn resolve_and_collect_inner(&mut self, ty: &Type, free_vars: &mut Vec<u32>) -> Type {
-        match ty {
-            Type::Located { meta, ty } => self
-                .resolve_and_collect_inner(ty, free_vars)
-                .with_meta(*meta),
-            Type::TypeVar(id) => {
-                let root = self.unification.find(*id);
-                if let Some(bound) = self.unification.get_binding(root).cloned() {
-                    self.resolve_and_collect_inner(&bound, free_vars)
-                } else {
-                    free_vars.push(root);
-                    Type::TypeVar(root)
-                }
-            }
-            Type::Option(inner) => {
-                Type::Option(Box::new(self.resolve_and_collect_inner(inner, free_vars)))
-            }
-            Type::Result(ok, err) => Type::Result(
-                Box::new(self.resolve_and_collect_inner(ok, free_vars)),
-                Box::new(self.resolve_and_collect_inner(err, free_vars)),
-            ),
-            Type::Tuple(elems) => Type::Tuple(
-                elems
-                    .iter()
-                    .map(|e| self.resolve_and_collect_inner(e, free_vars))
-                    .collect(),
-            ),
-            Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
-                let resolved_args = args
-                    .iter()
-                    .map(|a| self.resolve_and_collect_inner(a, free_vars))
+            let forall = Type::ForAll(param_names, Box::new(remapped_body.clone()));
+            // Record the monotype body separately from its binders. The legacy
+            // `Type::ForAll` wrapper remains only in the inference environment.
+            if let Some(owner) = &self.current_ownership_owner {
+                let binders: Vec<_> = (0..generalized.len() as u32)
+                    .map(crate::core::phase::InferVarId)
                     .collect();
-                Type::Func(
-                    resolved_args,
-                    Box::new(self.resolve_and_collect_inner(ret, free_vars)),
-                )
+                if let Ok(scheme) = crate::core::phase::TypeScheme::new(binders, remapped_body) {
+                    self.schemes.insert(owner.clone(), scheme);
+                }
             }
-            Type::Ref(lt, inner) => Type::Ref(
-                lt.clone(),
-                Box::new(self.resolve_and_collect_inner(inner, free_vars)),
-            ),
-            Type::RefMut(lt, inner) => Type::RefMut(
-                lt.clone(),
-                Box::new(self.resolve_and_collect_inner(inner, free_vars)),
-            ),
-            Type::Shared(inner) => {
-                Type::Shared(Box::new(self.resolve_and_collect_inner(inner, free_vars)))
-            }
-            Type::LocalShared(inner) => {
-                Type::LocalShared(Box::new(self.resolve_and_collect_inner(inner, free_vars)))
-            }
-            Type::Weak(inner) => {
-                Type::Weak(Box::new(self.resolve_and_collect_inner(inner, free_vars)))
-            }
-            Type::WeakLocal(inner) => {
-                Type::WeakLocal(Box::new(self.resolve_and_collect_inner(inner, free_vars)))
-            }
-            Type::RawPtr(inner) => {
-                Type::RawPtr(Box::new(self.resolve_and_collect_inner(inner, free_vars)))
-            }
-            Type::RawPtrMut(inner) => {
-                Type::RawPtrMut(Box::new(self.resolve_and_collect_inner(inner, free_vars)))
-            }
-            Type::CShared(inner) => {
-                Type::CShared(Box::new(self.resolve_and_collect_inner(inner, free_vars)))
-            }
-            Type::CBorrow(inner) => {
-                Type::CBorrow(Box::new(self.resolve_and_collect_inner(inner, free_vars)))
-            }
-            Type::CBorrowMut(inner) => {
-                Type::CBorrowMut(Box::new(self.resolve_and_collect_inner(inner, free_vars)))
-            }
-            Type::CBuffer(inner) => {
-                Type::CBuffer(Box::new(self.resolve_and_collect_inner(inner, free_vars)))
-            }
-            Type::Array(inner, size) => Type::Array(
-                Box::new(self.resolve_and_collect_inner(inner, free_vars)),
-                *size,
-            ),
-            Type::Slice(inner) => {
-                Type::Slice(Box::new(self.resolve_and_collect_inner(inner, free_vars)))
-            }
-            Type::Newtype(name, inner) => Type::Newtype(
-                name.clone(),
-                Box::new(self.resolve_and_collect_inner(inner, free_vars)),
-            ),
-            Type::Name(name, args) => Type::Name(
-                name.clone(),
-                args.iter()
-                    .map(|a| self.resolve_and_collect_inner(a, free_vars))
-                    .collect(),
-            ),
-            Type::ForAll(params, body) => Type::ForAll(
-                params.clone(),
-                Box::new(self.resolve_and_collect_inner(body, free_vars)),
-            ),
-            _ => ty.clone(),
+            forall
         }
     }
 
@@ -868,23 +714,20 @@ impl<'a> Checker<'a> {
     ///
     /// When using a polymorphic function, call this to get a fresh copy.
     ///
-    /// Bug-8 clarification: params (Vec<String>) are labels for error messages only,
-    /// not used for type substitution. The actual substitution uses integer indices
-    /// (i as u32) matching TypeVar IDs in the body. This avoids confusion between
-    /// user-defined type parameters (Type::Name) and inference variables (TypeVar).
+    /// v0.31.2: Uses `RemapFolder` from type_folder infrastructure.
     pub(crate) fn instantiate(&mut self, ty: &Type) -> Type {
         match ty.unlocated() {
             Type::ForAll(params, body) => {
                 let mut substitutions = HashMap::new();
                 for (i, _param) in params.iter().enumerate() {
                     let fresh = self.fresh_var();
-                    // Map the bound variable name to a fresh TypeVar
-                    // The body uses TypeVar(i) for the i-th bound variable
                     if let Type::TypeVar(id) = fresh {
                         substitutions.insert(i as u32, id);
                     }
                 }
-                let substituted = self.substitute_type_vars(body, &substitutions);
+                let mut remapper = crate::core::type_folder::RemapFolder::new(substitutions);
+                let substituted =
+                    crate::core::type_folder::walk_type((**body).clone(), &mut remapper);
                 // CK-C3: peel nested ForAll after substitution so polymorphic
                 // let bindings do not leave residual quantifiers in the type.
                 self.instantiate(&substituted)
@@ -893,141 +736,87 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn collect_type_vars_inner(&self, ty: &Type, vars: &mut Vec<u32>) {
-        match ty {
-            Type::Located { ty, .. } => self.collect_type_vars_inner(ty, vars),
-            Type::TypeVar(id) => vars.push(*id),
-            Type::ForAll(_, body) => self.collect_type_vars_inner(body, vars),
-            Type::Option(inner) => self.collect_type_vars_inner(inner, vars),
-            Type::Result(ok, err) => {
-                self.collect_type_vars_inner(ok, vars);
-                self.collect_type_vars_inner(err, vars);
-            }
-            Type::Tuple(elems) => {
-                for e in elems {
-                    self.collect_type_vars_inner(e, vars);
-                }
-            }
-            Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
-                for a in args {
-                    self.collect_type_vars_inner(a, vars);
-                }
-                self.collect_type_vars_inner(ret, vars);
-            }
-            Type::Ref(_, inner)
-            | Type::RefMut(_, inner)
-            | Type::Shared(inner)
-            | Type::LocalShared(inner)
-            | Type::Weak(inner)
-            | Type::WeakLocal(inner)
-            | Type::RawPtr(inner)
-            | Type::RawPtrMut(inner)
-            | Type::CShared(inner)
-            | Type::CBorrow(inner)
-            | Type::CBorrowMut(inner)
-            | Type::CBuffer(inner)
-            | Type::Array(inner, _)
-            | Type::Slice(inner)
-            | Type::Newtype(_, inner) => self.collect_type_vars_inner(inner, vars),
-            Type::Name(_, args) => {
-                for a in args {
-                    self.collect_type_vars_inner(a, vars);
-                }
-            }
-            _ => {}
-        }
-    }
-
     /// Collect TypeVar IDs that appear in the environment.
     fn collect_env_type_vars(&self, env: &HashMap<String, Type>) -> Vec<u32> {
         let mut vars = Vec::new();
         for ty in env.values() {
-            self.collect_type_vars_inner(ty, &mut vars);
+            let mut collector = crate::core::type_folder::CollectVarsFolder::new();
+            crate::core::type_folder::walk_type(ty.clone(), &mut collector);
+            vars.extend(collector.vars);
         }
         vars.sort();
         vars.dedup();
         vars
     }
 
-    /// Substitute TypeVar IDs in a type with new IDs.
-    fn substitute_type_vars(&self, ty: &Type, subs: &HashMap<u32, u32>) -> Type {
-        match ty {
-            Type::Located { meta, ty } => self.substitute_type_vars(ty, subs).with_meta(*meta),
-            Type::TypeVar(id) => {
-                if let Some(new_id) = subs.get(id) {
-                    Type::TypeVar(*new_id)
-                } else {
-                    ty.clone()
+    /// v0.31.2: Zonk all resolved function types and store in zonked_func_types.
+    /// Called before extracting artifacts from the checker.
+    pub(crate) fn finalize_zonked_func_types(&mut self) {
+        fn function_span(items: &[Item], prefix: &str, target: &str) -> Option<Span> {
+            for item in items {
+                match item {
+                    Item::Func(function) => {
+                        let qualified = if prefix.is_empty() {
+                            function.name.clone()
+                        } else {
+                            format!("{prefix}::{}", function.name)
+                        };
+                        if qualified == target {
+                            return Some(function.meta.span);
+                        }
+                    }
+                    Item::Module(module) => {
+                        let nested = if prefix.is_empty() {
+                            module.name.clone()
+                        } else {
+                            format!("{prefix}::{}", module.name)
+                        };
+                        if let Some(span) = function_span(&module.items, &nested, target) {
+                            return Some(span);
+                        }
+                    }
+                    _ => {}
                 }
             }
-            Type::Option(inner) => Type::Option(Box::new(self.substitute_type_vars(inner, subs))),
-            Type::Result(ok, err) => Type::Result(
-                Box::new(self.substitute_type_vars(ok, subs)),
-                Box::new(self.substitute_type_vars(err, subs)),
-            ),
-            Type::Tuple(elems) => Type::Tuple(
-                elems
-                    .iter()
-                    .map(|e| self.substitute_type_vars(e, subs))
-                    .collect(),
-            ),
-            Type::Func(args, ret) => Type::Func(
-                args.iter()
-                    .map(|a| self.substitute_type_vars(a, subs))
-                    .collect(),
-                Box::new(self.substitute_type_vars(ret, subs)),
-            ),
-            Type::Ref(lt, inner) => {
-                Type::Ref(lt.clone(), Box::new(self.substitute_type_vars(inner, subs)))
-            }
-            Type::RefMut(lt, inner) => {
-                Type::RefMut(lt.clone(), Box::new(self.substitute_type_vars(inner, subs)))
-            }
-            Type::Name(name, args) => Type::Name(
-                name.clone(),
-                args.iter()
-                    .map(|a| self.substitute_type_vars(a, subs))
-                    .collect(),
-            ),
-            // Bug 7 fix: added missing container variants
-            Type::Array(inner, size) => {
-                Type::Array(Box::new(self.substitute_type_vars(inner, subs)), *size)
-            }
-            Type::Slice(inner) => Type::Slice(Box::new(self.substitute_type_vars(inner, subs))),
-            Type::Shared(inner) => Type::Shared(Box::new(self.substitute_type_vars(inner, subs))),
-            Type::LocalShared(inner) => {
-                Type::LocalShared(Box::new(self.substitute_type_vars(inner, subs)))
-            }
-            Type::Weak(inner) => Type::Weak(Box::new(self.substitute_type_vars(inner, subs))),
-            Type::WeakLocal(inner) => {
-                Type::WeakLocal(Box::new(self.substitute_type_vars(inner, subs)))
-            }
-            Type::RawPtr(inner) => Type::RawPtr(Box::new(self.substitute_type_vars(inner, subs))),
-            Type::RawPtrMut(inner) => {
-                Type::RawPtrMut(Box::new(self.substitute_type_vars(inner, subs)))
-            }
-            Type::CShared(inner) => Type::CShared(Box::new(self.substitute_type_vars(inner, subs))),
-            Type::CBorrow(inner) => Type::CBorrow(Box::new(self.substitute_type_vars(inner, subs))),
-            Type::CBorrowMut(inner) => {
-                Type::CBorrowMut(Box::new(self.substitute_type_vars(inner, subs)))
-            }
-            Type::CBuffer(inner) => Type::CBuffer(Box::new(self.substitute_type_vars(inner, subs))),
-            Type::Newtype(name, inner) => Type::Newtype(
-                name.clone(),
-                Box::new(self.substitute_type_vars(inner, subs)),
-            ),
-            Type::ExternFunc(args, ret) => Type::ExternFunc(
-                args.iter()
-                    .map(|a| self.substitute_type_vars(a, subs))
-                    .collect(),
-                Box::new(self.substitute_type_vars(ret, subs)),
-            ),
-            Type::ForAll(params, body) => Type::ForAll(
-                params.clone(),
-                Box::new(self.substitute_type_vars(body, subs)),
-            ),
-            _ => ty.clone(),
+            None
         }
+
+        let mut zonked = HashMap::new();
+        for (name, (params, ret)) in self.funcs.clone() {
+            let finalized = (|| {
+                let params = params
+                    .iter()
+                    .map(|param| {
+                        self.unification
+                            .zonk(param)
+                            .and_then(crate::core::phase::ZonkedTy::from_resolved)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let ret = self
+                    .unification
+                    .zonk(&ret)
+                    .and_then(crate::core::phase::ZonkedTy::from_resolved)?;
+                Ok::<_, crate::core::unification::ResolveError>((params, ret))
+            })();
+            match finalized {
+                Ok(signature) => {
+                    zonked.insert(name, signature);
+                }
+                Err(error) => {
+                    let span = function_span(&self.file.items, "", &name)
+                        .unwrap_or_else(|| self.diagnostic_span());
+                    self.errors.push(Diagnostic::error_code(
+                        crate::diagnostic::codes::E0200,
+                        format!(
+                            "TOOL-RESOLUTION-001: function '{}' did not finalize to a monotype: {}",
+                            name, error
+                        ),
+                        span,
+                    ));
+                }
+            }
+        }
+        self.zonked_func_types = zonked;
     }
 }
 

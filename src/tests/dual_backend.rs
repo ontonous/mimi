@@ -9,17 +9,11 @@
 use super::*;
 
 fn can_link() -> bool {
-    std::process::Command::new("cc")
-        .arg("--version")
-        .output()
-        .is_ok()
+    crate::tests::can_link()
 }
 
 fn can_cc() -> bool {
-    std::process::Command::new("cc")
-        .arg("--version")
-        .output()
-        .is_ok()
+    crate::tests::can_link()
 }
 
 macro_rules! dual_assert {

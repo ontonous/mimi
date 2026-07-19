@@ -50,8 +50,8 @@ pub func render(template: string, lookup: func(string) -> string) -> string {
     result
 }
 
-// lookup_with_default: returns the string value for key in vars, or default_val.
-func lookup_with_default(vars: Record, key: string, default_val: string) -> string {
+// Returns the string value for key, or default_val when the key is absent.
+pub func lookup_with_default(vars: Record, key: string, default_val: string) -> string {
     let ks = keys(vars)
     let vs = values(vars)
     let mut ki = 0

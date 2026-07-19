@@ -15,7 +15,13 @@ impl<'a> Interpreter<'a> {
         if let Some(map) = self.resolved_functions.as_ref() {
             if let Some((arity, _, _)) = map.get(&func.name) {
                 let has_defaults = func.params.iter().any(|p| p.default_value.is_some());
-                if !has_defaults && args.len() != *arity {
+                // Bare-name directories can also contain a flattened wrapper
+                // with the same name as an already-selected trait/impl method
+                // (for example `repeat(string, n)` vs `Str.repeat(n)`). Only
+                // apply the directory guard when it describes this exact AST
+                // callable; the FuncDef arity check below remains authoritative
+                // for a colliding method until 0.31.4 installs canonical method IDs.
+                if *arity == func.params.len() && !has_defaults && args.len() != *arity {
                     return Err(InterpError::wrong_arg_count(format!(
                         "function '{}' expects {} arguments, got {} (checked directory)",
                         func.name,
@@ -61,6 +67,15 @@ impl<'a> Interpreter<'a> {
                     break;
                 }
             }
+        }
+
+        if filled_args.len() != func.params.len() {
+            return Err(InterpError::wrong_arg_count(format!(
+                "function '{}' expects {} arguments, got {}",
+                func.name,
+                func.params.len(),
+                filled_args.len()
+            )));
         }
 
         // Handle async functions

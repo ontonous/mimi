@@ -27,13 +27,18 @@ fn mimi_bin() -> PathBuf {
 }
 
 fn can_link() -> bool {
-    Command::new("cc").arg("--version").output().is_ok()
+    static CAN_LINK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CAN_LINK.get_or_init(|| Command::new("cc").arg("--version").output().is_ok())
 }
 
 /// Files that are expected to fail because they exercise known
 /// language or codegen gaps. Keep this list minimal and aligned with
 /// `tests/real_world/RESULTS.md`.
 const KNOWN_GAPS: &[&str] = &[];
+
+/// Programs whose feature contract is intentionally interpreter-only. Keep in
+/// lockstep with `tests/real_world/run_suite.py`.
+const INTERPRETER_ONLY: &[&str] = &["flow_test_macros.mimi"];
 
 fn is_known_gap(path: &Path) -> bool {
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -122,10 +127,15 @@ fn real_world_cli_suite() {
 
         // Prefer stdout-aware run for dual-backend match (esp. flow_* MCDD).
         let interp_out = run_mimi_run_out(src);
-        let codegen = if can_link() {
+        let requires_codegen = !INTERPRETER_ONLY.contains(&name.as_ref());
+        let codegen = if requires_codegen && can_link() {
             Some(run_mimi_build_and_exec(src))
         } else {
-            eprintln!("SKIP build for {name}: cc not available");
+            if requires_codegen {
+                eprintln!("SKIP build for {name}: cc not available");
+            } else {
+                eprintln!("SKIP build for {name}: interpreter-only fixture");
+            }
             None
         };
 
