@@ -607,17 +607,70 @@ impl BodyLowerer<'_> {
                     target,
                 }
             }
-            Stmt::Desc(..) | Stmt::Rule(..) | Stmt::MmsBlock { .. } => return Ok(None),
-            Stmt::Math(_) | Stmt::Pinned { .. } | Stmt::Ellipsis => {
-                return self.unsupported(&node_id, stmt_kind(stmt))
+            Stmt::Pinned {
+                expr,
+                timeout,
+                var,
+                body,
+            } => {
+                let value = self.lower_expr(expr, &format!("{role}.expression"))?;
+                let timeout = timeout
+                    .as_ref()
+                    .map(|timeout| self.lower_expr(timeout, &format!("{role}.timeout")))
+                    .transpose()?;
+                self.scopes.push(BTreeMap::new());
+                let binding = var.as_ref().map(|name| {
+                    let binding_id = NodeId(format!("{}/pinned-binding", node_id.0));
+                    let local_id = ResolvedLocalId(NodeId(format!("{}/local", binding_id.0)));
+                    let binding_origin = Origin::Desugared {
+                        parent: node_id.clone(),
+                        rule: "resolved_body.pinned_binding".into(),
+                        span: origin.user_span(),
+                    };
+                    self.insert_local(
+                        name.clone(),
+                        ResolvedLocal {
+                            id: local_id.clone(),
+                            display_name: name.clone(),
+                            ty: value.ty.clone(),
+                            mutable: false,
+                            origin: binding_origin,
+                        },
+                        &binding_id,
+                    )?;
+                    Ok::<_, Vec<ResolvedBodyError>>(local_id)
+                });
+                let lowered = (|| {
+                    let binding = binding.transpose()?;
+                    let body =
+                        self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?;
+                    Ok::<_, Vec<ResolvedBodyError>>((binding, body))
+                })();
+                self.scopes.pop();
+                let (binding, body) = lowered?;
+                ResolvedStmtKind::Pinned {
+                    value,
+                    timeout,
+                    binding,
+                    body,
+                }
             }
+            Stmt::Desc(..) | Stmt::Rule(..) | Stmt::MmsBlock { .. } => return Ok(None),
+            Stmt::Math(_) | Stmt::Ellipsis => return self.unsupported(&node_id, stmt_kind(stmt)),
             Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
         };
+        let backend_requirements = matches!(&kind, ResolvedStmtKind::Pinned { .. })
+            .then(|| super::BackendRequirement {
+                requirement_id: "RESOURCE-LINEAR-001".into(),
+                capability: "ffi.pinned".into(),
+            })
+            .into_iter()
+            .collect();
         Ok(Some(ResolvedStmt {
             node_id,
             origin,
             ty: self.unit.clone(),
-            backend_requirements: Vec::new(),
+            backend_requirements,
             kind,
         }))
     }
@@ -2814,6 +2867,41 @@ mod tests {
         assert_eq!(&place.base, local);
         body.validate(program.resolved_types())
             .expect("valid while-let");
+    }
+
+    #[test]
+    fn pinned_scope_retains_value_timeout_binding_and_capability() {
+        let file = parse(
+            "func anchor(value: i32) -> i32 { let mut result = 0; pinned(value, timeout = 5) |ptr| { result = ptr; } result }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower pinned");
+        let body = &bodies[&NodeId("function:anchor".into())];
+        let statement = &body.root.statements[1];
+        let ResolvedStmtKind::Pinned {
+            value,
+            timeout,
+            binding: Some(binding),
+            body: pinned_body,
+        } = &statement.kind
+        else {
+            panic!("pinned statement expected");
+        };
+        assert_eq!(body.locals[binding].ty, value.ty);
+        assert!(timeout.is_some());
+        let ResolvedStmtKind::Assign { value, .. } = &pinned_body.statements[0].kind else {
+            panic!("pinned body assignment expected");
+        };
+        let ResolvedExprKind::Load(place) = &value.kind else {
+            panic!("pinned binding load expected");
+        };
+        assert_eq!(&place.base, binding);
+        assert!(statement
+            .backend_requirements
+            .iter()
+            .any(|requirement| requirement.capability == "ffi.pinned"));
+        body.validate(program.resolved_types())
+            .expect("valid pinned scope");
     }
 
     #[test]
