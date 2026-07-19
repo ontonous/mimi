@@ -449,7 +449,7 @@ pub struct ResolvedBodyError {
 }
 
 impl ResolvedBodyError {
-    fn new(node_id: NodeId, message: impl Into<String>) -> Self {
+    pub(crate) fn new(node_id: NodeId, message: impl Into<String>) -> Self {
         Self {
             node_id,
             message: message.into(),
