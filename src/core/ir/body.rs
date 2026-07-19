@@ -265,6 +265,10 @@ pub enum ResolvedExprKind {
     FString(Vec<ResolvedFStringPart>),
     Load(ResolvedPlace),
     Constant(NodeId),
+    DefaultArgument {
+        callable: NodeId,
+        parameter: ResolvedParameterId,
+    },
     Binary {
         op: ResolvedBinaryOp,
         left: Box<ResolvedExpr>,
@@ -476,6 +480,8 @@ pub struct ResolvedBody {
     /// Typed expressions evaluated to compute structured places. A place
     /// references these nodes by stable NodeId instead of retaining raw AST.
     pub place_inputs: BTreeMap<NodeId, ResolvedExpr>,
+    /// Declaration-owned typed default expressions keyed by parameter identity.
+    pub default_values: BTreeMap<ResolvedParameterId, ResolvedExpr>,
     pub root: ResolvedBlock,
 }
 
@@ -534,6 +540,12 @@ impl ResolvedBody {
                 validator.error(key, "place input key disagrees with expression identity");
             }
             validator.visit_expr(input);
+        }
+        for (parameter, value) in &self.default_values {
+            if parameter.0 .0.trim().is_empty() {
+                validator.error(&self.owner, "default value has an empty parameter identity");
+            }
+            validator.visit_expr(value);
         }
         validator.visit_block(&self.root);
         for (owner, target, role) in validator.pending_nodes.clone() {
@@ -805,6 +817,17 @@ impl BodyValidator<'_> {
             | ResolvedExprKind::ComptimeValue(item) => {
                 if item.0.trim().is_empty() {
                     self.error(&expression.node_id, "resolved item identity is empty");
+                }
+            }
+            ResolvedExprKind::DefaultArgument {
+                callable,
+                parameter,
+            } => {
+                if callable.0.trim().is_empty() || parameter.0 .0.trim().is_empty() {
+                    self.error(
+                        &expression.node_id,
+                        "default argument contains an empty semantic identity",
+                    );
                 }
             }
             ResolvedExprKind::Binary { left, right, .. } => {
@@ -1158,6 +1181,7 @@ mod tests {
             owner: node("func.main"),
             locals: BTreeMap::from([(local.id.clone(), local)]),
             place_inputs: BTreeMap::new(),
+            default_values: BTreeMap::new(),
             root: ResolvedBlock {
                 node_id: node("block.root"),
                 origin: origin(),

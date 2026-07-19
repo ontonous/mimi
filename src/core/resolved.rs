@@ -6374,6 +6374,18 @@ fn stabilize_expression_types(
         let mut owner_types = BTreeMap::new();
         for (key, ty) in expression_types {
             let Some(node_id) = keys.get(key) else {
+                let foreign_owners = program
+                    .node_meta
+                    .values()
+                    .filter(|meta| meta.expression_key.as_ref() == Some(key))
+                    .map(|meta| &meta.node_id)
+                    .collect::<Vec<_>>();
+                if foreign_owners.len() == 1 {
+                    // The checker may re-check a declaration-owned default at
+                    // a call site. Its semantic node remains owned by the
+                    // callee and is materialized exactly once there.
+                    continue;
+                }
                 errors.push(Diagnostic::error(
                     format!(
                         "TOOL-RESOLUTION-001: checker expression in '{}' has no stable NodeId",

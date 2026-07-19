@@ -73,6 +73,7 @@ pub fn lower_function_body(
     let mut lowerer = BodyLowerer {
         owner: input.signature.owner.clone(),
         fallback: input.function.meta.span,
+        function: input.function,
         signature: input.signature,
         signatures: input.signatures,
         functions: input.functions,
@@ -93,9 +94,11 @@ pub fn lower_function_body(
         unit,
         locals: BTreeMap::new(),
         place_inputs: BTreeMap::new(),
+        default_values: BTreeMap::new(),
         scopes: vec![BTreeMap::new()],
     };
     lowerer.install_parameters()?;
+    lowerer.lower_default_values()?;
     let root = lowerer.lower_block(
         &input.function.body,
         "body",
@@ -106,6 +109,7 @@ pub fn lower_function_body(
         owner: input.signature.owner.clone(),
         locals: lowerer.locals,
         place_inputs: lowerer.place_inputs,
+        default_values: lowerer.default_values,
         root,
     };
     body.validate(input.types)?;
@@ -220,6 +224,7 @@ fn collect_function_syntax<'a>(
 struct BodyLowerer<'a> {
     owner: NodeId,
     fallback: Span,
+    function: &'a FuncDef,
     signature: &'a ResolvedSignature,
     signatures: &'a BTreeMap<NodeId, ResolvedSignature>,
     functions: &'a HashMap<NodeId, ResolvedFunction>,
@@ -240,6 +245,7 @@ struct BodyLowerer<'a> {
     unit: ResolvedTypeId,
     locals: BTreeMap<ResolvedLocalId, ResolvedLocal>,
     place_inputs: BTreeMap<NodeId, ResolvedExpr>,
+    default_values: BTreeMap<super::ResolvedParameterId, ResolvedExpr>,
     scopes: Vec<BTreeMap<String, ResolvedLocalId>>,
 }
 
@@ -262,6 +268,45 @@ impl BodyLowerer<'_> {
                 },
                 &parameter.id.0,
             )?;
+        }
+        Ok(())
+    }
+
+    fn lower_default_values(&mut self) -> Result<(), Vec<ResolvedBodyError>> {
+        let parameters = self.function.params.clone();
+        for parameter in &parameters {
+            let Some(default) = &parameter.default_value else {
+                continue;
+            };
+            let resolved = self
+                .signature
+                .parameters
+                .iter()
+                .find(|candidate| candidate.name == parameter.name)
+                .ok_or_else(|| {
+                    vec![ResolvedBodyError::new(
+                        self.owner.clone(),
+                        format!(
+                            "default parameter '{}' has no canonical signature identity",
+                            parameter.name
+                        ),
+                    )]
+                })?;
+            let value = self.lower_expr(
+                default,
+                &format!("parameter.{}.default", stable_id_fragment(&parameter.name)),
+            )?;
+            self.identity_conversion(&resolved.id.0, &value.ty, &resolved.ty)?;
+            if self
+                .default_values
+                .insert(resolved.id.clone(), value)
+                .is_some()
+            {
+                return Err(vec![ResolvedBodyError::new(
+                    resolved.id.0.clone(),
+                    "parameter default identity collision",
+                )]);
+            }
         }
         Ok(())
     }
@@ -1363,11 +1408,11 @@ impl BodyLowerer<'_> {
             .cloned()
             .zip(type_arguments.iter().cloned())
             .collect::<BTreeMap<_, _>>();
-        if arguments.len() != signature.parameters.len() {
+        if arguments.len() > signature.parameters.len() {
             return Err(vec![ResolvedBodyError::new(
                 node_id.clone(),
                 format!(
-                    "call argument count {} does not match canonical parameter count {}",
+                    "call argument count {} exceeds canonical parameter count {}",
                     arguments.len(),
                     signature.parameters.len()
                 ),
@@ -1414,13 +1459,59 @@ impl BodyLowerer<'_> {
 
         let mut lowered = Vec::with_capacity(slots.len());
         for (parameter, slot) in signature.parameters.iter().zip(slots) {
-            let (value, value_role) = slot.ok_or_else(|| {
-                vec![ResolvedBodyError::new(
+            let value = if let Some((value, value_role)) = slot {
+                self.lower_expr(value, &value_role)?
+            } else if parameter.has_default {
+                if !signature.generic_parameters.is_empty() {
+                    return self.unsupported(node_id, "generic parameter default instantiation");
+                }
+                let declaration = function
+                    .param_decls
+                    .iter()
+                    .find(|declaration| declaration.name == parameter.name)
+                    .ok_or_else(|| {
+                        vec![ResolvedBodyError::new(
+                            node_id.clone(),
+                            format!(
+                                "defaulted parameter '{}' has no declaration",
+                                parameter.name
+                            ),
+                        )]
+                    })?;
+                if declaration.default_value.is_none() {
+                    return Err(vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        format!(
+                            "parameter '{}' is marked defaulted without a typed default body",
+                            parameter.name
+                        ),
+                    )]);
+                }
+                ResolvedExpr {
+                    node_id: NodeId(format!(
+                        "{}/default-argument:{}",
+                        node_id.0,
+                        stable_id_fragment(&parameter.name)
+                    )),
+                    origin: Origin::Desugared {
+                        parent: node_id.clone(),
+                        rule: "resolved_body.default_argument".into(),
+                        span: self.origin(node_id)?.user_span(),
+                    },
+                    ty: parameter.ty.clone(),
+                    effects: Vec::new(),
+                    backend_requirements: Vec::new(),
+                    kind: ResolvedExprKind::DefaultArgument {
+                        callable: function.node_id.clone(),
+                        parameter: parameter.id.clone(),
+                    },
+                }
+            } else {
+                return Err(vec![ResolvedBodyError::new(
                     node_id.clone(),
                     format!("parameter '{}' has no checked argument", parameter.name),
-                )]
-            })?;
-            let value = self.lower_expr(value, &value_role)?;
+                )]);
+            };
             let target = if signature.generic_parameters.is_empty() {
                 parameter.ty.clone()
             } else if self.collect_instantiation(&parameter.ty, &value.ty, &mut substitutions) {
@@ -3030,6 +3121,45 @@ mod tests {
             panic!("inferred generic call expected");
         };
         assert_eq!(inferred.type_arguments, call.type_arguments);
+    }
+
+    #[test]
+    fn omitted_default_argument_references_typed_declaration_body() {
+        let file = parse(
+            "func add(left: i32, right: i32 = 2) -> i32 { left + right }\nfunc main() -> i32 { add(left = 5) }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower defaults");
+        let add = &bodies[&NodeId("function:add".into())];
+        let signature = program
+            .resolved_signature(&NodeId("function:add".into()))
+            .unwrap();
+        let default_parameter = &signature.parameters[1].id;
+        let default = &add.default_values[default_parameter];
+        assert!(matches!(
+            default.kind,
+            ResolvedExprKind::Literal(ResolvedLiteral::Int(2))
+        ));
+
+        let result = bodies[&NodeId("function:main".into())]
+            .root
+            .result
+            .as_ref()
+            .unwrap();
+        let ResolvedExprKind::Call(call) = &result.kind else {
+            panic!("defaulted call expected");
+        };
+        assert_eq!(call.arguments.len(), 2);
+        assert!(matches!(
+            call.arguments[1].value.kind,
+            ResolvedExprKind::DefaultArgument {
+                ref callable,
+                ref parameter,
+            } if callable == &NodeId("function:add".into())
+                && parameter == default_parameter
+        ));
+        add.validate(program.resolved_types())
+            .expect("valid declaration default");
     }
 
     #[test]

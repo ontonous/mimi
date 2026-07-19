@@ -90,6 +90,30 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // Default expressions are declaration-owned typed artifacts. Capture
+        // them under the callee while its parameters and generic binders are
+        // in scope, rather than re-checking cloned syntax at each call site.
+        for parameter in &func.params {
+            if let Some(default) = &parameter.default_value {
+                let expected = self.resolve_type(&parameter.ty);
+                let actual = self.check_expr(&expected, default, &mut scopes);
+                if self.unification.unify(&actual, &expected).is_err()
+                    && !is_numeric_coercion(&expected, &actual)
+                {
+                    self.errors.push(Diagnostic::error_code(
+                        codes::E0211,
+                        format!(
+                            "default for parameter '{}' expected {}, found {}",
+                            parameter.name,
+                            fmt_type(&expected),
+                            fmt_type(&actual)
+                        ),
+                        parameter.meta.span,
+                    ));
+                }
+            }
+        }
+
         // Check for contracts on shared-param functions (E0502)
         let has_shared_param = func.params.iter().any(|p| {
             matches!(
