@@ -208,6 +208,7 @@ pub struct ResolvedState {
     pub node_id: NodeId,
     pub id: StateId,
     pub payload: Vec<(String, Type)>,
+    pub field_ids: BTreeMap<String, NodeId>,
     pub origin: Origin,
 }
 
@@ -4824,6 +4825,18 @@ fn collect_flow(
                 }
             }
             let node_id = NodeId(format!("state:{}::{}", qualified_name, state.name));
+            let mut field_ids = BTreeMap::new();
+            for field in state.payload.as_deref().unwrap_or_default() {
+                let field_id = ids.anonymous(
+                    &node_id,
+                    "decl.field",
+                    &format!("payload.field.{}", stable_id_fragment(&field.name)),
+                    usable_span(field.meta.span),
+                    field.meta.origin,
+                    errors,
+                );
+                field_ids.insert(field.name.clone(), field_id);
+            }
             let origin = resolve_enclosed_origin(
                 &node_id,
                 state.meta,
@@ -4837,6 +4850,7 @@ fn collect_flow(
                     node_id,
                     id,
                     payload,
+                    field_ids,
                     origin,
                 },
             )
@@ -7254,6 +7268,86 @@ fn build_canonical_function_signatures(
                     ),
                     actor.origin.user_span(),
                 )),
+            }
+        }
+    }
+
+    let mut flows = program.flows.values().collect::<Vec<_>>();
+    flows.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    for flow in flows {
+        let module = flow.id.0.rsplit_once("::").map(|(module, _)| module);
+        let mut resolve_name = |name: &str| {
+            if let Some(primitive) = crate::core::ResolvedTypeName::primitive(name) {
+                return Some(primitive);
+            }
+            if let Some(module) = module {
+                let qualified = format!("{module}::{name}");
+                if let Some(candidates) = nominal_catalog.get(&qualified) {
+                    if candidates.len() == 1 {
+                        return crate::core::NominalTypeId::new(candidates.iter().next()?.clone())
+                            .ok()
+                            .map(crate::core::ResolvedTypeName::Nominal);
+                    }
+                }
+            }
+            if let Some(candidates) = nominal_catalog.get(name) {
+                if candidates.len() == 1 {
+                    return crate::core::NominalTypeId::new(candidates.iter().next()?.clone())
+                        .ok()
+                        .map(crate::core::ResolvedTypeName::Nominal);
+                }
+            }
+            builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal)
+        };
+        let mut states = flow.states.values().collect::<Vec<_>>();
+        states.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        for state in states {
+            for (name, field_type) in &state.payload {
+                let Some(field_id) = state.field_ids.get(name) else {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: state '{}::{}' field '{}' has no stable declaration identity",
+                            flow.id.0, state.id.name, name
+                        ),
+                        state.origin.user_span(),
+                    ));
+                    continue;
+                };
+                if !program.node_meta.contains_key(field_id) {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: state field '{}' is absent from NodeMeta",
+                            field_id.0
+                        ),
+                        state.origin.user_span(),
+                    ));
+                    continue;
+                }
+                let zonked = match ZonkedTy::from_resolved(field_type.clone()) {
+                    Ok(ty) => ty,
+                    Err(error) => {
+                        errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: field '{}' in state '{}::{}' is not zonked: {error}",
+                                name, flow.id.0, state.id.name
+                            ),
+                            state.origin.user_span(),
+                        ));
+                        continue;
+                    }
+                };
+                match types.intern_zonked(&zonked, &capabilities, &mut resolve_name) {
+                    Ok(ty) => {
+                        field_types.insert(field_id.clone(), ty);
+                    }
+                    Err(error) => errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: field '{}' in state '{}::{}' is not canonical: {error}",
+                            name, flow.id.0, state.id.name
+                        ),
+                        state.origin.user_span(),
+                    )),
+                }
             }
         }
     }

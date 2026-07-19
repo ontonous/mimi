@@ -39,6 +39,7 @@ pub struct FunctionBodyInput<'a> {
     pub functions: &'a HashMap<NodeId, ResolvedFunction>,
     pub type_defs: &'a HashMap<NodeId, ResolvedTypeDef>,
     pub actors: &'a HashMap<NodeId, ResolvedActor>,
+    pub flows: &'a HashMap<crate::core::FlowId, crate::core::ResolvedFlow>,
     pub traits: &'a HashMap<NodeId, ResolvedTrait>,
     pub impls: &'a HashMap<NodeId, ResolvedImpl>,
     pub field_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
@@ -79,6 +80,7 @@ pub fn lower_function_body(
         functions: input.functions,
         type_defs: input.type_defs,
         actors: input.actors,
+        flows: input.flows,
         traits: input.traits,
         impls: input.impls,
         field_types: input.field_types,
@@ -151,6 +153,7 @@ pub fn lower_checked_function_bodies(
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            flows: program.flows(),
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
@@ -240,6 +243,7 @@ struct BodyLowerer<'a> {
     functions: &'a HashMap<NodeId, ResolvedFunction>,
     type_defs: &'a HashMap<NodeId, ResolvedTypeDef>,
     actors: &'a HashMap<NodeId, ResolvedActor>,
+    flows: &'a HashMap<crate::core::FlowId, crate::core::ResolvedFlow>,
     traits: &'a HashMap<NodeId, ResolvedTrait>,
     impls: &'a HashMap<NodeId, ResolvedImpl>,
     field_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
@@ -1229,15 +1233,27 @@ impl BodyLowerer<'_> {
             _ => return self.unsupported(node_id, "record construction without nominal type"),
         };
         let owner = NodeId(nominal.as_str().to_string());
-        let definition = self.type_defs.get(&owner).ok_or_else(|| {
-            vec![ResolvedBodyError::new(
-                node_id.clone(),
-                format!("record owner '{}' has no resolved definition", owner.0),
-            )]
-        })?;
-        let declared = match &definition.declaration.kind {
-            crate::ast::TypeDefKind::Record(fields) => fields,
-            _ => return self.unsupported(node_id, "non-record nominal construction"),
+        let declared: Vec<String> = if let Some(definition) = self.type_defs.get(&owner) {
+            match &definition.declaration.kind {
+                crate::ast::TypeDefKind::Record(fields) => {
+                    fields.iter().map(|field| field.name.clone()).collect()
+                }
+                _ => return self.unsupported(node_id, "non-record nominal construction"),
+            }
+        } else {
+            let states = self
+                .flows
+                .values()
+                .flat_map(|flow| flow.states.values())
+                .filter(|state| state.node_id == owner)
+                .collect::<Vec<_>>();
+            let [state] = states.as_slice() else {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("record owner '{}' has no unique field catalog", owner.0),
+                )]);
+            };
+            state.payload.iter().map(|(name, _)| name.clone()).collect()
         };
         let mut surface = BTreeMap::new();
         for field in fields {
@@ -1249,14 +1265,14 @@ impl BodyLowerer<'_> {
             }
         }
         let mut lowered = Vec::with_capacity(declared.len());
-        for declaration in declared {
-            let value = surface.remove(declaration.name.as_str()).ok_or_else(|| {
+        for declaration in &declared {
+            let value = surface.remove(declaration.as_str()).ok_or_else(|| {
                 vec![ResolvedBodyError::new(
                     node_id.clone(),
-                    format!("record field '{}' has no checked value", declaration.name),
+                    format!("record field '{declaration}' has no checked value"),
                 )]
             })?;
-            let field_id = self.resolve_field(node_id, ty, &declaration.name)?;
+            let field_id = self.resolve_field(node_id, ty, declaration)?;
             let declaration_ty = self.field_types.get(&field_id).ok_or_else(|| {
                 vec![ResolvedBodyError::new(
                     field_id.clone(),
@@ -1266,10 +1282,7 @@ impl BodyLowerer<'_> {
             let target_ty = self.instantiate_member_type(node_id, ty, declaration_ty)?;
             let value = self.lower_expr(
                 &value.value,
-                &format!(
-                    "{role}.field.{}.value",
-                    stable_id_fragment(&declaration.name)
-                ),
+                &format!("{role}.field.{}.value", stable_id_fragment(declaration)),
             )?;
             let conversion = self.identity_conversion(node_id, &value.ty, &target_ty)?;
             lowered.push(ResolvedRecordField {
@@ -2672,10 +2685,24 @@ impl BodyLowerer<'_> {
                 )]
             })?
         } else {
-            return Err(vec![ResolvedBodyError::new(
-                node_id.clone(),
-                format!("nominal owner '{}' has no field catalog", owner.0),
-            )]);
+            let states = self
+                .flows
+                .values()
+                .flat_map(|flow| flow.states.values())
+                .filter(|state| state.node_id == owner)
+                .collect::<Vec<_>>();
+            let [state] = states.as_slice() else {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("nominal owner '{}' has no unique field catalog", owner.0),
+                )]);
+            };
+            state.field_ids.get(name).cloned().ok_or_else(|| {
+                vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("field '{name}' is absent from state owner '{}'", owner.0),
+                )]
+            })?
         };
         if !self.node_meta.contains_key(&field_id) || !self.field_types.contains_key(&field_id) {
             return Err(vec![ResolvedBodyError::new(
@@ -3424,6 +3451,7 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            flows: program.flows(),
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
@@ -3465,6 +3493,7 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            flows: program.flows(),
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
@@ -3498,6 +3527,7 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            flows: program.flows(),
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
@@ -3545,6 +3575,7 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            flows: program.flows(),
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
@@ -3588,6 +3619,7 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            flows: program.flows(),
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
@@ -3725,6 +3757,7 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            flows: program.flows(),
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
@@ -3763,6 +3796,7 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            flows: program.flows(),
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
@@ -3807,6 +3841,7 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            flows: program.flows(),
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
@@ -3908,6 +3943,7 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            flows: program.flows(),
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
@@ -4014,6 +4050,7 @@ mod tests {
             functions: program.functions(),
             type_defs: program.type_defs(),
             actors: program.actors(),
+            flows: program.flows(),
             traits: program.traits(),
             impls: program.impls(),
             field_types: program.resolved_field_types(),
@@ -4515,6 +4552,53 @@ mod tests {
         assert_eq!(call.arguments[1].parameter, signature.parameters[1].id);
         body.validate(program.resolved_types())
             .expect("valid transition call");
+    }
+
+    #[test]
+    fn flow_state_records_share_canonical_payload_field_facts() {
+        let file = parse(
+            "flow Calc { state Zero { v: i32 } state Value { v: i32 } transition add(Zero, amount: i32) -> Value { do { return Value { v: self.v + amount } } } }\nfunc main() -> i32 { let current = Zero { v: 10 }; let next = Calc::add(current, 5); next.v }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let state = &program.flow("Calc").expect("flow").states["Zero"];
+        let field = state.field_ids.get("v").expect("state field identity");
+        let field_type = program
+            .resolved_field_type(field)
+            .expect("canonical state field type");
+        assert!(matches!(
+            program.resolved_types().get(field_type),
+            Some(ResolvedType::Primitive(crate::core::ir::PrimitiveType::I32))
+        ));
+
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower flow state body");
+        let body = &bodies[&NodeId("function:main".into())];
+        let ResolvedStmtKind::Bind {
+            initializer: Some(current),
+            ..
+        } = &body.root.statements[0].kind
+        else {
+            panic!("state construction expected");
+        };
+        assert!(matches!(
+            &current.kind,
+            ResolvedExprKind::Record { fields, .. } if fields[0].field == *field
+        ));
+        let ResolvedExprKind::Load(place) = &body.root.result.as_ref().expect("field load").kind
+        else {
+            panic!("state payload projection expected");
+        };
+        let result_field = program.flow("Calc").unwrap().states["Value"]
+            .field_ids
+            .get("v")
+            .unwrap();
+        assert!(matches!(
+            place.projections.as_slice(),
+            [ResolvedProjection::Field { field: projected, ty }]
+                if projected == result_field
+                    && Some(ty) == program.resolved_field_type(result_field)
+        ));
+        body.validate(program.resolved_types())
+            .expect("valid typed flow state records");
     }
 
     #[test]
