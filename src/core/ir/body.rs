@@ -398,6 +398,11 @@ pub enum ResolvedStmtKind {
         condition: ResolvedExpr,
         body: ResolvedBlock,
     },
+    WhileLet {
+        pattern: ResolvedPattern,
+        initializer: ResolvedExpr,
+        body: ResolvedBlock,
+    },
     Loop(ResolvedBlock),
     For {
         pattern: ResolvedPattern,
@@ -643,6 +648,21 @@ impl BodyValidator<'_> {
             ResolvedStmtKind::Expr(expression) => self.visit_expr(expression),
             ResolvedStmtKind::While { condition, body } => {
                 self.visit_expr(condition);
+                self.visit_block(body);
+            }
+            ResolvedStmtKind::WhileLet {
+                pattern,
+                initializer,
+                body,
+            } => {
+                self.visit_pattern(pattern);
+                self.visit_expr(initializer);
+                if pattern.ty != initializer.ty {
+                    self.error(
+                        &statement.node_id,
+                        "while-let pattern type disagrees with initializer type",
+                    );
+                }
                 self.visit_block(body);
             }
             ResolvedStmtKind::Loop(body) => self.visit_block(body),

@@ -403,6 +403,28 @@ impl BodyLowerer<'_> {
                 condition: self.lower_expr(cond, &format!("{role}.condition"))?,
                 body: self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?,
             },
+            Stmt::WhileLet { pat, init, body } => {
+                let initializer = self.lower_expr(init, &format!("{role}.initializer"))?;
+                self.scopes.push(BTreeMap::new());
+                let lowered = (|| {
+                    let pattern = self.lower_binding_pattern(
+                        pat,
+                        &format!("{role}.pattern"),
+                        initializer.ty.clone(),
+                        false,
+                    )?;
+                    let body =
+                        self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?;
+                    Ok::<_, Vec<ResolvedBodyError>>((pattern, body))
+                })();
+                self.scopes.pop();
+                let (pattern, body) = lowered?;
+                ResolvedStmtKind::WhileLet {
+                    pattern,
+                    initializer,
+                    body,
+                }
+            }
             Stmt::Loop(body) => ResolvedStmtKind::Loop(self.lower_block(
                 body,
                 &format!("{role}.body"),
@@ -586,7 +608,7 @@ impl BodyLowerer<'_> {
                 }
             }
             Stmt::Desc(..) | Stmt::Rule(..) | Stmt::MmsBlock { .. } => return Ok(None),
-            Stmt::WhileLet { .. } | Stmt::Math(_) | Stmt::Pinned { .. } | Stmt::Ellipsis => {
+            Stmt::Math(_) | Stmt::Pinned { .. } | Stmt::Ellipsis => {
                 return self.unsupported(&node_id, stmt_kind(stmt))
             }
             Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
@@ -2758,6 +2780,40 @@ mod tests {
         function_body
             .validate(program.resolved_types())
             .expect("valid for body");
+    }
+
+    #[test]
+    fn while_let_retains_typed_pattern_scope_and_initializer() {
+        let file = parse(
+            "func take(value: Option<i32>) -> i32 { let mut result = 0; while let Some(inner) = value { result = inner; break; } result }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower while-let");
+        let body = &bodies[&NodeId("function:take".into())];
+        let ResolvedStmtKind::WhileLet {
+            pattern,
+            initializer,
+            body: loop_body,
+        } = &body.root.statements[1].kind
+        else {
+            panic!("while-let expected");
+        };
+        assert_eq!(pattern.ty, initializer.ty);
+        let ResolvedPatternKind::Constructor { fields, .. } = &pattern.kind else {
+            panic!("Some pattern expected");
+        };
+        let ResolvedPatternKind::Binding { local, .. } = &fields[0].1.kind else {
+            panic!("payload binding expected");
+        };
+        let ResolvedStmtKind::Assign { value, .. } = &loop_body.statements[0].kind else {
+            panic!("loop assignment expected");
+        };
+        let ResolvedExprKind::Load(place) = &value.kind else {
+            panic!("assignment must load while-let binding");
+        };
+        assert_eq!(&place.base, local);
+        body.validate(program.resolved_types())
+            .expect("valid while-let");
     }
 
     #[test]
