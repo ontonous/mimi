@@ -721,6 +721,38 @@ impl BodyLowerer<'_> {
                 "call has no checker-resolved call-site record",
             )]
         })?;
+        if site.kind == ResolvedCallKind::Builtin {
+            let builtin =
+                super::BuiltinId::new(site.callee.clone()).map_err(|error| vec![error])?;
+            let mut lowered = Vec::with_capacity(arguments.len());
+            for index in 0..arguments.len() {
+                if matches!(arguments[index].unlocated(), Expr::NamedArg(_, _)) {
+                    return self.unsupported(node_id, "named arguments for builtin call");
+                }
+                let argument_role =
+                    expr_sibling_role(&format!("{role}.argument"), arguments, index);
+                let value = self.lower_expr(&arguments[index], &argument_role)?;
+                lowered.push(ResolvedArgument {
+                    parameter: super::ResolvedParameterId(NodeId(format!(
+                        "builtin:{}/parameter:{index}",
+                        site.callee
+                    ))),
+                    conversion: CheckedConversion {
+                        kind: CheckedConversionKind::Identity,
+                        from: value.ty.clone(),
+                        to: value.ty.clone(),
+                    },
+                    value,
+                });
+            }
+            return Ok(ResolvedCall {
+                callee: ResolvedCallee::Builtin(builtin),
+                arguments: lowered,
+                permission: None,
+                effects: Vec::new(),
+                session: Vec::new(),
+            });
+        }
         if site.kind != ResolvedCallKind::Function {
             return self.unsupported(node_id, &format!("closed {:?} call target", site.kind));
         }
@@ -1763,12 +1795,18 @@ mod tests {
         assert!(bodies.contains_key(&NodeId("function:increment".into())));
         assert!(bodies.contains_key(&NodeId("function:main".into())));
 
-        let unsupported = parse("func main() { println(1) }");
-        let checked = crate::core::check_program(&unsupported).expect("checker accepts builtin");
-        let errors = lower_checked_function_bodies(&unsupported, &checked)
-            .expect_err("unsupported builtin prevents the whole map");
-        assert!(errors
-            .iter()
-            .any(|error| error.message.contains("closed Unknown call target")));
+        let builtin_file = parse("func main() { println(1) }");
+        let checked = crate::core::check_program(&builtin_file).expect("checker accepts builtin");
+        let bodies = lower_checked_function_bodies(&builtin_file, &checked)
+            .expect("builtin identity is canonical");
+        let main = &bodies[&NodeId("function:main".into())];
+        let expression = main.root.result.as_ref().expect("builtin tail expression");
+        assert!(matches!(
+            expression.kind,
+            ResolvedExprKind::Call(ResolvedCall {
+                callee: ResolvedCallee::Builtin(_),
+                ..
+            })
+        ));
     }
 }
