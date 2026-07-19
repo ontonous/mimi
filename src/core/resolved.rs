@@ -145,6 +145,8 @@ pub struct NodeMeta {
     expression_key: Option<ExpressionTypeKey>,
     /// Ephemeral explicit type operand consumed while constructing canonical IR.
     type_operand: Option<Type>,
+    /// Ephemeral ordered generic arguments consumed while constructing canonical IR.
+    type_arguments: Vec<Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -590,6 +592,7 @@ pub struct CheckedProgram {
     resolved_signatures: BTreeMap<NodeId, crate::core::ResolvedSignature>,
     resolved_node_types: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     resolved_type_operands: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    resolved_type_arguments: BTreeMap<NodeId, Vec<crate::core::ResolvedTypeId>>,
     resolved_field_types: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     callable_cfgs: BTreeMap<NodeId, crate::core::cfg::CallableCfg>,
     resource_analyses: BTreeMap<NodeId, crate::core::ResourceAnalysis>,
@@ -682,15 +685,18 @@ impl CheckedProgram {
             resolved_node_types,
             resolved_type_operands,
             resolved_field_types,
+            resolved_type_arguments,
         ) = build_canonical_function_signatures(&program, &stable_expression_types)?;
         for meta in program.node_meta.values_mut() {
             meta.type_operand = None;
+            meta.type_arguments.clear();
         }
         program.resolved_types = resolved_types;
         program.resolved_signatures = resolved_signatures;
         program.resolved_node_types = resolved_node_types;
         program.resolved_type_operands = resolved_type_operands;
         program.resolved_field_types = resolved_field_types;
+        program.resolved_type_arguments = resolved_type_arguments;
         program.callable_cfgs = callable_cfgs;
         program.resource_analyses = resource_analyses;
         Ok(program)
@@ -881,6 +887,7 @@ impl CheckedProgram {
             resolved_signatures: BTreeMap::new(),
             resolved_node_types: BTreeMap::new(),
             resolved_type_operands: BTreeMap::new(),
+            resolved_type_arguments: BTreeMap::new(),
             resolved_field_types: BTreeMap::new(),
             callable_cfgs: BTreeMap::new(),
             resource_analyses: BTreeMap::new(),
@@ -1149,6 +1156,17 @@ impl CheckedProgram {
 
     pub fn resolved_type_operand(&self, node: &NodeId) -> Option<&crate::core::ResolvedTypeId> {
         self.resolved_type_operands.get(node)
+    }
+
+    pub fn resolved_type_arguments(&self) -> &BTreeMap<NodeId, Vec<crate::core::ResolvedTypeId>> {
+        &self.resolved_type_arguments
+    }
+
+    pub fn resolved_type_arguments_at(
+        &self,
+        node: &NodeId,
+    ) -> Option<&[crate::core::ResolvedTypeId]> {
+        self.resolved_type_arguments.get(node).map(Vec::as_slice)
     }
 
     pub fn resolved_field_types(&self) -> &BTreeMap<NodeId, crate::core::ResolvedTypeId> {
@@ -4175,6 +4193,19 @@ fn collect_expr_meta(
                 ));
             }
         }
+        if let Expr::Turbofish(_, arguments, _) = expr.unlocated() {
+            if !node_meta.type_arguments.is_empty() {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: expression NodeId '{}' has more than one generic argument list",
+                        node_id.0
+                    ),
+                    exact.unwrap_or(fallback),
+                ));
+            } else {
+                node_meta.type_arguments.clone_from(arguments);
+            }
+        }
     }
     match expr.unlocated() {
         Expr::Literal(lit) => {
@@ -4733,6 +4764,7 @@ fn insert_node_meta(
             precision,
             expression_key: None,
             type_operand: None,
+            type_arguments: Vec::new(),
         },
     );
 }
@@ -6310,6 +6342,7 @@ type CanonicalFunctionArtifacts = (
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    BTreeMap<NodeId, Vec<crate::core::ResolvedTypeId>>,
 );
 
 fn stabilize_expression_types(
@@ -6484,6 +6517,7 @@ fn build_canonical_function_signatures(
     let mut signatures = BTreeMap::new();
     let mut node_types = BTreeMap::new();
     let mut type_operands = BTreeMap::new();
+    let mut type_arguments = BTreeMap::new();
     let mut field_types = BTreeMap::new();
     let mut errors = Vec::new();
     let mut functions = program.functions.values().collect::<Vec<_>>();
@@ -6654,6 +6688,47 @@ fn build_canonical_function_signatures(
                             ),
                             program.node_meta[node_id].origin.user_span(),
                         )),
+                    }
+                }
+                if let Some(arguments) = program
+                    .node_meta
+                    .get(node_id)
+                    .map(|meta| meta.type_arguments.as_slice())
+                    .filter(|arguments| !arguments.is_empty())
+                {
+                    let mut canonical = Vec::with_capacity(arguments.len());
+                    let mut failed = false;
+                    for argument in arguments {
+                        let zonked = match ZonkedTy::from_resolved(argument.clone()) {
+                            Ok(argument) => argument,
+                            Err(error) => {
+                                errors.push(Diagnostic::error(
+                                    format!(
+                                        "TOOL-RESOLUTION-001: generic argument at '{}' is not zonked: {error}",
+                                        node_id.0
+                                    ),
+                                    program.node_meta[node_id].origin.user_span(),
+                                ));
+                                failed = true;
+                                continue;
+                            }
+                        };
+                        match types.intern_zonked(&zonked, &capabilities, &mut resolve_name) {
+                            Ok(argument) => canonical.push(argument),
+                            Err(error) => {
+                                errors.push(Diagnostic::error(
+                                    format!(
+                                        "TOOL-RESOLUTION-001: generic argument at '{}' is not canonical: {error}",
+                                        node_id.0
+                                    ),
+                                    program.node_meta[node_id].origin.user_span(),
+                                ));
+                                failed = true;
+                            }
+                        }
+                    }
+                    if !failed {
+                        type_arguments.insert(node_id.clone(), canonical);
                     }
                 }
             }
@@ -6958,7 +7033,14 @@ fn build_canonical_function_signatures(
         }));
     }
     if errors.is_empty() {
-        Ok((types, signatures, node_types, type_operands, field_types))
+        Ok((
+            types,
+            signatures,
+            node_types,
+            type_operands,
+            field_types,
+            type_arguments,
+        ))
     } else {
         Err(errors)
     }
@@ -7232,6 +7314,10 @@ mod tests {
             .node_meta()
             .values()
             .all(|meta| meta.type_operand.is_none()));
+        assert!(program
+            .node_meta()
+            .values()
+            .all(|meta| meta.type_arguments.is_empty()));
     }
 
     #[test]

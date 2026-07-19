@@ -47,6 +47,7 @@ pub struct FunctionBodyInput<'a> {
     pub constants: &'a HashMap<NodeId, ResolvedConstant>,
     pub node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     pub type_operands: &'a BTreeMap<NodeId, ResolvedTypeId>,
+    pub type_arguments: &'a BTreeMap<NodeId, Vec<ResolvedTypeId>>,
     pub types: &'a ResolvedTypeTable,
     pub node_meta: &'a HashMap<NodeId, NodeMeta>,
     pub sources: &'a SourceRegistry,
@@ -85,6 +86,7 @@ pub fn lower_function_body(
         constants: input.constants,
         node_types: input.node_types,
         type_operands: input.type_operands,
+        type_arguments: input.type_arguments,
         types: input.types,
         node_meta: input.node_meta,
         ids: NodeIdBuilder::new(input.sources),
@@ -143,6 +145,7 @@ pub fn lower_checked_function_bodies(
             constants: program.constants(),
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
+            type_arguments: program.resolved_type_arguments(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -230,6 +233,7 @@ struct BodyLowerer<'a> {
     constants: &'a HashMap<NodeId, ResolvedConstant>,
     node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     type_operands: &'a BTreeMap<NodeId, ResolvedTypeId>,
+    type_arguments: &'a BTreeMap<NodeId, Vec<ResolvedTypeId>>,
     types: &'a ResolvedTypeTable,
     node_meta: &'a HashMap<NodeId, NodeMeta>,
     ids: NodeIdBuilder<'a>,
@@ -969,7 +973,23 @@ impl BodyLowerer<'_> {
                 ResolvedExprKind::Await(Box::new(self.lower_expr(value, &format!("{role}.inner"))?))
             }
             Expr::Call(callee, arguments) => {
-                ResolvedExprKind::Call(self.lower_call(&node_id, callee, arguments, role)?)
+                ResolvedExprKind::Call(self.lower_call(&node_id, callee, arguments, role, &[])?)
+            }
+            Expr::Turbofish(name, _, arguments) => {
+                let type_arguments =
+                    self.type_arguments.get(&node_id).cloned().ok_or_else(|| {
+                        vec![ResolvedBodyError::new(
+                            node_id.clone(),
+                            "turbofish call has no canonical generic argument list",
+                        )]
+                    })?;
+                ResolvedExprKind::Call(self.lower_call(
+                    &node_id,
+                    &Expr::Ident(name.clone()),
+                    arguments,
+                    role,
+                    &type_arguments,
+                )?)
             }
             Expr::Match(scrutinee, arms) => {
                 let scrutinee = self.lower_expr(scrutinee, &format!("{role}.scrutinee"))?;
@@ -1006,7 +1026,6 @@ impl BodyLowerer<'_> {
             Expr::Quote(_)
             | Expr::QuoteInterpolate(_)
             | Expr::Lambda { .. }
-            | Expr::Turbofish(_, _, _)
             | Expr::NamedArg(_, _) => return self.unsupported(&node_id, expr_kind(expr)),
             Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
         };
@@ -1191,6 +1210,7 @@ impl BodyLowerer<'_> {
         callee: &Expr,
         arguments: &[Expr],
         role: &str,
+        type_arguments: &[ResolvedTypeId],
     ) -> Result<ResolvedCall, Vec<ResolvedBodyError>> {
         let site = self.call_sites.get(node_id).ok_or_else(|| {
             vec![ResolvedBodyError::new(
@@ -1199,6 +1219,9 @@ impl BodyLowerer<'_> {
             )]
         })?;
         if site.kind == ResolvedCallKind::Builtin {
+            if !type_arguments.is_empty() {
+                return self.unsupported(node_id, "generic arguments on builtin call");
+            }
             let builtin =
                 super::BuiltinId::new(site.callee.clone()).map_err(|error| vec![error])?;
             let mut lowered = Vec::with_capacity(arguments.len());
@@ -1224,6 +1247,7 @@ impl BodyLowerer<'_> {
             }
             return Ok(ResolvedCall {
                 callee: ResolvedCallee::Builtin(builtin),
+                type_arguments: Vec::new(),
                 arguments: lowered,
                 permission: None,
                 effects: Vec::new(),
@@ -1231,6 +1255,9 @@ impl BodyLowerer<'_> {
             });
         }
         if site.kind == ResolvedCallKind::Extern {
+            if !type_arguments.is_empty() {
+                return self.unsupported(node_id, "generic arguments on extern call");
+            }
             let candidates = self
                 .extern_blocks
                 .values()
@@ -1282,6 +1309,7 @@ impl BodyLowerer<'_> {
             }
             return Ok(ResolvedCall {
                 callee: ResolvedCallee::Extern(function.node_id.clone()),
+                type_arguments: Vec::new(),
                 arguments: lowered,
                 permission: None,
                 effects: Vec::new(),
@@ -1289,6 +1317,9 @@ impl BodyLowerer<'_> {
             });
         }
         if site.kind == ResolvedCallKind::Method {
+            if !type_arguments.is_empty() {
+                return self.unsupported(node_id, "generic arguments on method call");
+            }
             return self.lower_method_call(node_id, callee, arguments, role);
         }
         if site.kind != ResolvedCallKind::Function {
@@ -1315,6 +1346,23 @@ impl BodyLowerer<'_> {
                 format!("callee '{}' has no canonical signature", function.node_id.0),
             )]
         })?;
+        if !type_arguments.is_empty() && signature.generic_parameters.len() != type_arguments.len()
+        {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "call supplies {} generic arguments but canonical signature requires {}",
+                    type_arguments.len(),
+                    signature.generic_parameters.len()
+                ),
+            )]);
+        }
+        let mut substitutions = signature
+            .generic_parameters
+            .iter()
+            .cloned()
+            .zip(type_arguments.iter().cloned())
+            .collect::<BTreeMap<_, _>>();
         if arguments.len() != signature.parameters.len() {
             return Err(vec![ResolvedBodyError::new(
                 node_id.clone(),
@@ -1373,13 +1421,53 @@ impl BodyLowerer<'_> {
                 )]
             })?;
             let value = self.lower_expr(value, &value_role)?;
-            let conversion = self.identity_conversion(node_id, &value.ty, &parameter.ty)?;
+            let target = if signature.generic_parameters.is_empty() {
+                parameter.ty.clone()
+            } else if self.collect_instantiation(&parameter.ty, &value.ty, &mut substitutions) {
+                value.ty.clone()
+            } else {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "argument for generic parameter '{}' disagrees with explicit instantiation",
+                        parameter.name
+                    ),
+                )]);
+            };
+            let conversion = self.identity_conversion(node_id, &value.ty, &target)?;
             lowered.push(ResolvedArgument {
                 parameter: parameter.id.clone(),
                 value,
                 conversion,
             });
         }
+        let call_result = self.node_types.get(node_id).ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "call has no checker-finalized result type",
+            )]
+        })?;
+        if !self.collect_instantiation(&signature.result, call_result, &mut substitutions) {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "call result type disagrees with canonical generic instantiation",
+            )]);
+        }
+        let type_arguments = signature
+            .generic_parameters
+            .iter()
+            .map(|parameter| {
+                substitutions.get(parameter).cloned().ok_or_else(|| {
+                    vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        format!(
+                            "generic parameter '{}' has no checker-closed instantiation",
+                            parameter.0
+                        ),
+                    )]
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let effects = site
             .effects
             .iter()
@@ -1391,6 +1479,7 @@ impl BodyLowerer<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ResolvedCall {
             callee: ResolvedCallee::Function(function.node_id.clone()),
+            type_arguments,
             arguments: lowered,
             permission: None,
             effects,
@@ -1598,6 +1687,7 @@ impl BodyLowerer<'_> {
         let effects = signature.effects.clone();
         Ok(ResolvedCall {
             callee: resolved_callee,
+            type_arguments: Vec::new(),
             arguments: lowered,
             permission,
             effects,
@@ -2192,6 +2282,170 @@ impl BodyLowerer<'_> {
         }
     }
 
+    fn collect_instantiation(
+        &self,
+        template: &ResolvedTypeId,
+        actual: &ResolvedTypeId,
+        substitutions: &mut BTreeMap<NodeId, ResolvedTypeId>,
+    ) -> bool {
+        let Some(template_ty) = self.types.get(template) else {
+            return false;
+        };
+        if let ResolvedType::GenericParameter(parameter) = template_ty {
+            return match substitutions.get(parameter) {
+                Some(instantiated) => instantiated == actual,
+                None => {
+                    substitutions.insert(parameter.clone(), actual.clone());
+                    true
+                }
+            };
+        }
+        if template == actual {
+            return true;
+        }
+        let Some(actual_ty) = self.types.get(actual) else {
+            return false;
+        };
+        match (template_ty, actual_ty) {
+            (
+                ResolvedType::Nominal {
+                    item: left_item,
+                    arguments: left,
+                },
+                ResolvedType::Nominal {
+                    item: right_item,
+                    arguments: right,
+                },
+            ) => {
+                left_item == right_item
+                    && left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(left, right)| self.collect_instantiation(left, right, substitutions))
+            }
+            (ResolvedType::Option(left), ResolvedType::Option(right))
+            | (ResolvedType::CBuffer(left), ResolvedType::CBuffer(right))
+            | (ResolvedType::Slice(left), ResolvedType::Slice(right))
+            | (ResolvedType::CShared(left), ResolvedType::CShared(right)) => {
+                self.collect_instantiation(left, right, substitutions)
+            }
+            (
+                ResolvedType::Result {
+                    ok: left_ok,
+                    error: left_error,
+                },
+                ResolvedType::Result {
+                    ok: right_ok,
+                    error: right_error,
+                },
+            ) => {
+                self.collect_instantiation(left_ok, right_ok, substitutions)
+                    && self.collect_instantiation(left_error, right_error, substitutions)
+            }
+            (ResolvedType::Tuple(left), ResolvedType::Tuple(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(left, right)| self.collect_instantiation(left, right, substitutions))
+            }
+            (
+                ResolvedType::Reference {
+                    lifetime: left_lifetime,
+                    mutable: left_mutable,
+                    target: left,
+                },
+                ResolvedType::Reference {
+                    lifetime: right_lifetime,
+                    mutable: right_mutable,
+                    target: right,
+                },
+            ) => {
+                left_lifetime == right_lifetime
+                    && left_mutable == right_mutable
+                    && self.collect_instantiation(left, right, substitutions)
+            }
+            (
+                ResolvedType::Function {
+                    abi: left_abi,
+                    parameters: left_parameters,
+                    result: left_result,
+                },
+                ResolvedType::Function {
+                    abi: right_abi,
+                    parameters: right_parameters,
+                    result: right_result,
+                },
+            ) => {
+                left_abi == right_abi
+                    && left_parameters.len() == right_parameters.len()
+                    && left_parameters
+                        .iter()
+                        .zip(right_parameters)
+                        .all(|(left, right)| self.collect_instantiation(left, right, substitutions))
+                    && self.collect_instantiation(left_result, right_result, substitutions)
+            }
+            (
+                ResolvedType::Ownership {
+                    kind: left_kind,
+                    target: left,
+                },
+                ResolvedType::Ownership {
+                    kind: right_kind,
+                    target: right,
+                },
+            ) => left_kind == right_kind && self.collect_instantiation(left, right, substitutions),
+            (
+                ResolvedType::Newtype {
+                    item: left_item,
+                    inner: left,
+                },
+                ResolvedType::Newtype {
+                    item: right_item,
+                    inner: right,
+                },
+            ) => left_item == right_item && self.collect_instantiation(left, right, substitutions),
+            (
+                ResolvedType::Array {
+                    element: left,
+                    length: left_length,
+                },
+                ResolvedType::Array {
+                    element: right,
+                    length: right_length,
+                },
+            ) => {
+                left_length == right_length
+                    && self.collect_instantiation(left, right, substitutions)
+            }
+            (
+                ResolvedType::RawPointer {
+                    mutable: left_mutable,
+                    target: left,
+                },
+                ResolvedType::RawPointer {
+                    mutable: right_mutable,
+                    target: right,
+                },
+            )
+            | (
+                ResolvedType::CBorrow {
+                    mutable: left_mutable,
+                    target: left,
+                },
+                ResolvedType::CBorrow {
+                    mutable: right_mutable,
+                    target: right,
+                },
+            ) => {
+                left_mutable == right_mutable
+                    && self.collect_instantiation(left, right, substitutions)
+            }
+            _ => false,
+        }
+    }
+
     fn shared_binding_type(
         &self,
         node_id: &NodeId,
@@ -2536,6 +2790,7 @@ mod tests {
             constants: program.constants(),
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
+            type_arguments: program.resolved_type_arguments(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2576,6 +2831,7 @@ mod tests {
             constants: program.constants(),
             node_types: &empty,
             type_operands: program.resolved_type_operands(),
+            type_arguments: program.resolved_type_arguments(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2608,6 +2864,7 @@ mod tests {
             constants: program.constants(),
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
+            type_arguments: program.resolved_type_arguments(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2654,6 +2911,7 @@ mod tests {
             constants: program.constants(),
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
+            type_arguments: program.resolved_type_arguments(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2696,6 +2954,7 @@ mod tests {
             constants: program.constants(),
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
+            type_arguments: program.resolved_type_arguments(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2735,6 +2994,45 @@ mod tests {
     }
 
     #[test]
+    fn turbofish_call_retains_canonical_instantiation() {
+        let file = parse(
+            "func identity<T>(value: T) -> T { value }\nfunc main() -> i32 { identity::<i32>(7) }\nfunc inferred() -> i32 { identity(8) }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower turbofish");
+        let result = bodies[&NodeId("function:main".into())]
+            .root
+            .result
+            .as_ref()
+            .unwrap();
+        let ResolvedExprKind::Call(call) = &result.kind else {
+            panic!("generic call expected");
+        };
+        assert_eq!(call.type_arguments.len(), 1);
+        assert!(matches!(
+            program.resolved_types().get(&call.type_arguments[0]),
+            Some(ResolvedType::Primitive(crate::core::ir::PrimitiveType::I32))
+        ));
+        assert_eq!(
+            call.arguments[0].conversion.from,
+            call.arguments[0].conversion.to
+        );
+        assert!(matches!(
+            call.callee,
+            ResolvedCallee::Function(ref node) if node == &NodeId("function:identity".into())
+        ));
+        let inferred = bodies[&NodeId("function:inferred".into())]
+            .root
+            .result
+            .as_ref()
+            .unwrap();
+        let ResolvedExprKind::Call(inferred) = &inferred.kind else {
+            panic!("inferred generic call expected");
+        };
+        assert_eq!(inferred.type_arguments, call.type_arguments);
+    }
+
+    #[test]
     fn field_place_reuses_the_declaration_identity() {
         let file = parse("type Point { x: i32 }\nfunc read(point: Point) -> i32 { point.x }");
         let program = crate::core::check_program(&file).expect("check");
@@ -2754,6 +3052,7 @@ mod tests {
             constants: program.constants(),
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
+            type_arguments: program.resolved_type_arguments(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2791,6 +3090,7 @@ mod tests {
             constants: program.constants(),
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
+            type_arguments: program.resolved_type_arguments(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2834,6 +3134,7 @@ mod tests {
             constants: program.constants(),
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
+            type_arguments: program.resolved_type_arguments(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2934,6 +3235,7 @@ mod tests {
             constants: program.constants(),
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
+            type_arguments: program.resolved_type_arguments(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -2975,6 +3277,7 @@ mod tests {
             constants: program.constants(),
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
+            type_arguments: program.resolved_type_arguments(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,

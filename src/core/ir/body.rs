@@ -164,6 +164,8 @@ pub struct ResolvedArgument {
 #[derive(Debug, Clone)]
 pub struct ResolvedCall {
     pub callee: ResolvedCallee,
+    /// Explicit or checker-inferred generic arguments in binder order.
+    pub type_arguments: Vec<ResolvedTypeId>,
     /// Checker-sorted parameter order. Surface named/default arguments are gone.
     pub arguments: Vec<ResolvedArgument>,
     pub permission: Option<Permission>,
@@ -958,6 +960,9 @@ impl BodyValidator<'_> {
 
     fn visit_call(&mut self, owner: &NodeId, call: &ResolvedCall) {
         self.validate_callee(owner, &call.callee);
+        for argument in &call.type_arguments {
+            self.require_type(owner, argument);
+        }
         let mut parameters = BTreeSet::new();
         for argument in &call.arguments {
             if !parameters.insert(&argument.parameter) {
@@ -1268,6 +1273,7 @@ mod tests {
                 backend_requirements: Vec::new(),
                 kind: ResolvedExprKind::Call(ResolvedCall {
                     callee: ResolvedCallee::Builtin(BuiltinId::new("test.identity").unwrap()),
+                    type_arguments: Vec::new(),
                     arguments: vec![argument("expr.arg-a"), argument("expr.arg-b")],
                     permission: None,
                     effects: Vec::new(),
