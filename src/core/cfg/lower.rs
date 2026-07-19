@@ -127,13 +127,34 @@ impl<'a> Lowerer<'a> {
         meta: Option<AstNodeMeta>,
         kind: CfgPointKind,
         role: &str,
+        uses: Vec<String>,
+        defs: Vec<String>,
+    ) -> NodeId {
+        let reads = uses.clone();
+        let writes = defs.clone();
+        self.point_with_accesses(block, meta, kind, role, uses, defs, reads, writes)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn point_with_accesses(
+        &mut self,
+        block: &BasicBlockId,
+        meta: Option<AstNodeMeta>,
+        kind: CfgPointKind,
+        role: &str,
         mut uses: Vec<String>,
         mut defs: Vec<String>,
+        mut reads: Vec<String>,
+        mut writes: Vec<String>,
     ) -> NodeId {
         uses.sort();
         uses.dedup();
         defs.sort();
         defs.dedup();
+        reads.sort();
+        reads.dedup();
+        writes.sort();
+        writes.dedup();
         let source = self.source(meta, &format!("cfg.point.{role}"), role);
         let node = source.node.clone();
         if let Some(block) = self.blocks.get_mut(block) {
@@ -142,6 +163,8 @@ impl<'a> Lowerer<'a> {
                 kind,
                 uses,
                 defs,
+                reads,
+                writes,
             });
         }
         node
@@ -346,13 +369,15 @@ impl<'a> Lowerer<'a> {
                 let current = self
                     .lower_expr(target, current, &format!("{role}.assign.target"))
                     .unwrap_or_else(|| self.new_block(meta, "unreachable.assign.target"));
-                self.point_with_data(
+                self.point_with_accesses(
                     &current,
                     meta,
                     CfgPointKind::Assignment,
                     "stmt.assign",
                     Vec::new(),
-                    place_root_name(target).into_iter().collect(),
+                    assigned_binding_name(target).into_iter().collect(),
+                    Vec::new(),
+                    place_spelling(target).into_iter().collect(),
                 );
                 Some(current)
             }
@@ -474,12 +499,16 @@ impl<'a> Lowerer<'a> {
             _ => {
                 let mut uses = Vec::new();
                 crate::core::Checker::collect_uses_in_expr(expr, &mut uses);
-                self.point_with_data(
+                let mut reads = Vec::new();
+                collect_read_places(expr, &mut reads);
+                self.point_with_accesses(
                     &current,
                     expr.meta(),
                     CfgPointKind::Expression,
                     expr_kind(expr),
                     uses,
+                    Vec::new(),
+                    reads,
                     Vec::new(),
                 );
                 Some(current)
@@ -983,13 +1012,126 @@ fn pattern_names(pattern: &Pattern) -> Vec<String> {
     names
 }
 
-fn place_root_name(expr: &Expr) -> Option<String> {
+fn assigned_binding_name(expr: &Expr) -> Option<String> {
     match expr.unlocated() {
         Expr::Ident(name) => Some(name.clone()),
-        Expr::Field(base, _) | Expr::TupleIndex(base, _) | Expr::Index(base, _) => {
-            place_root_name(base)
-        }
-        Expr::Unary(crate::ast::UnOp::Deref, base) => place_root_name(base),
         _ => None,
+    }
+}
+
+fn place_spelling(expr: &Expr) -> Option<String> {
+    match expr.unlocated() {
+        Expr::Ident(name) => Some(name.clone()),
+        Expr::Field(base, field) => Some(format!("{}.{}", place_spelling(base)?, field)),
+        Expr::TupleIndex(base, index) => Some(format!("{}.{}", place_spelling(base)?, index)),
+        Expr::Index(base, index) => {
+            let index = match index.unlocated() {
+                Expr::Literal(Lit::Int(value)) => value.to_string(),
+                _ => "*".to_string(),
+            };
+            Some(format!("{}[{index}]", place_spelling(base)?))
+        }
+        Expr::Unary(crate::ast::UnOp::Deref, base) => Some(format!("*{}", place_spelling(base)?)),
+        _ => None,
+    }
+}
+
+fn collect_read_places(expr: &Expr, places: &mut Vec<String>) {
+    if let Some(place) = place_spelling(expr) {
+        places.push(place);
+        collect_index_operands(expr, places);
+        return;
+    }
+    match expr.unlocated() {
+        Expr::Unary(_, inner)
+        | Expr::Try(inner)
+        | Expr::Spawn(inner)
+        | Expr::Await(inner)
+        | Expr::Cast(inner, _)
+        | Expr::NamedArg(_, inner)
+        | Expr::OptionalChain(inner, _) => collect_read_places(inner, places),
+        Expr::Binary(_, left, right) => {
+            collect_read_places(left, places);
+            collect_read_places(right, places);
+        }
+        Expr::Call(callee, args) => {
+            collect_read_places(callee, places);
+            for arg in args {
+                collect_read_places(arg, places);
+            }
+        }
+        Expr::Tuple(values) | Expr::List(values) | Expr::SetLiteral(values) => {
+            for value in values {
+                collect_read_places(value, places);
+            }
+        }
+        Expr::Record { fields, .. } => {
+            for field in fields {
+                collect_read_places(&field.value, places);
+            }
+        }
+        Expr::Comprehension {
+            expr, iter, guard, ..
+        } => {
+            collect_read_places(expr, places);
+            collect_read_places(iter, places);
+            if let Some(guard) = guard {
+                collect_read_places(guard, places);
+            }
+        }
+        Expr::Range { start, end } => {
+            collect_read_places(start, places);
+            collect_read_places(end, places);
+        }
+        Expr::SliceExpr { target, start, end } => {
+            collect_read_places(target, places);
+            if let Some(start) = start {
+                collect_read_places(start, places);
+            }
+            if let Some(end) = end {
+                collect_read_places(end, places);
+            }
+        }
+        Expr::MapLiteral { entries } => {
+            for (key, value) in entries {
+                collect_read_places(key, places);
+                collect_read_places(value, places);
+            }
+        }
+        Expr::Turbofish(_, _, args) => {
+            for arg in args {
+                collect_read_places(arg, places);
+            }
+        }
+        Expr::Literal(_)
+        | Expr::Ident(_)
+        | Expr::Field(_, _)
+        | Expr::TupleIndex(_, _)
+        | Expr::Index(_, _)
+        | Expr::Block(_)
+        | Expr::If { .. }
+        | Expr::Match(_, _)
+        | Expr::Lambda { .. }
+        | Expr::Arena(_)
+        | Expr::Comptime(_)
+        | Expr::Quote(_)
+        | Expr::QuoteInterpolate(_)
+        | Expr::Old(_)
+        | Expr::TypeOf(_)
+        | Expr::TypeInfo(_)
+        | Expr::Located { .. } => {}
+    }
+}
+
+fn collect_index_operands(expr: &Expr, places: &mut Vec<String>) {
+    match expr.unlocated() {
+        Expr::Index(base, index) => {
+            collect_index_operands(base, places);
+            collect_read_places(index, places);
+        }
+        Expr::Field(base, _) | Expr::TupleIndex(base, _) | Expr::Unary(_, base) => {
+            collect_index_operands(base, places);
+        }
+        _ => {}
     }
 }

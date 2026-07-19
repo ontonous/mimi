@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::core::{
-    Availability, CanonicalActionKind, CanonicalResourceAction, CfgLocation, IndexProjection,
-    Loan, LoanId, LoanKind, LocalId, OwnershipLedger, Place, PlaceProjection, ResourceActionKind,
+    Availability, CanonicalActionKind, CanonicalResourceAction, CfgLocation, IndexProjection, Loan,
+    LoanId, LoanKind, LocalId, OwnershipLedger, Place, PlaceProjection, ResourceActionKind,
     ResourceAnalysis, ResourceFact, ResourceId,
 };
 use crate::diagnostic::Diagnostic;
@@ -49,7 +49,10 @@ pub fn analyze_cfgs(
     }
 }
 
-fn analyze_one(cfg: &CallableCfg, ledger: &OwnershipLedger) -> Result<ResourceAnalysis, Vec<Diagnostic>> {
+fn analyze_one(
+    cfg: &CallableCfg,
+    ledger: &OwnershipLedger,
+) -> Result<ResourceAnalysis, Vec<Diagnostic>> {
     let mut actions = Vec::new();
     let mut loans = Vec::<Loan>::new();
     let mut legacy_ends: BTreeMap<String, Vec<CfgLocation>> = BTreeMap::new();
@@ -133,7 +136,9 @@ fn analyze_one(cfg: &CallableCfg, ledger: &OwnershipLedger) -> Result<ResourceAn
         let locations = loan
             .reference_name
             .as_ref()
-            .map(|reference| liveness_end_locations(cfg, reference, &loan.start, &live_in, &live_out))
+            .map(|reference| {
+                liveness_end_locations(cfg, reference, &loan.start, &live_in, &live_out)
+            })
             .filter(|locations| !locations.is_empty())
             .unwrap_or_else(|| {
                 legacy_ends
@@ -157,6 +162,61 @@ fn analyze_one(cfg: &CallableCfg, ledger: &OwnershipLedger) -> Result<ResourceAn
                 span,
                 origin,
             });
+        }
+    }
+    let borrowed_roots: BTreeMap<_, _> = loans
+        .iter()
+        .map(|loan| (loan.place.base_name.clone(), loan.place.base.clone()))
+        .collect();
+    for (block_id, block) in &cfg.blocks {
+        if !cfg.reachable.contains(block_id) {
+            continue;
+        }
+        for point in &block.points {
+            for spelling in &point.reads {
+                let place = parse_place(&cfg.owner, spelling);
+                let Some(local) = borrowed_roots.get(&place.base_name) else {
+                    continue;
+                };
+                let mut place = place;
+                place.base = local.clone();
+                actions.push(CanonicalResourceAction {
+                    kind: CanonicalActionKind::Read,
+                    resource: ResourceId(local.0.clone()),
+                    source: Some(place),
+                    target: None,
+                    loan: None,
+                    location: CfgLocation {
+                        block: block_id.clone(),
+                        point: point.source.node.clone(),
+                        edge: None,
+                    },
+                    span: point.source.span,
+                    origin: point.source.origin,
+                });
+            }
+            for spelling in &point.writes {
+                let place = parse_place(&cfg.owner, spelling);
+                let Some(local) = borrowed_roots.get(&place.base_name) else {
+                    continue;
+                };
+                let mut place = place;
+                place.base = local.clone();
+                actions.push(CanonicalResourceAction {
+                    kind: CanonicalActionKind::Write,
+                    resource: ResourceId(local.0.clone()),
+                    source: Some(place),
+                    target: None,
+                    loan: None,
+                    location: CfgLocation {
+                        block: block_id.clone(),
+                        point: point.source.node.clone(),
+                        edge: None,
+                    },
+                    span: point.source.span,
+                    origin: point.source.origin,
+                });
+            }
         }
     }
 
@@ -183,7 +243,12 @@ fn analyze_one(cfg: &CallableCfg, ledger: &OwnershipLedger) -> Result<ResourceAn
             .iter()
             .filter(|action| action.location.block == block && action.location.edge.is_none())
             .collect();
-        block_actions.sort_by_key(|action| point_order(cfg, &block, &action.location.point));
+        block_actions.sort_by_key(|action| {
+            (
+                point_order(cfg, &block, &action.location.point),
+                action_rank(action.kind),
+            )
+        });
         for action in block_actions {
             transfer(action, &mut outgoing, &loan_catalog, &mut errors);
         }
@@ -235,6 +300,12 @@ fn transfer(
     errors: &mut Vec<Diagnostic>,
 ) {
     match action.kind {
+        CanonicalActionKind::Read => {
+            reject_read_conflicts(action, state, loans, errors);
+        }
+        CanonicalActionKind::Write => {
+            reject_conflicting_loans(action, state, loans, errors);
+        }
         CanonicalActionKind::Introduce => {
             state.resources.insert(
                 action.resource.clone(),
@@ -250,10 +321,13 @@ fn transfer(
         | CanonicalActionKind::TransferChild
         | CanonicalActionKind::DelegateConsume => {
             reject_conflicting_loans(action, state, loans, errors);
-            let fact = state.resources.entry(action.resource.clone()).or_insert(ResourceFact {
-                availability: Availability::Available,
-                owner: action.source.clone(),
-            });
+            let fact = state
+                .resources
+                .entry(action.resource.clone())
+                .or_insert(ResourceFact {
+                    availability: Availability::Available,
+                    owner: action.source.clone(),
+                });
             if fact.availability != Availability::Available {
                 errors.push(Diagnostic::error_code(
                     crate::diagnostic::codes::E0304,
@@ -320,6 +394,32 @@ fn transfer(
     }
 }
 
+fn reject_read_conflicts(
+    action: &CanonicalResourceAction,
+    state: &FlowState,
+    loans: &BTreeMap<LoanId, &Loan>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let Some(place) = &action.source else {
+        return;
+    };
+    for active in &state.active_loans {
+        if loans
+            .get(active)
+            .is_some_and(|loan| loan.kind == LoanKind::Mutable && loan.place.conflicts_with(place))
+        {
+            errors.push(Diagnostic::error_code(
+                crate::diagnostic::codes::E0415,
+                format!(
+                    "cannot read '{}' while it is mutably borrowed",
+                    place.display()
+                ),
+                action.span,
+            ));
+        }
+    }
+}
+
 fn reject_conflicting_loans(
     action: &CanonicalResourceAction,
     state: &FlowState,
@@ -334,10 +434,15 @@ fn reject_conflicting_loans(
             .get(active)
             .is_some_and(|loan| loan.place.conflicts_with(place))
         {
+            let operation = if action.kind == CanonicalActionKind::Write {
+                "write"
+            } else {
+                "move or drop"
+            };
             errors.push(Diagnostic::error_code(
                 crate::diagnostic::codes::E0415,
                 format!(
-                    "cannot move or drop '{}' while it is borrowed",
+                    "cannot {operation} '{}' while it is borrowed",
                     place.display()
                 ),
                 action.span,
@@ -414,7 +519,9 @@ fn join_predecessors(
             };
             joined.resources.insert(id, fact);
         }
-        joined.active_loans.extend(state.active_loans.iter().cloned());
+        joined
+            .active_loans
+            .extend(state.active_loans.iter().cloned());
     }
     joined
 }
@@ -437,9 +544,15 @@ fn emit_incompatible_join(
         && left.availability == Availability::Available
         && right.availability == Availability::Available
     {
-        format!("resource '{}' is moved to incompatible places at a CFG join", name)
+        format!(
+            "resource '{}' is moved to incompatible places at a CFG join",
+            name
+        )
     } else {
-        format!("resource '{}' is consumed on only some reachable CFG paths", name)
+        format!(
+            "resource '{}' is consumed on only some reachable CFG paths",
+            name
+        )
     };
     errors.push(
         Diagnostic::error_code(
@@ -449,7 +562,9 @@ fn emit_incompatible_join(
                 .map(|block| block.source.span)
                 .unwrap_or(crate::span::Span::UNKNOWN),
         )
-        .with_help("move, return, transfer, or drop the resource on every reachable path, or on none"),
+        .with_help(
+            "move, return, transfer, or drop the resource on every reachable path, or on none",
+        ),
     );
 }
 
@@ -678,6 +793,22 @@ fn canonical_kind(kind: ResourceActionKind) -> CanonicalActionKind {
     }
 }
 
+fn action_rank(kind: CanonicalActionKind) -> u8 {
+    match kind {
+        CanonicalActionKind::Read => 0,
+        CanonicalActionKind::Write => 1,
+        CanonicalActionKind::BorrowEnd => 2,
+        CanonicalActionKind::Introduce => 3,
+        CanonicalActionKind::BorrowShared | CanonicalActionKind::BorrowMut => 4,
+        CanonicalActionKind::Move
+        | CanonicalActionKind::Drop
+        | CanonicalActionKind::Return
+        | CanonicalActionKind::TransferSession
+        | CanonicalActionKind::TransferChild
+        | CanonicalActionKind::DelegateConsume => 5,
+    }
+}
+
 fn parse_place(owner: &crate::core::NodeId, spelling: &str) -> Place {
     let mut rest = spelling;
     let mut deref = false;
@@ -797,14 +928,13 @@ func main() -> i32 { 0 }
         );
         let program = crate::core::check_program(&file).expect("balanced branch checks");
         let owner = crate::core::NodeId("function:close".into());
-        let analysis = program.resource_analysis(&owner).expect("resource analysis");
+        let analysis = program
+            .resource_analysis(&owner)
+            .expect("resource analysis");
         let token = ResourceId(crate::core::NodeId("function:close/local:token".into()));
-        assert!(analysis
-            .out_states
-            .values()
-            .any(|state| state.get(&token).is_some_and(|fact| {
-                fact.availability == Availability::Consumed
-            })));
+        assert!(analysis.out_states.values().any(|state| state
+            .get(&token)
+            .is_some_and(|fact| { fact.availability == Availability::Consumed })));
         assert!(analysis.actions.iter().all(|action| {
             program
                 .callable_cfg(&owner)
@@ -887,5 +1017,120 @@ func main() -> i32 { 0 }
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn mutable_loan_rejects_overlapping_root_read() {
+        let file = parse(
+            r#"
+func read_while_mutably_borrowed() -> i32 {
+    let mut value = 1
+    let loan = &mut value
+    let copied = value
+    *loan = 2
+    copied
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let errors = crate::core::check_program(&file).expect_err("root read must conflict");
+        assert!(errors.iter().any(|error| {
+            error.code.as_deref() == Some(crate::diagnostic::codes::E0415)
+                && error.message == "cannot read 'value' while it is mutably borrowed"
+        }));
+    }
+
+    #[test]
+    fn shared_loan_rejects_overlapping_write() {
+        let file = parse(
+            r#"
+func write_while_shared() -> i32 {
+    let mut value = 1
+    let loan = &value
+    value = 2
+    *loan
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let errors = crate::core::check_program(&file).expect_err("root write must conflict");
+        assert!(errors.iter().any(|error| {
+            error.code.as_deref() == Some(crate::diagnostic::codes::E0415)
+                && error.message == "cannot write 'value' while it is borrowed"
+        }));
+    }
+
+    #[test]
+    fn disjoint_sibling_accesses_remain_available_during_mutable_loan() {
+        let file = parse(
+            r#"
+type Pair { left: i32, right: i32 }
+func update_siblings() -> i32 {
+    let mut pair = Pair { left: 1, right: 2 }
+    let loan = &mut pair.left
+    pair.right = pair.right + 1
+    *loan = 4
+    pair.right
+}
+func main() -> i32 { update_siblings() }
+"#,
+        );
+        crate::core::check_program(&file).expect("sibling places do not overlap");
+    }
+
+    #[test]
+    fn edge_specific_borrow_end_is_stable_and_source_traceable() {
+        let file = parse(
+            r#"
+type Pair { left: i32, right: i32 }
+func branch_read(flag: bool) -> i32 {
+    let pair = Pair { left: 1, right: 2 }
+    let loan = &pair.left
+    let selected = if flag { *loan } else { 0 }
+    selected + pair.right
+}
+func main() -> i32 { branch_read(true) }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("branch loan checks");
+        let owner = crate::core::NodeId("function:branch_read".into());
+        let analysis = program
+            .resource_analysis(&owner)
+            .expect("resource analysis");
+        let cfg = program.callable_cfg(&owner).expect("callable CFG");
+        let edge_end = analysis
+            .actions
+            .iter()
+            .find(|action| {
+                action.kind == CanonicalActionKind::BorrowEnd && action.location.edge.is_some()
+            })
+            .expect("borrow ends on the branch where the reference is dead");
+        let edge = edge_end.location.edge.as_ref().expect("edge identity");
+        assert!(cfg.edge(edge).is_some());
+        assert!(cfg.reachable.contains(&edge_end.location.block));
+        assert_ne!(edge_end.span, crate::span::Span::UNKNOWN);
+        assert_eq!(edge_end.origin, crate::ast::AstOrigin::User);
+    }
+
+    #[test]
+    fn loan_live_across_backedge_is_rejected() {
+        let file = parse(
+            r#"
+func loop_read(flag: bool) -> i32 {
+    let value = 1
+    let loan = &value
+    while flag {
+        println(*loan)
+    }
+    value
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let errors = crate::core::check_program(&file).expect_err("loop-carried loan must fail");
+        assert!(errors.iter().any(|error| {
+            error.code.as_deref() == Some(crate::diagnostic::codes::E0415)
+                && error.message == "borrow remains live across a loop back-edge"
+        }));
     }
 }
