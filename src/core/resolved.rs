@@ -345,7 +345,9 @@ pub struct ResolvedTransition {
     pub node_id: NodeId,
     pub id: TransitionId,
     pub targets: Vec<StateId>,
+    pub source_parameter_id: NodeId,
     pub params: Vec<(String, Type)>,
+    pub parameter_ids: Vec<NodeId>,
     pub is_fallback: bool,
     pub is_ffi_pinned: bool,
     pub origin: Origin,
@@ -1347,6 +1349,7 @@ fn collect_items(
                 collect_flow(
                     flow,
                     &qualified,
+                    &ids,
                     flows,
                     transitions,
                     backend_requirements,
@@ -3437,6 +3440,19 @@ fn collect_item_meta(
                     errors,
                 );
                 let transition_span = declaration_span(transition.meta, span);
+                insert_child_meta(
+                    AstNodeMeta::inherited(
+                        transition_span,
+                        AstOrigin::Desugared("normalization.transition_source_parameter"),
+                    ),
+                    &transition_id,
+                    "decl.parameter",
+                    "parameter.self",
+                    transition_span,
+                    ids,
+                    out,
+                    errors,
+                );
                 for param in &transition.params {
                     collect_param_meta(
                         param,
@@ -4772,6 +4788,7 @@ fn insert_node_meta(
 fn collect_flow(
     flow: &FlowDef,
     qualified_name: &str,
+    ids: &NodeIdBuilder<'_>,
     flows: &mut HashMap<FlowId, ResolvedFlow>,
     transitions: &mut HashMap<TransitionId, ResolvedTransition>,
     backend_requirements: &mut Vec<CapabilityRequirement>,
@@ -4851,6 +4868,14 @@ fn collect_flow(
         ));
         let transition_origin =
             resolve_enclosed_origin(&node_id, transition.meta, &flow_node_id, span, errors);
+        let source_parameter_id = ids.anonymous(
+            &node_id,
+            "decl.parameter",
+            "parameter.self",
+            usable_span(span),
+            AstOrigin::Desugared("normalization.transition_source_parameter"),
+            errors,
+        );
         let resolved = ResolvedTransition {
             node_id,
             id: id.clone(),
@@ -4862,6 +4887,7 @@ fn collect_flow(
                     name: name.clone(),
                 })
                 .collect(),
+            source_parameter_id,
             params: {
                 let params = transition
                     .params
@@ -4885,6 +4911,23 @@ fn collect_flow(
                 }
                 params
             },
+            parameter_ids: transition
+                .params
+                .iter()
+                .map(|parameter| {
+                    ids.anonymous(
+                        &NodeId(format!(
+                            "transition:{}::{}::{}",
+                            qualified_name, transition.name, transition.from_state
+                        )),
+                        "decl.parameter",
+                        &format!("parameter.{}", stable_id_fragment(&parameter.name)),
+                        usable_span(parameter.meta.span),
+                        parameter.meta.origin,
+                        errors,
+                    )
+                })
+                .collect(),
             is_fallback: transition.is_fallback,
             is_ffi_pinned: transition.is_ffi_pinned,
             origin: transition_origin,
@@ -6813,6 +6856,182 @@ fn build_canonical_function_signatures(
             }));
         } else {
             signatures.insert(function.node_id.clone(), signature);
+        }
+    }
+
+    let mut transitions = program.transitions.values().collect::<Vec<_>>();
+    transitions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    for transition in transitions {
+        if transition.params.len() != transition.parameter_ids.len() {
+            errors.push(Diagnostic::error(
+                format!(
+                    "TOOL-RESOLUTION-001: transition '{}' parameter identity count mismatch",
+                    transition.node_id.0
+                ),
+                transition.span,
+            ));
+            continue;
+        }
+        for parameter in
+            std::iter::once(&transition.source_parameter_id).chain(transition.parameter_ids.iter())
+        {
+            if !program.node_meta.contains_key(parameter) {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: transition parameter '{}' is absent from NodeMeta",
+                        parameter.0
+                    ),
+                    transition.span,
+                ));
+            }
+        }
+        let module = transition
+            .id
+            .flow
+            .0
+            .rsplit_once("::")
+            .map(|(module, _)| module);
+        let mut resolve_name = |name: &str| {
+            if let Some(primitive) = crate::core::ResolvedTypeName::primitive(name) {
+                return Some(primitive);
+            }
+            if let Some(module) = module {
+                let qualified = format!("{module}::{name}");
+                if let Some(candidates) = nominal_catalog.get(&qualified) {
+                    if candidates.len() == 1 {
+                        return crate::core::NominalTypeId::new(candidates.iter().next()?.clone())
+                            .ok()
+                            .map(crate::core::ResolvedTypeName::Nominal);
+                    }
+                }
+            }
+            if let Some(candidates) = nominal_catalog.get(name) {
+                if candidates.len() == 1 {
+                    return crate::core::NominalTypeId::new(candidates.iter().next()?.clone())
+                        .ok()
+                        .map(crate::core::ResolvedTypeName::Nominal);
+                }
+            }
+            builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal)
+        };
+        let source_name = format!("{}::{}", transition.id.flow.0, transition.id.source.name);
+        let source_zonked = match ZonkedTy::from_resolved(Type::Name(source_name, Vec::new())) {
+            Ok(ty) => ty,
+            Err(error) => {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: transition '{}' source type is not zonked: {error}",
+                        transition.node_id.0
+                    ),
+                    transition.span,
+                ));
+                continue;
+            }
+        };
+        let source = match types.intern_zonked(&source_zonked, &capabilities, &mut resolve_name) {
+            Ok(ty) => ty,
+            Err(error) => {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: transition '{}' source type is not canonical: {error}",
+                        transition.node_id.0
+                    ),
+                    transition.span,
+                ));
+                continue;
+            }
+        };
+        let mut parameters = vec![crate::core::ResolvedParameter {
+            id: crate::core::ResolvedParameterId(transition.source_parameter_id.clone()),
+            name: "self".into(),
+            ty: source,
+            mutable: false,
+            permission: Some(crate::core::Permission::Consume),
+            has_default: false,
+        }];
+        let mut failed = false;
+        for ((name, ty), parameter_id) in transition.params.iter().zip(&transition.parameter_ids) {
+            let zonked = match ZonkedTy::from_resolved(ty.clone()) {
+                Ok(ty) => ty,
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: transition '{}' parameter '{}' is not zonked: {error}",
+                            transition.node_id.0, name
+                        ),
+                        transition.span,
+                    ));
+                    failed = true;
+                    continue;
+                }
+            };
+            match types.intern_zonked(&zonked, &capabilities, &mut resolve_name) {
+                Ok(ty) => parameters.push(crate::core::ResolvedParameter {
+                    id: crate::core::ResolvedParameterId(parameter_id.clone()),
+                    name: name.clone(),
+                    ty,
+                    mutable: false,
+                    permission: None,
+                    has_default: false,
+                }),
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: transition '{}' parameter '{}' is not canonical: {error}",
+                            transition.node_id.0, name
+                        ),
+                        transition.span,
+                    ));
+                    failed = true;
+                }
+            }
+        }
+        if failed {
+            continue;
+        }
+        let result_type = transition
+            .targets
+            .first()
+            .map(|target| Type::Name(format!("{}::{}", target.flow.0, target.name), Vec::new()))
+            .unwrap_or_else(|| Type::Name("unit".into(), Vec::new()));
+        let result = match ZonkedTy::from_resolved(result_type) {
+            Ok(ty) => match types.intern_zonked(&ty, &capabilities, &mut resolve_name) {
+                Ok(ty) => ty,
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: transition '{}' result type is not canonical: {error}",
+                            transition.node_id.0
+                        ),
+                        transition.span,
+                    ));
+                    continue;
+                }
+            },
+            Err(error) => {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: transition '{}' result type is not zonked: {error}",
+                        transition.node_id.0
+                    ),
+                    transition.span,
+                ));
+                continue;
+            }
+        };
+        let signature = crate::core::ResolvedSignature {
+            owner: transition.node_id.clone(),
+            generic_parameters: Vec::new(),
+            parameters,
+            result,
+            effects: Vec::new(),
+        };
+        if let Err(signature_errors) = signature.validate(&types) {
+            errors.extend(signature_errors.into_iter().map(|error| {
+                Diagnostic::error(format!("TOOL-RESOLUTION-001: {error}"), transition.span)
+            }));
+        } else {
+            signatures.insert(transition.node_id.clone(), signature);
         }
     }
 
