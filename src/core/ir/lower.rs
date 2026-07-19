@@ -7,13 +7,13 @@
 use super::{
     CheckedConversion, CheckedConversionKind, EffectId, MatchArm as ResolvedMatchArm,
     ResolvedArgument, ResolvedBinaryOp, ResolvedBlock, ResolvedBody, ResolvedBodyError,
-    ResolvedCall, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLiteral, ResolvedLocal,
-    ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedProjection,
-    ResolvedRecordField, ResolvedSignature, ResolvedStmt, ResolvedStmtKind, ResolvedType,
-    ResolvedTypeId, ResolvedTypeTable, ResolvedUnaryOp,
+    ResolvedCall, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLambda, ResolvedLiteral,
+    ResolvedLocal, ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace,
+    ResolvedProjection, ResolvedRecordField, ResolvedSignature, ResolvedStmt, ResolvedStmtKind,
+    ResolvedType, ResolvedTypeId, ResolvedTypeTable, ResolvedUnaryOp,
 };
 use crate::ast::{
-    AstOrigin, BinOp, Expr, File, FuncDef, Item, Lit, Pattern, PatternKind, Stmt, UnOp,
+    AstOrigin, BinOp, Expr, File, FuncDef, Item, Lit, Param, Pattern, PatternKind, Stmt, UnOp,
 };
 use crate::core::resolved::{
     expr_kind, expr_sibling_role, impl_method_owner, interpolation_role, map_entry_role,
@@ -27,7 +27,7 @@ use crate::core::{
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const BLOCK_NORMALIZATION_RULE: &str = "resolved_body.structured_block";
 
@@ -95,6 +95,7 @@ pub fn lower_function_body(
         locals: BTreeMap::new(),
         place_inputs: BTreeMap::new(),
         default_values: BTreeMap::new(),
+        lambda_contexts: Vec::new(),
         scopes: vec![BTreeMap::new()],
     };
     lowerer.install_parameters()?;
@@ -246,7 +247,13 @@ struct BodyLowerer<'a> {
     locals: BTreeMap<ResolvedLocalId, ResolvedLocal>,
     place_inputs: BTreeMap<NodeId, ResolvedExpr>,
     default_values: BTreeMap<super::ResolvedParameterId, ResolvedExpr>,
+    lambda_contexts: Vec<LambdaCaptureContext>,
     scopes: Vec<BTreeMap<String, ResolvedLocalId>>,
+}
+
+struct LambdaCaptureContext {
+    owned: BTreeSet<ResolvedLocalId>,
+    captures: BTreeSet<ResolvedLocalId>,
 }
 
 impl BodyLowerer<'_> {
@@ -1017,6 +1024,9 @@ impl BodyLowerer<'_> {
             Expr::Await(value) => {
                 ResolvedExprKind::Await(Box::new(self.lower_expr(value, &format!("{role}.inner"))?))
             }
+            Expr::Lambda { params, body, .. } => {
+                self.lower_lambda(&node_id, params, body, role, &ty)?
+            }
             Expr::Call(callee, arguments) => {
                 ResolvedExprKind::Call(self.lower_call(&node_id, callee, arguments, role, &[])?)
             }
@@ -1068,10 +1078,9 @@ impl BodyLowerer<'_> {
                     conversion,
                 }
             }
-            Expr::Quote(_)
-            | Expr::QuoteInterpolate(_)
-            | Expr::Lambda { .. }
-            | Expr::NamedArg(_, _) => return self.unsupported(&node_id, expr_kind(expr)),
+            Expr::Quote(_) | Expr::QuoteInterpolate(_) | Expr::NamedArg(_, _) => {
+                return self.unsupported(&node_id, expr_kind(expr))
+            }
             Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
         };
         let effects = match &kind {
@@ -1114,6 +1123,88 @@ impl BodyLowerer<'_> {
             backend_requirements,
             kind,
         })
+    }
+
+    fn lower_lambda(
+        &mut self,
+        node_id: &NodeId,
+        params: &[Param],
+        body: &[Stmt],
+        role: &str,
+        ty: &ResolvedTypeId,
+    ) -> Result<ResolvedExprKind, Vec<ResolvedBodyError>> {
+        let (parameter_types, result_type) = match self.types.get(ty) {
+            Some(ResolvedType::Function {
+                parameters, result, ..
+            }) => (parameters.clone(), result.clone()),
+            _ => {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    "lambda expression does not have a canonical function type",
+                )])
+            }
+        };
+        if params.len() != parameter_types.len() {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "lambda parameter count disagrees with its canonical function type",
+            )]);
+        }
+
+        self.scopes.push(BTreeMap::new());
+        self.lambda_contexts.push(LambdaCaptureContext {
+            owned: BTreeSet::new(),
+            captures: BTreeSet::new(),
+        });
+        let lowered = (|| {
+            let mut parameters = Vec::with_capacity(params.len());
+            for (parameter, parameter_type) in params.iter().zip(parameter_types) {
+                if parameter.default_value.is_some() {
+                    return Err(vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        format!(
+                            "lambda parameter '{}' uses a default value outside the typed default model",
+                            parameter.name
+                        ),
+                    )]);
+                }
+                let parameter_node = self.catalogued_id(
+                    "decl.parameter",
+                    &format!("{role}.parameter.{}", stable_id_fragment(&parameter.name)),
+                    usable_span(parameter.meta.span),
+                    parameter.meta.origin,
+                )?;
+                let local_id = ResolvedLocalId(NodeId(format!("{}/local", parameter_node.0)));
+                let origin = self.origin(&parameter_node)?;
+                self.insert_local(
+                    parameter.name.clone(),
+                    ResolvedLocal {
+                        id: local_id.clone(),
+                        display_name: parameter.name.clone(),
+                        ty: parameter_type,
+                        mutable: parameter.mut_,
+                        origin,
+                    },
+                    &parameter_node,
+                )?;
+                parameters.push(local_id);
+            }
+            let body = self.lower_block(body, &format!("{role}.body"), result_type, true)?;
+            Ok::<_, Vec<ResolvedBodyError>>((parameters, body))
+        })();
+        let capture_context = self
+            .lambda_contexts
+            .pop()
+            .expect("lambda lowering installed a capture context");
+        self.scopes.pop();
+        let (parameters, body) = lowered?;
+
+        Ok(ResolvedExprKind::Lambda(Box::new(ResolvedLambda {
+            owner: NodeId(format!("{}/callable", node_id.0)),
+            parameters,
+            captures: capture_context.captures.into_iter().collect(),
+            body,
+        })))
     }
 
     fn lower_record(
@@ -1263,6 +1354,19 @@ impl BodyLowerer<'_> {
                 "call has no checker-resolved call-site record",
             )]
         })?;
+        if site.kind == ResolvedCallKind::Unknown {
+            if let Expr::Ident(name) = callee.unlocated() {
+                if let Some(local) = self.lookup_local(name) {
+                    return self.lower_local_closure_call(
+                        node_id,
+                        local,
+                        arguments,
+                        role,
+                        type_arguments,
+                    );
+                }
+            }
+        }
         if site.kind == ResolvedCallKind::Builtin {
             if !type_arguments.is_empty() {
                 return self.unsupported(node_id, "generic arguments on builtin call");
@@ -1574,6 +1678,85 @@ impl BodyLowerer<'_> {
             arguments: lowered,
             permission: None,
             effects,
+            session: Vec::new(),
+        })
+    }
+
+    fn lower_local_closure_call(
+        &mut self,
+        node_id: &NodeId,
+        local: ResolvedLocalId,
+        arguments: &[Expr],
+        role: &str,
+        type_arguments: &[ResolvedTypeId],
+    ) -> Result<ResolvedCall, Vec<ResolvedBodyError>> {
+        if !type_arguments.is_empty() {
+            return self.unsupported(node_id, "generic arguments on local closure call");
+        }
+        let local_type = self
+            .locals
+            .get(&local)
+            .map(|local| local.ty.clone())
+            .ok_or_else(|| {
+                vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    "local closure call references a missing local",
+                )]
+            })?;
+        let (parameters, result) = match self.types.get(&local_type) {
+            Some(ResolvedType::Function {
+                parameters, result, ..
+            }) => (parameters.clone(), result.clone()),
+            _ => {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("local '{}' is not callable", local.0 .0),
+                )])
+            }
+        };
+        if arguments.len() != parameters.len() {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "local closure argument count {} does not match canonical parameter count {}",
+                    arguments.len(),
+                    parameters.len()
+                ),
+            )]);
+        }
+        let call_result = self.node_types.get(node_id).ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "local closure call has no checker-finalized result type",
+            )]
+        })?;
+        self.identity_conversion(node_id, &result, call_result)?;
+
+        let mut lowered = Vec::with_capacity(arguments.len());
+        for (index, (argument, parameter_type)) in
+            arguments.iter().zip(parameters.into_iter()).enumerate()
+        {
+            if matches!(argument.unlocated(), Expr::NamedArg(_, _)) {
+                return self.unsupported(node_id, "named arguments on local closure call");
+            }
+            let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
+            let value = self.lower_expr(argument, &argument_role)?;
+            let conversion = self.identity_conversion(node_id, &value.ty, &parameter_type)?;
+            lowered.push(ResolvedArgument {
+                parameter: super::ResolvedParameterId(NodeId(format!(
+                    "{}/call-parameter:{index}",
+                    local.0 .0
+                ))),
+                value,
+                conversion,
+            });
+        }
+        Ok(ResolvedCall {
+            callee: ResolvedCallee::LocalClosure(local),
+            type_arguments: Vec::new(),
+            arguments: lowered,
+            permission: None,
+            effects: Vec::new(),
             session: Vec::new(),
         })
     }
@@ -2690,27 +2873,39 @@ impl BodyLowerer<'_> {
         local: ResolvedLocal,
         owner: &NodeId,
     ) -> Result<(), Vec<ResolvedBodyError>> {
+        let local_id = local.id.clone();
         let scope = self.scopes.last_mut().expect("body always has a scope");
-        if scope.insert(name.clone(), local.id.clone()).is_some() {
+        if scope.insert(name.clone(), local_id.clone()).is_some() {
             return Err(vec![ResolvedBodyError::new(
                 owner.clone(),
                 format!("duplicate local binding '{name}' in one lexical scope"),
             )]);
         }
-        if self.locals.insert(local.id.clone(), local).is_some() {
+        if self.locals.insert(local_id.clone(), local).is_some() {
             return Err(vec![ResolvedBodyError::new(
                 owner.clone(),
                 "stable local identity collision",
             )]);
         }
+        if let Some(context) = self.lambda_contexts.last_mut() {
+            context.owned.insert(local_id);
+        }
         Ok(())
     }
 
-    fn lookup_local(&self, name: &str) -> Option<ResolvedLocalId> {
-        self.scopes
+    fn lookup_local(&mut self, name: &str) -> Option<ResolvedLocalId> {
+        let local = self
+            .scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.get(name).cloned())
+            .find_map(|scope| scope.get(name).cloned())?;
+        for context in self.lambda_contexts.iter_mut().rev() {
+            if context.owned.contains(&local) {
+                break;
+            }
+            context.captures.insert(local.clone());
+        }
+        Some(local)
     }
 
     fn expr_id(&self, expr: &Expr, role: &str) -> Result<NodeId, Vec<ResolvedBodyError>> {
@@ -3777,6 +3972,67 @@ mod tests {
         bodies[&NodeId("function:static_value".into())]
             .validate(program.resolved_types())
             .expect("valid comptime body");
+    }
+
+    #[test]
+    fn lambda_retains_typed_parameters_body_and_captures() {
+        let file = parse(
+            "func inspect(offset: i32) -> i32 { let apply = fn(value: i32) -> i32 { value + offset }; 0 }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower lambda");
+        let body = &bodies[&NodeId("function:inspect".into())];
+        let ResolvedStmtKind::Bind {
+            initializer: Some(initializer),
+            ..
+        } = &body.root.statements[0].kind
+        else {
+            panic!("lambda binding expected");
+        };
+        let ResolvedExprKind::Lambda(lambda) = &initializer.kind else {
+            panic!("typed lambda expected");
+        };
+        assert_eq!(lambda.parameters.len(), 1);
+        assert_eq!(lambda.captures.len(), 1);
+        assert_eq!(body.locals[&lambda.parameters[0]].display_name, "value");
+        assert_eq!(body.locals[&lambda.captures[0]].display_name, "offset");
+        let ResolvedExprKind::Binary { left, right, .. } =
+            &lambda.body.result.as_ref().expect("lambda result").kind
+        else {
+            panic!("lambda result must retain its typed expression tree");
+        };
+        assert!(matches!(
+            &left.kind,
+            ResolvedExprKind::Load(place) if place.base == lambda.parameters[0]
+        ));
+        assert!(matches!(
+            &right.kind,
+            ResolvedExprKind::Load(place) if place.base == lambda.captures[0]
+        ));
+        body.validate(program.resolved_types())
+            .expect("valid typed lambda");
+    }
+
+    #[test]
+    fn local_closure_call_uses_closed_local_and_parameter_identities() {
+        let file = parse(
+            "func inspect(offset: i32) -> i32 { let apply = fn(value: i32) -> i32 { value + offset }; apply(2) }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower closure call");
+        let body = &bodies[&NodeId("function:inspect".into())];
+        let result = body.root.result.as_ref().expect("closure call result");
+        let ResolvedExprKind::Call(call) = &result.kind else {
+            panic!("resolved closure call expected");
+        };
+        let ResolvedCallee::LocalClosure(local) = &call.callee else {
+            panic!("closure call must use its stable local identity");
+        };
+        assert_eq!(body.locals[local].display_name, "apply");
+        assert_eq!(call.arguments.len(), 1);
+        assert!(call.arguments[0].parameter.0 .0.starts_with(&local.0 .0));
+        body.validate(program.resolved_types())
+            .expect("valid local closure call");
     }
 
     #[test]
