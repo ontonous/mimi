@@ -1382,11 +1382,12 @@ mod tests {
         let ResolvedExprKind::Load(place) = &body.root.result.as_ref().unwrap().kind else {
             panic!("field read must be a place load");
         };
-        let ResolvedProjection::Field { field, .. } = &place.projections[0] else {
+        let ResolvedProjection::Field { field, ty } = &place.projections[0] else {
             panic!("field projection expected");
         };
         assert!(field.0.starts_with("type:Point/node:decl.field@"));
         assert!(program.node_meta().contains_key(field));
+        assert_eq!(program.resolved_field_type(field), Some(ty));
     }
 
     #[test]

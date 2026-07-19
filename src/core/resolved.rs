@@ -582,6 +582,7 @@ pub struct CheckedProgram {
     resolved_types: crate::core::ResolvedTypeTable,
     resolved_signatures: BTreeMap<NodeId, crate::core::ResolvedSignature>,
     resolved_node_types: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    resolved_field_types: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     callable_cfgs: BTreeMap<NodeId, crate::core::cfg::CallableCfg>,
     resource_analyses: BTreeMap<NodeId, crate::core::ResourceAnalysis>,
 }
@@ -667,11 +668,12 @@ impl CheckedProgram {
         }
         program.type_schemes = schemes;
         program.zonked_function_types = zonked_by_node;
-        let (resolved_types, resolved_signatures, resolved_node_types) =
+        let (resolved_types, resolved_signatures, resolved_node_types, resolved_field_types) =
             build_canonical_function_signatures(&program, &stable_expression_types)?;
         program.resolved_types = resolved_types;
         program.resolved_signatures = resolved_signatures;
         program.resolved_node_types = resolved_node_types;
+        program.resolved_field_types = resolved_field_types;
         program.callable_cfgs = callable_cfgs;
         program.resource_analyses = resource_analyses;
         Ok(program)
@@ -860,6 +862,7 @@ impl CheckedProgram {
             resolved_types: crate::core::ResolvedTypeTable::new(),
             resolved_signatures: BTreeMap::new(),
             resolved_node_types: BTreeMap::new(),
+            resolved_field_types: BTreeMap::new(),
             callable_cfgs: BTreeMap::new(),
             resource_analyses: BTreeMap::new(),
         })
@@ -1119,6 +1122,14 @@ impl CheckedProgram {
 
     pub fn resolved_node_type(&self, node: &NodeId) -> Option<&crate::core::ResolvedTypeId> {
         self.resolved_node_types.get(node)
+    }
+
+    pub fn resolved_field_types(&self) -> &BTreeMap<NodeId, crate::core::ResolvedTypeId> {
+        &self.resolved_field_types
+    }
+
+    pub fn resolved_field_type(&self, field: &NodeId) -> Option<&crate::core::ResolvedTypeId> {
+        self.resolved_field_types.get(field)
     }
 
     pub fn callable_cfgs(&self) -> &BTreeMap<NodeId, crate::core::cfg::CallableCfg> {
@@ -6071,6 +6082,7 @@ type CanonicalFunctionArtifacts = (
     crate::core::ResolvedTypeTable,
     BTreeMap<NodeId, crate::core::ResolvedSignature>,
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    BTreeMap<NodeId, crate::core::ResolvedTypeId>,
 );
 
 fn stabilize_expression_types(
@@ -6244,6 +6256,7 @@ fn build_canonical_function_signatures(
     let ids = NodeIdBuilder::new(&program.legacy_file.sources);
     let mut signatures = BTreeMap::new();
     let mut node_types = BTreeMap::new();
+    let mut field_types = BTreeMap::new();
     let mut errors = Vec::new();
     let mut functions = program.functions.values().collect::<Vec<_>>();
     functions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
@@ -6457,13 +6470,103 @@ fn build_canonical_function_signatures(
         }
     }
 
+    let mut definitions = program.type_defs.values().collect::<Vec<_>>();
+    definitions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    for definition in definitions {
+        let mut generic_names = BTreeMap::new();
+        for generic in &definition.declaration.generics {
+            let id = ids.anonymous(
+                &definition.node_id,
+                "decl.generic_parameter",
+                &format!("generic.{}", stable_id_fragment(&generic.name)),
+                usable_span(generic.meta.span),
+                generic.meta.origin,
+                &mut errors,
+            );
+            generic_names.insert(generic.name.clone(), id);
+        }
+        let module = definition
+            .qualified_name
+            .rsplit_once("::")
+            .map(|(module, _)| module);
+        let mut resolve_name = |name: &str| {
+            if let Some(primitive) = crate::core::ResolvedTypeName::primitive(name) {
+                return Some(primitive);
+            }
+            if let Some(parameter) = generic_names.get(name) {
+                return Some(crate::core::ResolvedTypeName::GenericParameter(
+                    parameter.clone(),
+                ));
+            }
+            if let Some(module) = module {
+                let qualified = format!("{module}::{name}");
+                if let Some(candidates) = nominal_catalog.get(&qualified) {
+                    if candidates.len() == 1 {
+                        return crate::core::NominalTypeId::new(candidates.iter().next()?.clone())
+                            .ok()
+                            .map(crate::core::ResolvedTypeName::Nominal);
+                    }
+                }
+            }
+            if let Some(candidates) = nominal_catalog.get(name) {
+                if candidates.len() == 1 {
+                    return crate::core::NominalTypeId::new(candidates.iter().next()?.clone())
+                        .ok()
+                        .map(crate::core::ResolvedTypeName::Nominal);
+                }
+            }
+            builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal)
+        };
+        let fields = match &definition.declaration.kind {
+            crate::ast::TypeDefKind::Record(fields) | crate::ast::TypeDefKind::Union(fields) => {
+                fields
+            }
+            _ => continue,
+        };
+        for field in fields {
+            let field_id = ids.anonymous(
+                &definition.node_id,
+                "decl.field",
+                &format!("field.{}", stable_id_fragment(&field.name)),
+                usable_span(field.meta.span),
+                field.meta.origin,
+                &mut errors,
+            );
+            let zonked = match ZonkedTy::from_resolved(field.ty.clone()) {
+                Ok(ty) => ty,
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: field '{}' in '{}' is not zonked: {error}",
+                            field.name, definition.qualified_name
+                        ),
+                        definition.origin.user_span(),
+                    ));
+                    continue;
+                }
+            };
+            match types.intern_zonked(&zonked, &capabilities, &mut resolve_name) {
+                Ok(ty) => {
+                    field_types.insert(field_id, ty);
+                }
+                Err(error) => errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: field '{}' in '{}' is not canonical: {error}",
+                        field.name, definition.qualified_name
+                    ),
+                    definition.origin.user_span(),
+                )),
+            }
+        }
+    }
+
     if let Err(type_errors) = types.validate() {
         errors.extend(type_errors.into_iter().map(|error| {
             Diagnostic::error(format!("TOOL-RESOLUTION-001: {error}"), Span::UNKNOWN)
         }));
     }
     if errors.is_empty() {
-        Ok((types, signatures, node_types))
+        Ok((types, signatures, node_types, field_types))
     } else {
         Err(errors)
     }
