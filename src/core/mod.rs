@@ -28,10 +28,11 @@ pub use ir::{
     FunctionTypeAbi, MethodId, NominalTypeId, OwnershipTypeKind, Permission, PrimitiveType,
     ResolvedArgument, ResolvedBlock, ResolvedBody, ResolvedBodyError, ResolvedCall, ResolvedCallee,
     ResolvedExpr, ResolvedExprKind, ResolvedIndex, ResolvedLiteral, ResolvedLocal, ResolvedLocalId,
-    ResolvedParameterId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedProjection,
-    ResolvedStmt, ResolvedStmtKind, ResolvedType, ResolvedTypeCapabilities, ResolvedTypeError,
-    ResolvedTypeId, ResolvedTypeName, ResolvedTypeTable, SessionResidualId, SessionTransition,
-    TraitTypeKind, RESOLVED_TYPE_SCHEMA_VERSION,
+    ResolvedParameter, ResolvedParameterId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace,
+    ResolvedProjection, ResolvedSignature, ResolvedSignatureError, ResolvedStmt, ResolvedStmtKind,
+    ResolvedType, ResolvedTypeCapabilities, ResolvedTypeError, ResolvedTypeId, ResolvedTypeName,
+    ResolvedTypeTable, SessionResidualId, SessionTransition, TraitTypeKind,
+    RESOLVED_TYPE_SCHEMA_VERSION,
 };
 pub use ownership::{
     Availability, BranchMerge, CanonicalActionKind, CanonicalResourceAction, CfgLocation,

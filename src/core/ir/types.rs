@@ -1,5 +1,6 @@
 use crate::ast::Type;
 use crate::core::phase::ZonkedTy;
+use crate::core::NodeId;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
@@ -142,6 +143,8 @@ pub enum TraitTypeKind {
 pub enum ResolvedTypeName {
     Primitive(PrimitiveType),
     Nominal(NominalTypeId),
+    /// A named binder in a generic callable/type declaration.
+    GenericParameter(NodeId),
 }
 
 impl ResolvedTypeName {
@@ -175,6 +178,7 @@ impl ResolvedTypeCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedType {
     Primitive(PrimitiveType),
+    GenericParameter(NodeId),
     Nominal {
         item: NominalTypeId,
         arguments: Vec<ResolvedTypeId>,
@@ -250,6 +254,7 @@ impl ResolvedType {
             } => parameters.iter().chain(std::iter::once(result)).collect(),
             Self::Array { element, .. } => vec![element],
             Self::Primitive(_)
+            | Self::GenericParameter(_)
             | Self::Capability(_)
             | Self::Nothing
             | Self::Allocator
@@ -263,6 +268,9 @@ impl ResolvedType {
         let mut output = String::new();
         match self {
             Self::Primitive(primitive) => atom(&mut output, "primitive", primitive.tag()),
+            Self::GenericParameter(parameter) => {
+                atom(&mut output, "generic-parameter", &parameter.0);
+            }
             Self::Nominal { item, arguments } => {
                 atom(&mut output, "nominal", item.as_str());
                 ids(&mut output, arguments);
@@ -497,6 +505,14 @@ impl ResolvedTypeTable {
     pub fn validate(&self) -> Result<(), Vec<ResolvedTypeError>> {
         let mut errors = Vec::new();
         for (stored_id, ty) in &self.entries {
+            if let ResolvedType::GenericParameter(parameter) = ty {
+                if parameter.0.trim().is_empty() {
+                    errors.push(ResolvedTypeError::InvalidIdentity {
+                        kind: "generic parameter",
+                        identity: parameter.0.clone(),
+                    });
+                }
+            }
             let canonical = ty.canonical();
             let computed_id = ResolvedTypeId::from_canonical(&canonical);
             if &computed_id != stored_id {
@@ -565,6 +581,12 @@ impl ResolvedTypeTable {
                         item,
                         arguments: self.intern_many(arguments, capabilities, resolve_name)?,
                     },
+                    ResolvedTypeName::GenericParameter(parameter) => {
+                        if !arguments.is_empty() {
+                            return Err(ResolvedTypeError::PrimitiveHasArguments(name.clone()));
+                        }
+                        ResolvedType::GenericParameter(parameter)
+                    }
                 }
             }
             Type::Ref(lifetime, target) | Type::RefMut(lifetime, target) => {

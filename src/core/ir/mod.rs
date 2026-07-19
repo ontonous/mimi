@@ -5,6 +5,7 @@
 //! verifier consume stable identities rather than re-resolving surface AST.
 
 mod body;
+mod callable;
 mod types;
 
 pub use body::{
@@ -16,6 +17,7 @@ pub use body::{
     ResolvedRecordField, ResolvedScopeKind, ResolvedStmt, ResolvedStmtKind, ResolvedUnaryOp,
     SessionResidualId, SessionTransition,
 };
+pub use callable::{ResolvedParameter, ResolvedSignature, ResolvedSignatureError};
 
 pub use types::{
     FunctionTypeAbi, NominalTypeId, OwnershipTypeKind, PrimitiveType, ResolvedType,
