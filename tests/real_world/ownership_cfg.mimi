@@ -7,6 +7,15 @@ type Pair {
     right: i32,
 }
 
+type Inner {
+    value: i32,
+}
+
+type Outer {
+    inner: Inner,
+    other: i32,
+}
+
 func borrow_fields() -> i32 {
     let mut pair = Pair {
         left: 1,
@@ -41,11 +50,44 @@ func branch_borrow(flag: bool) -> i32 {
     }
 }
 
+func nested_place_borrow() -> i32 {
+    let mut outer = Outer {
+        inner: Inner { value: 3 },
+        other: 4,
+    }
+    let nested = &mut outer.inner.value
+    *nested = 6 as i32
+    outer.inner.value + outer.other
+}
+
+func loop_index_borrow() -> i32 {
+    let mut values = [1, 2, 3]
+    let mut index = 0
+    while index < 3 {
+        // Each loan ends before the back-edge; the dynamic index aliases
+        // conservatively within an iteration but does not cross iterations.
+        let slot = &mut values[index]
+        *slot = *slot + 1
+        index = index + 1
+    }
+    values[0] + values[1] + values[2]
+}
+
+func terminal_branch(flag: bool) -> i32 {
+    if flag {
+        return 1
+    }
+    return 2
+}
+
 func main() -> i32 {
     let field_total = borrow_fields()
     let index_total = borrow_indexes_sequentially()
     let branch_total = branch_borrow(true)
-    let total = field_total + index_total + branch_total
+    let nested_total = nested_place_borrow()
+    let loop_total = loop_index_borrow()
+    let terminal_total = terminal_branch(true)
+    let total = field_total + index_total + branch_total + nested_total + loop_total + terminal_total
     println(total)
     0
 }

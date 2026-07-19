@@ -72,6 +72,28 @@ func main() -> i32 {
     assert_eq!(stdout.trim(), "5\n13");
 }
 
+#[test]
+fn e2e_dynamic_index_reference_uses_original_list_slot() {
+    if !can_link() {
+        return;
+    }
+    let stdout = compile_and_run(
+        r#"
+func bump(value: &mut i32) { *value = *value + 7 }
+func main() -> i32 {
+    let mut values = [3, 5, 9]
+    let index = 1
+    let slot = &mut values[index]
+    bump(slot)
+    println(values[index])
+    0
+}
+"#,
+    )
+    .expect("compile and run dynamic list index reference");
+    assert_eq!(stdout.trim(), "12");
+}
+
 fn can_link() -> bool {
     crate::tests::can_link()
 }
