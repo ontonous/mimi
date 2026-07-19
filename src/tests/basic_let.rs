@@ -191,7 +191,7 @@ func main() -> i32 {
         if let Item::Func(func) = item {
             func.body
                 .iter()
-                .any(|stmt| matches!(stmt, Stmt::Let { init: Some(_), .. }))
+                .any(|stmt| matches!(stmt.unlocated(), Stmt::Let { init: Some(_), .. }))
         } else {
             false
         }

@@ -12,12 +12,26 @@ impl<'a> Checker<'a> {
         expr: &Expr,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        match expr {
+        let previous_span = self.replace_span(expr.meta().map(|meta| meta.span));
+        let result = self.check_expr_inner(expected, expr, scopes);
+        self.set_span(previous_span);
+        result
+    }
+
+    fn check_expr_inner(
+        &mut self,
+        expected: &Type,
+        expr: &Expr,
+        scopes: &mut Vec<HashMap<String, Type>>,
+    ) -> Type {
+        match expr.unlocated() {
             // C3: None in context of Option<T> → infer Option<T>
-            Expr::Literal(Lit::Unit) if matches!(expected, Type::Option(_)) => expected.clone(),
+            Expr::Literal(Lit::Unit) if matches!(expected.unlocated(), Type::Option(_)) => {
+                expected.clone()
+            }
             // C3: bare None (parsed as Ident "None") in Option context
             Expr::Ident(name) if name == "None" => {
-                if let Type::Option(_) = expected {
+                if let Type::Option(_) = expected.unlocated() {
                     expected.clone()
                 } else {
                     self.infer_expr(expr, scopes)
@@ -26,7 +40,7 @@ impl<'a> Checker<'a> {
             // List literal in List / List<T> context:
             // empty → expected; non-empty List<T> → check each elem against T.
             Expr::List(elems) => {
-                if let Type::Name(name, inner) = expected {
+                if let Type::Name(name, inner) = expected.unlocated() {
                     if name == "List" {
                         if elems.is_empty() {
                             return expected.clone();
@@ -93,7 +107,22 @@ impl<'a> Checker<'a> {
         expr: &Expr,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        match expr {
+        let previous_span = self.replace_span(expr.meta().map(|meta| meta.span));
+        let result = self.infer_expr_inner(expr, scopes);
+        self.set_span(previous_span);
+        // The AstNodeMeta migration wraps types in `Type::Located { meta, ty }`.
+        // Inference results are consumed by `matches!` and `unify` which expect
+        // kind variants; strip the wrapper so downstream type discrimination
+        // (len/sort/is_empty/...) sees the underlying Type::Name directly.
+        result.into_unlocated()
+    }
+
+    fn infer_expr_inner(
+        &mut self,
+        expr: &Expr,
+        scopes: &mut Vec<HashMap<String, Type>>,
+    ) -> Type {
+        match expr.unlocated() {
             Expr::Literal(l) => self.infer_literal(l),
             Expr::Ident(name) => self.lookup_var(name, scopes),
             Expr::Call(callee, args) => self.infer_call_expr(callee, args, scopes),
@@ -129,7 +158,7 @@ impl<'a> Checker<'a> {
             Expr::OptionalChain(inner, field) => {
                 let inner_ty = self.infer_expr(inner, scopes);
                 // Normalize both Type::Option/Result and Type::Name("Option"/"Result", …).
-                let base_ty = match &inner_ty {
+                let base_ty = match inner_ty.unlocated() {
                     Type::Option(t) => t.as_ref().clone(),
                     Type::Result(ok, _) => ok.as_ref().clone(),
                     Type::Name(n, args) if n == "Option" && args.len() == 1 => args[0].clone(),
@@ -137,7 +166,7 @@ impl<'a> Checker<'a> {
                     _ => {
                         // May still be a TypeVar unified to Option later — try resolve.
                         let resolved = self.unification.resolve(&inner_ty);
-                        match &resolved {
+                        match resolved.unlocated() {
                             Type::Option(t) => t.as_ref().clone(),
                             Type::Result(ok, _) => ok.as_ref().clone(),
                             Type::Name(n, args) if n == "Option" && args.len() == 1 => {
@@ -181,6 +210,7 @@ impl<'a> Checker<'a> {
                 let _ = self.infer_expr(inner, scopes);
                 self.resolve_type(target_type)
             }
+            Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
         }
     }
 }

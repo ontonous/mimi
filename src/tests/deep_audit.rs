@@ -417,7 +417,6 @@ fn lx_c6_indent_stack_no_panic() {
 #[test]
 fn ip_h2_sleep_negative_rejected() {
     // IP-H2: negative sleep must error, not wrap to huge u64.
-    use super::run_source;
     // sleep is a builtin; negative should error at runtime in interp.
     let src = r#"
         func main() -> i32 {

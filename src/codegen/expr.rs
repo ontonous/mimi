@@ -10,13 +10,14 @@ use std::collections::HashMap;
 use super::CodeGenerator;
 use super::VarEntry;
 
+#[allow(dead_code)]
 impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn compile_expr(
         &mut self,
         expr: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        match expr {
+        match expr.unlocated() {
             Expr::Literal(lit) => self.compile_literal_expr(lit, vars),
             Expr::Ident(name) => self.compile_ident_expr(name, vars),
             Expr::Binary(op, lhs, rhs) => self.compile_binary_expr(*op, lhs, rhs, vars),
@@ -123,7 +124,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let val = self.compile_expr(inner, vars)?;
-        let target_name = match target_type {
+        let target_name = match target_type.unlocated() {
             Type::Name(name, _) => name.as_str(),
             _ => return Err("unsupported cast target type in codegen".into()),
         };
@@ -583,7 +584,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_struct_gep(sty, field_ptr, idx as u32, field)
             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
         // i32 fields: load as i32 then sext to i64 (same as compile_field_expr).
-        let (load_ty, ext) = match &fields[idx].ty {
+        let (load_ty, ext) = match fields[idx].ty.unlocated() {
             Type::Name(n, _) if n == "i32" => {
                 (BasicTypeEnum::IntType(self.context.i32_type()), true)
             }
@@ -692,7 +693,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         expr: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> String {
-        match expr {
+        match expr.unlocated() {
             Expr::Literal(Lit::String(_)) | Expr::Literal(Lit::FString(_)) => "string".to_string(),
             // Int literals lower as i64 in compile_literal; track i64 so product
             // tuples and List<(…)> elem reconstruct match stored layout.
@@ -722,7 +723,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Expr::Record { ty: Some(name), .. } => name.clone(),
             Expr::Call(callee, args) => {
-                if let Expr::Ident(name) = callee.as_ref() {
+                if let Expr::Ident(name) = callee.unlocated() {
                     // Try to strip _new suffix used by our codegen constructors
                     if let Some(stripped) = name.strip_suffix("_new") {
                         return stripped.to_string();
@@ -773,13 +774,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                         return ret_name;
                     }
                     name.clone()
-                } else if let Expr::Field(obj, method) = callee.as_ref() {
+                } else if let Expr::Field(obj, method) = callee.unlocated() {
                     // Method call result: infer the return type of string methods
                     // so that chained calls like s.trim().to_upper() work.
                     let obj_type = self.infer_object_type(obj, vars);
                     if obj_type == "string" {
                         self.infer_string_method_return_type(method)
-                    } else if let Expr::Ident(flow_name) = obj.as_ref() {
+                    } else if let Expr::Ident(flow_name) = obj.unlocated() {
                         // Flow::transition(from, ...) → to-state of the exact overload.
                         if let Some(flow) = self.flow_defs.get(flow_name) {
                             let from_type = args
@@ -907,7 +908,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Block(block) => block
                 .last()
                 .and_then(|last| {
-                    if let Stmt::Expr(e) = last {
+                    if let Stmt::Expr(e) = last.unlocated() {
                         Some(self.infer_object_type(e, vars))
                     } else {
                         None
@@ -1039,7 +1040,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let Some(ret_ty) = &fdef.ret {
                 // Check if this is a newtype constructor — return the newtype name
                 // (not the unfolded inner type) so trait method dispatch works.
-                if matches!(ret_ty, crate::ast::Type::Newtype(n, _) if n == name) {
+                if matches!(ret_ty.unlocated(), crate::ast::Type::Newtype(n, _) if n == name) {
                     return Some(name.to_string());
                 }
                 return Some(crate::core::fmt_type(ret_ty));
@@ -1200,7 +1201,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     fn compile_quote_fold_expr(&self, expr: &Expr) -> Option<BasicValueEnum<'ctx>> {
-        match expr {
+        match expr.unlocated() {
             Expr::Literal(lit) => self.compile_literal_const(lit),
             Expr::Block(block) => match block.as_slice() {
                 [Stmt::Expr(e)] => self.compile_quote_fold_expr(e),
@@ -1688,7 +1689,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let null_i8 = i8_ty.const_zero();
 
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Expr(e) => self.compile_quote_runtime_expr(e),
             Stmt::Block(block) => self.compile_quote_runtime(block),
             Stmt::Return(e) => {
@@ -1701,8 +1702,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Stmt::Continue => self.call_quote_new_leaf(19, self.i64_const(0)), // QAST_CONTINUE
             Stmt::Let { pat, init, .. } => {
-                let name = match pat {
-                    crate::ast::Pattern::Variable(n) => n.clone(),
+                let name = match &pat.kind {
+                    crate::ast::PatternKind::Variable(n) => n.clone(),
                     _ => return Err("let pattern not supported in runtime quote".into()),
                 };
                 let name_ptr = self
@@ -1790,7 +1791,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let null_i8 = i8_ty.const_zero();
 
-        match expr {
+        match expr.unlocated() {
             Expr::Literal(lit) => match lit {
                 Lit::Int(v) => self.call_quote_new_leaf(0, self.i64_const(*v)), // QAST_INT
                 Lit::Float(v) => self.call_quote_new_leaf(1, self.i64_const(v.to_bits() as i64)), // QAST_FLOAT

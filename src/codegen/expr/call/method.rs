@@ -23,7 +23,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if method_name == "upgrade"
             && (obj_type.starts_with("weak ") || obj_type.starts_with("weak_local "))
         {
-            if let Expr::Ident(name) = obj {
+            if let Expr::Ident(name) = obj.unlocated() {
                 return self.compile_weak_upgrade(name, vars);
             }
         }
@@ -33,7 +33,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Also handles raw pointer values from w.upgrade() which returns i8*,
         // and Option<shared T> values where deref extracts payload+loads.
         if method_name == "deref" {
-            if let Expr::Ident(name) = obj {
+            if let Expr::Ident(name) = obj.unlocated() {
                 if let Some(val) = self.compile_shared_deref(name, vars)? {
                     return Ok(val);
                 }
@@ -43,7 +43,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // 0.6. Weak variable upgrade without explicit type annotation:
         // fallback when infer_object_type returns the variable name, not "weak T".
         if method_name == "upgrade" {
-            if let Expr::Ident(name) = obj {
+            if let Expr::Ident(name) = obj.unlocated() {
                 if self.shared_var_names.contains(name.as_str()) {
                     return self.compile_weak_upgrade(name, vars);
                 }
@@ -127,7 +127,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .cloned()
                         .unwrap_or_default();
                     let is_generic_call = impl_type_args.iter().any(|ta| {
-                        if let Type::Name(tn, _) = ta {
+                        if let Type::Name(tn, _) = ta.unlocated() {
                             obj_type.contains(&format!("<{}>", tn))
                         } else {
                             false
@@ -166,7 +166,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if concrete_types.len() == impl_type_args.len() {
                         let mut type_map: HashMap<String, Type> = HashMap::new();
                         for (ta, ct) in impl_type_args.iter().zip(concrete_types.iter()) {
-                            if let Type::Name(tn, _) = ta {
+                            if let Type::Name(tn, _) = ta.unlocated() {
                                 type_map.insert(tn.clone(), Type::Name(ct.to_string(), vec![]));
                             }
                         }
@@ -192,16 +192,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         impl_type_args.clone(),
                                     )),
                                 );
-                                f.params.insert(
-                                    0,
+                                f.params.insert(0, {
+                                    let meta = crate::ast::AstNodeMeta::inherited(
+                                        f.meta.span,
+                                        crate::ast::AstOrigin::RuntimeSystem("codegen.impl_self"),
+                                    );
                                     crate::ast::Param {
+                                        meta,
                                         name: "self".into(),
-                                        ty: self_ty,
+                                        ty: self_ty.deep_reorigin(meta),
                                         mut_: false,
                                         default_value: None,
                                         borrow: None,
-                                    },
-                                );
+                                    }
+                                });
                                 self.compile_generic_func(f, &type_map)?;
                             }
                         }
@@ -300,7 +304,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         //    When `obj` is a flow type name (not an instance), dispatch to the
         //    synthetic transition function. The first argument is the from-state
         //    payload; remaining args are the event parameters.
-        if let Expr::Ident(flow_name) = obj {
+        if let Expr::Ident(flow_name) = obj.unlocated() {
             if self.flow_defs.contains_key(flow_name) {
                 return self.compile_flow_transition_call(flow_name, method_name, args, vars);
             }
@@ -521,7 +525,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
 
         for (idx, field) in fields.iter().enumerate() {
-            let field_ty_name = match &field.ty {
+            let field_ty_name = match field.ty.unlocated() {
                 Type::Name(n, _) => n.as_str(),
                 _ => continue,
             };
@@ -730,7 +734,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("extract self str: {}", e)))?;
                     return Ok(data_ptr);
                 }
-                if let Expr::Ident(name) = obj {
+                if let Expr::Ident(name) = obj.unlocated() {
                     if let Some(&(alloca, _)) = vars.get(name.as_str()) {
                         Ok(alloca.into())
                     } else {
@@ -1230,7 +1234,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         type_args: &[Type],
         raw_ptr: inkwell::values::PointerValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        match &type_args[0] {
+        match type_args[0].unlocated() {
             Type::Name(n, _) if n == "i32" || n == "i64" => {
                 let func = self.get_runtime_fn("mimi_json_as_i64")?;
                 let result = self.build_call(
@@ -1304,9 +1308,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let inner_ty = &type_params[0];
                 let i64_ty = self.context.i64_type();
                 // List of Option of product: dedicated runtime path.
-                if let Type::Name(on, oargs) = inner_ty {
+                if let Type::Name(on, oargs) = inner_ty.unlocated() {
                     if on == "Option" && oargs.len() == 1 {
-                        let opt_inner = match &oargs[0] {
+                        let opt_inner = match oargs[0].unlocated() {
                             Type::Name(an, aargs) if aargs.is_empty() => {
                                 if let Some(td) = self.type_defs.get(an) {
                                     if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
@@ -1320,7 +1324,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             other => other.clone(),
                         };
-                        if let Type::Tuple(elems) = opt_inner {
+                        if let Type::Tuple(elems) = opt_inner.unlocated() {
                             let arity = elems.len() as u64;
                             let func =
                                 self.get_runtime_fn("mimi_list_from_json_option_product_i64")?;
@@ -1352,9 +1356,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 // List of Set of product / Set of Map of product.
-                if let Type::Name(sn, sargs) = inner_ty {
+                if let Type::Name(sn, sargs) = inner_ty.unlocated() {
                     if sn == "Set" && sargs.len() == 1 {
-                        let set_elem = match &sargs[0] {
+                        let set_elem = match sargs[0].unlocated() {
                             Type::Name(an, aargs) if aargs.is_empty() => {
                                 if let Some(td) = self.type_defs.get(an) {
                                     if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
@@ -1368,9 +1372,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             other => other.clone(),
                         };
-                        if let Type::Name(mn, margs) = &set_elem {
+                        if let Type::Name(mn, margs) = set_elem.unlocated() {
                             if mn == "Map" && margs.len() == 2 {
-                                let map_val = match &margs[1] {
+                                let map_val = match margs[1].unlocated() {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
                                             if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
@@ -1385,7 +1389,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     other => other.clone(),
                                 };
-                                if let Type::Tuple(elems) = map_val {
+                                if let Type::Tuple(elems) = map_val.unlocated() {
                                     let arity = elems.len() as u64;
                                     let func = self.get_runtime_fn(
                                         "mimi_list_from_json_set_map_product_i64",
@@ -1417,7 +1421,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                             }
                         }
-                        if let Type::Tuple(elems) = set_elem {
+                        if let Type::Tuple(elems) = set_elem.unlocated() {
                             let arity = elems.len() as u64;
                             let func =
                                 self.get_runtime_fn("mimi_list_from_json_set_product_i64")?;
@@ -1449,11 +1453,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 // List of Set of Option of product.
-                if let Type::Name(sn, sargs) = inner_ty {
+                if let Type::Name(sn, sargs) = inner_ty.unlocated() {
                     if sn == "Set" && sargs.len() == 1 {
-                        if let Type::Name(on, oargs) = &sargs[0] {
+                        if let Type::Name(on, oargs) = sargs[0].unlocated() {
                             if on == "Option" && oargs.len() == 1 {
-                                let opt_inner = match &oargs[0] {
+                                let opt_inner = match oargs[0].unlocated() {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
                                             if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
@@ -1468,7 +1472,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     other => other.clone(),
                                 };
-                                if let Type::Tuple(elems) = opt_inner {
+                                if let Type::Tuple(elems) = opt_inner.unlocated() {
                                     let arity = elems.len() as u64;
                                     let func = self.get_runtime_fn(
                                         "mimi_list_from_json_set_option_product_i64",
@@ -1503,11 +1507,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 // List of Set of Result of product.
-                if let Type::Name(sn, sargs) = inner_ty {
+                if let Type::Name(sn, sargs) = inner_ty.unlocated() {
                     if sn == "Set" && sargs.len() == 1 {
-                        if let Type::Name(rn, rargs) = &sargs[0] {
+                        if let Type::Name(rn, rargs) = sargs[0].unlocated() {
                             if rn == "Result" && !rargs.is_empty() {
-                                let res_ok = match &rargs[0] {
+                                let res_ok = match rargs[0].unlocated() {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
                                             if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
@@ -1522,7 +1526,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     other => other.clone(),
                                 };
-                                if let Type::Tuple(elems) = res_ok {
+                                if let Type::Tuple(elems) = res_ok.unlocated() {
                                     let arity = elems.len() as u64;
                                     let func = self.get_runtime_fn(
                                         "mimi_list_from_json_set_result_product_i64",
@@ -1557,9 +1561,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 // List of Result of product / Map of product: dedicated runtime paths.
-                if let Type::Name(rn, rargs) = inner_ty {
+                if let Type::Name(rn, rargs) = inner_ty.unlocated() {
                     if rn == "Result" && rargs.len() == 2 {
-                        let ok_ty = match &rargs[0] {
+                        let ok_ty = match rargs[0].unlocated() {
                             Type::Name(an, aargs) if aargs.is_empty() => {
                                 if let Some(td) = self.type_defs.get(an) {
                                     if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
@@ -1573,7 +1577,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             other => other.clone(),
                         };
-                        if let Type::Tuple(elems) = ok_ty {
+                        if let Type::Tuple(elems) = ok_ty.unlocated() {
                             let arity = elems.len() as u64;
                             let func =
                                 self.get_runtime_fn("mimi_list_from_json_result_product_i64")?;
@@ -1602,9 +1606,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                             return Ok(loaded.into());
                         }
-                        if let Type::Name(mn, margs) = &ok_ty {
+                        if let Type::Name(mn, margs) = ok_ty.unlocated() {
                             if mn == "Map" && margs.len() == 2 {
-                                let map_val = match &margs[1] {
+                                let map_val = match margs[1].unlocated() {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
                                             if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
@@ -1619,7 +1623,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     other => other.clone(),
                                 };
-                                if let Type::Tuple(elems) = map_val {
+                                if let Type::Tuple(elems) = map_val.unlocated() {
                                     let arity = elems.len() as u64;
                                     let func = self.get_runtime_fn(
                                         "mimi_list_from_json_result_map_product_i64",
@@ -1651,7 +1655,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                             }
                             if mn == "Set" && margs.len() == 1 {
-                                let set_elem = match &margs[0] {
+                                let set_elem = match margs[0].unlocated() {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
                                             if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
@@ -1666,7 +1670,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     other => other.clone(),
                                 };
-                                if let Type::Tuple(elems) = set_elem {
+                                if let Type::Tuple(elems) = set_elem.unlocated() {
                                     let arity = elems.len() as u64;
                                     let func = self.get_runtime_fn(
                                         "mimi_list_from_json_result_set_product_i64",
@@ -1779,7 +1783,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_pointer_value();
 
                 // Parse element and store based on inner type
-                let elem_i64 = match inner_ty {
+                let elem_i64 = match inner_ty.unlocated() {
                     Type::Name(n, _) if n == "i32" || n == "i64" => {
                         let parser = self.get_runtime_fn("mimi_json_as_i64")?;
                         let val = self
@@ -1890,11 +1894,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Type::Name(n, args) if n == "Set" => {
                         let elem_is_string = args
                             .first()
-                            .map(|t| matches!(t, Type::Name(tn, _) if tn == "string"))
+                            .map(|t| matches!(t.unlocated(), Type::Name(tn, _) if tn == "string"))
                             .unwrap_or(false);
                         let elem_is_float = args
                             .first()
-                            .map(|t| matches!(t, Type::Name(tn, _) if tn == "f32" || tn == "f64"))
+                            .map(|t| matches!(t.unlocated(), Type::Name(tn, _) if tn == "f32" || tn == "f64"))
                             .unwrap_or(false);
                         let fn_name = if elem_is_string {
                             "mimi_set_from_json_string"
@@ -2218,7 +2222,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let val_ty = args.get(1);
                 let resolved_val = val_ty.map(|t| {
                     // Expand type aliases to underlying product tuple when possible.
-                    match t {
+                    match t.unlocated() {
                         Type::Name(an, aargs) if aargs.is_empty() => {
                             if let Some(td) = self.type_defs.get(an) {
                                 if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
@@ -2232,10 +2236,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 });
                 let val_is_product = resolved_val
                     .as_ref()
-                    .map(|t| matches!(t, Type::Tuple(_)))
+                    .map(|t| matches!(t.unlocated(), Type::Tuple(_)))
                     .unwrap_or(false);
                 if val_is_product {
-                    let arity = match resolved_val.as_ref() {
+                    let arity = match resolved_val.as_ref().map(Type::unlocated) {
                         Some(Type::Tuple(elems)) => elems.len() as u64,
                         _ => 2,
                     };
@@ -2255,7 +2259,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .into());
                 }
                 // Map<string, List/Set/Map/Option/Result of product>.
-                if let Some(Type::Name(ln, largs)) = resolved_val.as_ref() {
+                if let Some(Type::Name(ln, largs)) = resolved_val.as_ref().map(Type::unlocated) {
                     if (ln == "List"
                         || ln == "Set"
                         || ln == "Map"
@@ -2273,7 +2277,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             None
                         };
                         if let Some(pt) = product_ty {
-                            let le = match pt {
+                            let le = match pt.unlocated() {
                                 Type::Name(an, aargs) if aargs.is_empty() => {
                                     if let Some(td) = self.type_defs.get(an) {
                                         if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
@@ -2287,7 +2291,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                                 other => other.clone(),
                             };
-                            if let Type::Tuple(elems) = le {
+                            if let Type::Tuple(elems) = le.unlocated() {
                                 let arity = elems.len() as u64;
                                 let (fn_name, label) = match ln.as_str() {
                                     "List" => (
@@ -2327,9 +2331,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // List of Set of Result of product.
                             if ln == "List" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "Set" && margs.len() == 1 {
-                                        let set_elem_r = match &margs[0] {
+                                        let set_elem_r = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -2345,9 +2349,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Name(rn, rargs) = &set_elem_r {
+                                        if let Type::Name(rn, rargs) = set_elem_r.unlocated() {
                                             if rn == "Result" && !rargs.is_empty() {
-                                                let res_ok = match &rargs[0] {
+                                                let res_ok = match rargs[0].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -2364,7 +2368,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = res_ok {
+                                                if let Type::Tuple(elems) = res_ok.unlocated() {
                                                     let arity = elems.len() as u64;
                                                     let func = self.get_runtime_fn(
                                                         "mimi_map_from_json_list_set_result_product_i64",
@@ -2397,9 +2401,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // List of Set of Option of product.
                             if ln == "List" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "Set" && margs.len() == 1 {
-                                        let set_elem0 = match &margs[0] {
+                                        let set_elem0 = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -2415,9 +2419,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Name(on, oargs) = &set_elem0 {
+                                        if let Type::Name(on, oargs) = set_elem0.unlocated() {
                                             if on == "Option" && oargs.len() == 1 {
-                                                let opt_inner = match &oargs[0] {
+                                                let opt_inner = match oargs[0].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -2434,7 +2438,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = opt_inner {
+                                                if let Type::Tuple(elems) = opt_inner.unlocated() {
                                                     let arity = elems.len() as u64;
                                                     let func = self.get_runtime_fn(
                                                         "mimi_map_from_json_list_set_option_product_i64",
@@ -2467,9 +2471,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // List of Set of product.
                             if ln == "List" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "Set" && margs.len() == 1 {
-                                        let set_elem = match &margs[0] {
+                                        let set_elem = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -2485,7 +2489,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Tuple(elems) = set_elem {
+                                        if let Type::Tuple(elems) = set_elem.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_list_set_product_i64",
@@ -2514,11 +2518,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // List of Set of Map of product.
                             if ln == "List" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "Set" && margs.len() == 1 {
-                                        if let Type::Name(mapn, mapargs) = &margs[0] {
+                                        if let Type::Name(mapn, mapargs) = margs[0].unlocated() {
                                             if mapn == "Map" && mapargs.len() == 2 {
-                                                let map_val = match &mapargs[1] {
+                                                let map_val = match mapargs[1].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -2535,7 +2539,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = map_val {
+                                                if let Type::Tuple(elems) = map_val.unlocated() {
                                                     let arity = elems.len() as u64;
                                                     let func = self.get_runtime_fn(
                                                         "mimi_map_from_json_list_set_map_product_i64",
@@ -2568,9 +2572,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // List of Map of List of product.
                             if ln == "List" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "Map" && margs.len() == 2 {
-                                        let map_val = match &margs[1] {
+                                        let map_val = match margs[1].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -2586,9 +2590,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Name(ln2, largs2) = &map_val {
+                                        if let Type::Name(ln2, largs2) = map_val.unlocated() {
                                             if ln2 == "List" && largs2.len() == 1 {
-                                                let list_elem = match &largs2[0] {
+                                                let list_elem = match largs2[0].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -2605,7 +2609,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = list_elem {
+                                                if let Type::Tuple(elems) = list_elem.unlocated() {
                                                     let arity = elems.len() as u64;
                                                     let func = self.get_runtime_fn(
                                                         "mimi_map_from_json_list_map_list_product_i64",
@@ -2638,9 +2642,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // List of Map of product.
                             if ln == "List" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "Map" && margs.len() == 2 {
-                                        let map_val = match &margs[1] {
+                                        let map_val = match margs[1].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -2656,7 +2660,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Tuple(elems) = map_val {
+                                        if let Type::Tuple(elems) = map_val.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_list_map_product_i64",
@@ -2685,9 +2689,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // List of Option of product / Option of Set of product.
                             if ln == "List" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "Option" && margs.len() == 1 {
-                                        let opt_inner = match &margs[0] {
+                                        let opt_inner = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -2703,9 +2707,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Name(sn, sargs) = &opt_inner {
+                                        if let Type::Name(sn, sargs) = opt_inner.unlocated() {
                                             if sn == "Set" && sargs.len() == 1 {
-                                                let set_elem = match &sargs[0] {
+                                                let set_elem = match sargs[0].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -2722,7 +2726,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = set_elem {
+                                                if let Type::Tuple(elems) = set_elem.unlocated() {
                                                     let arity = elems.len() as u64;
                                                     let func = self.get_runtime_fn(
                                                         "mimi_map_from_json_list_option_set_product_i64",
@@ -2750,7 +2754,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 }
                                             }
                                         }
-                                        if let Type::Tuple(elems) = opt_inner {
+                                        if let Type::Tuple(elems) = opt_inner.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_list_option_product_i64",
@@ -2779,9 +2783,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // Map of Map of List/Set/Option/Result of product.
                             if ln == "Map" {
-                                if let Type::Name(sn, sargs) = &le {
+                                if let Type::Name(sn, sargs) = le.unlocated() {
                                     if sn == "Result" && sargs.len() == 2 {
-                                        let res_ok = match &sargs[0] {
+                                        let res_ok = match sargs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -2797,7 +2801,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Tuple(elems) = res_ok {
+                                        if let Type::Tuple(elems) = res_ok.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_map_result_product_i64",
@@ -2823,7 +2827,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                     }
                                     if sn == "List" && sargs.len() == 1 {
-                                        let list_elem = match &sargs[0] {
+                                        let list_elem = match sargs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -2839,7 +2843,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Tuple(elems) = list_elem {
+                                        if let Type::Tuple(elems) = list_elem.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_map_list_product_i64",
@@ -2865,7 +2869,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                     }
                                     if sn == "Option" && sargs.len() == 1 {
-                                        let opt_inner = match &sargs[0] {
+                                        let opt_inner = match sargs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -2881,7 +2885,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Tuple(elems) = opt_inner {
+                                        if let Type::Tuple(elems) = opt_inner.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_map_option_product_i64",
@@ -2910,9 +2914,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // Map of Map of Set of product (outer Map values are Map of Set of product).
                             if ln == "Map" {
-                                if let Type::Name(sn, sargs) = &le {
+                                if let Type::Name(sn, sargs) = le.unlocated() {
                                     if sn == "Set" && sargs.len() == 1 {
-                                        let set_elem = match &sargs[0] {
+                                        let set_elem = match sargs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -2928,7 +2932,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Tuple(elems) = set_elem {
+                                        if let Type::Tuple(elems) = set_elem.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_map_set_product_i64",
@@ -2957,11 +2961,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // Set of List of Map of product.
                             if ln == "Set" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "List" && margs.len() == 1 {
-                                        if let Type::Name(mapn, mapargs) = &margs[0] {
+                                        if let Type::Name(mapn, mapargs) = margs[0].unlocated() {
                                             if mapn == "Map" && mapargs.len() == 2 {
-                                                let map_val = match &mapargs[1] {
+                                                let map_val = match mapargs[1].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -2978,7 +2982,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = map_val {
+                                                if let Type::Tuple(elems) = map_val.unlocated() {
                                                     let arity = elems.len() as u64;
                                                     let func = self.get_runtime_fn(
                                                         "mimi_map_from_json_set_list_map_product_i64",
@@ -3011,9 +3015,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // Set of Map of List of product.
                             if ln == "Set" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "Map" && margs.len() == 2 {
-                                        let map_val = match &margs[1] {
+                                        let map_val = match margs[1].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -3029,9 +3033,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Name(ln2, largs2) = &map_val {
+                                        if let Type::Name(ln2, largs2) = map_val.unlocated() {
                                             if ln2 == "List" && largs2.len() == 1 {
-                                                let list_elem = match &largs2[0] {
+                                                let list_elem = match largs2[0].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -3048,7 +3052,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = list_elem {
+                                                if let Type::Tuple(elems) = list_elem.unlocated() {
                                                     let arity = elems.len() as u64;
                                                     let func = self.get_runtime_fn(
                                                         "mimi_map_from_json_set_map_list_product_i64",
@@ -3081,9 +3085,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // Set of Map of product.
                             if ln == "Set" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "Map" && margs.len() == 2 {
-                                        let map_val = match &margs[1] {
+                                        let map_val = match margs[1].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -3099,7 +3103,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Tuple(elems) = map_val {
+                                        if let Type::Tuple(elems) = map_val.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_set_map_product_i64",
@@ -3128,9 +3132,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // Set of List of product.
                             if ln == "Set" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "List" && margs.len() == 1 {
-                                        let list_elem = match &margs[0] {
+                                        let list_elem = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -3146,7 +3150,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Tuple(elems) = list_elem {
+                                        if let Type::Tuple(elems) = list_elem.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_set_list_product_i64",
@@ -3175,9 +3179,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // Set of Option of product.
                             if ln == "Set" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "Option" && margs.len() == 1 {
-                                        let opt_inner = match &margs[0] {
+                                        let opt_inner = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -3193,7 +3197,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Tuple(elems) = opt_inner {
+                                        if let Type::Tuple(elems) = opt_inner.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_set_option_product_i64",
@@ -3222,9 +3226,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // Set of Result of Option of product.
                             if ln == "Set" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "Result" && !margs.is_empty() {
-                                        let res_ok0 = match &margs[0] {
+                                        let res_ok0 = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -3240,9 +3244,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Name(on, oargs) = &res_ok0 {
+                                        if let Type::Name(on, oargs) = res_ok0.unlocated() {
                                             if on == "Option" && oargs.len() == 1 {
-                                                let opt_inner = match &oargs[0] {
+                                                let opt_inner = match oargs[0].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -3259,7 +3263,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = opt_inner {
+                                                if let Type::Tuple(elems) = opt_inner.unlocated() {
                                                     let arity = elems.len() as u64;
                                                     let func = self.get_runtime_fn(
                                                         "mimi_map_from_json_set_result_option_product_i64",
@@ -3292,9 +3296,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // Set of Result of product.
                             if ln == "Set" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "Result" && !margs.is_empty() {
-                                        let res_ok = match &margs[0] {
+                                        let res_ok = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -3310,7 +3314,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Tuple(elems) = res_ok {
+                                        if let Type::Tuple(elems) = res_ok.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_set_result_product_i64",
@@ -3339,9 +3343,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // List of Result of Option of product.
                             if ln == "List" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "Result" && !margs.is_empty() {
-                                        let res_ok0 = match &margs[0] {
+                                        let res_ok0 = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -3357,9 +3361,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Name(on, oargs) = &res_ok0 {
+                                        if let Type::Name(on, oargs) = res_ok0.unlocated() {
                                             if on == "Option" && oargs.len() == 1 {
-                                                let opt_inner = match &oargs[0] {
+                                                let opt_inner = match oargs[0].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -3376,7 +3380,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = opt_inner {
+                                                if let Type::Tuple(elems) = opt_inner.unlocated() {
                                                     let arity = elems.len() as u64;
                                                     let func = self.get_runtime_fn(
                                                         "mimi_map_from_json_list_result_option_product_i64",
@@ -3409,9 +3413,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // List of Result of product.
                             if ln == "List" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "Result" && !margs.is_empty() {
-                                        let res_ok = match &margs[0] {
+                                        let res_ok = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -3427,7 +3431,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Tuple(elems) = res_ok {
+                                        if let Type::Tuple(elems) = res_ok.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_list_result_product_i64",
@@ -3456,9 +3460,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             // Option/Result of Map of product; Option of Set of product.
                             if ln == "Option" || ln == "Result" {
-                                if let Type::Name(mn, margs) = &le {
+                                if let Type::Name(mn, margs) = le.unlocated() {
                                     if mn == "Map" && margs.len() == 2 {
-                                        let map_val = match &margs[1] {
+                                        let map_val = match margs[1].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -3474,9 +3478,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Name(ln2, largs2) = &map_val {
+                                        if let Type::Name(ln2, largs2) = map_val.unlocated() {
                                             if ln2 == "List" && largs2.len() == 1 {
-                                                let list_elem = match &largs2[0] {
+                                                let list_elem = match largs2[0].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -3493,7 +3497,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = list_elem {
+                                                if let Type::Tuple(elems) = list_elem.unlocated() {
                                                     if ln == "Option" {
                                                         let arity = elems.len() as u64;
                                                         let func = self.get_runtime_fn(
@@ -3523,7 +3527,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 }
                                             }
                                         }
-                                        if let Type::Tuple(elems) = map_val {
+                                        if let Type::Tuple(elems) = map_val.unlocated() {
                                             let arity = elems.len() as u64;
                                             let (fn_name, label) = if ln == "Option" {
                                                 (
@@ -3555,7 +3559,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                     }
                                     if mn == "Set" && margs.len() == 1 {
-                                        let set_elem = match &margs[0] {
+                                        let set_elem = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -3573,9 +3577,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         };
                                         // Option of Set of Map of product.
                                         if ln == "Option" {
-                                            if let Type::Name(mn2, margs2) = &set_elem {
+                                            if let Type::Name(mn2, margs2) = set_elem.unlocated() {
                                                 if mn2 == "Map" && margs2.len() == 2 {
-                                                    let map_val = match &margs2[1] {
+                                                    let map_val = match margs2[1].unlocated() {
                                                         Type::Name(an, aargs)
                                                             if aargs.is_empty() =>
                                                         {
@@ -3595,7 +3599,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         }
                                                         other => other.clone(),
                                                     };
-                                                    if let Type::Tuple(elems) = map_val {
+                                                    if let Type::Tuple(elems) = map_val.unlocated()
+                                                    {
                                                         let arity = elems.len() as u64;
                                                         let func = self.get_runtime_fn(
                                                             "mimi_map_from_json_option_set_map_product_i64",
@@ -3626,9 +3631,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                         // Option of Set of List of product (before product-tuple arm moves set_elem).
                                         if ln == "Option" {
-                                            if let Type::Name(ln2, largs2) = &set_elem {
+                                            if let Type::Name(ln2, largs2) = set_elem.unlocated() {
                                                 if ln2 == "List" && largs2.len() == 1 {
-                                                    let list_elem = match &largs2[0] {
+                                                    let list_elem = match largs2[0].unlocated() {
                                                         Type::Name(an, aargs)
                                                             if aargs.is_empty() =>
                                                         {
@@ -3648,7 +3653,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         }
                                                         other => other.clone(),
                                                     };
-                                                    if let Type::Tuple(elems) = list_elem {
+                                                    if let Type::Tuple(elems) =
+                                                        list_elem.unlocated()
+                                                    {
                                                         let arity = elems.len() as u64;
                                                         let func = self.get_runtime_fn(
                                                             "mimi_map_from_json_option_set_list_product_i64",
@@ -3679,9 +3686,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                         // Result of Set of Map of product.
                                         if ln == "Result" {
-                                            if let Type::Name(mn2, margs2) = &set_elem {
+                                            if let Type::Name(mn2, margs2) = set_elem.unlocated() {
                                                 if mn2 == "Map" && margs2.len() == 2 {
-                                                    let map_val = match &margs2[1] {
+                                                    let map_val = match margs2[1].unlocated() {
                                                         Type::Name(an, aargs)
                                                             if aargs.is_empty() =>
                                                         {
@@ -3701,7 +3708,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         }
                                                         other => other.clone(),
                                                     };
-                                                    if let Type::Tuple(elems) = map_val {
+                                                    if let Type::Tuple(elems) = map_val.unlocated()
+                                                    {
                                                         let arity = elems.len() as u64;
                                                         let func = self.get_runtime_fn(
                                                             "mimi_map_from_json_result_set_map_product_i64",
@@ -3732,9 +3740,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                         // Result of Set of List of product.
                                         if ln == "Result" {
-                                            if let Type::Name(ln2, largs2) = &set_elem {
+                                            if let Type::Name(ln2, largs2) = set_elem.unlocated() {
                                                 if ln2 == "List" && largs2.len() == 1 {
-                                                    let list_elem = match &largs2[0] {
+                                                    let list_elem = match largs2[0].unlocated() {
                                                         Type::Name(an, aargs)
                                                             if aargs.is_empty() =>
                                                         {
@@ -3754,7 +3762,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         }
                                                         other => other.clone(),
                                                     };
-                                                    if let Type::Tuple(elems) = list_elem {
+                                                    if let Type::Tuple(elems) =
+                                                        list_elem.unlocated()
+                                                    {
                                                         let arity = elems.len() as u64;
                                                         let func = self.get_runtime_fn(
                                                             "mimi_map_from_json_result_set_list_product_i64",
@@ -3783,7 +3793,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 }
                                             }
                                         }
-                                        if let Type::Tuple(elems) = set_elem {
+                                        if let Type::Tuple(elems) = set_elem.unlocated() {
                                             let arity = elems.len() as u64;
                                             let (fn_name, label) = if ln == "Option" {
                                                 (
@@ -3816,7 +3826,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     // Option of List of product / Map of product.
                                     if ln == "Option" && mn == "List" && margs.len() == 1 {
-                                        let list_elem = match &margs[0] {
+                                        let list_elem = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -3832,9 +3842,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Name(mapn, mapargs) = &list_elem {
+                                        if let Type::Name(mapn, mapargs) = list_elem.unlocated() {
                                             if mapn == "Map" && mapargs.len() == 2 {
-                                                let map_val = match &mapargs[1] {
+                                                let map_val = match mapargs[1].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -3851,7 +3861,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = map_val {
+                                                if let Type::Tuple(elems) = map_val.unlocated() {
                                                     let arity = elems.len() as u64;
                                                     let func = self.get_runtime_fn(
                                                         "mimi_map_from_json_option_list_map_product_i64",
@@ -3879,7 +3889,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 }
                                             }
                                         }
-                                        if let Type::Tuple(elems) = list_elem {
+                                        if let Type::Tuple(elems) = list_elem.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_option_list_product_i64",
@@ -3906,7 +3916,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     // Result of List of Map of product.
                                     if ln == "Result" && mn == "List" && margs.len() == 1 {
-                                        let list_elem_m = match &margs[0] {
+                                        let list_elem_m = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -3922,9 +3932,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Name(mapn, mapargs) = &list_elem_m {
+                                        if let Type::Name(mapn, mapargs) = list_elem_m.unlocated() {
                                             if mapn == "Map" && mapargs.len() == 2 {
-                                                let map_val = match &mapargs[1] {
+                                                let map_val = match mapargs[1].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -3941,7 +3951,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = map_val {
+                                                if let Type::Tuple(elems) = map_val.unlocated() {
                                                     let arity = elems.len() as u64;
                                                     let func = self.get_runtime_fn(
                                                         "mimi_map_from_json_result_list_map_product_i64",
@@ -3972,7 +3982,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     // Result of List of Set of product.
                                     if ln == "Result" && mn == "List" && margs.len() == 1 {
-                                        let list_elem_s = match &margs[0] {
+                                        let list_elem_s = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -3988,9 +3998,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Name(sn, sargs) = &list_elem_s {
+                                        if let Type::Name(sn, sargs) = list_elem_s.unlocated() {
                                             if sn == "Set" && sargs.len() == 1 {
-                                                let set_elem = match &sargs[0] {
+                                                let set_elem = match sargs[0].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -4007,7 +4017,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = set_elem {
+                                                if let Type::Tuple(elems) = set_elem.unlocated() {
                                                     let arity = elems.len() as u64;
                                                     let func = self.get_runtime_fn(
                                                         "mimi_map_from_json_result_list_set_product_i64",
@@ -4038,7 +4048,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     // Result of List of Option of product.
                                     if ln == "Result" && mn == "List" && margs.len() == 1 {
-                                        let list_elem0 = match &margs[0] {
+                                        let list_elem0 = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -4054,9 +4064,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Name(on, oargs) = &list_elem0 {
+                                        if let Type::Name(on, oargs) = list_elem0.unlocated() {
                                             if on == "Option" && oargs.len() == 1 {
-                                                let opt_inner = match &oargs[0] {
+                                                let opt_inner = match oargs[0].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -4073,7 +4083,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = opt_inner {
+                                                if let Type::Tuple(elems) = opt_inner.unlocated() {
                                                     let arity = elems.len() as u64;
                                                     let func = self.get_runtime_fn(
                                                         "mimi_map_from_json_result_list_option_product_i64",
@@ -4104,7 +4114,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     // Result of List of product.
                                     if ln == "Result" && mn == "List" && margs.len() == 1 {
-                                        let list_elem = match &margs[0] {
+                                        let list_elem = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -4120,7 +4130,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Tuple(elems) = list_elem {
+                                        if let Type::Tuple(elems) = list_elem.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_result_list_product_i64",
@@ -4147,7 +4157,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     // Option of Result of product.
                                     if ln == "Option" && mn == "Result" && !margs.is_empty() {
-                                        let res_ok = match &margs[0] {
+                                        let res_ok = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -4163,7 +4173,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Tuple(elems) = res_ok {
+                                        if let Type::Tuple(elems) = res_ok.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_option_result_product_i64",
@@ -4190,7 +4200,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     // Result of Option of List of product.
                                     if ln == "Result" && mn == "Option" && margs.len() == 1 {
-                                        let opt_inner0 = match &margs[0] {
+                                        let opt_inner0 = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -4206,9 +4216,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Name(ln2, largs2) = &opt_inner0 {
+                                        if let Type::Name(ln2, largs2) = opt_inner0.unlocated() {
                                             if ln2 == "List" && largs2.len() == 1 {
-                                                let list_elem = match &largs2[0] {
+                                                let list_elem = match largs2[0].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -4225,7 +4235,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = list_elem {
+                                                if let Type::Tuple(elems) = list_elem.unlocated() {
                                                     let arity = elems.len() as u64;
                                                     let func = self.get_runtime_fn(
                                                         "mimi_map_from_json_result_option_list_product_i64",
@@ -4256,7 +4266,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     // Option of Result of List of product.
                                     if ln == "Option" && mn == "Result" && !margs.is_empty() {
-                                        let res_ok0 = match &margs[0] {
+                                        let res_ok0 = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -4272,9 +4282,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Name(ln2, largs2) = &res_ok0 {
+                                        if let Type::Name(ln2, largs2) = res_ok0.unlocated() {
                                             if ln2 == "List" && largs2.len() == 1 {
-                                                let list_elem = match &largs2[0] {
+                                                let list_elem = match largs2[0].unlocated() {
                                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                                         if let Some(td) = self.type_defs.get(an) {
                                                             if let crate::ast::TypeDefKind::Alias(
@@ -4291,7 +4301,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     }
                                                     other => other.clone(),
                                                 };
-                                                if let Type::Tuple(elems) = list_elem {
+                                                if let Type::Tuple(elems) = list_elem.unlocated() {
                                                     let arity = elems.len() as u64;
                                                     let func = self.get_runtime_fn(
                                                         "mimi_map_from_json_option_result_list_product_i64",
@@ -4322,7 +4332,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     // Result of Option of product.
                                     if ln == "Result" && mn == "Option" && margs.len() == 1 {
-                                        let opt_inner = match &margs[0] {
+                                        let opt_inner = match margs[0].unlocated() {
                                             Type::Name(an, aargs) if aargs.is_empty() => {
                                                 if let Some(td) = self.type_defs.get(an) {
                                                     if let crate::ast::TypeDefKind::Alias(inner) =
@@ -4338,7 +4348,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             }
                                             other => other.clone(),
                                         };
-                                        if let Type::Tuple(elems) = opt_inner {
+                                        if let Type::Tuple(elems) = opt_inner.unlocated() {
                                             let arity = elems.len() as u64;
                                             let func = self.get_runtime_fn(
                                                 "mimi_map_from_json_result_option_product_i64",
@@ -4377,10 +4387,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     })
                     .unwrap_or(true);
                 let val_is_float = val_ty
-                    .map(|t| matches!(t, Type::Name(tn, _) if tn == "f32" || tn == "f64"))
+                    .map(|t| matches!(t.unlocated(), Type::Name(tn, _) if tn == "f32" || tn == "f64"))
                     .unwrap_or(false);
                 let val_is_string = val_ty
-                    .map(|t| matches!(t, Type::Name(tn, _) if tn == "string"))
+                    .map(|t| matches!(t.unlocated(), Type::Name(tn, _) if tn == "string"))
                     .unwrap_or(false);
                 if !val_is_int && !val_is_float && !val_is_string {
                     return Err(CompileError::Generic(
@@ -4405,7 +4415,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Type::Name(n, args) if n == "Set" => {
                 let elem_ty = args.first();
-                let resolved_elem = elem_ty.map(|t| match t {
+                let resolved_elem = elem_ty.map(|t| match t.unlocated() {
                     Type::Name(an, aargs) if aargs.is_empty() => {
                         if let Some(td) = self.type_defs.get(an) {
                             if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
@@ -4416,7 +4426,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     other => other.clone(),
                 });
-                if let Some(Type::Tuple(elems)) = resolved_elem.as_ref() {
+                if let Some(Type::Tuple(elems)) = resolved_elem.as_ref().map(Type::unlocated) {
                     let arity = elems.len() as u64;
                     let func = self.get_runtime_fn("mimi_set_from_json_product_i64")?;
                     let result = self.build_call(
@@ -4434,9 +4444,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .into());
                 }
                 // Set of Option/Result of product.
-                if let Some(Type::Name(ln, largs)) = resolved_elem.as_ref() {
+                if let Some(Type::Name(ln, largs)) = resolved_elem.as_ref().map(Type::unlocated) {
                     if ln == "Option" && largs.len() == 1 {
-                        let inner = match &largs[0] {
+                        let inner = match largs[0].unlocated() {
                             Type::Name(an, aargs) if aargs.is_empty() => {
                                 if let Some(td) = self.type_defs.get(an) {
                                     if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
@@ -4451,9 +4461,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             other => other.clone(),
                         };
                         // Option of Result of product.
-                        if let Type::Name(rn, rargs) = &inner {
+                        if let Type::Name(rn, rargs) = inner.unlocated() {
                             if rn == "Result" && !rargs.is_empty() {
-                                let res_ok = match &rargs[0] {
+                                let res_ok = match rargs[0].unlocated() {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
                                             if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
@@ -4468,7 +4478,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     other => other.clone(),
                                 };
-                                if let Type::Tuple(elems) = res_ok {
+                                if let Type::Tuple(elems) = res_ok.unlocated() {
                                     let arity = elems.len() as u64;
                                     let func = self.get_runtime_fn(
                                         "mimi_set_from_json_option_result_product_i64",
@@ -4492,7 +4502,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                             }
                         }
-                        if let Type::Tuple(elems) = inner {
+                        if let Type::Tuple(elems) = inner.unlocated() {
                             let arity = elems.len() as u64;
                             let func =
                                 self.get_runtime_fn("mimi_set_from_json_option_product_i64")?;
@@ -4515,7 +4525,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     if ln == "Result" && largs.len() == 2 {
-                        let inner = match &largs[0] {
+                        let inner = match largs[0].unlocated() {
                             Type::Name(an, aargs) if aargs.is_empty() => {
                                 if let Some(td) = self.type_defs.get(an) {
                                     if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
@@ -4530,9 +4540,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             other => other.clone(),
                         };
                         // Result of Option of product.
-                        if let Type::Name(on, oargs) = &inner {
+                        if let Type::Name(on, oargs) = inner.unlocated() {
                             if on == "Option" && oargs.len() == 1 {
-                                let opt_inner = match &oargs[0] {
+                                let opt_inner = match oargs[0].unlocated() {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
                                             if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
@@ -4547,7 +4557,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     other => other.clone(),
                                 };
-                                if let Type::Tuple(elems) = opt_inner {
+                                if let Type::Tuple(elems) = opt_inner.unlocated() {
                                     let arity = elems.len() as u64;
                                     let func = self.get_runtime_fn(
                                         "mimi_set_from_json_result_option_product_i64",
@@ -4571,7 +4581,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                             }
                         }
-                        if let Type::Tuple(elems) = inner {
+                        if let Type::Tuple(elems) = inner.unlocated() {
                             let arity = elems.len() as u64;
                             let func =
                                 self.get_runtime_fn("mimi_set_from_json_result_product_i64")?;
@@ -4595,11 +4605,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 // Set of List of Map of product.
-                if let Some(Type::Name(ln, largs)) = elem_ty {
+                if let Some(Type::Name(ln, largs)) = elem_ty.map(Type::unlocated) {
                     if ln == "List" && largs.len() == 1 {
-                        if let Type::Name(mn, margs) = &largs[0] {
+                        if let Type::Name(mn, margs) = largs[0].unlocated() {
                             if mn == "Map" && margs.len() == 2 {
-                                let map_val = match &margs[1] {
+                                let map_val = match margs[1].unlocated() {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
                                             if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
@@ -4614,7 +4624,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     other => other.clone(),
                                 };
-                                if let Type::Tuple(elems) = map_val {
+                                if let Type::Tuple(elems) = map_val.unlocated() {
                                     let arity = elems.len() as u64;
                                     let func = self.get_runtime_fn(
                                         "mimi_set_from_json_list_map_product_i64",
@@ -4641,11 +4651,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 // Set of Result of List of product.
-                if let Some(Type::Name(rn, rargs)) = elem_ty {
+                if let Some(Type::Name(rn, rargs)) = elem_ty.map(Type::unlocated) {
                     if rn == "Result" && rargs.len() == 2 {
-                        if let Type::Name(ln, largs) = &rargs[0] {
+                        if let Type::Name(ln, largs) = rargs[0].unlocated() {
                             if ln == "List" && largs.len() == 1 {
-                                let list_elem = match &largs[0] {
+                                let list_elem = match largs[0].unlocated() {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
                                             if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
@@ -4660,7 +4670,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     other => other.clone(),
                                 };
-                                if let Type::Tuple(elems) = list_elem {
+                                if let Type::Tuple(elems) = list_elem.unlocated() {
                                     let arity = elems.len() as u64;
                                     let func = self.get_runtime_fn(
                                         "mimi_set_from_json_result_list_product_i64",
@@ -4687,11 +4697,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 // Set of Result of Map of product.
-                if let Some(Type::Name(rn, rargs)) = elem_ty {
+                if let Some(Type::Name(rn, rargs)) = elem_ty.map(Type::unlocated) {
                     if rn == "Result" && rargs.len() == 2 {
-                        if let Type::Name(mn, margs) = &rargs[0] {
+                        if let Type::Name(mn, margs) = rargs[0].unlocated() {
                             if mn == "Map" && margs.len() == 2 {
-                                let map_val = match &margs[1] {
+                                let map_val = match margs[1].unlocated() {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
                                             if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
@@ -4706,7 +4716,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     other => other.clone(),
                                 };
-                                if let Type::Tuple(elems) = map_val {
+                                if let Type::Tuple(elems) = map_val.unlocated() {
                                     let arity = elems.len() as u64;
                                     let func = self.get_runtime_fn(
                                         "mimi_set_from_json_result_map_product_i64",
@@ -4733,11 +4743,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 // Set of Option of Map of product.
-                if let Some(Type::Name(on, oargs)) = elem_ty {
+                if let Some(Type::Name(on, oargs)) = elem_ty.map(Type::unlocated) {
                     if on == "Option" && oargs.len() == 1 {
-                        if let Type::Name(mn, margs) = &oargs[0] {
+                        if let Type::Name(mn, margs) = oargs[0].unlocated() {
                             if mn == "Map" && margs.len() == 2 {
-                                let map_val = match &margs[1] {
+                                let map_val = match margs[1].unlocated() {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
                                             if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
@@ -4752,7 +4762,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     other => other.clone(),
                                 };
-                                if let Type::Tuple(elems) = map_val {
+                                if let Type::Tuple(elems) = map_val.unlocated() {
                                     let arity = elems.len() as u64;
                                     let func = self.get_runtime_fn(
                                         "mimi_set_from_json_option_map_product_i64",
@@ -4779,9 +4789,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 // Set of Map of List/Set of product.
-                if let Some(Type::Name(mn, margs)) = elem_ty {
+                if let Some(Type::Name(mn, margs)) = elem_ty.map(Type::unlocated) {
                     if mn == "Map" && margs.len() == 2 {
-                        let map_val = match &margs[1] {
+                        let map_val = match margs[1].unlocated() {
                             Type::Name(an, aargs) if aargs.is_empty() => {
                                 if let Some(td) = self.type_defs.get(an) {
                                     if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
@@ -4795,9 +4805,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             other => other.clone(),
                         };
-                        if let Type::Name(ln, largs) = &map_val {
+                        if let Type::Name(ln, largs) = map_val.unlocated() {
                             if ln == "Set" && largs.len() == 1 {
-                                let set_elem = match &largs[0] {
+                                let set_elem = match largs[0].unlocated() {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
                                             if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
@@ -4812,7 +4822,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     other => other.clone(),
                                 };
-                                if let Type::Tuple(elems) = set_elem {
+                                if let Type::Tuple(elems) = set_elem.unlocated() {
                                     let arity = elems.len() as u64;
                                     let func = self
                                         .get_runtime_fn("mimi_set_from_json_map_set_product_i64")?;
@@ -4835,7 +4845,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                             }
                             if ln == "List" && largs.len() == 1 {
-                                let list_elem = match &largs[0] {
+                                let list_elem = match largs[0].unlocated() {
                                     Type::Name(an, aargs) if aargs.is_empty() => {
                                         if let Some(td) = self.type_defs.get(an) {
                                             if let crate::ast::TypeDefKind::Alias(inner) = &td.kind
@@ -4850,7 +4860,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     other => other.clone(),
                                 };
-                                if let Type::Tuple(elems) = list_elem {
+                                if let Type::Tuple(elems) = list_elem.unlocated() {
                                     let arity = elems.len() as u64;
                                     let func = self.get_runtime_fn(
                                         "mimi_set_from_json_map_list_product_i64",
@@ -4877,9 +4887,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 // Set of Map of product.
-                if let Some(Type::Name(mn, margs)) = elem_ty {
+                if let Some(Type::Name(mn, margs)) = elem_ty.map(Type::unlocated) {
                     if mn == "Map" && margs.len() == 2 {
-                        let map_val = match &margs[1] {
+                        let map_val = match margs[1].unlocated() {
                             Type::Name(an, aargs) if aargs.is_empty() => {
                                 if let Some(td) = self.type_defs.get(an) {
                                     if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
@@ -4893,7 +4903,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                             other => other.clone(),
                         };
-                        if let Type::Tuple(elems) = map_val {
+                        if let Type::Tuple(elems) = map_val.unlocated() {
                             let arity = elems.len() as u64;
                             let func = self.get_runtime_fn("mimi_set_from_json_map_product_i64")?;
                             let result = self.build_call(
@@ -4921,10 +4931,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     })
                     .unwrap_or(true);
                 let elem_is_float = elem_ty
-                    .map(|t| matches!(t, Type::Name(tn, _) if tn == "f32" || tn == "f64"))
+                    .map(|t| matches!(t.unlocated(), Type::Name(tn, _) if tn == "f32" || tn == "f64"))
                     .unwrap_or(false);
                 let elem_is_string = elem_ty
-                    .map(|t| matches!(t, Type::Name(tn, _) if tn == "string"))
+                    .map(|t| matches!(t.unlocated(), Type::Name(tn, _) if tn == "string"))
                     .unwrap_or(false);
                 if !elem_is_int && !elem_is_float && !elem_is_string {
                     return Err(CompileError::Generic(
@@ -5017,7 +5027,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .try_as_basic_value_opt()
                         .ok_or("json_get_element returned void")?
                         .into_pointer_value();
-                    let is_string = matches!(e, Type::Name(n, _) if n == "string");
+                    let is_string = matches!(e.unlocated(), Type::Name(n, _) if n == "string");
                     let elem_val = if is_string {
                         self.wrap_raw_string_ptr(elem_json)?
                     } else {
@@ -5462,7 +5472,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         ok_ty: &Type,
         raw_ptr: PointerValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        match ok_ty {
+        match ok_ty.unlocated() {
             Type::Name(tn, _) if tn == "i32" || tn == "i64" => {
                 let func = self.get_runtime_fn("mimi_json_as_i64")?;
                 let r = self.build_call(
@@ -5565,7 +5575,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Type::Name(n, args) if n == "Map" => {
                 let val_ty = args.get(1);
-                let resolved_val = val_ty.map(|t| match t {
+                let resolved_val = val_ty.map(|t| match t.unlocated() {
                     Type::Name(an, aargs) if aargs.is_empty() => {
                         if let Some(td) = self.type_defs.get(an) {
                             if let crate::ast::TypeDefKind::Alias(inner) = &td.kind {
@@ -5576,7 +5586,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     other => other.clone(),
                 });
-                if let Some(Type::Tuple(elems)) = resolved_val.as_ref() {
+                if let Some(Type::Tuple(elems)) = resolved_val.as_ref().map(Type::unlocated) {
                     let arity = elems.len() as u64;
                     let func = self.get_runtime_fn("mimi_map_from_json_product_i64")?;
                     let result = self.build_call(
@@ -5595,11 +5605,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let val_is_string = args
                     .get(1)
-                    .map(|t| matches!(t, Type::Name(tn, _) if tn == "string"))
+                    .map(|t| matches!(t.unlocated(), Type::Name(tn, _) if tn == "string"))
                     .unwrap_or(false);
                 let val_is_float = args
                     .get(1)
-                    .map(|t| matches!(t, Type::Name(tn, _) if tn == "f32" || tn == "f64"))
+                    .map(|t| matches!(t.unlocated(), Type::Name(tn, _) if tn == "f32" || tn == "f64"))
                     .unwrap_or(false);
                 let fn_name = if val_is_string {
                     "mimi_map_from_json_string"
@@ -5619,11 +5629,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             Type::Name(n, args) if n == "Set" => {
                 let elem_is_string = args
                     .first()
-                    .map(|t| matches!(t, Type::Name(tn, _) if tn == "string"))
+                    .map(|t| matches!(t.unlocated(), Type::Name(tn, _) if tn == "string"))
                     .unwrap_or(false);
                 let elem_is_float = args
                     .first()
-                    .map(|t| matches!(t, Type::Name(tn, _) if tn == "f32" || tn == "f64"))
+                    .map(|t| matches!(t.unlocated(), Type::Name(tn, _) if tn == "f32" || tn == "f64"))
                     .unwrap_or(false);
                 let fn_name = if elem_is_string {
                     "mimi_set_from_json_string"
@@ -5797,7 +5807,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         json_as_f64_fn: Option<inkwell::values::FunctionValue<'ctx>>,
         json_as_bool_fn: Option<inkwell::values::FunctionValue<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        match &field.ty {
+        match field.ty.unlocated() {
             crate::ast::Type::Name(n, _) if n == "i32" || n == "i64" => {
                 let f = json_as_i64_fn.ok_or("mimi_json_as_i64 not declared")?;
                 let r = self.build_call(
@@ -5969,6 +5979,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         return self.compile_json_scalar_field(
                             type_name,
                             &crate::ast::Field {
+                                meta: field.meta,
                                 name: field.name.clone(),
                                 ty: aliased,
                             },
@@ -6041,7 +6052,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             inner,
             crate::ast::Type::Name(n, _)
                 if n == "List" || n == "Option" || n == "Set" || n == "Map"
-        ) || matches!(inner, crate::ast::Type::Option(_));
+        ) || matches!(inner.unlocated(), crate::ast::Type::Option(_));
         let option_sty = if force_heap {
             self.context.struct_type(
                 &[
@@ -6121,6 +6132,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Some path: parse inner as a temporary Field of type T.
         self.builder.position_at_end(some_bb);
         let fake_field = crate::ast::Field {
+            meta: crate::ast::AstNodeMeta::synthetic(crate::ast::AstOrigin::RuntimeSystem(
+                "codegen.json_option_inner",
+            )),
             name: "opt_inner".into(),
             ty: inner.clone(),
         };
@@ -6300,7 +6314,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             Ok(val) => Ok(val),
             Err(_) => {
                 // Try to resolve as a module function
-                if let Expr::Ident(name) = expr {
+                if let Expr::Ident(name) = expr.unlocated() {
                     if let Some(func) = self.module.get_function(name) {
                         let fn_ptr = func.as_global_value().as_pointer_value();
                         return Ok(BasicValueEnum::PointerValue(fn_ptr));

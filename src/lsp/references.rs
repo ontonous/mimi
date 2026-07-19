@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::ast::{Item, Pattern, Stmt};
+use crate::ast::{Item, PatternKind, Stmt};
 use crate::lsp::util::word_range_at;
 use crate::lsp::LspServer;
 
@@ -34,13 +34,13 @@ impl LspServer {
                     Item::Func(f) if f.name == word => {
                         // Use AST position (line, col) of the func keyword.
                         // f.pos is 1-indexed, LSP expects 0-indexed.
-                        let def_line = f.pos.0.saturating_sub(1);
+                        let def_line = f.meta.span.start_line.saturating_sub(1);
                         let func_keyword_len = "func ".len();
                         return Some(serde_json::json!({
                             "uri": uri,
                             "range": {
-                                "start": { "line": def_line, "character": f.pos.1 },
-                                "end": { "line": def_line, "character": f.pos.1 + func_keyword_len + f.name.len() }
+                                "start": { "line": def_line, "character": f.meta.span.start_col },
+                                "end": { "line": def_line, "character": f.meta.span.start_col + func_keyword_len + f.name.len() }
                             }
                         }));
                     }
@@ -82,7 +82,7 @@ impl LspServer {
                     // Check function parameters
                     if f.params.iter().any(|p| p.name == word) {
                         // Parameter definition is at the function signature
-                        let def_line = f.pos.0.saturating_sub(1);
+                        let def_line = f.meta.span.start_line.saturating_sub(1);
                         let param_offset = f
                             .params
                             .iter()
@@ -92,8 +92,8 @@ impl LspServer {
                         return Some(serde_json::json!({
                             "uri": uri,
                             "range": {
-                                "start": { "line": def_line, "character": f.pos.1 + param_offset },
-                                "end": { "line": def_line, "character": f.pos.1 + param_offset + word.len() }
+                                "start": { "line": def_line, "character": f.meta.span.start_col + param_offset },
+                                "end": { "line": def_line, "character": f.meta.span.start_col + param_offset + word.len() }
                             }
                         }));
                     }
@@ -101,7 +101,7 @@ impl LspServer {
                     // text scan (fast, avoids deep AST traversal)
                     // L-H9: restrict text scan to the enclosing function region
                     // (not whole-file first match).
-                    let func_start = f.pos.0.saturating_sub(1);
+                    let func_start = f.meta.span.start_line.saturating_sub(1);
                     let text_lines: Vec<&str> = text.lines().collect();
                     let func_end = text_lines
                         .iter()
@@ -117,12 +117,11 @@ impl LspServer {
                         .map(|(i, _)| i)
                         .unwrap_or(text_lines.len());
                     for stmt in f.body.iter() {
-                        if let Stmt::Let {
-                            pat: Pattern::Variable(name),
-                            ..
-                        } = stmt
-                        {
-                            if name == word {
+                        if let Stmt::Let { pat, .. } = stmt.unlocated() {
+                            if let PatternKind::Variable(name) = &pat.kind {
+                                if name != word {
+                                    continue;
+                                }
                                 let text_line = text_lines
                                     .iter()
                                     .enumerate()
@@ -183,7 +182,7 @@ impl LspServer {
 
         // Search across all open documents for impl blocks
         for (doc_uri, doc_text) in &self.documents {
-            if let Some(file) = self.parse_with_recovery(doc_text) {
+            if let Some(file) = self.parse_with_recovery_for_uri(doc_text, Some(doc_uri)) {
                 for impl_def in &file.items {
                     if let Item::Impl(imp) = impl_def {
                         if imp.trait_name == word {
@@ -237,9 +236,9 @@ impl LspServer {
                         // CL-H1: use the AST-recorded position (f.pos) when
                         // available to avoid substring-search false positives.
                         // Parser positions are 1-indexed; LSP is 0-indexed.
-                        if f.pos.0 > 0 || f.pos.1 > 0 {
-                            def_line = Some(f.pos.0.saturating_sub(1));
-                            def_col = Some(f.pos.1.saturating_sub(1));
+                        if f.meta.span.start_line > 0 || f.meta.span.start_col > 0 {
+                            def_line = Some(f.meta.span.start_line.saturating_sub(1));
+                            def_col = Some(f.meta.span.start_col.saturating_sub(1));
                             break;
                         }
                         def_line = text
@@ -365,13 +364,11 @@ impl LspServer {
                         found = true;
                     }
                     for stmt in &f.body {
-                        if let Stmt::Let {
-                            pat: Pattern::Variable(ref vname),
-                            ..
-                        } = stmt
-                        {
-                            if vname.as_str() == word {
-                                found = true;
+                        if let Stmt::Let { pat, .. } = stmt.unlocated() {
+                            if let PatternKind::Variable(vname) = &pat.kind {
+                                if vname.as_str() == word {
+                                    found = true;
+                                }
                             }
                         }
                     }
@@ -666,9 +663,9 @@ impl LspServer {
                         // CL-H1: use the AST-recorded position (f.pos) when
                         // available to avoid substring-search false positives.
                         // Parser positions are 1-indexed; LSP is 0-indexed.
-                        if f.pos.0 > 0 || f.pos.1 > 0 {
-                            def_line = Some(f.pos.0.saturating_sub(1));
-                            def_col = Some(f.pos.1.saturating_sub(1));
+                        if f.meta.span.start_line > 0 || f.meta.span.start_col > 0 {
+                            def_line = Some(f.meta.span.start_line.saturating_sub(1));
+                            def_col = Some(f.meta.span.start_col.saturating_sub(1));
                             break;
                         }
                         def_line = text

@@ -363,7 +363,7 @@ impl InterpError {
             message = format!("{} [{}]", message, func);
         }
 
-        let mut diag = Diagnostic::error_code(self.code(), message, Span::single(0, 0));
+        let mut diag = Diagnostic::error_code(self.code(), message, Span::UNKNOWN);
 
         if let Some(help) = &ctx.help {
             diag = diag.with_help(help.clone());
@@ -372,7 +372,7 @@ impl InterpError {
             let stack_str: Vec<&str> = ctx.call_stack.iter().map(|s| s.as_str()).collect();
             diag = diag.with_note(
                 format!("call stack: {}", stack_str.join(" → ")),
-                Span::single(0, 0),
+                Span::UNKNOWN,
             );
         }
 

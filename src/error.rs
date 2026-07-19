@@ -204,7 +204,7 @@ impl CompileError {
                 }
                 diag
             }
-            _ => Diagnostic::error_code(code, self.to_string(), Span::single(0, 0)),
+            _ => Diagnostic::error_code(code, self.to_string(), Span::UNKNOWN),
         }
     }
 }

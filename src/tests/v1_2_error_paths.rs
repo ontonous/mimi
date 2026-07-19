@@ -109,7 +109,9 @@ func f() -> i32 {
         crate::ast::Item::Func(f) => &f.body,
         _ => panic!("expected func"),
     };
-    let has_math = body.iter().any(|s| matches!(s, crate::ast::Stmt::Math(_)));
+    let has_math = body
+        .iter()
+        .any(|s| matches!(s.unlocated(), crate::ast::Stmt::Math(_)));
     assert!(
         has_math,
         "Math block was silently dropped during recovery: {:#?}",

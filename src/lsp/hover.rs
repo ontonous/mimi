@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::ast::{BinOp, Expr, Item, Lit, Pattern, Stmt, Type, TypeDefKind, UnOp};
+use crate::ast::{BinOp, Expr, Item, Lit, Pattern, PatternKind, Stmt, Type, TypeDefKind, UnOp};
 use crate::lsp::util::word_range_at;
 use crate::lsp::LspServer;
 
@@ -55,7 +55,7 @@ impl LspServer {
                         let contracts: Vec<String> = f
                             .body
                             .iter()
-                            .filter_map(|s| match s {
+                            .filter_map(|s| match s.unlocated() {
                                 Stmt::Requires(e, _) => {
                                     Some(format!("  requires: {}", Self::format_contract_expr(e)))
                                 }
@@ -306,7 +306,7 @@ impl LspServer {
 
     /// Format a contract expression for human-readable hover display
     fn format_contract_expr(expr: &Expr) -> String {
-        match expr {
+        match expr.unlocated() {
             Expr::Ident(name) => name.clone(),
             Expr::Literal(lit) => Self::format_lit(lit),
             Expr::Binary(op, lhs, rhs) => {
@@ -339,7 +339,7 @@ impl LspServer {
                 let then_expr = then_
                     .iter()
                     .filter_map(|s| {
-                        if let Stmt::Expr(e) = s {
+                        if let Stmt::Expr(e) = s.unlocated() {
                             Some(Self::format_contract_expr(e))
                         } else {
                             None
@@ -350,7 +350,7 @@ impl LspServer {
                 let else_expr = else_.as_ref().and_then(|b| {
                     b.iter()
                         .filter_map(|s| {
-                            if let Stmt::Expr(e) = s {
+                            if let Stmt::Expr(e) = s.unlocated() {
                                 Some(Self::format_contract_expr(e))
                             } else {
                                 None
@@ -393,7 +393,7 @@ impl LspServer {
             Expr::Block(stmts) => {
                 let tail: Vec<String> = stmts
                     .iter()
-                    .filter_map(|s| match s {
+                    .filter_map(|s| match s.unlocated() {
                         Stmt::Expr(e) => Some(Self::format_contract_expr(e)),
                         Stmt::Return(Some(e)) => {
                             Some(format!("return {}", Self::format_contract_expr(e)))
@@ -425,15 +425,15 @@ impl LspServer {
     }
 
     fn format_pat(pat: &Pattern) -> String {
-        match pat {
-            Pattern::Wildcard => "_",
-            Pattern::Variable(name) => name.as_str(),
-            Pattern::Literal(lit) => return Self::format_lit(lit),
-            Pattern::Constructor(name, args) => {
+        match &pat.kind {
+            PatternKind::Wildcard => "_",
+            PatternKind::Variable(name) => name.as_str(),
+            PatternKind::Literal(lit) => return Self::format_lit(lit),
+            PatternKind::Constructor(name, args) => {
                 let args_str: Vec<String> = args.iter().map(|(_, p)| Self::format_pat(p)).collect();
                 return format!("{}({})", name, args_str.join(", "));
             }
-            Pattern::Tuple(pats) => {
+            PatternKind::Tuple(pats) => {
                 return format!(
                     "({})",
                     pats.iter()
@@ -442,7 +442,7 @@ impl LspServer {
                         .join(", ")
                 );
             }
-            Pattern::Array(pats) => {
+            PatternKind::Array(pats) => {
                 return format!(
                     "[{}]",
                     pats.iter()
@@ -451,7 +451,7 @@ impl LspServer {
                         .join(", ")
                 );
             }
-            Pattern::Slice(pats, rest) => {
+            PatternKind::Slice(pats, rest) => {
                 let mut s: Vec<String> = pats.iter().map(Self::format_pat).collect();
                 if let Some(r) = rest {
                     s.push(format!("..{}", Self::format_pat(r)));
@@ -466,7 +466,7 @@ impl LspServer {
 
     /// Format an expression as a short display string for hover hints.
     pub(crate) fn format_expr_simple(expr: &Expr) -> String {
-        match expr {
+        match expr.unlocated() {
             Expr::Literal(l) => crate::lsp::LspServer::format_lit_simple(l),
             Expr::Ident(name) => name.clone(),
             Expr::Unary(op, e) => format!(
@@ -562,7 +562,7 @@ impl LspServer {
 
     /// Format a type for human-readable display
     pub(crate) fn type_display(ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, params) => {
                 if params.is_empty() {
                     name.clone()
@@ -623,6 +623,7 @@ impl LspServer {
             Type::ForAll(params, body) => {
                 format!("forall {}. {}", params.join(", "), Self::type_display(body))
             }
+            Type::Located { .. } => unreachable!("unlocated() returned Type::Located"),
         }
     }
 
@@ -647,9 +648,9 @@ impl LspServer {
                 _ => None,
             })
             .collect();
-        funcs.sort_by_key(|f| f.pos.0);
+        funcs.sort_by_key(|f| f.meta.span.start_line);
         for f in funcs.into_iter().rev() {
-            let start0 = f.pos.0.saturating_sub(1);
+            let start0 = f.meta.span.start_line.saturating_sub(1);
             if line < start0 {
                 continue;
             }
@@ -722,12 +723,12 @@ impl LspServer {
         // forward only — handles non-shadowing sequential bindings).
         for stmt in block {
             if let Stmt::Let {
-                pat: Pattern::Variable(name),
-                ty: Some(ty),
-                ..
-            } = stmt
+                pat, ty: Some(ty), ..
+            } = stmt.unlocated()
             {
-                locals.push((name.clone(), ty.clone()));
+                if let PatternKind::Variable(name) = &pat.kind {
+                    locals.push((name.clone(), ty.clone()));
+                }
             }
         }
 
@@ -789,7 +790,7 @@ impl LspServer {
         file: &crate::ast::File,
         out: &mut Option<Value>,
     ) {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Let {
                 init: Some(expr), ..
             } => {
@@ -840,7 +841,7 @@ impl LspServer {
         if out.is_some() {
             return;
         }
-        match expr {
+        match expr.unlocated() {
             Expr::Field(obj, field) => {
                 if field == word {
                     if let Some(hover) = Self::resolve_field_hover(obj, field, locals, file) {
@@ -914,7 +915,7 @@ impl LspServer {
         // the file. For other type forms (List, Option, Result, etc.) we
         // can't easily extract the field — return None and let the
         // top-level hover handle the word as an identifier.
-        if let Type::Name(type_name, _) = &ty {
+        if let Type::Name(type_name, _) = ty.unlocated() {
             for item in &file.items {
                 if let Item::Type(td) = item {
                     if &td.name == type_name {
@@ -943,7 +944,7 @@ impl LspServer {
 
     /// Strip a `a.b.c` chain down to its leftmost identifier.
     fn strip_field_chain(expr: &Expr) -> Option<String> {
-        match expr {
+        match expr.unlocated() {
             Expr::Ident(name) => Some(name.clone()),
             Expr::Field(obj, _) => Self::strip_field_chain(obj),
             _ => None,
@@ -953,7 +954,7 @@ impl LspServer {
     /// Check whether `word` appears anywhere in the block's last
     /// expression (implicit return). Used to trigger return-type hover.
     fn word_in_last_expr(block: &[Stmt], word: &str) -> bool {
-        let last = match block.last() {
+        let last = match block.last().map(Stmt::unlocated) {
             Some(Stmt::Expr(e)) | Some(Stmt::Return(Some(e))) => e,
             _ => return false,
         };
@@ -969,7 +970,7 @@ impl LspServer {
     /// hovering over `a` would match a string literal `"cat"`).  Now we
     /// only match on identifiers and call names, not literal contents.
     fn expr_contains_word(e: &Expr, w: &str) -> bool {
-        match e {
+        match e.unlocated() {
             Expr::Ident(name) => name == w,
             Expr::Field(obj, name) => name == w || Self::expr_contains_word(obj, w),
             Expr::Index(obj, idx) => {

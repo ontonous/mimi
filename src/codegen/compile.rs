@@ -2,7 +2,6 @@ use crate::ast::*;
 use std::collections::HashMap;
 
 use crate::error::{CompileError, MimiResult};
-use crate::span::Span;
 
 use super::CodeGenerator;
 use inkwell::passes::PassBuilderOptions;
@@ -334,6 +333,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         for (node_id, meta) in program.node_meta() {
             let precision = match meta.precision {
                 crate::core::SpanPrecision::Exact => "exact",
+                crate::core::SpanPrecision::SourceAnchor => "source_anchor",
                 crate::core::SpanPrecision::DeclarationFallback => "declaration_fallback",
             };
             node_meta_precision.insert(node_id.0.clone(), precision.to_string());
@@ -633,6 +633,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .type_map
             .keys()
             .map(|k| crate::ast::GenericParam {
+                meta: crate::ast::AstNodeMeta::synthetic(crate::ast::AstOrigin::RuntimeSystem(
+                    "codegen.generic_substitution",
+                )),
                 name: k.clone(),
                 bounds: vec![],
             })
@@ -666,6 +669,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // the original `&File` borrow has ended. The clone is shallow
         // w.r.t. String interning but acceptable at this scope.
         self.comptime_file = Some(std::rc::Rc::new(crate::ast::File {
+            sources: file.sources.clone(),
             imports: file.imports.clone(),
             items: file.items.clone(),
             implicit_single: false,
@@ -720,8 +724,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let type_name = format!("{}::{}", qualified, s.name);
                         let fields = s.payload.clone().unwrap_or_default();
                         let td = TypeDef {
+                            meta: AstNodeMeta::inherited(
+                                s.meta.span,
+                                AstOrigin::RuntimeSystem("codegen.flow_state_type"),
+                            ),
                             name: type_name.clone(),
-                            decl_pos: None,
                             pub_: false,
                             kind: TypeDefKind::Record(fields),
                             generics: vec![],
@@ -734,8 +741,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                             && !self.type_defs.contains_key(&s.name)
                         {
                             let td = TypeDef {
+                                meta: AstNodeMeta::inherited(
+                                    s.meta.span,
+                                    AstOrigin::RuntimeSystem("codegen.flow_state_alias"),
+                                ),
                                 name: s.name.clone(),
-                                decl_pos: None,
                                 pub_: false,
                                 kind: TypeDefKind::Record(s.payload.clone().unwrap_or_default()),
                                 generics: vec![],
@@ -750,7 +760,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // v0.29.24: first @max_children(N) wins as process spawn quota.
                     if self.max_children.is_none() {
                         for a in &f.annotations {
-                            if let crate::ast::FlowAnnotation::MaxChildren(n) = a {
+                            if let crate::ast::FlowAnnotationKind::MaxChildren(n) = &a.kind {
                                 self.max_children = Some(*n);
                                 break;
                             }
@@ -784,7 +794,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if f.is_comptime || f.is_async || f.extern_abi.is_some() {
                     continue;
                 }
-                if matches!(f.ret, Some(Type::ImplTrait(_))) {
+                if matches!(
+                    f.ret.as_ref().map(Type::unlocated),
+                    Some(Type::ImplTrait(_))
+                ) {
                     continue;
                 }
                 self.declare_func(f)?;
@@ -817,7 +830,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if f.is_comptime {
                         // Skip — folded value lives in self.comptime_values.
                     } else {
-                        self.compile_func(f).map_err(|e| e.at(Span::from(f.pos)))?;
+                        self.compile_func(f).map_err(|e| e.at(f.meta.span))?;
                     }
                 }
                 Item::Actor(actor) => {
@@ -880,15 +893,25 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// has a closed tagged-state-union ABI.
     /// Body: the transition body with outer `do { }` unwrapped (if present).
     pub(super) fn transition_to_func(flow: &FlowDef, t: &TransitionDef) -> FuncDef {
+        let origin = AstOrigin::RuntimeSystem("codegen.transition_lowering");
+        let meta = AstNodeMeta::inherited(t.meta.span, origin);
         let mut params = Vec::new();
         params.push(Param {
+            meta,
             name: "self".to_string(),
-            ty: Type::Name(t.from_state.clone(), vec![]),
+            ty: Type::Name(t.from_state.clone(), vec![]).deep_reorigin(meta),
             mut_: false,
             default_value: None,
             borrow: None,
         });
-        params.extend(t.params.iter().cloned());
+        params.extend(t.params.iter().map(|param| Param {
+            meta,
+            name: param.name.clone(),
+            ty: param.ty.clone().deep_reorigin(meta),
+            mut_: param.mut_,
+            default_value: param.default_value.clone(),
+            borrow: param.borrow,
+        }));
 
         // H2: recover bodies already keep persistent shadows when
         // `flow.persistent_fields` is non-empty (inject_system_verbs keep=true).
@@ -903,7 +926,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let body: Block = match &t.body {
             Some(block) => {
                 if block.len() == 1 {
-                    if let Stmt::Do(inner) = &block[0] {
+                    if let Stmt::Do(inner) = block[0].unlocated() {
                         inner.clone()
                     } else {
                         block.clone()
@@ -912,9 +935,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Multiple top-level stmts: unwrap each Do, keep rest.
                     let mut out = Vec::new();
                     for stmt in block {
-                        match stmt {
+                        match stmt.unlocated() {
                             Stmt::Do(inner) => out.extend(inner.iter().cloned()),
-                            other => out.push(other.clone()),
+                            _ => out.push(stmt.clone()),
                         }
                     }
                     out
@@ -924,10 +947,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
 
         FuncDef {
+            meta,
             name: Self::transition_fn_name(&flow.name, &t.name, &t.from_state),
             pub_: false,
             params,
-            ret: Some(Type::Name(ret_name, vec![])),
+            ret: Some(Type::Name(ret_name, vec![]).deep_reorigin(meta)),
             body,
             where_clause: vec![],
             generics: vec![],
@@ -935,7 +959,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             is_comptime: false,
             is_async: false,
             extern_abi: None,
-            pos: t.pos,
         }
     }
 
@@ -956,11 +979,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "multi-target transition '{}::{}({})' requires a tagged-state-union ABI",
                     flow.name, t.name, t.from_state
                 ))
-                .at(Span::from(t.pos)));
+                .at(t.meta.span));
             }
             let func = Self::transition_to_func(flow, t);
-            self.compile_func(&func)
-                .map_err(|e| e.at(Span::from(t.pos)))?;
+            self.compile_func(&func).map_err(|e| e.at(t.meta.span))?;
         }
         Ok(())
     }
@@ -969,6 +991,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// so that field access and struct construction work in codegen.
     fn register_builtin_record_types(&mut self) -> MimiResult<()> {
         use inkwell::types::BasicTypeEnum;
+        let meta = AstNodeMeta::synthetic(AstOrigin::RuntimeSystem("codegen.builtin_type"));
+        let generated_type =
+            |name: &str| crate::ast::Type::Name(name.to_string(), vec![]).deep_reorigin(meta);
         let i32_ty = BasicTypeEnum::IntType(self.context.i32_type());
         let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
         let bool_ty = BasicTypeEnum::IntType(self.context.bool_type());
@@ -982,21 +1007,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         // ExecResult { exit_code: i32, stdout: string, stderr: string }
         if !self.type_defs.contains_key("ExecResult") {
             let exec_ty = crate::ast::TypeDef {
+                meta,
                 name: "ExecResult".to_string(),
-                decl_pos: None,
                 pub_: false,
                 kind: crate::ast::TypeDefKind::Record(vec![
                     crate::ast::Field {
+                        meta,
                         name: "exit_code".to_string(),
-                        ty: crate::ast::Type::Name("i32".to_string(), vec![]),
+                        ty: generated_type("i32"),
                     },
                     crate::ast::Field {
+                        meta,
                         name: "stdout".to_string(),
-                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                        ty: generated_type("string"),
                     },
                     crate::ast::Field {
+                        meta,
                         name: "stderr".to_string(),
-                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                        ty: generated_type("string"),
                     },
                 ]),
                 generics: vec![],
@@ -1013,25 +1041,29 @@ impl<'ctx> CodeGenerator<'ctx> {
         // StatResult { size: i64, modified: i64, is_file: bool, is_dir: bool }
         if !self.type_defs.contains_key("StatResult") {
             let stat_ty = crate::ast::TypeDef {
+                meta,
                 name: "StatResult".to_string(),
-                decl_pos: None,
                 pub_: false,
                 kind: crate::ast::TypeDefKind::Record(vec![
                     crate::ast::Field {
+                        meta,
                         name: "size".to_string(),
-                        ty: crate::ast::Type::Name("i64".to_string(), vec![]),
+                        ty: generated_type("i64"),
                     },
                     crate::ast::Field {
+                        meta,
                         name: "modified".to_string(),
-                        ty: crate::ast::Type::Name("i64".to_string(), vec![]),
+                        ty: generated_type("i64"),
                     },
                     crate::ast::Field {
+                        meta,
                         name: "is_file".to_string(),
-                        ty: crate::ast::Type::Name("bool".to_string(), vec![]),
+                        ty: generated_type("bool"),
                     },
                     crate::ast::Field {
+                        meta,
                         name: "is_dir".to_string(),
-                        ty: crate::ast::Type::Name("bool".to_string(), vec![]),
+                        ty: generated_type("bool"),
                     },
                 ]),
                 generics: vec![],
@@ -1048,17 +1080,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         // v0.29.20 PeerFault { peer_id, reason }
         if !self.type_defs.contains_key("PeerFault") {
             let pf_ty = crate::ast::TypeDef {
+                meta,
                 name: "PeerFault".to_string(),
-                decl_pos: None,
                 pub_: false,
                 kind: crate::ast::TypeDefKind::Record(vec![
                     crate::ast::Field {
+                        meta,
                         name: "peer_id".to_string(),
-                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                        ty: generated_type("string"),
                     },
                     crate::ast::Field {
+                        meta,
                         name: "reason".to_string(),
-                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                        ty: generated_type("string"),
                     },
                 ]),
                 generics: vec![],
@@ -1074,29 +1108,34 @@ impl<'ctx> CodeGenerator<'ctx> {
         // v0.29.39: added memory_dump + panic_payload structured sub-records
         if !self.type_defs.contains_key("SystemTrace") {
             let st_ty = crate::ast::TypeDef {
+                meta,
                 name: "SystemTrace".to_string(),
-                decl_pos: None,
                 pub_: false,
                 kind: crate::ast::TypeDefKind::Record(vec![
                     crate::ast::Field {
+                        meta,
                         name: "last_state_name".to_string(),
-                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                        ty: generated_type("string"),
                     },
                     crate::ast::Field {
+                        meta,
                         name: "unexpected_event".to_string(),
-                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                        ty: generated_type("string"),
                     },
                     crate::ast::Field {
+                        meta,
                         name: "snapshot".to_string(),
-                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                        ty: generated_type("string"),
                     },
                     crate::ast::Field {
+                        meta,
                         name: "memory_dump".to_string(),
-                        ty: crate::ast::Type::Name("MemoryDump".to_string(), vec![]),
+                        ty: generated_type("MemoryDump"),
                     },
                     crate::ast::Field {
+                        meta,
                         name: "panic_payload".to_string(),
-                        ty: crate::ast::Type::Name("PanicPayload".to_string(), vec![]),
+                        ty: generated_type("PanicPayload"),
                     },
                 ]),
                 generics: vec![],
@@ -1135,25 +1174,29 @@ impl<'ctx> CodeGenerator<'ctx> {
         // v0.29.39: PanicPayload { error_type: string, file: string, line: i32, stack: string }
         if !self.type_defs.contains_key("PanicPayload") {
             let pp_ty = crate::ast::TypeDef {
+                meta,
                 name: "PanicPayload".to_string(),
-                decl_pos: None,
                 pub_: false,
                 kind: crate::ast::TypeDefKind::Record(vec![
                     crate::ast::Field {
+                        meta,
                         name: "error_type".to_string(),
-                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                        ty: generated_type("string"),
                     },
                     crate::ast::Field {
+                        meta,
                         name: "file".to_string(),
-                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                        ty: generated_type("string"),
                     },
                     crate::ast::Field {
+                        meta,
                         name: "line".to_string(),
-                        ty: crate::ast::Type::Name("i32".to_string(), vec![]),
+                        ty: generated_type("i32"),
                     },
                     crate::ast::Field {
+                        meta,
                         name: "stack".to_string(),
-                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                        ty: generated_type("string"),
                     },
                 ]),
                 generics: vec![],
@@ -1170,17 +1213,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         // v0.29.39: MemoryDump { fields: string, count: i32 }
         if !self.type_defs.contains_key("MemoryDump") {
             let md_ty = crate::ast::TypeDef {
+                meta,
                 name: "MemoryDump".to_string(),
-                decl_pos: None,
                 pub_: false,
                 kind: crate::ast::TypeDefKind::Record(vec![
                     crate::ast::Field {
+                        meta,
                         name: "fields".to_string(),
-                        ty: crate::ast::Type::Name("string".to_string(), vec![]),
+                        ty: generated_type("string"),
                     },
                     crate::ast::Field {
+                        meta,
                         name: "count".to_string(),
-                        ty: crate::ast::Type::Name("i32".to_string(), vec![]),
+                        ty: generated_type("i32"),
                     },
                 ]),
                 generics: vec![],

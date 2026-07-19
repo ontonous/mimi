@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use crate::core::helpers::types_compatible;
 
 fn fmt_type(ty: &Type) -> String {
-    match ty {
+    match ty.unlocated() {
         Type::Name(n, args) if args.is_empty() => n.clone(),
         Type::Name(n, args) => {
             let inner: Vec<String> = args.iter().map(fmt_type).collect();
@@ -42,25 +42,26 @@ fn fmt_type(ty: &Type) -> String {
 /// dual(Name)   = dual(Name)   (kept symbolic until resolved)
 /// ```
 pub fn dual(s: &SessionType) -> SessionType {
-    match s {
+    match s.unlocated() {
         SessionType::Send(t, cont) => SessionType::Recv(t.clone(), Box::new(dual(cont))),
         SessionType::Recv(t, cont) => SessionType::Send(t.clone(), Box::new(dual(cont))),
         SessionType::End => SessionType::End,
         SessionType::Dual(inner) => {
             // dual(dual(S)) = S (involution). Nested duals collapse.
-            match inner.as_ref() {
+            match inner.as_ref().unlocated() {
                 SessionType::Dual(inner2) => dual(inner2),
                 other => other.clone(),
             }
         }
         SessionType::Name(n) => SessionType::Dual(Box::new(SessionType::Name(n.clone()))),
+        SessionType::Located { .. } => unreachable!("unlocated session type"),
     }
 }
 
 /// Resolve named session references and expand `dual(...)` using `env`.
 /// Returns `None` if a name is unknown (caller emits a diagnostic).
 pub fn resolve(s: &SessionType, env: &HashMap<String, SessionType>) -> Option<SessionType> {
-    match s {
+    match s.unlocated() {
         SessionType::Send(t, cont) => {
             let c = resolve(cont, env)?;
             Some(SessionType::Send(t.clone(), Box::new(c)))
@@ -74,7 +75,7 @@ pub fn resolve(s: &SessionType, env: &HashMap<String, SessionType>) -> Option<Se
             let body = env.get(n)?;
             // Avoid infinite recursion on self-referential sessions by only
             // expanding one level of Name; dual/send/recv continue resolve.
-            match body {
+            match body.unlocated() {
                 SessionType::Name(n2) if n2 == n => Some(SessionType::Name(n.clone())),
                 other => resolve(other, env),
             }
@@ -83,12 +84,13 @@ pub fn resolve(s: &SessionType, env: &HashMap<String, SessionType>) -> Option<Se
             let r = resolve(inner, env)?;
             Some(dual(&r))
         }
+        SessionType::Located { .. } => unreachable!("unlocated session type"),
     }
 }
 
 /// Structural equality of session types after dual-normalization.
 pub fn session_eq(a: &SessionType, b: &SessionType) -> bool {
-    match (a, b) {
+    match (a.unlocated(), b.unlocated()) {
         (SessionType::End, SessionType::End) => true,
         (SessionType::Send(ta, ca), SessionType::Send(tb, cb)) => {
             types_compatible(ta, tb) && session_eq(ca, cb)
@@ -138,7 +140,7 @@ pub fn apply_action(
     action: SessionAction,
 ) -> Result<(SessionType, Option<Type>), SessionOrderError> {
     // Normalize dual wrappers first.
-    let residual = match residual {
+    let residual = match residual.unlocated() {
         SessionType::Dual(inner) => dual(inner),
         other => other.clone(),
     };
@@ -162,7 +164,7 @@ pub fn apply_action(
 
 /// Human-readable session type formatting for diagnostics.
 pub fn fmt_session(s: &SessionType) -> String {
-    match s {
+    match s.unlocated() {
         SessionType::Send(t, cont) => {
             format!("!{} . {}", fmt_type(t), fmt_session(cont))
         }
@@ -172,6 +174,7 @@ pub fn fmt_session(s: &SessionType) -> String {
         SessionType::Dual(inner) => format!("dual({})", fmt_session(inner)),
         SessionType::Name(n) => n.clone(),
         SessionType::End => "end".to_string(),
+        SessionType::Located { .. } => unreachable!("unlocated session type"),
     }
 }
 
@@ -182,9 +185,9 @@ pub fn fmt_session(s: &SessionType) -> String {
 ///   encoded as `Type::Name(session_name, [])`
 /// - bare `SessionChan` → unknown / untracked
 pub fn session_from_chan_type(ty: &Type) -> Option<String> {
-    match ty {
+    match ty.unlocated() {
         Type::Name(n, args) if n == "SessionChan" || n == "session_chan" => {
-            if let Some(Type::Name(s, _)) = args.first() {
+            if let Some(Type::Name(s, _)) = args.first().map(Type::unlocated) {
                 Some(s.clone())
             } else {
                 None
@@ -216,10 +219,10 @@ mod tests {
         let d = dual(&s);
         match d {
             SessionType::Recv(t, cont) => {
-                assert!(matches!(t, Type::Name(n, _) if n == "i32"));
+                assert!(matches!(t.unlocated(), Type::Name(n, _) if n == "i32"));
                 match *cont {
                     SessionType::Send(t2, cont2) => {
-                        assert!(matches!(t2, Type::Name(n, _) if n == "string"));
+                        assert!(matches!(t2.unlocated(), Type::Name(n, _) if n == "string"));
                         assert_eq!(*cont2, SessionType::End);
                     }
                     other => panic!("expected Send, got {:?}", other),
@@ -245,9 +248,9 @@ mod tests {
             Box::new(SessionType::Recv(str_ty(), Box::new(SessionType::End))),
         );
         let (r1, t1) = apply_action(&s, SessionAction::Send).unwrap();
-        assert!(matches!(t1, Some(Type::Name(n, _)) if n == "i32"));
+        assert!(matches!(t1.as_ref().map(Type::unlocated), Some(Type::Name(n, _)) if n == "i32"));
         let (r2, t2) = apply_action(&r1, SessionAction::Recv).unwrap();
-        assert!(matches!(t2, Some(Type::Name(n, _)) if n == "string"));
+        assert!(matches!(t2.as_ref().map(Type::unlocated), Some(Type::Name(n, _)) if n == "string"));
         let (r3, _) = apply_action(&r2, SessionAction::Close).unwrap();
         assert_eq!(r3, SessionType::End);
     }

@@ -12,11 +12,11 @@ use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 /// proved separately by `i32_definedness_obligations`, before a value equation
 /// may be used to prove a postcondition.
 pub(crate) fn expr_to_z3_int(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Int> {
-    match expr {
+    match expr.unlocated() {
         Expr::Literal(Lit::Int(n)) => Some(Z3Int::from_i64(*n)),
         Expr::Ident(name) => vars.get_int(name).cloned(),
         Expr::Old(inner) => {
-            if let Expr::Ident(name) = inner.as_ref() {
+            if let Expr::Ident(name) = inner.unlocated() {
                 let old_name = format!("old_{}", name);
                 return vars.get_int(&old_name).cloned();
             }
@@ -89,10 +89,10 @@ pub(crate) fn expr_to_z3_int(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Int> 
             encode_match_int(&matched, arms, vars)
         }
         Expr::Call(callee, call_args) => {
-            if let Expr::Ident(name) = callee.as_ref() {
+            if let Expr::Ident(name) = callee.unlocated() {
                 // Special-case len(s) — returns the string or list length variable.
                 if name == "len" && call_args.len() == 1 {
-                    if let Expr::Ident(s) = &call_args[0] {
+                    if let Expr::Ident(s) = call_args[0].unlocated() {
                         if let Some(len_var) = vars.get_string_len(s) {
                             return Some(len_var.clone());
                         }
@@ -102,8 +102,8 @@ pub(crate) fn expr_to_z3_int(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Int> 
                         }
                     }
                     // len(sort(xs)) → list_len[xs] (sort preserves length)
-                    if let Expr::Call(callee2, args2) = &call_args[0] {
-                        if let Expr::Ident(name2) = callee2.as_ref() {
+                    if let Expr::Call(callee2, args2) = call_args[0].unlocated() {
+                        if let Expr::Ident(name2) = callee2.unlocated() {
                             if (name2 == "sort" || name2 == "reverse") && args2.len() == 1 {
                                 if let Some(list_len) = resolve_list_len(&args2[0], vars) {
                                     return Some(list_len.clone());
@@ -152,7 +152,7 @@ fn collect_i32_definedness(
     vars: &mut Z3VarMap,
     obligations: &mut Vec<IntDefinedness>,
 ) -> Option<()> {
-    match expr {
+    match expr.unlocated() {
         Expr::Binary(op, lhs, rhs) => {
             collect_i32_definedness(lhs, vars, obligations)?;
             collect_i32_definedness(rhs, vars, obligations)?;
@@ -229,10 +229,10 @@ fn collect_i32_definedness(
 /// Convert an expression to a Z3 variable name for field/identity access.
 /// Handles nested identities (e.g. p.x -> "p", old(p).x -> "old_p").
 fn field_var_name(expr: &Expr) -> String {
-    match expr {
+    match expr.unlocated() {
         Expr::Ident(name) => name.clone(),
         Expr::Old(inner) => {
-            if let Expr::Ident(name) = inner.as_ref() {
+            if let Expr::Ident(name) = inner.unlocated() {
                 format!("old_{}", name)
             } else {
                 format!("old_{}", field_var_name(inner))
@@ -246,7 +246,7 @@ fn field_var_name(expr: &Expr) -> String {
 }
 
 pub(crate) fn expr_to_z3_real(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Real> {
-    match expr {
+    match expr.unlocated() {
         Expr::Literal(Lit::Int(n)) => Some(Z3Real::from_int(&Z3Int::from_i64(*n))),
         Expr::Literal(Lit::Float(f)) => {
             if *f == 0.0 {
@@ -273,7 +273,7 @@ pub(crate) fn expr_to_z3_real(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Real
             }
         }
         Expr::Old(inner) => {
-            if let Expr::Ident(name) = inner.as_ref() {
+            if let Expr::Ident(name) = inner.unlocated() {
                 let old_name = format!("old_{}", name);
                 if let Some(v) = vars.get_real(&old_name) {
                     return Some(v.clone());
@@ -334,10 +334,10 @@ pub(crate) fn expr_to_z3_real(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Real
             encode_match_real(&matched, arms, vars)
         }
         Expr::Call(callee, call_args) => {
-            if let Expr::Ident(name) = callee.as_ref() {
+            if let Expr::Ident(name) = callee.unlocated() {
                 // Special-case len(s) for string length in real context.
                 if name == "len" && call_args.len() == 1 {
-                    if let Expr::Ident(s) = &call_args[0] {
+                    if let Expr::Ident(s) = call_args[0].unlocated() {
                         if let Some(len_var) = vars.get_string_len(s) {
                             return Some(Z3Real::from_int(len_var));
                         }
@@ -347,8 +347,8 @@ pub(crate) fn expr_to_z3_real(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Real
                         }
                     }
                     // len(sort(xs)) → list_len[xs] (sort preserves length)
-                    if let Expr::Call(callee2, args2) = &call_args[0] {
-                        if let Expr::Ident(name2) = callee2.as_ref() {
+                    if let Expr::Call(callee2, args2) = call_args[0].unlocated() {
+                        if let Expr::Ident(name2) = callee2.unlocated() {
                             if (name2 == "sort" || name2 == "reverse") && args2.len() == 1 {
                                 if let Some(list_len) = resolve_list_len(&args2[0], vars) {
                                     return Some(Z3Real::from_int(&list_len));
@@ -374,7 +374,7 @@ pub(crate) fn expr_to_z3_real(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Real
 }
 
 pub(crate) fn expr_to_z3_bool(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Bool> {
-    match expr {
+    match expr.unlocated() {
         Expr::Literal(Lit::Bool(b)) => Some(Z3Bool::from_bool(*b)),
         Expr::Ident(name) => {
             // RT-H6 (audit): try string nonempty lookup before falling
@@ -396,7 +396,7 @@ pub(crate) fn expr_to_z3_bool(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Bool
                 })
         }
         Expr::Old(inner) => {
-            if let Expr::Ident(name) = inner.as_ref() {
+            if let Expr::Ident(name) = inner.unlocated() {
                 let old_name = format!("old_{}", name);
                 // RT-H6: check string nonempty for old(string) expressions.
                 if let Some(v) = vars.get_string_nonempty(&old_name) {
@@ -549,10 +549,10 @@ pub(crate) fn expr_to_z3_bool(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Bool
             encode_match_bool(&matched, arms, vars)
         }
         Expr::Call(callee, call_args) => {
-            if let Expr::Ident(name) = callee.as_ref() {
+            if let Expr::Ident(name) = callee.unlocated() {
                 // Special-case len(s) for string length in bool context.
                 if name == "len" && call_args.len() == 1 {
-                    if let Expr::Ident(s) = &call_args[0] {
+                    if let Expr::Ident(s) = call_args[0].unlocated() {
                         if let Some(len_var) = vars.get_string_len(s) {
                             return Some(len_var.ne(Z3Int::from_i64(0)));
                         }
@@ -562,8 +562,8 @@ pub(crate) fn expr_to_z3_bool(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Bool
                         }
                     }
                     // len(sort(xs)) → list_len[xs] (sort preserves length)
-                    if let Expr::Call(callee2, args2) = &call_args[0] {
-                        if let Expr::Ident(name2) = callee2.as_ref() {
+                    if let Expr::Call(callee2, args2) = call_args[0].unlocated() {
+                        if let Expr::Ident(name2) = callee2.unlocated() {
                             if (name2 == "sort" || name2 == "reverse") && args2.len() == 1 {
                                 if let Some(list_len) = resolve_list_len(&args2[0], vars) {
                                     return Some(list_len.ne(Z3Int::from_i64(0)));
@@ -614,11 +614,11 @@ pub(crate) fn expr_to_z3_bool(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Bool
 }
 
 fn is_real_expr(expr: &Expr, vars: &Z3VarMap) -> bool {
-    match expr {
+    match expr.unlocated() {
         Expr::Ident(name) => vars.is_real(name),
         Expr::Literal(Lit::Float(_)) => true,
         Expr::Old(inner) => {
-            if let Expr::Ident(name) = inner.as_ref() {
+            if let Expr::Ident(name) = inner.unlocated() {
                 let old_name = format!("old_{}", name);
                 vars.is_real(&old_name)
             } else {
@@ -646,7 +646,7 @@ fn is_real_expr(expr: &Expr, vars: &Z3VarMap) -> bool {
             }
         }
         Expr::Call(callee, args) => {
-            if let Expr::Ident(name) = callee.as_ref() {
+            if let Expr::Ident(name) = callee.unlocated() {
                 if name == "len" {
                     return false; // len() always returns int
                 }
@@ -681,11 +681,11 @@ pub(crate) fn call_var_key(name: &str, args: &[Expr]) -> String {
 /// Encode a pattern match condition: returns a Z3 boolean that is true
 /// when the pattern matches the given encoded matched term.
 fn pattern_matches_z3(matched: &Z3Int, pat: &Pattern, _vars: &mut Z3VarMap) -> Option<Z3Bool> {
-    match pat {
-        Pattern::Wildcard => Some(Z3Bool::from_bool(true)),
-        Pattern::Variable(_) => Some(Z3Bool::from_bool(true)),
-        Pattern::Literal(Lit::Int(n)) => Some(matched.eq(Z3Int::from_i64(*n))),
-        Pattern::Literal(Lit::Bool(b)) => {
+    match &pat.kind {
+        PatternKind::Wildcard => Some(Z3Bool::from_bool(true)),
+        PatternKind::Variable(_) => Some(Z3Bool::from_bool(true)),
+        PatternKind::Literal(Lit::Int(n)) => Some(matched.eq(Z3Int::from_i64(*n))),
+        PatternKind::Literal(Lit::Bool(b)) => {
             let b_int = Z3Int::from_i64(if *b { 1 } else { 0 });
             Some(matched.eq(&b_int))
         }
@@ -696,13 +696,15 @@ fn pattern_matches_z3(matched: &Z3Int, pat: &Pattern, _vars: &mut Z3VarMap) -> O
 /// Build a Z3 ite chain for match expression with int result type.
 /// Each arm is guarded by its pattern condition, building nested ite.
 fn encode_match_int(matched: &Z3Int, arms: &[MatchArm], vars: &mut Z3VarMap) -> Option<Z3Int> {
-    let has_wildcard = arms.iter().any(|a| matches!(a.pat, Pattern::Wildcard));
+    let has_wildcard = arms
+        .iter()
+        .any(|a| matches!(&a.pat.kind, PatternKind::Wildcard));
     let mut result: Option<Z3Int> = None;
     for (i, arm) in arms.iter().rev().enumerate() {
         let arm_val = expr_to_z3_int(&arm.body, vars)?;
         // Last arm in reverse = first match arm (most specific).
         // If it's a Wildcard, it's also the default — just use its value.
-        if i == 0 && matches!(arm.pat, Pattern::Wildcard) {
+        if i == 0 && matches!(&arm.pat.kind, PatternKind::Wildcard) {
             result = Some(arm_val);
             continue;
         }
@@ -738,11 +740,14 @@ fn encode_match_real(matched: &Z3Real, arms: &[MatchArm], vars: &mut Z3VarMap) -
         let arm_val = expr_to_z3_real(&arm.body, vars)?;
         // Wildcard and Variable patterns always match — directly take arm value.
         // No need to call pattern_matches_z3 with a dummy matched_int = 0.
-        if matches!(arm.pat, Pattern::Wildcard | Pattern::Variable(_)) {
+        if matches!(
+            &arm.pat.kind,
+            PatternKind::Wildcard | PatternKind::Variable(_)
+        ) {
             result = Some(arm_val);
             continue;
         }
-        let base_cond = if let Pattern::Literal(Lit::Float(f)) = &arm.pat {
+        let base_cond = if let PatternKind::Literal(Lit::Float(f)) = &arm.pat.kind {
             if let Some(f_lit) = float_to_z3_real(*f) {
                 matched.eq(&f_lit)
             } else {
@@ -775,7 +780,7 @@ fn encode_match_bool(matched: &Z3Int, arms: &[MatchArm], vars: &mut Z3VarMap) ->
     let mut result: Option<Z3Bool> = None;
     for (i, arm) in arms.iter().rev().enumerate() {
         let arm_val = expr_to_z3_bool(&arm.body, vars)?;
-        if i == 0 && matches!(arm.pat, Pattern::Wildcard) {
+        if i == 0 && matches!(&arm.pat.kind, PatternKind::Wildcard) {
             result = Some(arm_val);
             continue;
         }
@@ -857,11 +862,11 @@ fn float_to_z3_real(f: f64) -> Option<Z3Real> {
 /// Resolve an expression to a Z3 string variable for string theory encoding.
 /// Handles `Ident`, `Literal("...")`, `old(ident)`, and `char_at(s, i)`.
 fn resolve_string_expr(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3String> {
-    match expr {
+    match expr.unlocated() {
         Expr::Ident(name) => vars.get_string_var(name).cloned(),
         Expr::Literal(Lit::String(s)) => Z3String::from_str(s).ok(),
         Expr::Old(inner) => {
-            if let Expr::Ident(name) = inner.as_ref() {
+            if let Expr::Ident(name) = inner.unlocated() {
                 let old_name = format!("old_{}", name);
                 vars.get_string_var(&old_name).cloned()
             } else {
@@ -874,7 +879,7 @@ fn resolve_string_expr(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3String> {
             vars.get_string_var(&key).cloned()
         }
         Expr::Call(callee, args) => {
-            if let Expr::Ident(name) = callee.as_ref() {
+            if let Expr::Ident(name) = callee.unlocated() {
                 if name == "char_at" && args.len() == 2 {
                     let s = resolve_string_expr(&args[0], vars)?;
                     let idx = expr_to_z3_int(&args[1], vars)?;
@@ -891,10 +896,10 @@ fn resolve_string_expr(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3String> {
 /// Handles identity (list param name), sort/reverse (which preserve length),
 /// and old() snapshots.
 pub(crate) fn resolve_list_len(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Int> {
-    match expr {
+    match expr.unlocated() {
         Expr::Ident(name) => vars.get_list_len(name).cloned(),
         Expr::Old(inner) => {
-            if let Expr::Ident(name) = inner.as_ref() {
+            if let Expr::Ident(name) = inner.unlocated() {
                 let old_name = format!("old_{}", name);
                 vars.get_list_len(&old_name).cloned()
             } else {
@@ -902,7 +907,7 @@ pub(crate) fn resolve_list_len(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Int
             }
         }
         Expr::Call(callee, args) => {
-            if let Expr::Ident(name) = callee.as_ref() {
+            if let Expr::Ident(name) = callee.unlocated() {
                 // sort() and reverse() preserve input list length
                 if (name == "sort" || name == "reverse") && args.len() == 1 {
                     return resolve_list_len(&args[0], vars);

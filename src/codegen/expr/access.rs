@@ -62,13 +62,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
         // Arch-2: Try type-driven lookup first (no string parsing)
-        if let Expr::Ident(name) = obj_expr {
-            if let Some(Type::Name(n, args)) = self.var_types.get(name) {
+        if let Expr::Ident(name) = obj_expr.unlocated() {
+            if let Some(Type::Name(n, args)) = self.var_types.get(name).map(Type::unlocated) {
                 if n == "List" && args.len() == 1 {
                     let elem_ty = &args[0];
                     // List<string> stores raw C-string pointers in its data slots,
                     // not pointers to the {i8*, i64} string struct.
-                    if let Type::Name(elem_name, _) = elem_ty {
+                    if let Type::Name(elem_name, _) = elem_ty.unlocated() {
                         if elem_name == "string" {
                             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                             let elem_ptr =
@@ -91,7 +91,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     // Product tuples / records / nested structs: ptrtoint slots.
-                    if matches!(elem_ty, Type::Tuple(_))
+                    if matches!(elem_ty.unlocated(), Type::Tuple(_))
                         || matches!(
                             types::mimi_type_to_llvm(self.context, elem_ty),
                             Some(BasicTypeEnum::StructType(_))
@@ -145,7 +145,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         if let Some(elem_ty) = crate::codegen::extract_list_elem_type(&obj_type) {
-            let llvm_ty = if let Type::Name(name, _) = &elem_ty {
+            let llvm_ty = if let Type::Name(name, _) = elem_ty.unlocated() {
                 self.type_llvm
                     .get(name)
                     .cloned()
@@ -186,7 +186,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         // Shared variable fast path: obj is a shared var, load heap ptr directly
-        if let Expr::Ident(name) = obj {
+        if let Expr::Ident(name) = obj.unlocated() {
             if self.shared_var_names.contains(name.as_str()) {
                 if let Some(&(alloca, _ty)) = vars.get(name.as_str()) {
                     if let Some(val) =
@@ -215,7 +215,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // i32 fields must be loaded as i32 then sign-extended to i64 to
                     // match Mimi's i64-uniform value convention; otherwise an i64
                     // load would over-read into the next struct field.
-                    let (load_ty, ext) = match &fields[idx].ty {
+                    let (load_ty, ext) = match fields[idx].ty.unlocated() {
                         Type::Name(n, _) if n == "i32" => {
                             (BasicTypeEnum::IntType(self.context.i32_type()), true)
                         }
@@ -590,7 +590,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         obj: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
-        if let Expr::Ident(var_name) = obj {
+        if let Expr::Ident(var_name) = obj.unlocated() {
             if let Some(converted) =
                 self.convert_list_elem_from_i64(elem_int, Some(var_name.as_str()))?
             {
@@ -608,7 +608,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         // D4: newtype .0 — newtypes are transparent in codegen, .0 is identity
         if index == 0 {
-            if let Expr::Ident(name) = tuple_expr {
+            if let Expr::Ident(name) = tuple_expr.unlocated() {
                 if let Some(type_name) = self.var_type_names.get(name) {
                     if let Some(td) = self.type_defs.get(type_name) {
                         if matches!(td.kind, crate::ast::TypeDefKind::Newtype(_)) {

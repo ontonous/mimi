@@ -527,6 +527,9 @@ fn encode_checked_const_value(value: &crate::core::ResolvedConstValue) -> String
     }
 }
 
+// Checked-directory queries form the verifier/tooling boundary; the compiler
+// binary intentionally uses only a subset in any one target.
+#[allow(dead_code)]
 impl Verifier {
     pub fn new() -> Result<Self, String> {
         Self::with_timeout(DEFAULT_TIMEOUT_MS)
@@ -693,6 +696,7 @@ impl Verifier {
         for (node_id, meta) in program.node_meta() {
             let precision = match meta.precision {
                 crate::core::SpanPrecision::Exact => "exact",
+                crate::core::SpanPrecision::SourceAnchor => "source_anchor",
                 crate::core::SpanPrecision::DeclarationFallback => "declaration_fallback",
             };
             node_meta_precision.insert(node_id.0.clone(), precision.to_string());
@@ -1629,6 +1633,12 @@ impl VerifierCtx {
                     for t in &flow.transitions {
                         if let Some(body) = &t.body {
                             let f = crate::ast::FuncDef {
+                                meta: crate::ast::AstNodeMeta::inherited(
+                                    t.meta.span,
+                                    crate::ast::AstOrigin::RuntimeSystem(
+                                        "verifier.transition_function",
+                                    ),
+                                ),
                                 name: format!("{}::{}", flow.name, t.name),
                                 pub_: false,
                                 params: t.params.clone(),
@@ -1640,7 +1650,6 @@ impl VerifierCtx {
                                 is_comptime: false,
                                 is_async: false,
                                 extern_abi: None,
-                                pos: t.pos,
                             };
                             self.func_defs.insert(f.name.clone(), f);
                         }

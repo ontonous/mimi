@@ -15,6 +15,7 @@ impl Parser {
         let saved_allow_record = self.allow_record_literal;
         self.allow_record_literal = true;
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            let arm_start = self.pos;
             let pat = self.parse_pattern()?;
             let guard = if self.at(&TokenKind::If) {
                 self.advance();
@@ -23,14 +24,37 @@ impl Parser {
                 None
             };
             self.expect(TokenKind::FatArrow, "`=>`")?;
+            let body_start = self.pos;
             let body = if self.at(&TokenKind::LBrace) {
                 self.advance();
                 let stmts = self.parse_block()?;
-                Expr::Block(stmts)
+                self.parsed_expr_from(body_start, Expr::Block(stmts))
             } else {
-                Expr::Block(vec![Stmt::Expr(self.parse_expr(0)?)])
+                let value = self.parse_expr(0)?;
+                let meta = value
+                    .meta()
+                    .map(|meta| {
+                        AstNodeMeta::new(
+                            meta.span,
+                            AstOrigin::Desugared("parser.match_arm.expression_body"),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        AstNodeMeta::synthetic(AstOrigin::Desugared(
+                            "parser.match_arm.expression_body",
+                        ))
+                    });
+                self.parsed_expr_from(
+                    body_start,
+                    Expr::Block(vec![Stmt::Expr(value).with_meta(meta)]),
+                )
             };
-            arms.push(MatchArm { pat, guard, body });
+            arms.push(MatchArm {
+                meta: self.consumed_meta(arm_start, AstOrigin::User),
+                pat,
+                guard,
+                body,
+            });
             self.skip_newlines();
             if self.at(&TokenKind::Comma) {
                 self.advance();
@@ -43,8 +67,9 @@ impl Parser {
 
     pub(crate) fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
         self.skip_newlines();
+        let start_pos = self.pos;
         let tok = self.peek();
-        match tok.kind.clone() {
+        let kind = match tok.kind.clone() {
             TokenKind::Ident(name) => {
                 self.advance();
                 if self.at(&TokenKind::LParen) {
@@ -63,18 +88,19 @@ impl Parser {
                         }
                     }
                     self.expect(TokenKind::RParen, "`)")?;
-                    Ok(Pattern::Constructor(name, pats))
+                    Ok(PatternKind::Constructor(name, pats))
                 } else if self.at(&TokenKind::LBrace) {
                     self.advance();
                     let mut fields = Vec::new();
                     if !self.at(&TokenKind::RBrace) {
                         loop {
+                            let field_start = self.pos;
                             let fname = self.expect_ident()?;
                             let pat = if self.at(&TokenKind::Colon) {
                                 self.advance();
                                 self.parse_pattern()?
                             } else {
-                                Pattern::Variable(fname.clone())
+                                self.pattern_from(field_start, PatternKind::Variable(fname.clone()))
                             };
                             fields.push((fname, pat));
                             if !self.at(&TokenKind::Comma) {
@@ -84,11 +110,11 @@ impl Parser {
                         }
                     }
                     self.expect(TokenKind::RBrace, "`}`")?;
-                    Ok(Pattern::Constructor(name, fields))
+                    Ok(PatternKind::Constructor(name, fields))
                 } else if name == "_" {
-                    Ok(Pattern::Wildcard)
+                    Ok(PatternKind::Wildcard)
                 } else {
-                    Ok(Pattern::Variable(name))
+                    Ok(PatternKind::Variable(name))
                 }
             }
             TokenKind::Int(v) => {
@@ -110,19 +136,19 @@ impl Parser {
                         .parse::<i64>()
                         .map_err(|_| ParseError::new("invalid integer", line, col))?
                 };
-                Ok(Pattern::Literal(Lit::Int(val)))
+                Ok(PatternKind::Literal(Lit::Int(val)))
             }
             TokenKind::String(v) => {
                 self.advance();
-                Ok(Pattern::Literal(Lit::String(v)))
+                Ok(PatternKind::Literal(Lit::String(v)))
             }
             TokenKind::True => {
                 self.advance();
-                Ok(Pattern::Literal(Lit::Bool(true)))
+                Ok(PatternKind::Literal(Lit::Bool(true)))
             }
             TokenKind::False => {
                 self.advance();
-                Ok(Pattern::Literal(Lit::Bool(false)))
+                Ok(PatternKind::Literal(Lit::Bool(false)))
             }
             TokenKind::LParen => {
                 self.advance();
@@ -137,7 +163,7 @@ impl Parser {
                     }
                 }
                 self.expect(TokenKind::RParen, "`)")?;
-                Ok(Pattern::Tuple(pats))
+                Ok(PatternKind::Tuple(pats))
             }
             TokenKind::LBracket => {
                 self.advance();
@@ -162,9 +188,9 @@ impl Parser {
                 }
                 self.expect(TokenKind::RBracket, "`]`")?;
                 if rest.is_some() {
-                    Ok(Pattern::Slice(pats, rest))
+                    Ok(PatternKind::Slice(pats, rest))
                 } else {
-                    Ok(Pattern::Array(pats))
+                    Ok(PatternKind::Array(pats))
                 }
             }
             // Soft keywords allowed as binding names in pattern context.
@@ -182,13 +208,48 @@ impl Parser {
             | TokenKind::End => {
                 let name = tok.kind.source_text().to_string();
                 self.advance();
-                Ok(Pattern::Variable(name))
+                Ok(PatternKind::Variable(name))
             }
             _ => Err(ParseError::new(
                 format!("unexpected token in pattern {}", tok.kind),
                 tok.line,
                 tok.col,
             )),
-        }
+        }?;
+        Ok(self.pattern_from(start_pos, kind))
+    }
+
+    fn pattern_from(&self, start_pos: usize, kind: PatternKind) -> Pattern {
+        Pattern::new(self.consumed_meta(start_pos, AstOrigin::User), kind)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::span::SourceId;
+
+    #[test]
+    fn parsed_patterns_keep_source_and_nested_spans() {
+        let source_id = SourceId::new(42);
+        let tokens = Lexer::new("(x, [1, ..rest])").tokenize().expect("lex");
+        let mut parser = Parser::new_with_source(tokens, source_id);
+        let pattern = parser.parse_pattern().expect("parse pattern");
+
+        assert_eq!(pattern.meta.span.source_id, source_id);
+        assert_eq!(pattern.meta.origin, AstOrigin::User);
+        assert_eq!(
+            pattern.meta.span,
+            Span::new(1, 1, 1, 17).with_source(source_id)
+        );
+        let PatternKind::Tuple(items) = &pattern.kind else {
+            panic!("expected tuple");
+        };
+        assert_eq!(
+            items[0].meta.span,
+            Span::new(1, 2, 1, 3).with_source(source_id)
+        );
+        assert_eq!(items[1].meta.span.source_id, source_id);
     }
 }

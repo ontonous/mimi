@@ -58,7 +58,7 @@ impl<'a> Checker<'a> {
         block: &Block,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        self.process_block_expr(block, scopes, |this, last, scopes, ret| match last {
+        self.process_block_expr(block, scopes, |this, last, scopes, ret| match last.unlocated() {
             Stmt::Expr(e) => this.infer_expr(e, scopes),
             Stmt::Return(Some(e)) => {
                 let t = this.infer_expr(e, scopes);
@@ -87,7 +87,7 @@ impl<'a> Checker<'a> {
         expected: &Type,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        self.process_block_expr(block, scopes, |this, last, scopes, ret| match last {
+        self.process_block_expr(block, scopes, |this, last, scopes, ret| match last.unlocated() {
             Stmt::Expr(e) => this.check_expr(expected, e, scopes),
             Stmt::Return(Some(e)) => {
                 let t = this.check_expr(expected, e, scopes);
@@ -168,7 +168,7 @@ impl<'a> Checker<'a> {
     ) -> Type {
         let iter_ty = self.infer_expr(iter, scopes);
         // Check iter is a list
-        if let Type::Name(n, args) = &iter_ty {
+        if let Type::Name(n, args) = iter_ty.unlocated() {
             if n != "List" || args.len() != 1 {
                 self.emit_code(
                     crate::diagnostic::codes::E0250,
@@ -180,7 +180,7 @@ impl<'a> Checker<'a> {
             }
         }
         // Infer element type from iter
-        let elem_ty = if let Type::Name(_, args) = &iter_ty {
+        let elem_ty = if let Type::Name(_, args) = iter_ty.unlocated() {
             if args.len() == 1 {
                 args[0].clone()
             } else {
@@ -203,7 +203,7 @@ impl<'a> Checker<'a> {
         // because the guard references the loop variable.
         if let Some(g) = guard {
             let guard_ty = self.infer_expr(g, scopes);
-            if !matches!(&guard_ty, Type::Name(n, _) if n == "bool") {
+            if !matches!(guard_ty.unlocated(), Type::Name(n, _) if n == "bool") {
                 self.emit_code(
                     crate::diagnostic::codes::E0230,
                     format!(
@@ -257,12 +257,12 @@ impl<'a> Checker<'a> {
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
         let inner_ty = self.infer_expr(inner, scopes);
-        match inner_ty {
+        match inner_ty.unlocated() {
             Type::Name(n, args) if n == "Future" && !args.is_empty() => args[0].clone(),
             other => {
                 self.emit_code(
                     crate::diagnostic::codes::E0245,
-                    format!("await requires Future type, found {}", fmt_type(&other)),
+                    format!("await requires Future type, found {}", fmt_type(other)),
                 );
                 Type::Name("unknown".into(), vec![])
             }
@@ -275,16 +275,16 @@ impl<'a> Checker<'a> {
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
         let inner_ty = self.infer_expr(expr, scopes);
-        match inner_ty {
+        match inner_ty.unlocated() {
             // Built-in Result<T, E> -> ? extracts T
             Type::Name(n, args) if n == "Result" && args.len() == 2 => args[0].clone(),
             // Built-in Option<T> -> ? extracts T
             Type::Name(n, args) if n == "Option" && args.len() == 1 => args[0].clone(),
             // T? syntactic sugar for Option<T>
-            Type::Option(inner) => (*inner).clone(),
+            Type::Option(inner) => inner.as_ref().clone(),
             // For unparameterized enum types like `Res`, look up the type definition
             Type::Name(name, ref args) if args.is_empty() => {
-                if let Some(tdef) = self.types.get(&name) {
+                if let Some(tdef) = self.types.get(name) {
                     match &tdef.kind {
                         TypeDefKind::Enum(variants) if variants.len() == 2 => {
                             // Try to find Ok/Err or Some/None pattern
@@ -352,7 +352,7 @@ impl<'a> Checker<'a> {
         // Comptime block: infer type from last expression
         let mut result_type = Type::Name("unit".into(), vec![]);
         for stmt in block {
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::Expr(e) => result_type = self.infer_expr(e, scopes),
                 Stmt::Return(Some(e)) => {
                     result_type = self.infer_expr(e, scopes);

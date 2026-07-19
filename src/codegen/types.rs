@@ -21,7 +21,8 @@ fn widen_int_to_i64<'ctx>(ctx: &'ctx Context, ty: BasicTypeEnum<'ctx>) -> BasicT
 }
 
 pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTypeEnum<'ctx>> {
-    match ty {
+    match ty.unlocated() {
+        Type::Located { ty, .. } => mimi_type_to_llvm(ctx, ty),
         Type::Name(name, args) => match name.as_str() {
             "i32" => Some(BasicTypeEnum::IntType(ctx.i32_type())),
             "i64" => Some(BasicTypeEnum::IntType(ctx.i64_type())),
@@ -286,7 +287,7 @@ pub fn is_simple_reprc_record(fields: &[Field]) -> bool {
     }
     fields
         .iter()
-        .all(|f| matches!(&f.ty, Type::Name(n, _) if n == "i32"))
+        .all(|f| matches!(f.ty.unlocated(), Type::Name(n, _) if n == "i32"))
 }
 
 /// Map a Mimi Type to LLVM for extern FFI (C ABI). i32 maps to LLVM i32 (int32_t)
@@ -295,7 +296,7 @@ pub fn mimi_type_to_llvm_extern<'ctx>(
     ctx: &'ctx Context,
     ty: &Type,
 ) -> Option<BasicTypeEnum<'ctx>> {
-    match ty {
+    match ty.unlocated() {
         Type::Name(name, _args) => match name.as_str() {
             "i32" => Some(BasicTypeEnum::IntType(ctx.i32_type())),
             "bool" => Some(BasicTypeEnum::IntType(ctx.i8_type())),

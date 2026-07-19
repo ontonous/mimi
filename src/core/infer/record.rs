@@ -24,6 +24,9 @@ fn subst_with_depth(ty: &Type, subst: &HashMap<String, Type>, depth: usize) -> T
     }
     let next = depth + 1;
     match ty {
+        Type::Located { meta, ty } => {
+            subst_with_depth(ty, subst, next).with_meta(*meta)
+        }
         Type::Name(name, args) if args.is_empty() && subst.contains_key(name) => {
             subst[name].clone()
         }
@@ -96,7 +99,7 @@ fn subst_with_depth(ty: &Type, subst: &HashMap<String, Type>, depth: usize) -> T
         | Type::ImplTrait(_)
         | Type::DynTrait(_) => {
             mimi_debug_assert!(
-                !matches!(ty, Type::Infer),
+                !matches!(ty.unlocated(), Type::Infer),
                 "substitute_type_params: unexpected Infer leaf type"
             );
             ty.clone()
@@ -143,7 +146,7 @@ impl<'a> Checker<'a> {
                             // same_type check to keep diagnostics unchanged. For fields
                             // that involve type parameters, use unification so the
                             // parameter can be inferred from the value.
-                            let uses_param = subst.values().any(|v| match v {
+                            let uses_param = subst.values().any(|v| match v.unlocated() {
                                 Type::TypeVar(id) => {
                                     crate::core::unification::UnificationTable::occurs_in(
                                         *id,

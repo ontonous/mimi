@@ -7,7 +7,7 @@ use crate::verifier::ctx::{VerifStatus, VerificationResult};
 /// Used in `expr_to_z3_*` to evaluate the tail expression of an if-else branch.
 pub(crate) fn block_tail_expr(block: &[Stmt]) -> Option<Expr> {
     for stmt in block.iter().rev() {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Expr(e) => return Some(e.clone()),
             Stmt::Return(Some(e)) => return Some(e.clone()),
             Stmt::Return(None) => return Some(Expr::Literal(Lit::Unit)),
@@ -20,7 +20,7 @@ pub(crate) fn block_tail_expr(block: &[Stmt]) -> Option<Expr> {
 /// Check if a comparison is between a string ident and an empty string literal.
 pub(crate) fn is_string_empty_cmp(lhs: &Expr, rhs: &Expr, op: &BinOp) -> bool {
     matches!(op, BinOp::EqCmp | BinOp::NeCmp)
-        && match (lhs, rhs) {
+        && match (lhs.unlocated(), rhs.unlocated()) {
             (Expr::Ident(_), Expr::Literal(Lit::String(s)))
             | (Expr::Literal(Lit::String(s)), Expr::Ident(_)) => s.is_empty(),
             _ => false,
@@ -30,7 +30,7 @@ pub(crate) fn is_string_empty_cmp(lhs: &Expr, rhs: &Expr, op: &BinOp) -> bool {
 /// Extract the string ident name from a string emptiness comparison.
 /// Assumes `is_string_empty_cmp` returned `true`.
 pub(crate) fn extract_string_empty_cmp(lhs: &Expr, rhs: &Expr, op: &BinOp) -> (String, BinOp) {
-    match (lhs, rhs) {
+    match (lhs.unlocated(), rhs.unlocated()) {
         (Expr::Ident(name), Expr::Literal(Lit::String(_))) => (name.clone(), *op),
         (Expr::Literal(Lit::String(_)), Expr::Ident(name)) => (name.clone(), *op),
         _ => (String::new(), *op),
@@ -46,7 +46,7 @@ pub(crate) fn extract_string_empty_cmp(lhs: &Expr, rhs: &Expr, op: &BinOp) -> (S
 pub(crate) fn extract_body_return(block: &[Stmt]) -> Option<Expr> {
     // First pass (forward): first explicit return or branching if wins.
     for stmt in block.iter() {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Return(Some(expr)) => return Some(expr.clone()),
             Stmt::Return(None) => return Some(Expr::Literal(Lit::Unit)),
             Stmt::If { cond, then_, else_ } => {
@@ -67,7 +67,7 @@ pub(crate) fn extract_body_return(block: &[Stmt]) -> Option<Expr> {
     }
     // Second pass (reverse): implicit return = last expression, skipping lets.
     for stmt in block.iter().rev() {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Expr(expr) => return Some(expr.clone()),
             Stmt::If { cond, then_, else_ } => {
                 return extract_if_return(cond, then_, else_);
@@ -94,15 +94,22 @@ fn extract_if_return(cond: &Expr, then_: &[Stmt], else_: &Option<Block>) -> Opti
         .as_ref()
         .and_then(|b| extract_body_return(b))
         .unwrap_or(Expr::Literal(Lit::Unit));
+    let desugared_stmt = |expr: Expr| {
+        let meta = expr
+            .meta()
+            .map(|meta| AstNodeMeta::new(meta.span, AstOrigin::Desugared("verifier.if_return")))
+            .unwrap_or_else(|| AstNodeMeta::synthetic(AstOrigin::Desugared("verifier.if_return")));
+        Stmt::Expr(expr).with_meta(meta)
+    };
     Some(Expr::If {
         cond: Box::new(cond.clone()),
-        then_: vec![Stmt::Expr(then_expr)],
-        else_: Some(vec![Stmt::Expr(else_expr)]),
+        then_: vec![desugared_stmt(then_expr)],
+        else_: Some(vec![desugared_stmt(else_expr)]),
     })
 }
 
 pub(crate) fn format_expr(expr: &Expr) -> String {
-    match expr {
+    match expr.unlocated() {
         Expr::Literal(Lit::Int(n)) => format!("{}", n),
         Expr::Literal(Lit::Float(f)) => format!("{}", f),
         Expr::Literal(Lit::Bool(b)) => format!("{}", b),
@@ -150,7 +157,7 @@ pub(crate) fn format_expr(expr: &Expr) -> String {
 }
 
 fn format_stmt(stmt: &Stmt) -> String {
-    match stmt {
+    match stmt.unlocated() {
         Stmt::Let { pat, .. } => format!("let {:?}", pat),
         Stmt::Expr(expr) => format_expr(expr),
         Stmt::Return(Some(expr)) => format!("return {}", format_expr(expr)),
@@ -165,7 +172,7 @@ fn format_stmt(stmt: &Stmt) -> String {
 }
 
 pub(crate) fn collect_idents_in_expr(expr: &Expr, idents: &mut Vec<String>) {
-    match expr {
+    match expr.unlocated() {
         Expr::Ident(name) => {
             if !idents.contains(name) {
                 idents.push(name.clone());
@@ -275,7 +282,7 @@ pub(crate) fn collect_idents_in_expr(expr: &Expr, idents: &mut Vec<String>) {
 }
 
 pub(crate) fn collect_idents_in_stmt(stmt: &Stmt, idents: &mut Vec<String>) {
-    match stmt {
+    match stmt.unlocated() {
         Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Drop(e) => collect_idents_in_expr(e, idents),
         Stmt::Return(None) | Stmt::Break(None) | Stmt::Continue => {}
         Stmt::Break(Some(e)) => collect_idents_in_expr(e, idents),
@@ -340,14 +347,6 @@ pub(crate) fn collect_idents_in_stmt(stmt: &Stmt, idents: &mut Vec<String>) {
     }
 }
 
-pub(crate) fn parse_contract_expr(text: &str) -> Result<Expr, String> {
-    let tokens = crate::lexer::Lexer::new(text).tokenize()?;
-    let expr = crate::parser::Parser::new(tokens)
-        .parse_expr(0)
-        .map_err(|e| e.message)?;
-    Ok(expr)
-}
-
 /// Return Unknown for all functions when Z3 is not available.
 pub(crate) fn mock_verify_file(file: &crate::ast::File) -> Vec<VerificationResult> {
     let mut results = Vec::new();
@@ -362,7 +361,7 @@ fn mock_verify_items(items: &[crate::ast::Item], results: &mut Vec<VerificationR
                 if !f.body.is_empty() {
                     let has_contracts = f.body.iter().any(|s| {
                         matches!(
-                            s,
+                            s.unlocated(),
                             Stmt::Requires(_, _)
                                 | Stmt::Ensures(_, _)
                                 | Stmt::Invariant(_, _)

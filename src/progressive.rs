@@ -27,16 +27,16 @@ pub fn apply_progressive_typestate(file: &mut File) -> bool {
     }
     // Script mode: inject invisible Main / Single.
     file.implicit_single = true;
-    let main_pos = file
+    let main_meta = file
         .items
         .iter()
         .find_map(|item| match item {
-            Item::Func(function) if function.name == "main" => Some(function.pos),
+            Item::Func(function) if function.name == "main" => Some(function.meta),
             _ => None,
         })
-        .unwrap_or((1, 1));
+        .expect("has_top_level_main guaranteed a main function");
     file.items
-        .insert(0, Item::Flow(make_implicit_main_flow(main_pos)));
+        .insert(0, Item::Flow(make_implicit_main_flow(main_meta)));
     true
 }
 
@@ -49,31 +49,35 @@ fn file_has_user_flow(file: &File) -> bool {
 }
 
 /// `flow Main { state Single; transition run(Single) -> Single { do { return Single { } } } }`
-fn make_implicit_main_flow(pos: (usize, usize)) -> FlowDef {
-    let run_body = vec![Stmt::Return(Some(Expr::Record {
+fn make_implicit_main_flow(parent_meta: AstNodeMeta) -> FlowDef {
+    let span = parent_meta.span;
+    let run_origin = AstOrigin::RuntimeSystem("progressive.run");
+    let run_result = Expr::Record {
         ty: Some("Single".to_string()),
         fields: vec![],
-    }))];
+    }
+    .with_meta(AstNodeMeta::new(span, run_origin));
+    let run_body =
+        vec![Stmt::Return(Some(run_result)).with_meta(AstNodeMeta::new(span, run_origin))];
     FlowDef {
+        meta: AstNodeMeta::inherited(span, AstOrigin::RuntimeSystem("progressive.main"))
+            .with_parent(AstParentHint::NamedFunction("main")),
         name: "Main".to_string(),
-        pos,
-        origin: AstOrigin::RuntimeSystem,
         pub_: false,
         generics: vec![],
         annotations: vec![],
         states: vec![StateDef {
+            meta: AstNodeMeta::inherited(span, AstOrigin::RuntimeSystem("progressive.single")),
             name: "Single".to_string(),
-            pos,
-            origin: AstOrigin::RuntimeSystem,
             payload: None,
         }],
         transitions: vec![TransitionDef {
+            meta: AstNodeMeta::inherited(span, run_origin),
             name: "run".to_string(),
             from_state: "Single".to_string(),
             params: vec![],
             to_states: vec!["Single".to_string()],
             body: Some(run_body),
-            pos,
             is_fallback: false,
             is_ffi_pinned: false,
         }],
@@ -100,9 +104,13 @@ pub fn main_local_names(file: &File) -> Vec<String> {
                 let mut names = Vec::new();
                 for stmt in &f.body {
                     if let Stmt::Let {
-                        pat: Pattern::Variable(n),
+                        pat:
+                            Pattern {
+                                kind: PatternKind::Variable(n),
+                                ..
+                            },
                         ..
-                    } = stmt
+                    } = stmt.unlocated()
                     {
                         if !names.contains(n) {
                             names.push(n.clone());
@@ -119,9 +127,20 @@ pub fn main_local_names(file: &File) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::span::SourceId;
+
+    const TEST_SOURCE: SourceId = SourceId::new(73);
+
+    fn user_meta(line: usize) -> AstNodeMeta {
+        AstNodeMeta::new(
+            crate::span::Span::single(line, 1).with_source(TEST_SOURCE),
+            AstOrigin::User,
+        )
+    }
 
     fn empty_file() -> File {
         File {
+            sources: crate::span::SourceRegistry::default(),
             imports: vec![],
             items: vec![],
             implicit_single: false,
@@ -132,10 +151,11 @@ mod tests {
     fn script_with_main_gets_implicit_main() {
         let mut file = empty_file();
         file.items.push(Item::Func(FuncDef {
+            meta: user_meta(1),
             name: "main".into(),
             pub_: false,
             params: vec![],
-            ret: Some(Type::Name("i32".into(), vec![])),
+            ret: Some(Type::Name("i32".into(), vec![]).with_meta(user_meta(1))),
             body: vec![Stmt::Return(Some(Expr::Literal(Lit::Int(0))))],
             where_clause: vec![],
             generics: vec![],
@@ -143,12 +163,49 @@ mod tests {
             is_comptime: false,
             is_async: false,
             extern_abi: None,
-            pos: (1, 1),
         }));
         assert!(apply_progressive_typestate(&mut file));
         assert!(file.implicit_single);
         assert!(matches!(&file.items[0], Item::Flow(f) if f.name == "Main"));
         assert!(f_has_single(&file));
+
+        let Item::Flow(flow) = &file.items[0] else {
+            panic!("implicit Main flow")
+        };
+        assert_eq!(flow.meta.span, user_meta(1).span);
+        assert_eq!(
+            flow.meta.origin,
+            AstOrigin::RuntimeSystem("progressive.main")
+        );
+        assert_eq!(
+            flow.meta.parent,
+            AstParentHint::NamedFunction("main"),
+            "implicit Main records its causal user function explicitly"
+        );
+        assert_eq!(flow.states[0].meta.span.source_id, TEST_SOURCE);
+        assert_eq!(
+            flow.states[0].meta.origin,
+            AstOrigin::RuntimeSystem("progressive.single")
+        );
+        assert_eq!(flow.states[0].meta.parent, AstParentHint::Enclosing);
+        assert_eq!(flow.transitions[0].meta.span.source_id, TEST_SOURCE);
+        assert_eq!(
+            flow.transitions[0].meta.origin,
+            AstOrigin::RuntimeSystem("progressive.run")
+        );
+        assert_eq!(flow.transitions[0].meta.parent, AstParentHint::Enclosing);
+        assert!(flow.annotations.is_empty());
+
+        let Item::Func(main) = &file.items[1] else {
+            panic!("original main")
+        };
+        let ret_meta = main
+            .ret
+            .as_ref()
+            .and_then(Type::meta)
+            .expect("user return type metadata");
+        assert_eq!(ret_meta.origin, AstOrigin::User);
+        assert_eq!(ret_meta.span.source_id, TEST_SOURCE);
     }
 
     fn f_has_single(file: &File) -> bool {
@@ -162,16 +219,14 @@ mod tests {
     fn explicit_flow_skips_injection() {
         let mut file = empty_file();
         file.items.push(Item::Flow(FlowDef {
+            meta: user_meta(1),
             name: "User".into(),
-            pos: (1, 1),
-            origin: AstOrigin::User,
             pub_: false,
             generics: vec![],
             annotations: vec![],
             states: vec![StateDef {
+                meta: user_meta(2),
                 name: "A".into(),
-                pos: (2, 1),
-                origin: AstOrigin::User,
                 payload: None,
             }],
             transitions: vec![],
@@ -181,10 +236,11 @@ mod tests {
             metadata_shadow_fields: vec![],
         }));
         file.items.push(Item::Func(FuncDef {
+            meta: user_meta(1),
             name: "main".into(),
             pub_: false,
             params: vec![],
-            ret: Some(Type::Name("i32".into(), vec![])),
+            ret: Some(Type::Name("i32".into(), vec![]).with_meta(user_meta(1))),
             body: vec![],
             where_clause: vec![],
             generics: vec![],
@@ -192,7 +248,6 @@ mod tests {
             is_comptime: false,
             is_async: false,
             extern_abi: None,
-            pos: (1, 1),
         }));
         assert!(!apply_progressive_typestate(&mut file));
         assert!(!file.implicit_single);
@@ -203,8 +258,8 @@ mod tests {
     fn no_main_no_injection() {
         let mut file = empty_file();
         file.items.push(Item::Type(TypeDef {
+            meta: AstNodeMeta::synthetic(AstOrigin::RuntimeSystem("test.fixture")),
             name: "T".into(),
-            decl_pos: None,
             pub_: false,
             kind: TypeDefKind::Record(vec![]),
             generics: vec![],

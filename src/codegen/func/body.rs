@@ -123,7 +123,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<()> {
         let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
 
-        if let Expr::Binary(BinOp::Range, start_expr, end_expr) = iterable {
+        if let Expr::Binary(BinOp::Range, start_expr, end_expr) = iterable.unlocated() {
             let start_val = self.compile_expr(start_expr, vars)?;
             let end_val = self.compile_expr(end_expr, vars)?;
             let start_iv = Self::expect_int_value(start_val, "range start must be i64")?;
@@ -200,8 +200,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> bool {
         // Direct function call: known List<string> producers
-        if let Expr::Call(callee, _) = iterable {
-            if let Expr::Ident(name) = callee.as_ref() {
+        if let Expr::Call(callee, _) = iterable.unlocated() {
+            if let Expr::Ident(name) = callee.unlocated() {
                 match name.as_str() {
                     "listdir" | "walk_dir" | "str_split" | "words" | "lines" | "split" | "keys" => {
                         return true;
@@ -211,12 +211,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         // Variable reference: check var_types and var_type_names
-        if let Expr::Ident(name) = iterable {
+        if let Expr::Ident(name) = iterable.unlocated() {
             // Check Type object
             if let Some(ty) = self.var_types.get(name) {
-                match ty {
+                match ty.unlocated() {
                     Type::Name(n, args) if n == "List" && !args.is_empty() => {
-                        return matches!(&args[0], Type::Name(inner, _) if inner == "string");
+                        return matches!(args[0].unlocated(), Type::Name(inner, _) if inner == "string");
                     }
                     _ => {}
                 }
@@ -229,9 +229,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         // General fallback: use the expression's inferred type.
-        if let Some(Type::Name(n, args)) = self.expr_type_of(iterable, vars) {
+        if let Some(Type::Name(n, args)) = self
+            .expr_type_of(iterable, vars)
+            .as_ref()
+            .map(Type::unlocated)
+        {
             if n == "List" && !args.is_empty() {
-                return matches!(&args[0], Type::Name(inner, _) if inner == "string");
+                return matches!(args[0].unlocated(), Type::Name(inner, _) if inner == "string");
             }
         }
         // Last resort: use infer_object_type which knows about builtin return types.
@@ -249,6 +253,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         value: &Expr,
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<()> {
+        // Unwrap `Expr::Located` wrapper introduced by the AstNodeMeta
+        // migration so kind variants (Ident/Field/Index/Unary) match directly.
+        let target = target.unlocated();
         match target {
             Expr::Ident(name) => {
                 let val = self.compile_expr(value, vars)?;
@@ -260,7 +267,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map(|t| t == "string")
                         .unwrap_or(false);
                     let is_temp = matches!(
-                        value,
+                        value.unlocated(),
                         Expr::Binary(BinOp::Add, _, _) | Expr::Literal(Lit::FString(_))
                     );
                     if is_string_val && is_temp {
@@ -311,7 +318,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             return self.compile_store_field(base_ptr, &obj_type, field_name, val);
         }
         // Check if obj is a shared variable — use heap pointer directly
-        if let Expr::Ident(name) = obj {
+        if let Expr::Ident(name) = obj.unlocated() {
             if self.shared_var_names.contains(name.as_str()) {
                 if let Some(&(alloca, _ty)) = vars.get(name.as_str()) {
                     let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -533,7 +540,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<()> {
         // Check if inner is a shared variable — use heap pointer directly
-        if let Expr::Ident(name) = inner {
+        if let Expr::Ident(name) = inner.unlocated() {
             if self.shared_var_names.contains(name.as_str()) {
                 if let Some(&(alloca, _ty)) = vars.get(name.as_str()) {
                     let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -861,7 +868,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(None);
         };
         // Skip conversion for known scalar element types
-        if let Type::Name(inner, _) = &elem_ty {
+        if let Type::Name(inner, _) = elem_ty.unlocated() {
             if matches!(
                 inner.as_str(),
                 "i32" | "i64" | "f32" | "f64" | "bool" | "string"
@@ -871,7 +878,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         // Resolve generic param (e.g., T→Item) via type_map if elem is a single
         // uppercase letter (generic placeholder from trait method self type).
-        let concrete_ty = match &elem_ty {
+        let concrete_ty = match elem_ty.unlocated() {
             Type::Name(inner, _)
                 if inner.len() == 1 && inner.chars().next().is_some_and(|c| c.is_uppercase()) =>
             {
@@ -899,12 +906,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Option<Type> {
         // Check var_types first (handles Type::Ref for generic trait method self)
-        if let Expr::Ident(name) = iterable {
+        if let Expr::Ident(name) = iterable.unlocated() {
             if let Some(ty) = self.var_types.get(name) {
-                let inner = match ty {
+                let inner = match ty.unlocated() {
                     Type::Name(n, args) if n == "List" && args.len() == 1 => Some(&args[0]),
                     Type::Ref(_, ref_inner) | Type::RefMut(_, ref_inner) => {
-                        if let Type::Name(n, args) = ref_inner.as_ref() {
+                        if let Type::Name(n, args) = ref_inner.unlocated() {
                             if n == "List" && args.len() == 1 {
                                 Some(&args[0])
                             } else {
@@ -918,7 +925,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 };
                 if let Some(elem) = inner {
                     // Try to resolve generic param (e.g., T → Item) via type_map
-                    if let Type::Name(elem_name, _) = elem {
+                    if let Type::Name(elem_name, _) = elem.unlocated() {
                         if let Some(resolved) = self.type_map.get(elem_name) {
                             return Some(resolved.clone());
                         }

@@ -146,7 +146,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Critical: never memcpy a narrow Result into a wide buffer without
         // inflate — field offsets diverge ({i1,i64,i64} vs {i1,{i64,i64},i64}).
         let val = if let Some(elem_ty) = self.pending_list_elem_type.clone() {
-            let needs_inflate = match &elem_ty {
+            let needs_inflate = match elem_ty.unlocated() {
                 Type::Result(_, _) | Type::Option(_) => true,
                 Type::Name(n, _) if n == "Result" || n == "Option" => true,
                 _ => false,

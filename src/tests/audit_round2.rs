@@ -433,6 +433,30 @@ func main() -> i32 {
 }
 
 #[test]
+fn generic_type_alias_arity_is_fail_closed() {
+    for annotation in ["Pair", "Pair<i32, string>"] {
+        let src = format!(
+            r#"
+type Pair<T> = (T, T)
+func main() -> i32 {{
+    let x: {annotation} = (1, 2)
+    return 0
+}}
+"#
+        );
+        let diagnostics = check_source(&src).expect_err("generic arity must be rejected");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.contains("expects 1 generic argument")
+                    && diagnostic.message.contains("Pair")
+            }),
+            "unexpected diagnostics for {annotation}: {:?}",
+            diagnostics
+        );
+    }
+}
+
+#[test]
 fn type_substitution_deeply_nested_generic() {
     // Deeply nested generics — should not overflow.
     // Map<string, List<Option<i32>>> has 4 levels of nesting.

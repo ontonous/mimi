@@ -103,13 +103,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         // When packing List<Result<Result<…>,…>>, inflate nested Result Ok/Err
         // payloads to the full declared layout before wrapping in outer Ok.
         if let Some(elem_ty) = self.pending_list_elem_type.clone() {
-            let inner_ok: Option<Type> = match &elem_ty {
+            let inner_ok: Option<Type> = match elem_ty.unlocated() {
                 Type::Result(ok, _) => Some((**ok).clone()),
                 Type::Name(n, args) if n == "Result" && !args.is_empty() => Some(args[0].clone()),
                 _ => None,
             };
             if let Some(inner) = inner_ok {
-                let is_nested_res = match &inner {
+                let is_nested_res = match inner.unlocated() {
                     Type::Result(_, _) => true,
                     Type::Name(n, _) if n == "Result" => true,
                     _ => false,
@@ -283,15 +283,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some(elem_ty) = self.pending_list_elem_type.clone() {
             // List element may be Result, or Option wrapping Result (inflate the
             // inner Result so Some(Err(...)) packs a full Ok-pad layout).
-            let result_ty: Option<Type> = match &elem_ty {
+            let result_ty: Option<Type> = match elem_ty.unlocated() {
                 Type::Result(_, _) => Some(elem_ty.clone()),
                 Type::Name(n, _) if n == "Result" => Some(elem_ty.clone()),
-                Type::Option(inner) => match inner.as_ref() {
+                Type::Option(inner) => match inner.as_ref().unlocated() {
                     Type::Result(_, _) => Some((**inner).clone()),
                     Type::Name(n, _) if n == "Result" => Some((**inner).clone()),
                     _ => None,
                 },
-                Type::Name(n, args) if n == "Option" && args.len() == 1 => match &args[0] {
+                Type::Name(n, args) if n == "Option" && args.len() == 1 => match args[0].unlocated() {
                     Type::Result(_, _) => Some(args[0].clone()),
                     Type::Name(rn, _) if rn == "Result" => Some(args[0].clone()),
                     _ => None,
@@ -630,7 +630,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // creates {i1,i64,i64} instead of {i1,{ptr,i64},i64}).
         let (pv, actual_sty_enum) = match obj_val {
             BasicValueEnum::PointerValue(pv) => {
-                let sty = if let Expr::Ident(name) = obj {
+                let sty = if let Expr::Ident(name) = obj.unlocated() {
                     vars.get(name.as_str())
                         .map(|entry| entry.1)
                         .unwrap_or(inferred_sty_enum)
@@ -685,7 +685,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let payload = self.build_load(payload_ty, pay_gep, "payload")?;
 
-        let obj_name = if let Expr::Ident(name) = obj {
+        let obj_name = if let Expr::Ident(name) = obj.unlocated() {
             Some(name.clone())
         } else {
             None
@@ -795,8 +795,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // pointer rather than returning the pointer itself.
         if let Some(name) = &ctx.obj_name {
             if self.upgrade_option_vars.contains(name.as_str()) {
-                if let Some(Type::Option(inner)) = self.var_types.get(name).cloned() {
-                    let loaded = self.load_upgrade_payload(ctx.payload, &inner)?;
+                if let Some(Type::Option(inner)) =
+                    self.var_types.get(name).map(Type::unlocated)
+                {
+                    let loaded = self.load_upgrade_payload(ctx.payload, inner)?;
                     return Ok(loaded);
                 }
             }
@@ -1106,7 +1108,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         match fn_val {
             BasicValueEnum::PointerValue(_) => {
-                if let Expr::Ident(name) = fn_expr {
+                if let Expr::Ident(name) = fn_expr.unlocated() {
                     if let Some(func) = self.module.get_function(name) {
                         // Adjust payload width to match the function's parameter type.
                         // After A1 + i64-payload fix, payload is i64 but the function
@@ -1211,7 +1213,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         match fn_val {
             BasicValueEnum::PointerValue(_) => {
-                if let Expr::Ident(name) = fn_expr {
+                if let Expr::Ident(name) = fn_expr.unlocated() {
                     if let Some(func) = self.module.get_function(name) {
                         let meta = crate::codegen::types::basic_value_to_metadata_value(
                             &payload,
@@ -1414,10 +1416,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Returns `None` when the type cannot be determined (fall back to
     /// `ctx.payload_ty`).
     fn infer_fn_return_llvm_type(&self, fn_expr: &Expr) -> Option<BasicTypeEnum<'ctx>> {
-        match fn_expr {
+        match fn_expr.unlocated() {
             Expr::Ident(name) => {
                 if let Some(ty) = self.var_types.get(name) {
-                    let ret = match ty {
+                    let ret = match ty.unlocated() {
                         Type::Func(_, ret) | Type::ExternFunc(_, ret) => Some(ret.as_ref()),
                         _ => None,
                     };

@@ -64,6 +64,9 @@ pub(crate) fn transition(mut server: LspServer, msg: &Value) -> (LspServer, Opti
             return (server, None);
         }
     };
+    if let Some(uri) = get_uri(msg) {
+        server.active_document_uri = Some(uri.to_string());
+    }
 
     // L-H6: lifecycle gates.
     use crate::lsp::LifecycleState;
@@ -261,15 +264,33 @@ fn did_open(mut server: LspServer, msg: &Value) -> (LspServer, Option<Value>) {
     {
         server.set_document_version(uri, v);
     }
-    let diagnostics = server.compute_diagnostics(text, Some(uri));
-    (
-        server,
-        Some(serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "textDocument/publishDiagnostics",
-            "params": { "uri": uri, "diagnostics": diagnostics }
-        })),
-    )
+    let notifications = server.compute_diagnostic_notifications(text, uri);
+    publish_diagnostic_notifications(server, uri, notifications, Vec::new())
+}
+
+fn publish_diagnostic_notifications(
+    mut server: LspServer,
+    primary_uri: &str,
+    mut notifications: Vec<Value>,
+    additional_primary: Vec<Value>,
+) -> (LspServer, Option<Value>) {
+    let primary_index = notifications
+        .iter()
+        .position(|notification| notification["params"]["uri"].as_str() == Some(primary_uri));
+    let mut primary = primary_index
+        .map(|index| notifications.remove(index))
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": { "uri": primary_uri, "diagnostics": [] }
+            })
+        });
+    if let Some(diagnostics) = primary["params"]["diagnostics"].as_array_mut() {
+        diagnostics.extend(additional_primary);
+    }
+    server.pending_notifications.extend(notifications);
+    (server, Some(primary))
 }
 
 /// Apply one LSP `TextDocumentContentChangeEvent` to `text`.
@@ -367,18 +388,10 @@ fn did_change(mut server: LspServer, msg: &Value) -> (LspServer, Option<Value>) 
         return (server, None);
     }
     server.cache_put(uri.to_string(), text.clone());
-    *server.parse_cache_text.borrow_mut() = (String::new(), None);
-    let mut diagnostics = server.compute_diagnostics(&text, Some(uri));
+    server.clear_parse_cache();
+    let notifications = server.compute_diagnostic_notifications(&text, uri);
     let verif_diags = server.compute_verification_diagnostics(&text, server.last_cursor_line, uri);
-    diagnostics.extend(verif_diags);
-    (
-        server,
-        Some(serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "textDocument/publishDiagnostics",
-            "params": { "uri": uri, "diagnostics": diagnostics }
-        })),
-    )
+    publish_diagnostic_notifications(server, uri, notifications, verif_diags)
 }
 
 fn did_close(mut server: LspServer, msg: &Value) -> (LspServer, Option<Value>) {
@@ -411,20 +424,13 @@ fn did_save(mut server: LspServer, msg: &Value) -> (LspServer, Option<Value>) {
         .and_then(|t| t.as_str());
     if let Some(t) = provided {
         server.cache_put(uri.to_string(), t.to_string());
-        *server.parse_cache_text.borrow_mut() = (String::new(), None);
+        server.clear_parse_cache();
     }
     let text = provided
         .or_else(|| server.documents.get(uri).map(|s| s.as_str()))
         .unwrap_or("");
-    let diagnostics = server.compute_diagnostics(text, Some(uri));
-    (
-        server,
-        Some(serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "textDocument/publishDiagnostics",
-            "params": { "uri": uri, "diagnostics": diagnostics }
-        })),
-    )
+    let notifications = server.compute_diagnostic_notifications(text, uri);
+    publish_diagnostic_notifications(server, uri, notifications, Vec::new())
 }
 
 fn completion(

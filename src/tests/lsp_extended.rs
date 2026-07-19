@@ -1371,6 +1371,16 @@ fn lsp_parse_error_range_valid() {
     );
 }
 
+#[test]
+fn lsp_lexer_error_uses_structured_position() {
+    let server = LspServer::new();
+    let diags = server.compute_diagnostics("func main() {\n    0\n\t0\n}", None);
+    assert_eq!(diags.len(), 1, "expected one lexer error: {diags:?}");
+    assert_eq!(diags[0]["range"]["start"]["line"], 2);
+    assert_eq!(diags[0]["range"]["start"]["character"], 0);
+    assert_eq!(diags[0]["range"]["end"]["character"], 1);
+}
+
 // --- P2: completion_context extern detection ---
 #[test]
 fn lsp_completion_extern_context() {

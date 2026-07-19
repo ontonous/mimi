@@ -2,7 +2,6 @@ use crate::ast::*;
 use crate::core::checker::Checker;
 use crate::core::helpers::{fmt_type, is_bool};
 use crate::diagnostic::Diagnostic;
-use crate::span::Span;
 use std::collections::HashMap;
 
 impl<'a> Checker<'a> {
@@ -97,7 +96,7 @@ impl<'a> Checker<'a> {
                                 variant,
                                 fmt_type(&subject_ty)
                             ),
-                            Span::single(self.current_line, self.current_col),
+                            self.diagnostic_span(),
                         )
                         .with_help(format!(
                             "add an arm for '{}' or a wildcard '_ => ...' arm",
@@ -109,7 +108,7 @@ impl<'a> Checker<'a> {
         } else if all_variants.is_empty() && !has_catchall {
             // D3: non-enum types (i32, string, etc.) without catch-all — warn
             let is_non_enum = matches!(
-                &subject_ty,
+                subject_ty.unlocated(),
                 Type::Name(n, _) if matches!(n.as_str(), "i32" | "i64" | "f64" | "string")
             );
             if is_non_enum {
@@ -120,7 +119,7 @@ impl<'a> Checker<'a> {
                             "match on {} type without wildcard '_ => ...' arm may be non-exhaustive",
                             fmt_type(&subject_ty)
                         ),
-                        Span::single(self.current_line, self.current_col),
+                        self.diagnostic_span(),
                     )
                     .with_help("add a wildcard '_ => ...' arm to handle unmatched values"),
                 );
@@ -137,13 +136,13 @@ impl<'a> Checker<'a> {
         pat: &Pattern,
         subject_ty: &Type,
     ) -> (Vec<String>, bool) {
-        match pat {
-            Pattern::Wildcard => {
+        match &pat.kind {
+            PatternKind::Wildcard => {
                 // Wildcard covers all variants
                 let all = self.get_enum_variants(subject_ty);
                 (all, true)
             }
-            Pattern::Variable(name) => {
+            PatternKind::Variable(name) => {
                 // Variable pattern: if the name matches an enum variant of the
                 // subject type, treat it as a constructor reference rather than
                 // a catch-all binding.  This makes `match c { Red => … }` on
@@ -156,7 +155,7 @@ impl<'a> Checker<'a> {
                     (all, true)
                 }
             }
-            Pattern::Literal(lit) => {
+            PatternKind::Literal(lit) => {
                 // Track literal coverage for bool (enum-like) and int/string types
                 let covered = match lit {
                     Lit::Bool(true) => vec!["true".into()],
@@ -173,14 +172,14 @@ impl<'a> Checker<'a> {
                 };
                 (covered, false)
             }
-            Pattern::Constructor(name, _) => {
+            PatternKind::Constructor(name, _) => {
                 // Constructor pattern covers only that specific variant
                 (vec![name.clone()], false)
             }
-            Pattern::Tuple(pats) => {
+            PatternKind::Tuple(pats) => {
                 // Tuple pattern - handle both Type::Tuple and Type::Name("Tuple", args)
                 let mut covered = Vec::new();
-                let elem_types_opt = match subject_ty {
+                let elem_types_opt = match subject_ty.unlocated() {
                     Type::Tuple(ts) => Some(ts.as_slice()),
                     Type::Name(n, args) if n == "Tuple" => Some(args.as_slice()),
                     _ => None,
@@ -199,7 +198,7 @@ impl<'a> Checker<'a> {
                 }
                 (covered, false)
             }
-            Pattern::Array(_) | Pattern::Slice(_, _) => (Vec::new(), false),
+            PatternKind::Array(_) | PatternKind::Slice(_, _) => (Vec::new(), false),
         }
     }
 }

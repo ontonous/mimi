@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 use super::*;
+use crate::span::SourceId;
 
 // ---------------------------------------------------------------------------
 // Macros
@@ -66,6 +67,7 @@ macro_rules! state_done {
         Ok((
             FlowState::Done(
                 File {
+                    sources: crate::span::SourceRegistry::default(),
                     imports: std::mem::take(&mut $acc.imports),
                     items: std::mem::take(&mut $acc.items),
                     implicit_single: false,
@@ -86,13 +88,14 @@ macro_rules! state_done {
 /// ```
 macro_rules! run_flow {
     // Strict mode: first error fails
-    ($state:expr, $mode:expr, $tokens:expr) => {{
+    ($state:expr, $mode:expr, $tokens:expr, $source_id:expr) => {{
         let mut __state = $state;
         loop {
             match __state {
                 FlowState::Done(file, _errors) => break Ok(file),
                 __s => {
-                    let (new_state, _) = __s.transition(&FlowEvent::Step, $mode, $tokens)?;
+                    let (new_state, _) =
+                        __s.transition(&FlowEvent::Step, $mode, $tokens, $source_id)?;
                     __state = new_state;
                 }
             }
@@ -101,7 +104,7 @@ macro_rules! run_flow {
     // Recovery mode: collect errors and preserve partial AST.
     // PR-C2: on a hard transition error, keep already-parsed imports/items
     // instead of returning an empty File + single error.
-    (recovery $state:expr, $mode:expr, $tokens:expr) => {{
+    (recovery $state:expr, $mode:expr, $tokens:expr, $source_id:expr) => {{
         let mut __state = $state;
         loop {
             match __state {
@@ -118,12 +121,13 @@ macro_rules! run_flow {
                             (file.imports.clone(), file.items.clone(), errors.clone())
                         }
                     };
-                    match __s.transition(&FlowEvent::Step, $mode, $tokens) {
+                    match __s.transition(&FlowEvent::Step, $mode, $tokens, $source_id) {
                         Ok((new_state, _)) => __state = new_state,
                         Err(e) => {
                             errors.push(e);
                             break (
                                 File {
+                                    sources: crate::span::SourceRegistry::default(),
                                     imports,
                                     items,
                                     implicit_single: false,
@@ -208,6 +212,8 @@ fn peek_slice(tokens: &[Token], pos: usize) -> &Token {
             kind: TokenKind::Eof,
             line: 0,
             col: 0,
+            end_line: 0,
+            end_col: 0,
         };
         &EOF
     } else {
@@ -227,8 +233,14 @@ fn at_slice(tokens: &[Token], pos: usize, kind: &TokenKind) -> bool {
 /// Create a temporary Parser at the given position within a token slice.
 /// This is the bridge between Flow state and the existing recursive descent
 /// parser. The Vec<Token> is cloned (cheap: ~24 bytes per token).
-fn sub_parser(tokens: &[Token], pos: usize, mode: ParseMode, recovery: bool) -> Parser {
-    Parser::splice(tokens, pos, mode, recovery)
+fn sub_parser(
+    tokens: &[Token],
+    pos: usize,
+    mode: ParseMode,
+    recovery: bool,
+    source_id: SourceId,
+) -> Parser {
+    Parser::splice(tokens, pos, mode, recovery, source_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -241,11 +253,17 @@ fn parse_one_import(
     pos: usize,
     mode: ParseMode,
     recovery: bool,
+    source_id: SourceId,
 ) -> (Result<Import, ParseError>, Vec<ParseError>, usize) {
-    let mut p = sub_parser(tokens, pos, mode, recovery);
-    let result = p.parse_import();
+    let mut p = sub_parser(tokens, pos, mode, recovery, source_id);
+    let result = p
+        .parse_import()
+        .map_err(|error| error.with_source(source_id));
     let stmt_errors = if recovery {
         std::mem::take(&mut p.errors)
+            .into_iter()
+            .map(|error| error.with_source(source_id))
+            .collect()
     } else {
         Vec::new()
     };
@@ -257,11 +275,15 @@ fn parse_one_item(
     pos: usize,
     mode: ParseMode,
     recovery: bool,
+    source_id: SourceId,
 ) -> (Result<Item, ParseError>, Vec<ParseError>, usize) {
-    let mut p = sub_parser(tokens, pos, mode, recovery);
-    let result = p.parse_item();
+    let mut p = sub_parser(tokens, pos, mode, recovery, source_id);
+    let result = p.parse_item().map_err(|error| error.with_source(source_id));
     let stmt_errors = if recovery {
         std::mem::take(&mut p.errors)
+            .into_iter()
+            .map(|error| error.with_source(source_id))
+            .collect()
     } else {
         Vec::new()
     };
@@ -322,6 +344,7 @@ impl FlowState {
         event: &FlowEvent,
         mode: ParseMode,
         tokens: &[Token],
+        source_id: SourceId,
     ) -> Result<(Self, Option<FlowOutput>), ParseError> {
         match (self, event) {
             // ── Init → Imports or Items (or Done if empty) ─────────
@@ -350,7 +373,7 @@ impl FlowState {
                     state_continue!(Items { pos }, acc, recovery)
                 } else {
                     let (result, stmt_errors, new_pos) =
-                        parse_one_import(tokens, pos, mode, recovery);
+                        parse_one_import(tokens, pos, mode, recovery, source_id);
                     let mut acc = acc;
                     if recovery {
                         acc.errors.extend(stmt_errors);
@@ -399,7 +422,7 @@ impl FlowState {
                     state_done!(acc)
                 } else {
                     let (result, stmt_errors, new_pos) =
-                        parse_one_item(tokens, pos, mode, recovery);
+                        parse_one_item(tokens, pos, mode, recovery, source_id);
                     if recovery {
                         acc.errors.extend(stmt_errors);
                     }
@@ -460,8 +483,14 @@ pub enum FlowOutput {
 /// Flow-based parser: strict mode (first error fails).
 /// Semantically equivalent to `Parser::parse_file()`.
 /// After parsing, expands the flow transfer matrix (+1 Fault fallback).
-pub fn flow_parse(tokens: Vec<Token>, mode: ParseMode) -> Result<File, ParseError> {
-    let mut file = run_flow!(flow_init!(false), mode, &tokens)?;
+pub fn flow_parse(
+    tokens: Vec<Token>,
+    mode: ParseMode,
+    source_id: SourceId,
+    source_registry: crate::span::SourceRegistry,
+) -> Result<File, ParseError> {
+    let mut file = run_flow!(flow_init!(false), mode, &tokens, source_id)?;
+    file.sources = source_registry;
     // v0.29.22: progressive Typestate — inject implicit Main/Single for scripts.
     crate::progressive::apply_progressive_typestate(&mut file);
     crate::flow_matrix::expand_file(&mut file);
@@ -471,8 +500,14 @@ pub fn flow_parse(tokens: Vec<Token>, mode: ParseMode) -> Result<File, ParseErro
 /// Flow-based parser: recovery mode (collects all errors).
 /// Semantically equivalent to `Parser::parse_file_with_recovery()`.
 /// After parsing, expands the flow transfer matrix (+1 Fault fallback).
-pub fn flow_parse_with_recovery(tokens: Vec<Token>, mode: ParseMode) -> (File, Vec<ParseError>) {
-    let (mut file, errors) = run_flow!(recovery flow_init!(true), mode, &tokens);
+pub fn flow_parse_with_recovery(
+    tokens: Vec<Token>,
+    mode: ParseMode,
+    source_id: SourceId,
+    source_registry: crate::span::SourceRegistry,
+) -> (File, Vec<ParseError>) {
+    let (mut file, errors) = run_flow!(recovery flow_init!(true), mode, &tokens, source_id);
+    file.sources = source_registry;
     crate::progressive::apply_progressive_typestate(&mut file);
     crate::flow_matrix::expand_file(&mut file);
     (file, errors)
@@ -491,10 +526,38 @@ mod tests {
         Lexer::new(src).tokenize().expect("lex failed")
     }
 
+    #[test]
+    fn parser_attaches_source_id_to_statement_spans() {
+        let source_id = SourceId::new(9);
+        let file = Parser::new_with_source(
+            tokenize("func main() -> i32 { requires: true\n return 0 }"),
+            source_id,
+        )
+        .parse_file()
+        .expect("parse");
+        let main = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Func(function) if function.name == "main" => Some(function),
+                _ => None,
+            })
+            .expect("main function");
+        let Stmt::Requires(_, span) = main.body[0].unlocated() else {
+            panic!("expected requires statement")
+        };
+        assert_eq!(span.source_id, source_id);
+    }
+
     fn assert_parse_equivalent(src: &str) {
         let tokens = tokenize(src);
         let old_result = Parser::new(tokens.clone()).legacy_parse_file();
-        let flow_result = flow_parse(tokens, ParseMode::Production);
+        let flow_result = flow_parse(
+            tokens,
+            ParseMode::Production,
+            SourceId::UNKNOWN,
+            SourceRegistry::default(),
+        );
         match (&old_result, &flow_result) {
             (Ok(old_file), Ok(flow_file)) => assert_eq!(
                 format!("{old_file:?}"), format!("{flow_file:?}"),
@@ -512,7 +575,12 @@ mod tests {
         let tokens = tokenize(src);
         let (old_file, old_errors) =
             Parser::new_with_recovery(tokens.clone()).legacy_parse_file_with_recovery();
-        let (flow_file, flow_errors) = flow_parse_with_recovery(tokens, ParseMode::Production);
+        let (flow_file, flow_errors) = flow_parse_with_recovery(
+            tokens,
+            ParseMode::Production,
+            SourceId::UNKNOWN,
+            SourceRegistry::default(),
+        );
         assert_eq!(
             format!("{old_file:?}"),
             format!("{flow_file:?}"),
@@ -611,7 +679,12 @@ mod tests {
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             let tokens = tokenize(&src);
             let old = Parser::new(tokens.clone()).legacy_parse_file();
-            let flow = flow_parse(tokens, ParseMode::Production);
+            let flow = flow_parse(
+                tokens,
+                ParseMode::Production,
+                SourceId::UNKNOWN,
+                SourceRegistry::default(),
+            );
             match (&old, &flow) {
                 (Ok(a), Ok(b)) => {
                     assert_eq!(a.imports.len(), b.imports.len(), "import count: {name}");
@@ -631,7 +704,12 @@ mod tests {
             let tokens = tokenize(&src);
             let (old_f, old_e) =
                 Parser::new_with_recovery(tokens.clone()).legacy_parse_file_with_recovery();
-            let (flow_f, flow_e) = flow_parse_with_recovery(tokens, ParseMode::Production);
+            let (flow_f, flow_e) = flow_parse_with_recovery(
+                tokens,
+                ParseMode::Production,
+                SourceId::UNKNOWN,
+                SourceRegistry::default(),
+            );
             assert_eq!(old_f.imports.len(), flow_f.imports.len(), "import: {name}");
             assert_eq!(old_f.items.len(), flow_f.items.len(), "item: {name}");
             assert_eq!(old_e.len(), flow_e.len(), "errors: {name}");
@@ -652,7 +730,13 @@ mod tests {
             return 0
         }"#;
         let tokens = Lexer::new(src).tokenize().expect("lex");
-        let file = flow_parse(tokens, ParseMode::Production).expect("parse");
+        let file = flow_parse(
+            tokens,
+            ParseMode::Production,
+            SourceId::UNKNOWN,
+            SourceRegistry::default(),
+        )
+        .expect("parse");
         let func_body = file
             .items
             .first()
@@ -663,7 +747,7 @@ mod tests {
             .expect("expected first item to be a function");
         let mms = func_body
             .iter()
-            .find_map(|s| match s {
+            .find_map(|s| match s.unlocated() {
                 crate::ast::Stmt::MmsBlock { content, .. } => Some(content),
                 _ => None,
             })

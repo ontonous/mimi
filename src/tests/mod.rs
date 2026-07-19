@@ -9,6 +9,7 @@ pub(crate) mod basic_tuples;
 pub(crate) mod boundary_stdlib;
 pub(crate) mod closures;
 pub(crate) mod codegen_boundary;
+pub(crate) mod diagnostic_routing;
 
 pub(crate) mod actors;
 pub(crate) mod builtin_funcs;

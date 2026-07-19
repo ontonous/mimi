@@ -5826,9 +5826,6 @@ pub extern "C" fn mimi_set_to_json_result_option_product_i64(
     }
 }
 
-/// Set of Map of product from JSON array of map objects.
-#[no_mangle]
-
 /// Set of List of Map of product from JSON.
 #[no_mangle]
 pub extern "C" fn mimi_set_from_json_list_map_product_i64(
@@ -8511,7 +8508,7 @@ pub extern "C" fn mimi_set_to_json_list_product_i64(
             alloc_c_string("[...]")
         };
     }
-    let mut items: Vec<i64> = set.inner.iter().map(|x| *x as i64).collect();
+    let items: Vec<i64> = set.inner.iter().map(|x| *x as i64).collect();
     // Sort by JSON string of list for stable dual
     let mut decorated: Vec<(String, i64)> = items
         .iter()

@@ -156,7 +156,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.build_store(alloca, param_val)?;
             lambda_vars.insert(p.name.clone(), (alloca, ty));
             // Track type name for field access and method dispatch
-            if let Type::Name(tn, _) = &p.ty {
+            if let Type::Name(tn, _) = p.ty.unlocated() {
                 self.var_type_names.insert(p.name.clone(), tn.clone());
                 self.var_types.insert(p.name.clone(), p.ty.clone());
             }
@@ -176,7 +176,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut last_expr: Option<&Expr> = None;
         let mut returned = false;
         for stmt in body {
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::Expr(e) => {
                     last_val = self.compile_expr(e, lambda_vars)?;
                     last_expr = Some(e);
@@ -317,7 +317,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) {
         let mut defined = param_names.clone();
         for stmt in block {
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::Expr(e) => self.collect_free_vars_expr(e, &defined, vars, free_vars),
                 Stmt::Let {
                     pat,
@@ -325,7 +325,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ..
                 } => {
                     self.collect_free_vars_expr(init, &defined, vars, free_vars);
-                    if let Pattern::Variable(name) = pat {
+                    if let PatternKind::Variable(name) = &pat.kind {
                         defined.insert(name.clone());
                     }
                 }
@@ -389,7 +389,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>),
         >,
     ) {
-        match expr {
+        match expr.unlocated() {
             Expr::Ident(name) => {
                 if !defined.contains(name.as_str()) {
                     if let Some(&(ptr, ty)) = vars.get(name.as_str()) {

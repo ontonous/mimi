@@ -6,7 +6,7 @@ impl<'a> Interpreter<'a> {
         // v0.29.31: per-actor-type spawn quota from @max_children on the flow.
         if let Some(flow) = self.flow_index.get(actor_name) {
             for ann in &flow.annotations {
-                if let crate::ast::FlowAnnotation::MaxChildren(n) = ann {
+                if let crate::ast::FlowAnnotationKind::MaxChildren(n) = &ann.kind {
                     let count = self
                         .actor_spawn_counts
                         .get(actor_name)
@@ -44,7 +44,7 @@ impl<'a> Interpreter<'a> {
                 .as_ref()
                 .map(|e| self.eval_expr(e))
                 .transpose()?
-                .unwrap_or_else(|| match &field.ty {
+                .unwrap_or_else(|| match field.ty.unlocated() {
                     Type::Name(n, _) if n == "i32" => Value::Int(0),
                     Type::Name(n, _) if n == "f64" => Value::Float(0.0),
                     Type::Name(n, _) if n == "bool" => Value::Bool(false),
@@ -88,7 +88,7 @@ impl<'a> Interpreter<'a> {
             handle.set_mailbox_depth_limit(depth);
         } else if let Some(flow) = self.flow_index.get(actor_name) {
             for ann in &flow.annotations {
-                if let crate::ast::FlowAnnotation::MailboxDepth(d) = ann {
+                if let crate::ast::FlowAnnotationKind::MailboxDepth(d) = &ann.kind {
                     handle.set_mailbox_depth_limit(*d);
                     break;
                 }
@@ -133,5 +133,4 @@ impl<'a> Interpreter<'a> {
         }
         Ok(handle_val)
     }
-
 }

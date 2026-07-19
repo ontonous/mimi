@@ -42,8 +42,7 @@ impl VerifierCtx {
                 let mut vars = self.setup_ffi_func_vars(session, func);
                 self.assert_func_requires(session, func, &mut vars);
 
-                let caller_span = Span::single(func.pos.0, func.pos.1);
-                for (extern_name, args) in &calls {
+                for (extern_name, args, call_span) in &calls {
                     if let Some(extern_func) = externs.get(extern_name.as_str()) {
                         let result = self.check_extern_call(
                             session,
@@ -51,7 +50,7 @@ impl VerifierCtx {
                             extern_func,
                             args,
                             &mut vars,
-                            caller_span,
+                            *call_span,
                         );
                         results.push(result);
                     }
@@ -79,19 +78,24 @@ impl VerifierCtx {
     fn find_extern_calls_in_func(
         func: &FuncDef,
         extern_names: &HashSet<String>,
-    ) -> Vec<(String, Vec<Expr>)> {
+    ) -> Vec<(String, Vec<Expr>, Span)> {
         let mut calls = Vec::new();
         Self::find_extern_calls_in_block(&func.body, extern_names, &mut calls);
+        for (_, _, span) in &mut calls {
+            if span.start_line == 0 || span.start_col == 0 {
+                *span = func.meta.span;
+            }
+        }
         calls
     }
 
     fn find_extern_calls_in_block(
         block: &[Stmt],
         extern_names: &HashSet<String>,
-        calls: &mut Vec<(String, Vec<Expr>)>,
+        calls: &mut Vec<(String, Vec<Expr>, Span)>,
     ) {
         for stmt in block {
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::Expr(e) | Stmt::Return(Some(e)) => {
                     Self::find_extern_calls_in_expr(e, extern_names, calls);
                 }
@@ -127,13 +131,17 @@ impl VerifierCtx {
     fn find_extern_calls_in_expr(
         expr: &Expr,
         extern_names: &HashSet<String>,
-        calls: &mut Vec<(String, Vec<Expr>)>,
+        calls: &mut Vec<(String, Vec<Expr>, Span)>,
     ) {
-        match expr {
+        match expr.unlocated() {
             Expr::Call(callee, args) => {
-                if let Expr::Ident(name) = callee.as_ref() {
+                if let Expr::Ident(name) = callee.unlocated() {
                     if extern_names.contains(name.as_str()) {
-                        calls.push((name.clone(), args.clone()));
+                        calls.push((
+                            name.clone(),
+                            args.clone(),
+                            expr.meta().map(|meta| meta.span).unwrap_or(Span::UNKNOWN),
+                        ));
                         return;
                     }
                 }
@@ -178,9 +186,9 @@ impl VerifierCtx {
     fn setup_ffi_func_vars(&mut self, _session: &mut SolverSession, func: &FuncDef) -> Z3VarMap {
         let mut vars = Z3VarMap::new();
         for p in &func.params {
-            if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
+            if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "f64") {
                 vars.insert_real(p.name.as_str(), Z3Real::new_const(p.name.as_str()));
-            } else if matches!(&p.ty, Type::Name(n, _) if n == "string") {
+            } else if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "string") {
                 vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
                 vars.insert_string_nonempty(
                     p.name.as_str(),
@@ -205,7 +213,7 @@ impl VerifierCtx {
         vars: &mut Z3VarMap,
     ) {
         for stmt in &func.body {
-            if let Stmt::Requires(expr, _) = stmt {
+            if let Stmt::Requires(expr, _) = stmt.unlocated() {
                 match expr::expr_to_z3_bool(expr, vars) {
                     Some(z3_bool) => session.assert(&z3_bool),
                     None => {
@@ -316,7 +324,7 @@ fn substitute_args(expr: &Expr, params: &[ExternParam], args: &[Expr]) -> Expr {
         // constraint that was meant to refer to different variables).
         return Expr::Literal(Lit::Bool(false));
     }
-    match expr {
+    match expr.unlocated() {
         Expr::Ident(name) => {
             if let Some(idx) = params.iter().position(|p| p.name == *name) {
                 if idx < args.len() {
@@ -382,7 +390,7 @@ fn substitute_args(expr: &Expr, params: &[ExternParam], args: &[Expr]) -> Expr {
 }
 
 fn substitute_args_in_stmt(stmt: &Stmt, params: &[ExternParam], args: &[Expr]) -> Stmt {
-    match stmt {
+    let transformed = match stmt.unlocated() {
         Stmt::Expr(e) => Stmt::Expr(substitute_args(e, params, args)),
         Stmt::Return(e) => Stmt::Return(e.as_ref().map(|e| substitute_args(e, params, args))),
         Stmt::Let {
@@ -391,14 +399,12 @@ fn substitute_args_in_stmt(stmt: &Stmt, params: &[ExternParam], args: &[Expr]) -
             init,
             mut_,
             ref_,
-            ..
         } => Stmt::Let {
             pat: pat.clone(),
             ty: ty.clone(),
             init: init.as_ref().map(|e| substitute_args(e, params, args)),
             mut_: *mut_,
             ref_: *ref_,
-            pos: (0, 0),
         },
         Stmt::If { cond, then_, else_ } => Stmt::If {
             cond: substitute_args(cond, params, args),
@@ -487,6 +493,10 @@ fn substitute_args_in_stmt(stmt: &Stmt, params: &[ExternParam], args: &[Expr]) -
             ty: ty.clone(),
             init: substitute_args(init, params, args),
         },
-        _ => stmt.clone(),
+        _ => stmt.unlocated().clone(),
+    };
+    match stmt.meta() {
+        Some(meta) => transformed.with_meta(meta),
+        None => transformed,
     }
 }

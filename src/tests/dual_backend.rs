@@ -64,26 +64,6 @@ macro_rules! dual_assert {
     }};
 }
 
-/// TC-C2: dual_assert that hard-fails if typecheck fails.
-macro_rules! dual_assert_typed {
-    ($src:expr, $expected:expr) => {{
-        if let Err(diags) = check_source($src) {
-            panic!(
-                "typecheck failed: {:?}",
-                diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
-            );
-        }
-        dual_assert!($src, $expected);
-    }};
-}
-
-macro_rules! dual_assert_interp_only {
-    ($src:expr, $expected_val:expr) => {{
-        let __val = run_source($src);
-        assert_eq!(__val, $expected_val, "interpreter mismatch");
-    }};
-}
-
 // ─── Map codegen tests (v0.28.2) ────────────────────────────
 // Map operations now work in both interpreter and codegen.
 

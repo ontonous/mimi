@@ -641,6 +641,7 @@ pub enum LexerState<'a> {
     Start {
         pos: LexerPos<'a>,
         mode: LexerMode,
+        #[allow(dead_code)]
         at_line_start: bool,
         acc: LexerAcc,
     },
@@ -653,6 +654,7 @@ pub enum LexerState<'a> {
     Dispatch {
         pos: LexerPos<'a>,
         mode: LexerMode,
+        #[allow(dead_code)]
         at_line_start: bool,
         acc: LexerAcc,
     },
@@ -773,6 +775,8 @@ impl<'a> LexerState<'a> {
                                 kind: TokenKind::Indent,
                                 line: pos.line,
                                 col: spaces,
+                                end_line: pos.line,
+                                end_col: spaces,
                             });
                             return state_continue!(Dispatch {}, pos, mode, false, acc);
                         } else if spaces < current {
@@ -788,6 +792,8 @@ impl<'a> LexerState<'a> {
                                     kind: TokenKind::Dedent,
                                     line: pos.line,
                                     col: spaces,
+                                    end_line: pos.line,
+                                    end_col: spaces,
                                 });
                             }
                             if *acc.indent_stack.last().unwrap_or(&0) != spaces {
@@ -821,6 +827,8 @@ impl<'a> LexerState<'a> {
                                     kind: TokenKind::Dedent,
                                     line: pos.line,
                                     col: pos.col,
+                                    end_line: pos.line,
+                                    end_col: pos.col,
                                 });
                             }
                         }
@@ -828,6 +836,8 @@ impl<'a> LexerState<'a> {
                             kind: TokenKind::Eof,
                             line: pos.line,
                             col: pos.col,
+                            end_line: pos.line,
+                            end_col: pos.col,
                         });
                         return Ok(LexerState::Done(Ok(acc)));
                     }
@@ -839,6 +849,8 @@ impl<'a> LexerState<'a> {
                         kind: TokenKind::Newline,
                         line,
                         col,
+                        end_line: pos.line,
+                        end_col: pos.col,
                     });
                     return state_continue!(LineStart {}, pos, mode, true, acc);
                 }
@@ -879,7 +891,13 @@ impl<'a> LexerState<'a> {
                 }
 
                 let (pos, kind) = lex_scan_token(pos, c, line, col)?;
-                acc.tokens.push(Token { kind, line, col });
+                acc.tokens.push(Token {
+                    kind,
+                    line,
+                    col,
+                    end_line: pos.line,
+                    end_col: pos.col,
+                });
                 state_continue!(LineStart {}, pos, mode, false, acc)
             }
 
@@ -1088,6 +1106,8 @@ fn advance_to_done(pos: LexerPos, mode: LexerMode, mut acc: LexerAcc) -> LexerAc
                 kind: TokenKind::Dedent,
                 line: pos.line,
                 col: pos.col,
+                end_line: pos.line,
+                end_col: pos.col,
             });
         }
     }
@@ -1095,6 +1115,8 @@ fn advance_to_done(pos: LexerPos, mode: LexerMode, mut acc: LexerAcc) -> LexerAc
         kind: TokenKind::Eof,
         line: pos.line,
         col: pos.col,
+        end_line: pos.line,
+        end_col: pos.col,
     });
     acc
 }
@@ -1142,7 +1164,31 @@ mod tests {
         }
         for (i, (f, l)) in flow.iter().zip(legacy.iter()).enumerate() {
             assert_eq!(f.kind, l.kind, "token {} kind mismatch for {:?}", i, src);
+            assert_eq!(
+                (f.line, f.col, f.end_line, f.end_col),
+                (l.line, l.col, l.end_line, l.end_col),
+                "token {} span mismatch for {:?}",
+                i,
+                src
+            );
         }
+    }
+
+    #[test]
+    fn token_end_positions_follow_source_text_not_decoded_values() {
+        let tokens = flow_tokenize("\"a\\n\\\"b\" -> value", LexerMode::Production).unwrap();
+        assert_eq!(
+            (tokens[0].line, tokens[0].col, tokens[0].end_line, tokens[0].end_col),
+            (1, 1, 1, 9)
+        );
+        assert_eq!(
+            (tokens[1].line, tokens[1].col, tokens[1].end_line, tokens[1].end_col),
+            (1, 10, 1, 12)
+        );
+        assert_eq!(
+            (tokens[2].line, tokens[2].col, tokens[2].end_line, tokens[2].end_col),
+            (1, 13, 1, 18)
+        );
     }
 
     #[test]

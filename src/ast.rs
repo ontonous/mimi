@@ -1,7 +1,10 @@
-use crate::span::Span;
+use crate::span::{SourceRegistry, Span};
 
 #[derive(Debug, Clone)]
 pub struct File {
+    /// Source table for every source-aware span reachable from this file.
+    /// IDs are dense session-local indexes; stable identity lives in SourceKey.
+    pub sources: SourceRegistry,
     pub imports: Vec<Import>,
     pub items: Vec<Item>,
     /// v0.29.22: true when this file was compiled in progressive Typestate
@@ -14,13 +17,96 @@ pub struct File {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AstOrigin {
     User,
-    Desugared,
-    PrototypeFallback,
-    RuntimeSystem,
+    Desugared(&'static str),
+    PrototypeFallback(&'static str),
+    RuntimeSystem(&'static str),
+}
+
+impl AstOrigin {
+    /// Stable provenance category used by diagnostics and tooling.
+    pub const fn kind(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Desugared(_) => "desugared",
+            Self::PrototypeFallback(_) => "prototype_fallback",
+            Self::RuntimeSystem(_) => "runtime_system",
+        }
+    }
+
+    /// Lowering rule that created this node. User-written nodes have no rule.
+    pub const fn rule(self) -> Option<&'static str> {
+        match self {
+            Self::User => None,
+            Self::Desugared(rule) | Self::PrototypeFallback(rule) | Self::RuntimeSystem(rule) => {
+                Some(rule)
+            }
+        }
+    }
+}
+
+/// Structural parent requested by a generated AST node.
+///
+/// This deliberately does not depend on `core::NodeId`: the resolved walker
+/// turns the hint into its canonical ID after it knows the enclosing semantic
+/// owner and module path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AstParentHint {
+    /// User nodes have no generated-origin parent. A generated node carrying
+    /// this value is malformed and must be rejected by resolved lowering.
+    #[default]
+    None,
+    /// The canonical structural owner selected by the AST walker.
+    Enclosing,
+    /// A function in the current module (or an explicitly qualified name).
+    NamedFunction(&'static str),
+    /// The compilation root, for generated top-level declarations that are
+    /// not caused by another source declaration.
+    CompilationRoot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AstNodeMeta {
+    pub span: Span,
+    pub origin: AstOrigin,
+    pub parent: AstParentHint,
+}
+
+impl AstNodeMeta {
+    pub const fn new(span: Span, origin: AstOrigin) -> Self {
+        let parent = match origin {
+            AstOrigin::User => AstParentHint::None,
+            AstOrigin::Desugared(_)
+            | AstOrigin::PrototypeFallback(_)
+            | AstOrigin::RuntimeSystem(_) => AstParentHint::Enclosing,
+        };
+        Self {
+            span,
+            origin,
+            parent,
+        }
+    }
+
+    pub const fn synthetic(origin: AstOrigin) -> Self {
+        Self::new(Span::UNKNOWN, origin)
+    }
+
+    /// Metadata for a generated child whose source anchor is inherited from
+    /// the user construct that triggered lowering.
+    pub const fn inherited(span: Span, origin: AstOrigin) -> Self {
+        Self::new(span, origin)
+    }
+
+    /// Override the default structural parent for a lowering whose cause is
+    /// not its enclosing AST owner.
+    pub const fn with_parent(mut self, parent: AstParentHint) -> Self {
+        self.parent = parent;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Import {
+    pub meta: AstNodeMeta,
     pub path: Vec<String>,
     pub alias: Option<String>,
 }
@@ -36,8 +122,8 @@ pub enum Item {
     Impl(ImplDef),
     ExternBlock(ExternBlock),
     Const {
+        meta: AstNodeMeta,
         name: String,
-        pos: (usize, usize),
         ty: Option<Type>,
         value: Expr,
         pub_: bool,
@@ -50,8 +136,7 @@ pub enum Item {
 
 #[derive(Debug, Clone)]
 pub struct ExternBlock {
-    pub pos: (usize, usize),
-    pub origin: AstOrigin,
+    pub meta: AstNodeMeta,
     pub abi: String,
     pub funcs: Vec<ExternFunc>,
     /// If true, the compiler wraps all FFI calls in this block with
@@ -66,6 +151,7 @@ pub struct ExternBlock {
 
 #[derive(Debug, Clone)]
 pub struct ExternFunc {
+    pub meta: AstNodeMeta,
     pub name: String,
     pub params: Vec<ExternParam>,
     pub ret: Option<Type>,
@@ -82,6 +168,7 @@ pub struct ExternFunc {
 
 #[derive(Debug, Clone)]
 pub struct ExternParam {
+    pub meta: AstNodeMeta,
     pub name: String,
     pub ty: Type,
     pub cap_mode: Option<CapMode>,
@@ -95,15 +182,15 @@ pub enum CapMode {
 
 #[derive(Debug, Clone)]
 pub struct TraitDef {
+    pub meta: AstNodeMeta,
     pub name: String,
-    pub pos: (usize, usize),
-    pub origin: AstOrigin,
     pub methods: Vec<TraitMethod>,
     pub generics: Vec<GenericParam>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TraitMethod {
+    pub meta: AstNodeMeta,
     pub name: String,
     pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,
@@ -112,8 +199,7 @@ pub struct TraitMethod {
 
 #[derive(Debug, Clone)]
 pub struct ImplDef {
-    pub pos: (usize, usize),
-    pub origin: AstOrigin,
+    pub meta: AstNodeMeta,
     pub generics: Vec<GenericParam>,
     pub trait_name: String,
     pub trait_args: Vec<Type>,
@@ -124,18 +210,16 @@ pub struct ImplDef {
 
 #[derive(Debug, Clone)]
 pub struct CapDef {
+    pub meta: AstNodeMeta,
     pub name: String,
-    pub pos: (usize, usize),
-    pub origin: AstOrigin,
     /// None for simple cap, Some(other_cap) for combined cap (A + B)
     pub combined_with: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ActorDef {
+    pub meta: AstNodeMeta,
     pub name: String,
-    pub pos: (usize, usize),
-    pub origin: AstOrigin,
     pub pub_: bool,
     pub fields: Vec<ActorField>,
     pub methods: Vec<FuncDef>,
@@ -143,6 +227,7 @@ pub struct ActorDef {
 
 #[derive(Debug, Clone)]
 pub struct ActorField {
+    pub meta: AstNodeMeta,
     pub name: String,
     pub ty: Type,
     pub mut_: bool,
@@ -151,12 +236,14 @@ pub struct ActorField {
 
 #[derive(Debug, Clone)]
 pub struct GenericParam {
+    pub meta: AstNodeMeta,
     pub name: String,
     pub bounds: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct FuncDef {
+    pub meta: AstNodeMeta,
     pub name: String,
     pub pub_: bool,
     pub params: Vec<Param>,
@@ -170,18 +257,18 @@ pub struct FuncDef {
     /// If Some(abi), this function is exported with a C-compatible ABI
     /// (e.g., `extern "C" func foo() { ... }`).
     pub extern_abi: Option<String>,
-    /// Source position (line, col) from the `func` keyword
-    pub pos: (usize, usize),
 }
 
 #[derive(Debug, Clone)]
 pub struct WhereClause {
+    pub meta: AstNodeMeta,
     pub type_param: String,
     pub bounds: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Param {
+    pub meta: AstNodeMeta,
     pub name: String,
     pub ty: Type,
     pub mut_: bool,
@@ -203,19 +290,16 @@ pub enum ParamBorrow {
 
 #[derive(Debug, Clone)]
 pub struct ModuleDef {
+    pub meta: AstNodeMeta,
     pub name: String,
-    pub pos: (usize, usize),
-    pub origin: AstOrigin,
     pub imports: Vec<Import>,
     pub items: Vec<Item>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TypeDef {
+    pub meta: AstNodeMeta,
     pub name: String,
-    /// Present only for user declarations parsed from source. Synthetic
-    /// builtin and lowering-only types deliberately carry no user span.
-    pub decl_pos: Option<(usize, usize)>,
     pub pub_: bool,
     pub kind: TypeDefKind,
     pub generics: Vec<GenericParam>,
@@ -246,12 +330,14 @@ pub enum TypeDefKind {
 
 #[derive(Debug, Clone)]
 pub struct Field {
+    pub meta: AstNodeMeta,
     pub name: String,
     pub ty: Type,
 }
 
 #[derive(Debug, Clone)]
 pub struct Variant {
+    pub meta: AstNodeMeta,
     pub name: String,
     pub payload: Option<VariantPayload>,
 }
@@ -263,7 +349,23 @@ pub enum VariantPayload {
 }
 
 #[derive(Debug, Clone)]
-pub enum Pattern {
+pub struct Pattern {
+    pub meta: AstNodeMeta,
+    pub kind: PatternKind,
+}
+
+impl Pattern {
+    pub const fn new(meta: AstNodeMeta, kind: PatternKind) -> Self {
+        Self { meta, kind }
+    }
+
+    pub const fn synthetic(kind: PatternKind, origin: AstOrigin) -> Self {
+        Self::new(AstNodeMeta::synthetic(origin), kind)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum PatternKind {
     Wildcard,
     Variable(String),
     Literal(Lit),
@@ -292,14 +394,19 @@ pub type Block = Vec<Stmt>;
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
+    /// Canonical source-aware statement node. The boxed value is its kind;
+    /// it is not a second semantic statement. Synthetic constructors remain
+    /// representable during migration and report their declared origin.
+    Located {
+        meta: AstNodeMeta,
+        stmt: Box<Stmt>,
+    },
     Let {
         pat: Pattern,
         ty: Option<Type>,
         init: Option<Expr>,
         mut_: bool,
         ref_: bool, // let ref x = ... for arena references
-        /// Source position (line, col) from the `let` keyword (1-indexed).
-        pos: (usize, usize),
     },
     Return(Option<Expr>),
     Break(Option<Expr>),
@@ -385,8 +492,59 @@ pub enum Stmt {
     Ellipsis,
 }
 
+impl Stmt {
+    pub fn with_meta(self, meta: AstNodeMeta) -> Stmt {
+        match self {
+            Stmt::Located { stmt, .. } => Stmt::Located { meta, stmt },
+            stmt => Stmt::Located {
+                meta,
+                stmt: Box::new(stmt),
+            },
+        }
+    }
+
+    pub fn synthetic_with_origin(self, origin: AstOrigin) -> Stmt {
+        self.with_meta(AstNodeMeta::synthetic(origin))
+    }
+
+    pub fn meta(&self) -> Option<AstNodeMeta> {
+        match self {
+            Stmt::Located { meta, .. } => Some(*meta),
+            _ => None,
+        }
+    }
+
+    pub fn unlocated(&self) -> &Stmt {
+        match self {
+            Stmt::Located { stmt, .. } => stmt.unlocated(),
+            stmt => stmt,
+        }
+    }
+
+    pub fn unlocated_mut(&mut self) -> &mut Stmt {
+        match self {
+            Stmt::Located { stmt, .. } => stmt.unlocated_mut(),
+            stmt => stmt,
+        }
+    }
+
+    pub fn into_unlocated(self) -> Stmt {
+        match self {
+            Stmt::Located { stmt, .. } => stmt.into_unlocated(),
+            stmt => stmt,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
+    /// Canonical source-aware expression node. The boxed value is its kind;
+    /// it is not a second semantic node. Legacy/synthetic constructors remain
+    /// representable during the migration and report no exact metadata.
+    Located {
+        meta: AstNodeMeta,
+        expr: Box<Expr>,
+    },
     Literal(Lit),
     Ident(String),
     Binary(BinOp, Box<Expr>, Box<Expr>),
@@ -474,6 +632,48 @@ pub enum Expr {
 }
 
 impl Expr {
+    pub fn with_meta(self, meta: AstNodeMeta) -> Expr {
+        match self {
+            Expr::Located { expr, .. } => Expr::Located { meta, expr },
+            expr => Expr::Located {
+                meta,
+                expr: Box::new(expr),
+            },
+        }
+    }
+
+    pub fn synthetic_with_origin(self, origin: AstOrigin) -> Expr {
+        self.with_meta(AstNodeMeta::synthetic(origin))
+    }
+
+    pub fn meta(&self) -> Option<AstNodeMeta> {
+        match self {
+            Expr::Located { meta, .. } => Some(*meta),
+            _ => None,
+        }
+    }
+
+    pub fn unlocated(&self) -> &Expr {
+        match self {
+            Expr::Located { expr, .. } => expr.unlocated(),
+            expr => expr,
+        }
+    }
+
+    pub fn unlocated_mut(&mut self) -> &mut Expr {
+        match self {
+            Expr::Located { expr, .. } => expr.unlocated_mut(),
+            expr => expr,
+        }
+    }
+
+    pub fn into_unlocated(self) -> Expr {
+        match self {
+            Expr::Located { expr, .. } => expr.into_unlocated(),
+            expr => expr,
+        }
+    }
+
     pub fn call(self, args: Vec<Expr>) -> Expr {
         Expr::Call(Box::new(self), args)
     }
@@ -513,12 +713,14 @@ impl Expr {
 
 #[derive(Debug, Clone)]
 pub struct RecordFieldExpr {
+    pub meta: AstNodeMeta,
     pub name: String,
     pub value: Expr,
 }
 
 #[derive(Debug, Clone)]
 pub struct MatchArm {
+    pub meta: AstNodeMeta,
     pub pat: Pattern,
     pub guard: Option<Expr>,
     pub body: Expr,
@@ -575,8 +777,15 @@ pub enum UnOp {
     Deref,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Type {
+    /// Canonical source-aware type node. Metadata is intentionally excluded
+    /// from semantic equality: two structurally equal types remain equal even
+    /// when they were written at different source locations.
+    Located {
+        meta: AstNodeMeta,
+        ty: Box<Type>,
+    },
     Name(String, Vec<Type>),
     /// Reference type: &'lt T (lifetime is optional)
     Ref(Option<String>, Box<Type>),
@@ -634,15 +843,188 @@ pub enum Type {
     ForAll(Vec<String>, Box<Type>),
 }
 
+impl Type {
+    /// Attach exact source/provenance metadata to this type node.
+    /// Reattaching metadata replaces the outer annotation instead of nesting
+    /// redundant `Located` wrappers.
+    pub fn with_meta(self, meta: AstNodeMeta) -> Type {
+        match self {
+            Type::Located { ty, .. } => Type::Located { meta, ty },
+            ty => Type::Located {
+                meta,
+                ty: Box::new(ty),
+            },
+        }
+    }
+
+    /// Attach provenance to a synthesized type that has no exact user span.
+    pub fn synthetic_with_origin(self, origin: AstOrigin) -> Type {
+        self.with_meta(AstNodeMeta::synthetic(origin))
+    }
+
+    /// Replace provenance on this type and every nested type node.
+    ///
+    /// Lowering passes use this when a user type is copied into a generated
+    /// declaration. Keeping the original nested `User` annotations would make
+    /// the generated declaration appear to contain user-written children even
+    /// though the entire type tree belongs to one lowering rule.
+    pub fn deep_reorigin(self, meta: AstNodeMeta) -> Type {
+        let ty = match self.into_unlocated() {
+            Type::Name(name, args) => Type::Name(
+                name,
+                args.into_iter()
+                    .map(|arg| arg.deep_reorigin(meta))
+                    .collect(),
+            ),
+            Type::Ref(lifetime, inner) => {
+                Type::Ref(lifetime, Box::new((*inner).deep_reorigin(meta)))
+            }
+            Type::RefMut(lifetime, inner) => {
+                Type::RefMut(lifetime, Box::new((*inner).deep_reorigin(meta)))
+            }
+            Type::Option(inner) => Type::Option(Box::new((*inner).deep_reorigin(meta))),
+            Type::Result(ok, err) => Type::Result(
+                Box::new((*ok).deep_reorigin(meta)),
+                Box::new((*err).deep_reorigin(meta)),
+            ),
+            Type::Tuple(items) => Type::Tuple(
+                items
+                    .into_iter()
+                    .map(|item| item.deep_reorigin(meta))
+                    .collect(),
+            ),
+            Type::Func(params, ret) => Type::Func(
+                params
+                    .into_iter()
+                    .map(|param| param.deep_reorigin(meta))
+                    .collect(),
+                Box::new((*ret).deep_reorigin(meta)),
+            ),
+            Type::ExternFunc(params, ret) => Type::ExternFunc(
+                params
+                    .into_iter()
+                    .map(|param| param.deep_reorigin(meta))
+                    .collect(),
+                Box::new((*ret).deep_reorigin(meta)),
+            ),
+            Type::CBuffer(inner) => Type::CBuffer(Box::new((*inner).deep_reorigin(meta))),
+            Type::Cap(name) => Type::Cap(name),
+            Type::Shared(inner) => Type::Shared(Box::new((*inner).deep_reorigin(meta))),
+            Type::LocalShared(inner) => Type::LocalShared(Box::new((*inner).deep_reorigin(meta))),
+            Type::Weak(inner) => Type::Weak(Box::new((*inner).deep_reorigin(meta))),
+            Type::WeakLocal(inner) => Type::WeakLocal(Box::new((*inner).deep_reorigin(meta))),
+            Type::Newtype(name, inner) => {
+                Type::Newtype(name, Box::new((*inner).deep_reorigin(meta)))
+            }
+            Type::Nothing => Type::Nothing,
+            Type::Allocator => Type::Allocator,
+            Type::Array(inner, size) => Type::Array(Box::new((*inner).deep_reorigin(meta)), size),
+            Type::Slice(inner) => Type::Slice(Box::new((*inner).deep_reorigin(meta))),
+            Type::ImplTrait(traits) => Type::ImplTrait(traits),
+            Type::DynTrait(traits) => Type::DynTrait(traits),
+            Type::RawPtr(inner) => Type::RawPtr(Box::new((*inner).deep_reorigin(meta))),
+            Type::RawPtrMut(inner) => Type::RawPtrMut(Box::new((*inner).deep_reorigin(meta))),
+            Type::CShared(inner) => Type::CShared(Box::new((*inner).deep_reorigin(meta))),
+            Type::CBorrow(inner) => Type::CBorrow(Box::new((*inner).deep_reorigin(meta))),
+            Type::CBorrowMut(inner) => Type::CBorrowMut(Box::new((*inner).deep_reorigin(meta))),
+            Type::RawString => Type::RawString,
+            Type::Infer => Type::Infer,
+            Type::TypeVar(id) => Type::TypeVar(id),
+            Type::ForAll(params, body) => {
+                Type::ForAll(params, Box::new((*body).deep_reorigin(meta)))
+            }
+            Type::Located { .. } => unreachable!("Type::into_unlocated returned Located"),
+        };
+        ty.with_meta(meta)
+    }
+
+    /// Return exact metadata when this node is source/provenance annotated.
+    pub fn meta(&self) -> Option<AstNodeMeta> {
+        match self {
+            Type::Located { meta, .. } => Some(*meta),
+            _ => None,
+        }
+    }
+
+    /// Borrow the semantic type kind, transparently skipping annotations.
+    pub fn unlocated(&self) -> &Type {
+        match self {
+            Type::Located { ty, .. } => ty.unlocated(),
+            ty => ty,
+        }
+    }
+
+    /// Mutably borrow the semantic type kind, transparently skipping
+    /// annotations.
+    pub fn unlocated_mut(&mut self) -> &mut Type {
+        match self {
+            Type::Located { ty, .. } => ty.unlocated_mut(),
+            ty => ty,
+        }
+    }
+
+    /// Consume annotations and return the semantic type kind.
+    pub fn into_unlocated(self) -> Type {
+        match self {
+            Type::Located { ty, .. } => ty.into_unlocated(),
+            ty => ty,
+        }
+    }
+}
+
+impl PartialEq for Type {
+    fn eq(&self, other: &Self) -> bool {
+        use Type::*;
+
+        match (self.unlocated(), other.unlocated()) {
+            (Name(a_name, a_args), Name(b_name, b_args)) => a_name == b_name && a_args == b_args,
+            (Ref(a_lt, a), Ref(b_lt, b)) | (RefMut(a_lt, a), RefMut(b_lt, b)) => {
+                a_lt == b_lt && a == b
+            }
+            (Option(a), Option(b))
+            | (CBuffer(a), CBuffer(b))
+            | (Shared(a), Shared(b))
+            | (LocalShared(a), LocalShared(b))
+            | (Weak(a), Weak(b))
+            | (WeakLocal(a), WeakLocal(b))
+            | (Slice(a), Slice(b))
+            | (RawPtr(a), RawPtr(b))
+            | (RawPtrMut(a), RawPtrMut(b))
+            | (CShared(a), CShared(b))
+            | (CBorrow(a), CBorrow(b))
+            | (CBorrowMut(a), CBorrowMut(b)) => a == b,
+            (Result(a_ok, a_err), Result(b_ok, b_err)) => a_ok == b_ok && a_err == b_err,
+            (Tuple(a), Tuple(b)) => a == b,
+            (Func(a_args, a_ret), Func(b_args, b_ret))
+            | (ExternFunc(a_args, a_ret), ExternFunc(b_args, b_ret)) => {
+                a_args == b_args && a_ret == b_ret
+            }
+            (Cap(a), Cap(b)) => a == b,
+            (Newtype(a_name, a), Newtype(b_name, b)) => a_name == b_name && a == b,
+            (Nothing, Nothing)
+            | (Allocator, Allocator)
+            | (RawString, RawString)
+            | (Infer, Infer) => true,
+            (Array(a, a_len), Array(b, b_len)) => a_len == b_len && a == b,
+            (ImplTrait(a), ImplTrait(b)) | (DynTrait(a), DynTrait(b)) => a == b,
+            (TypeVar(a), TypeVar(b)) => a == b,
+            (ForAll(a_params, a), ForAll(b_params, b)) => a_params == b_params && a == b,
+            // `unlocated` above recursively removes every outer annotation,
+            // so reaching `Located` here would indicate a broken invariant.
+            (Located { .. }, _) | (_, Located { .. }) => unreachable!(),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Type {}
+
 // ── Flow/state/transition types ─────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct FlowDef {
+    pub meta: AstNodeMeta,
     pub name: String,
-    /// Source position of the `flow` keyword. Generated flows inherit the
-    /// source position of the construct that caused their lowering.
-    pub pos: (usize, usize),
-    pub origin: AstOrigin,
     pub pub_: bool,
     pub generics: Vec<GenericParam>,
     pub annotations: Vec<FlowAnnotation>,
@@ -664,23 +1046,45 @@ pub struct FlowDef {
 }
 
 #[derive(Debug, Clone)]
-pub enum FlowAnnotation {
+pub struct FlowAnnotation {
+    pub meta: AstNodeMeta,
+    pub kind: FlowAnnotationKind,
+}
+
+impl PartialEq for FlowAnnotation {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
+impl Eq for FlowAnnotation {}
+
+impl FlowAnnotation {
+    pub const fn new(meta: AstNodeMeta, kind: FlowAnnotationKind) -> Self {
+        Self { meta, kind }
+    }
+
+    pub const fn synthetic(kind: FlowAnnotationKind, origin: AstOrigin) -> Self {
+        Self::new(AstNodeMeta::synthetic(origin), kind)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowAnnotationKind {
     MailboxDepth(usize),
     MaxChildren(usize),
 }
 
 #[derive(Debug, Clone)]
 pub struct StateDef {
+    pub meta: AstNodeMeta,
     pub name: String,
-    /// Source position of the `state` keyword. Generated states inherit their
-    /// parent flow position.
-    pub pos: (usize, usize),
-    pub origin: AstOrigin,
     pub payload: Option<Vec<Field>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TransitionDef {
+    pub meta: AstNodeMeta,
     pub name: String,
     pub from_state: String,
     pub params: Vec<Param>,
@@ -688,8 +1092,6 @@ pub struct TransitionDef {
     pub to_states: Vec<String>,
     /// Transition body — requires a `do { }` block
     pub body: Option<Block>,
-    /// Source position (line, col) from the `transition` keyword
-    pub pos: (usize, usize),
     /// True when this transition was injected by transfer-matrix auto-completion
     /// (`(state, event) → Fault`). User-written transitions always have `false`.
     pub is_fallback: bool,
@@ -700,9 +1102,8 @@ pub struct TransitionDef {
 
 #[derive(Debug, Clone)]
 pub struct ProtocolDef {
+    pub meta: AstNodeMeta,
     pub name: String,
-    pub pos: (usize, usize),
-    pub origin: AstOrigin,
     pub generics: Vec<GenericParam>,
     pub states: Vec<ProtocolStateDef>,
     pub transitions: Vec<ProtocolTransitionDef>,
@@ -711,9 +1112,8 @@ pub struct ProtocolDef {
 /// Top-level session type alias: `session Name = SessionTypeExpr`.
 #[derive(Debug, Clone)]
 pub struct SessionDef {
+    pub meta: AstNodeMeta,
     pub name: String,
-    pub pos: (usize, usize),
-    pub origin: AstOrigin,
     pub pub_: bool,
     pub body: SessionType,
 }
@@ -725,8 +1125,13 @@ pub struct SessionDef {
 /// session S = !i32 . ?string . end
 /// session T = dual(S)
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum SessionType {
+    /// Source/provenance wrapper. Semantic session operations ignore it.
+    Located {
+        meta: AstNodeMeta,
+        session: Box<SessionType>,
+    },
     /// Send a value of type `T`, then continue as `cont`: `!T . cont`
     Send(Type, Box<SessionType>),
     /// Receive a value of type `T`, then continue as `cont`: `?T . cont`
@@ -739,8 +1144,62 @@ pub enum SessionType {
     End,
 }
 
+impl SessionType {
+    pub fn with_meta(self, meta: AstNodeMeta) -> Self {
+        match self {
+            Self::Located { session, .. } => Self::Located { meta, session },
+            session => Self::Located {
+                meta,
+                session: Box::new(session),
+            },
+        }
+    }
+
+    pub fn synthetic_with_origin(self, origin: AstOrigin) -> Self {
+        self.with_meta(AstNodeMeta::synthetic(origin))
+    }
+
+    pub fn meta(&self) -> Option<AstNodeMeta> {
+        match self {
+            Self::Located { meta, .. } => Some(*meta),
+            _ => None,
+        }
+    }
+
+    pub fn unlocated(&self) -> &Self {
+        match self {
+            Self::Located { session, .. } => session.unlocated(),
+            session => session,
+        }
+    }
+
+    pub fn into_unlocated(self) -> Self {
+        match self {
+            Self::Located { session, .. } => session.into_unlocated(),
+            session => session,
+        }
+    }
+}
+
+impl PartialEq for SessionType {
+    fn eq(&self, other: &Self) -> bool {
+        match (self.unlocated(), other.unlocated()) {
+            (Self::Send(a_ty, a_cont), Self::Send(b_ty, b_cont))
+            | (Self::Recv(a_ty, a_cont), Self::Recv(b_ty, b_cont)) => {
+                a_ty == b_ty && a_cont == b_cont
+            }
+            (Self::Dual(a), Self::Dual(b)) => a == b,
+            (Self::Name(a), Self::Name(b)) => a == b,
+            (Self::End, Self::End) => true,
+            (Self::Located { .. }, _) | (_, Self::Located { .. }) => unreachable!(),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProtocolStateDef {
+    pub meta: AstNodeMeta,
     pub name: String,
     pub payload_name: Option<String>,
     pub payload_type: Option<Type>,
@@ -748,6 +1207,7 @@ pub struct ProtocolStateDef {
 
 #[derive(Debug, Clone)]
 pub struct ProtocolTransitionDef {
+    pub meta: AstNodeMeta,
     pub name: String,
     pub from_state: String,
     pub to_state: String,

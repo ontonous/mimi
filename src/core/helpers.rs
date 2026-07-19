@@ -71,6 +71,7 @@ pub fn is_type_param(name: &str, generics: &[GenericParam]) -> bool {
 /// Prevents infinite recursion from self-referential type substitutions.
 fn occurs_check(name: &str, ty: &Type, _generics: &[GenericParam]) -> bool {
     match ty {
+        Type::Located { ty, .. } => occurs_check(name, ty, _generics),
         Type::Name(n, args) => {
             if n == name {
                 return true;
@@ -126,6 +127,9 @@ pub fn subst_type_params(
     type_map: &HashMap<String, Type>,
 ) -> Type {
     match ty {
+        Type::Located { meta, ty } => {
+            subst_type_params(ty, generics, type_map).with_meta(*meta)
+        }
         Type::Name(name, args) => {
             if is_type_param(name, generics) {
                 if let Some(concrete) = type_map.get(name) {
@@ -241,7 +245,7 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
     //
     // Normalize Type::Name("Result", [T, E]) <-> Type::Result(T, E) and Type::Name("Option", [T]) <-> Type::Option(T)
     // Compare args directly without cloning to allocate new enum variants.
-    match (a, b) {
+    match (a.unlocated(), b.unlocated()) {
         (Type::Name(na, aa), Type::Name(nb, ab)) => {
             // A4: "unknown" is a cascade placeholder — only matches itself.
             if na == "unknown" || nb == "unknown" {
@@ -346,7 +350,7 @@ pub(crate) fn types_compatible(a: &Type, b: &Type) -> bool {
 /// Check for numeric type widening (i32→i64, i32→f64, i64→f64).
 /// Integer literals default to i32; this allows them to flow into i64/i32/f64 parameters.
 pub(crate) fn is_numeric_coercion(declared: &Type, init_ty: &Type) -> bool {
-    match (declared, init_ty) {
+    match (declared.unlocated(), init_ty.unlocated()) {
         (Type::Name(dn, _), Type::Name(in_n, _)) => {
             let (d, i) = (dn.as_str(), in_n.as_str());
             matches!((d, i), ("i64", "i32") | ("f64", "i32") | ("f64", "i64"))
@@ -360,7 +364,7 @@ pub(crate) fn is_trait_coercion(
     init_ty: &Type,
     impls: &HashMap<(String, String), Vec<String>>,
 ) -> bool {
-    match (declared, init_ty) {
+    match (declared.unlocated(), init_ty.unlocated()) {
         (Type::DynTrait(trait_names), Type::Name(ty_name, _)) => trait_names
             .iter()
             .all(|trait_name| impls.contains_key(&(trait_name.clone(), ty_name.clone()))),
@@ -369,15 +373,15 @@ pub(crate) fn is_trait_coercion(
 }
 
 pub(crate) fn is_int(t: &Type) -> bool {
-    matches!(t, Type::Name(n, _) if n == "i32" || n == "i64")
+    matches!(t.unlocated(), Type::Name(n, _) if n == "i32" || n == "i64")
 }
 
 pub(crate) fn is_float(t: &Type) -> bool {
-    matches!(t, Type::Name(n, _) if n == "f64")
+    matches!(t.unlocated(), Type::Name(n, _) if n == "f64")
 }
 
 pub(crate) fn is_numeric(t: &Type) -> bool {
-    matches!(t, Type::Name(n, _) if n == "i32" || n == "i64" || n == "f64")
+    matches!(t.unlocated(), Type::Name(n, _) if n == "i32" || n == "i64" || n == "f64")
 }
 
 /// CG-H2 (audit): predicates whether the codegen for `to_json` can serialize
@@ -392,7 +396,7 @@ pub(crate) fn is_numeric(t: &Type) -> bool {
 ///
 /// Genuinely unsupported: Channel/Future/Atomic (no codegen path).
 pub(crate) fn is_json_serializable(t: &Type) -> bool {
-    match t {
+    match t.unlocated() {
         Type::Infer => true,                                    // _ placeholder — defer
         Type::Newtype(_, inner) => is_json_serializable(inner), // transparent
         // Product tuples: JSON arrays when every element is serializable.
@@ -411,7 +415,7 @@ pub(crate) fn is_json_serializable(t: &Type) -> bool {
             }
             // Map<string, V> when V is serializable (scalars or product tuples).
             if n == "Map" && args.len() == 2 {
-                let key_ok = matches!(&args[0], Type::Name(k, _) if k == "string");
+                let key_ok = matches!(args[0].unlocated(), Type::Name(k, _) if k == "string");
                 let val_ok = is_json_serializable(&args[1]);
                 return key_ok && val_ok;
             }
@@ -495,15 +499,16 @@ pub(crate) fn common_numeric_type(a: &Type, b: &Type) -> Option<Type> {
 }
 
 pub(crate) fn is_bool(t: &Type) -> bool {
-    matches!(t, Type::Name(n, _) if n == "bool")
+    matches!(t.unlocated(), Type::Name(n, _) if n == "bool")
 }
 
 pub(crate) fn is_string(t: &Type) -> bool {
-    matches!(t, Type::Name(n, _) if n == "string")
+    matches!(t.unlocated(), Type::Name(n, _) if n == "string")
 }
 
 pub fn fmt_type(t: &Type) -> String {
     match t {
+        Type::Located { ty, .. } => fmt_type(ty),
         Type::Name(n, args) if args.is_empty() => n.clone(),
         Type::Name(n, args) => format!(
             "{}<{}>",
@@ -544,7 +549,7 @@ pub fn fmt_type(t: &Type) -> String {
         // This aligns fmt_type with same_type: if same_type(Newtype(x, A), B) is true,
         // then fmt_type(Newtype(x, A)) == fmt_type(B).
         Type::Newtype(_name, inner) => {
-            if !matches!(inner.as_ref(), Type::Newtype(..)) {
+            if !matches!(inner.unlocated(), Type::Newtype(..)) {
                 fmt_type(inner)
             } else {
                 format!("newtype {} {}", _name, fmt_type(inner))
@@ -581,7 +586,7 @@ pub fn fmt_type(t: &Type) -> String {
 
 /// Collect unique named lifetimes from a type (e.g., from `&'a i32` → collects "a")
 pub(crate) fn collect_lifetimes(ty: &Type) -> Vec<String> {
-    match ty {
+    match ty.unlocated() {
         Type::Ref(Some(lt), inner) | Type::RefMut(Some(lt), inner) => {
             let mut lifetimes = vec![lt.clone()];
             lifetimes.extend(collect_lifetimes(inner));
@@ -622,7 +627,7 @@ pub(crate) fn collect_lifetimes(ty: &Type) -> Vec<String> {
 
 /// Check if a type contains any elided lifetime (Ref(None, _) or RefMut(None, _)).
 pub(crate) fn type_contains_elided_lifetime(ty: &Type) -> bool {
-    match ty {
+    match ty.unlocated() {
         Type::Ref(None, _) | Type::RefMut(None, _) => true,
         Type::Ref(Some(_), inner) | Type::RefMut(Some(_), inner) => {
             type_contains_elided_lifetime(inner)
@@ -643,6 +648,7 @@ pub(crate) fn type_contains_elided_lifetime(ty: &Type) -> bool {
 /// Apply lifetime elision: replace all `Ref(None, _)` with `Ref(Some(lt), _)` in a type.
 pub(crate) fn elide_lifetime(ty: &Type, lt: &str) -> Type {
     match ty {
+        Type::Located { meta, ty } => elide_lifetime(ty, lt).with_meta(*meta),
         Type::Ref(None, inner) => {
             Type::Ref(Some(lt.to_string()), Box::new(elide_lifetime(inner, lt)))
         }

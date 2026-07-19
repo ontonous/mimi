@@ -1,7 +1,6 @@
 use crate::ast::*;
 use crate::core::helpers::*;
 use crate::diagnostic::Diagnostic;
-use crate::span::Span;
 use std::collections::HashMap;
 
 use super::Checker;
@@ -10,7 +9,7 @@ impl<'a> Checker<'a> {
     pub(crate) fn lookup_var(&mut self, name: &str, scopes: &mut [HashMap<String, Type>]) -> Type {
         for scope in scopes.iter().rev() {
             if let Some(t) = scope.get(name) {
-                if matches!(t, Type::Cap(_)) {
+                if matches!(t.unlocated(), Type::Cap(_)) {
                     if let Some(info) = self.cap_info(name) {
                         if info.consumed || info.maybe_consumed {
                             self.errors.push(
@@ -24,7 +23,7 @@ impl<'a> Checker<'a> {
                                     } else {
                                         format!("capability '{}' has already been consumed", name)
                                     },
-                                    Span::single(self.current_line, self.current_col),
+                                    self.diagnostic_span(),
                                 )
                                 .with_help(
                                     "linear capabilities must have the same ownership state on every reachable path",
@@ -39,7 +38,7 @@ impl<'a> Checker<'a> {
                                     "capability '{}' is not owned by the current callable",
                                     name
                                 ),
-                                Span::single(self.current_line, self.current_col),
+                                self.diagnostic_span(),
                             )
                             .with_help(
                                 "capture linear capabilities with an explicit ownership transfer",
@@ -120,7 +119,7 @@ impl<'a> Checker<'a> {
                 Diagnostic::error_code(
                     crate::diagnostic::codes::E0400,
                     format!("undefined variable '{}'", name),
-                    Span::single(self.current_line, self.current_col),
+                    self.diagnostic_span(),
                 )
                 .with_help(format!("did you mean '{}'?", suggested)),
             );
@@ -153,6 +152,9 @@ impl<'a> Checker<'a> {
 
     fn replace_generic_names_with_typevars(ty: &Type, names: &HashMap<String, u32>) -> Type {
         match ty {
+            Type::Located { meta, ty } => {
+                Self::replace_generic_names_with_typevars(ty, names).with_meta(*meta)
+            }
             Type::Name(n, args) if args.is_empty() => {
                 if let Some(&id) = names.get(n) {
                     Type::TypeVar(id)
@@ -220,7 +222,7 @@ impl<'a> Checker<'a> {
 
     /// Get all variant names for an enum type
     pub(crate) fn get_enum_variants(&self, ty: &Type) -> Vec<String> {
-        match ty {
+        match ty.unlocated() {
             Type::Result(_, _) => {
                 vec!["Ok".into(), "Err".into()]
             }

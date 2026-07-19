@@ -205,6 +205,10 @@ fn flatten_items_inner(items: &[Item], queue: &mut Vec<StepKind>) {
                     if let Some(body) = &t.body {
                         // Synthesize a FuncDef for the transition body.
                         let f = FuncDef {
+                            meta: AstNodeMeta::inherited(
+                                t.meta.span,
+                                AstOrigin::RuntimeSystem("verifier.transition_function"),
+                            ),
                             name: format!("{}::{}", flow.name, t.name),
                             pub_: false,
                             params: t.params.clone(),
@@ -216,7 +220,6 @@ fn flatten_items_inner(items: &[Item], queue: &mut Vec<StepKind>) {
                             is_comptime: false,
                             is_async: false,
                             extern_abi: None,
-                            pos: t.pos,
                         };
                         queue.push(StepKind::Func(f));
                     }
@@ -271,10 +274,7 @@ pub fn flow_verify_file_or_mock(file: &File) -> Result<Vec<VerificationResult>, 
 
 #[cfg(test)]
 fn flow_verify_source_unchecked(source: &str) -> Result<Vec<VerificationResult>, String> {
-    let tokens = crate::lexer::Lexer::new(source).tokenize()?;
-    let file = crate::parser::Parser::new(tokens)
-        .parse_file()
-        .map_err(|error| error.message)?;
+    let file = super::parse_memory_source(source, "flow-unchecked-tests")?;
     flow_verify_file_or_mock(&file)
 }
 
@@ -283,10 +283,7 @@ mod tests {
     use super::*;
     /// Helper: create a file AST from source (same as verify_source's parsing).
     fn parse_source(source: &str) -> Result<File, String> {
-        let tokens = crate::lexer::Lexer::new(source).tokenize()?;
-        crate::parser::Parser::new(tokens)
-            .parse_file()
-            .map_err(|e| e.message)
+        crate::verifier::parse_memory_source(source, "flow-tests")
     }
 
     /// Assert that Flow verifier produces equivalent results to legacy.

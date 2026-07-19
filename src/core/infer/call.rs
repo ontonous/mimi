@@ -13,7 +13,7 @@ impl<'a> Checker<'a> {
         args: &[Expr],
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        match callee {
+        match callee.unlocated() {
             Expr::Ident(name) => self.check_call(name, args, scopes),
             Expr::Field(obj, method_name) => self.infer_method_call(obj, method_name, args, scopes),
             _ => {

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::ast::{Expr, Item, Pattern, Stmt};
+use crate::ast::{Expr, Item, PatternKind, Stmt};
 use crate::lsp::LspServer;
 
 impl LspServer {
@@ -21,7 +21,7 @@ impl LspServer {
         for item in &file.items {
             if let Item::Func(f) = item {
                 func_params.insert(
-                    (f.name.clone(), f.pos.0),
+                    (f.name.clone(), f.meta.span.start_line),
                     f.params.iter().map(|p| p.name.clone()).collect(),
                 );
             }
@@ -30,7 +30,7 @@ impl LspServer {
         // Walk all function definitions looking for let statements and calls
         for item in &file.items {
             if let Item::Func(f) = item {
-                let func_key = (f.name.clone(), f.pos.0);
+                let func_key = (f.name.clone(), f.meta.span.start_line);
                 self.collect_hints_from_block(&f.body, text, &mut hints, &func_params, &func_key);
             }
         }
@@ -49,11 +49,11 @@ impl LspServer {
     ) {
         for stmt in stmts {
             #[allow(clippy::collapsible_match)]
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::Let { pat, init, .. } => {
                     // Type hint for `let x = <literal>` — show the inferred type
                     if let Some(init_expr) = init {
-                        let type_str = match init_expr {
+                        let type_str = match init_expr.unlocated() {
                             Expr::Literal(lit) => match lit {
                                 crate::ast::Lit::Int(_) => "i64",
                                 crate::ast::Lit::Float(_) => "f64",
@@ -68,8 +68,8 @@ impl LspServer {
                         if !type_str.is_empty() {
                             // Find the `=` position on the let line using AST info
                             let lines: Vec<&str> = text.lines().collect();
-                            let pat_name = match pat {
-                                Pattern::Variable(n) => n.as_str(),
+                            let pat_name = match &pat.kind {
+                                PatternKind::Variable(n) => n.as_str(),
                                 _ => "",
                             };
                             if !pat_name.is_empty() {
@@ -148,10 +148,10 @@ impl LspServer {
         current_func: &(String, usize),
     ) {
         #[allow(clippy::single_match)]
-        match expr {
+        match expr.unlocated() {
             Expr::Call(callee, args) => {
                 // Extract function name from callee
-                let func_name = match callee.as_ref() {
+                let func_name = match callee.unlocated() {
                     Expr::Ident(n) => n.as_str(),
                     _ => return,
                 };

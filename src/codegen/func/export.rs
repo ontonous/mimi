@@ -83,7 +83,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.build_store(alloca, internal_val)?;
 
             // Track type metadata for method dispatch etc.
-            if let Type::Name(tn, args) = &param.ty {
+            if let Type::Name(tn, args) = param.ty.unlocated() {
                 if tn == "List" && !args.is_empty() {
                     if let Some(full) = self.get_full_type_name(&param.ty) {
                         self.var_type_names.insert(param.name.clone(), full);
@@ -121,7 +121,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Map a Mimi type to the LLVM type used at the C ABI boundary for
     /// exported functions.
     fn c_abi_llvm_type(&self, ty: &Type) -> MimiResult<BasicTypeEnum<'ctx>> {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => Ok(BasicTypeEnum::IntType(self.context.i32_type())),
                 "i64" => Ok(BasicTypeEnum::IntType(self.context.i64_type())),
@@ -185,7 +185,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         c_val: BasicValueEnum<'ctx>,
         ty: &Type,
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => {
                     // After A1 restoration, internal i32 uses i32 type.
@@ -259,7 +259,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         let unit_ty = Type::Name("unit".to_string(), vec![]);
         let ty = ty.unwrap_or(&unit_ty);
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => {
                     let iv = internal_val.into_int_value();
@@ -313,7 +313,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         internal_val: BasicValueEnum<'ctx>,
         ty: &Type,
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        match ty {
+        match ty.unlocated() {
             Type::Name(n, args) if n == "List" => {
                 let list_struct_ty = self.list_struct_type();
                 let alloca =
@@ -338,7 +338,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         ))
                     }
                 }
-                let elem = args.first().and_then(|t| match t {
+                let elem = args.first().and_then(|t| match t.unlocated() {
                     Type::Name(en, _) => Some(en.as_str()),
                     _ => None,
                 });
@@ -612,7 +612,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Get the C ABI size and alignment of a field type.
     fn field_c_size_align(&self, ty: &Type) -> MimiResult<(usize, usize)> {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => Ok((4, 4)),
                 "i64" => Ok((8, 8)),
@@ -637,7 +637,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         internal_val: BasicValueEnum<'ctx>,
         ty: &Type,
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => {
                     let iv = internal_val.into_int_value();
@@ -687,7 +687,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         c_val: BasicValueEnum<'ctx>,
         ty: &Type,
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => {
                     // After A1 restoration, internal i32 fields use i32 type.
@@ -762,7 +762,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             internal_param_meta.push(types::basic_to_metadata(self.context, ty));
         }
 
-        let internal_ret_ty: BasicTypeEnum<'ctx> = match cb_ret {
+        let internal_ret_ty: BasicTypeEnum<'ctx> = match cb_ret.unlocated() {
             Type::Name(n, _) if n == "f64" => BasicTypeEnum::FloatType(self.context.f64_type()),
             _ => BasicTypeEnum::IntType(i64_ty),
         };
@@ -829,7 +829,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         internal_val: BasicValueEnum<'ctx>,
         ty: &Type,
     ) -> MimiResult<BasicMetadataValueEnum<'ctx>> {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => {
                     let truncated = self
@@ -876,7 +876,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         c_val: BasicValueEnum<'ctx>,
         ty: &Type,
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => {
                     // After A1 restoration, internal i32 is i32 — pass through.

@@ -16,9 +16,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         val: BasicValueEnum<'ctx>,
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<()> {
-        match pat {
-            Pattern::Wildcard => Ok(()),
-            Pattern::Variable(name) => {
+        match &pat.kind {
+            PatternKind::Wildcard => Ok(()),
+            PatternKind::Variable(name) => {
                 let llvm_ty = val.get_type();
                 // Entry-block alloca so register_heap_slot's entry null-init
                 // and free paths dominate even after malloc_or_abort BB splits.
@@ -29,7 +29,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 vars.insert(name.clone(), (alloca, llvm_ty));
                 Ok(())
             }
-            Pattern::Literal(lit) => {
+            PatternKind::Literal(lit) => {
                 let lit_val = self
                     .compile_literal_expr(lit, &HashMap::new())
                     .map_err(|e| {
@@ -80,7 +80,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(format!("assert call error: {}", e)))?;
                 Ok(())
             }
-            Pattern::Constructor(name, sub_patterns) => {
+            PatternKind::Constructor(name, sub_patterns) => {
                 if sub_patterns.is_empty() {
                     return Ok(());
                 }
@@ -151,7 +151,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Ok(())
             }
-            Pattern::Tuple(sub_patterns) => {
+            PatternKind::Tuple(sub_patterns) => {
                 // Load struct value if we have a pointer
                 let struct_val = match val {
                     BasicValueEnum::PointerValue(pv) => {
@@ -194,7 +194,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Ok(())
             }
-            Pattern::Array(sub_patterns) => {
+            PatternKind::Array(sub_patterns) => {
                 let list_ptr = match val {
                     BasicValueEnum::PointerValue(pv) => pv,
                     _ => {
@@ -259,8 +259,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Ok(())
             }
-            Pattern::Slice(sub_patterns, rest) => {
-                self.compile_pattern_bind(&Pattern::Array(sub_patterns.clone()), val, vars)?;
+            PatternKind::Slice(sub_patterns, rest) => {
+                let prefix = Pattern::synthetic(
+                    PatternKind::Array(sub_patterns.clone()),
+                    AstOrigin::Desugared("codegen.slice_pattern.prefix"),
+                );
+                self.compile_pattern_bind(&prefix, val, vars)?;
                 if let Some(rest_pat) = rest {
                     // Bind rest to a freshly allocated copy of the tail so
                     // reassignment of the original list cannot free shared data.
@@ -358,12 +362,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         val: &BasicValueEnum<'ctx>,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<inkwell::values::IntValue<'ctx>> {
-        match pat {
-            Pattern::Wildcard | Pattern::Variable(_) => {
+        match &pat.kind {
+            PatternKind::Wildcard | PatternKind::Variable(_) => {
                 // Always matches
                 Ok(self.context.bool_type().const_int(1, false))
             }
-            Pattern::Literal(lit) => {
+            PatternKind::Literal(lit) => {
                 let lit_val = self
                     .compile_literal_expr(lit, vars)
                     .map_err(|e| CompileError::LlvmError(format!("literal compile: {}", e)))?;
@@ -377,7 +381,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     )),
                 }
             }
-            Pattern::Constructor(name, _) => {
+            PatternKind::Constructor(name, _) => {
                 // Newtypes have only one constructor, so the pattern always matches.
                 if let Some(td) = self.type_defs.get(name) {
                     if matches!(td.kind, crate::ast::TypeDefKind::Newtype(_)) {
@@ -404,7 +408,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_int_compare(inkwell::IntPredicate::EQ, tag, ord_val, "pat_ctor_check")
                     .map_err(|e| CompileError::LlvmError(format!("icmp: {}", e)))
             }
-            Pattern::Tuple(sub_pats) => {
+            PatternKind::Tuple(sub_pats) => {
                 // All sub-patterns must match
                 let mut result = self.context.bool_type().const_int(1, false);
                 for (i, sub_pat) in sub_pats.iter().enumerate() {
@@ -417,7 +421,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Ok(result)
             }
-            Pattern::Array(sub_pats) => {
+            PatternKind::Array(sub_pats) => {
                 // Fixed-length list/array: match when len == sub_pats.len().
                 // Element sub-patterns are not re-checked here (bind phase
                 // re-evaluates); length is the loop-continuation guard.
@@ -446,7 +450,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_int_compare(inkwell::IntPredicate::EQ, len, expected, "pat_arr_len")
                     .map_err(|e| CompileError::LlvmError(format!("icmp: {}", e)))
             }
-            Pattern::Slice(sub_pats, _rest) => {
+            PatternKind::Slice(sub_pats, _rest) => {
                 // Prefix length: match when len >= sub_pats.len().
                 let list_ptr = match val {
                     BasicValueEnum::PointerValue(pv) => *pv,

@@ -26,8 +26,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<HashMap<String, VarEntry<'ctx>>, CompileError> {
         let mut local_vars = vars.clone();
         // Bind variables from pattern
-        match &arm.pat {
-            Pattern::Variable(name) => {
+        match &arm.pat.kind {
+            PatternKind::Variable(name) => {
                 // Uppercase identifiers that name enum variants are treated as
                 // unit constructor patterns, not variable bindings.
                 if self.find_variant_ordinal(name).is_ok() {
@@ -49,7 +49,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 };
                 self.bind_pattern_var(&mut local_vars, name, val, ty)?;
             }
-            Pattern::Constructor(name, inner_patterns) => {
+            PatternKind::Constructor(name, inner_patterns) => {
                 // Newtypes are transparent: the constructor pattern binds the
                 // inner variable directly to the scrutinee value.
                 if let Some(td) = self.type_defs.get(name) {
@@ -211,7 +211,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let payload_ptr = self.build_alloca(packed_ty_enum, "multi_payload_alloca")?;
                     self.build_store(payload_ptr, payload_sv)?;
                     for (j, (_, inner_pat)) in inner_patterns.iter().enumerate() {
-                        if let Pattern::Variable(pname) = inner_pat {
+                        if let PatternKind::Variable(pname) = &inner_pat.kind {
                             if j >= arg_tys.len() {
                                 break;
                             }
@@ -252,7 +252,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         })
                     });
                     for (_, inner_pat) in inner_patterns {
-                        if let Pattern::Variable(bind_name) = inner_pat {
+                        if let PatternKind::Variable(bind_name) = &inner_pat.kind {
                             self.bind_pattern_var(&mut local_vars, bind_name, payload, payload_ty)?;
                             if let Some(ref ast_ty) = payload_ast {
                                 self.var_types.insert(bind_name.clone(), ast_ty.clone());
@@ -265,7 +265,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
             }
-            Pattern::Tuple(inner_pats) => {
+            PatternKind::Tuple(inner_pats) => {
                 // For tuple patterns, bind inner variables by loading from struct.
                 // Prefer the actual struct type from the scrutinee value when available,
                 // falling back to tuple_type_stack only for PointerValue scrutinees.
@@ -288,7 +288,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 };
                 let struct_ty_enum = BasicTypeEnum::StructType(struct_ty);
                 for (j, inner_pat) in inner_pats.iter().enumerate() {
-                    if let Pattern::Variable(name) = inner_pat {
+                    if let PatternKind::Variable(name) = &inner_pat.kind {
                         let elem_ty = struct_ty
                             .get_field_type_at_index(j as u32)
                             .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
@@ -306,7 +306,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
             }
-            Pattern::Array(inner_pats) => {
+            PatternKind::Array(inner_pats) => {
                 // For array patterns, bind inner variables by loading from list data
                 let scrutinee_ptr = match scrutinee_val {
                     BasicValueEnum::PointerValue(pv) => pv,
@@ -315,7 +315,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let data_ptr = self.load_list_data_ptr(scrutinee_ptr)?;
                 self.bind_list_prefix(data_ptr, inner_pats, &mut local_vars)?;
             }
-            Pattern::Slice(inner_pats, rest) => {
+            PatternKind::Slice(inner_pats, rest) => {
                 // For slice patterns, bind prefix variables and rest as list
                 let scrutinee_ptr = match scrutinee_val {
                     BasicValueEnum::PointerValue(pv) => pv,
@@ -326,7 +326,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                 // Bind rest as remaining list (simplified: bind as empty list)
                 if let Some(rest_pat) = rest.as_ref() {
-                    if let Pattern::Variable(name) = rest_pat.as_ref() {
+                    if let PatternKind::Variable(name) = &rest_pat.kind {
                         let i64_ty = self.context.i64_type();
                         let empty_list: BasicValueEnum = i64_ty.const_int(0, false).into();
                         self.bind_pattern_var(
@@ -338,7 +338,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
             }
-            Pattern::Wildcard | Pattern::Literal(_) => {
+            PatternKind::Wildcard | PatternKind::Literal(_) => {
                 // Wildcard and literal patterns: no variable binding needed
             }
         }
@@ -403,7 +403,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<(), CompileError> {
         let i64_ty = self.context.i64_type();
         for (j, inner_pat) in inner_pats.iter().enumerate() {
-            if let Pattern::Variable(name) = inner_pat {
+            if let PatternKind::Variable(name) = &inner_pat.kind {
                 let idx = i64_ty.const_int(j as u64, false);
                 let elem_ptr = self
                     .gep()
@@ -454,8 +454,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let struct_ty_enum = BasicTypeEnum::StructType(struct_ty);
         let mut agg: Option<inkwell::values::IntValue<'ctx>> = None;
         for (j, pat) in inner_pats.iter().enumerate() {
-            let lit_val = match pat {
-                Pattern::Literal(lit) => match lit {
+            let lit_val = match &pat.kind {
+                PatternKind::Literal(lit) => match lit {
                     Lit::Int(n) => Some(i64_ty.const_int(*n as u64, true)),
                     Lit::Bool(b) => Some(i64_ty.const_int(*b as u64, false)),
                     Lit::Unit => Some(i64_ty.const_int(0, false)),
@@ -536,8 +536,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_pointer_value();
         let mut agg: Option<inkwell::values::IntValue<'ctx>> = None;
         for (j, pat) in inner_pats.iter().enumerate() {
-            let lit_val = match pat {
-                Pattern::Literal(lit) => match lit {
+            let lit_val = match &pat.kind {
+                PatternKind::Literal(lit) => match lit {
                     Lit::Int(n) => Some(i64_ty.const_int(*n as u64, true)),
                     Lit::Bool(b) => Some(i64_ty.const_int(*b as u64, false)),
                     Lit::Unit => Some(i64_ty.const_int(0, false)),
@@ -734,8 +734,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         let needs_tag = if is_string_scrutinee {
             false
         } else {
-            arms.iter()
-                .any(|arm| matches!(arm.pat, Pattern::Constructor(_, _) | Pattern::Literal(_)))
+            arms.iter().any(|arm| {
+                matches!(
+                    &arm.pat.kind,
+                    PatternKind::Constructor(_, _) | PatternKind::Literal(_)
+                )
+            })
         };
         let scrutinee_iv: Option<inkwell::values::IntValue<'ctx>> = match scrutinee_val {
             BasicValueEnum::IntValue(iv) => Some(iv),
@@ -849,11 +853,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .append_basic_block(function, &format!("arm{}", arm_idx));
         self.builder.position_at_end(else_bb);
 
-        match &arm.pat {
-            Pattern::Wildcard | Pattern::Variable(_) => {
+        match &arm.pat.kind {
+            PatternKind::Wildcard | PatternKind::Variable(_) => {
                 // If the variable name is actually an enum variant, treat it as a
                 // unit constructor pattern and compare the tag.
-                let is_variant = if let Pattern::Variable(name) = &arm.pat {
+                let is_variant = if let PatternKind::Variable(name) = &arm.pat.kind {
                     self.find_variant_ordinal(name).is_ok()
                 } else {
                     false
@@ -865,7 +869,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                     })?;
                     let ordinal = self
-                        .find_variant_ordinal(if let Pattern::Variable(name) = &arm.pat {
+                        .find_variant_ordinal(if let PatternKind::Variable(name) = &arm.pat.kind {
                             name
                         } else {
                             ""
@@ -894,7 +898,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Ok((arm_bb, wccont_bb))
                 }
             }
-            Pattern::Literal(lit) => {
+            PatternKind::Literal(lit) => {
                 // String literals need strcmp-based comparison instead of tag matching.
                 if let Lit::String(s) = lit {
                     let scrutinee_ptr =
@@ -980,7 +984,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Ok((arm_bb, next_bb))
                 }
             }
-            Pattern::Constructor(name, _) => {
+            PatternKind::Constructor(name, _) => {
                 // Newtypes are transparent and have a single constructor, so
                 // the arm always matches.
                 if self
@@ -1015,7 +1019,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_cond_br(cmp, arm_bb, next_bb)?;
                 Ok((arm_bb, next_bb))
             }
-            Pattern::Tuple(inner_pats) => {
+            PatternKind::Tuple(inner_pats) => {
                 let match_cmp = self.compile_tuple_pattern(scrutinee_val, inner_pats)?;
                 let next_bb = self
                     .context
@@ -1026,7 +1030,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Ok((arm_bb, next_bb))
             }
-            Pattern::Array(inner_pats) => {
+            PatternKind::Array(inner_pats) => {
                 let match_cmp = self.compile_array_pattern(scrutinee_val, inner_pats)?;
                 let next_bb = self
                     .context
@@ -1037,7 +1041,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Ok((arm_bb, next_bb))
             }
-            Pattern::Slice(inner_pats, rest) => {
+            PatternKind::Slice(inner_pats, rest) => {
                 let match_cmp = self.compile_slice_pattern(scrutinee_val, inner_pats, rest)?;
                 let next_bb = self
                     .context

@@ -10,7 +10,84 @@
 //! SystemTrace, Reset/Recover).
 
 use crate::ast::*;
+use crate::span::Span;
 use std::collections::{HashMap, HashSet};
+
+fn flow_generated_meta(flow: &FlowDef, origin: AstOrigin) -> AstNodeMeta {
+    AstNodeMeta::inherited(flow.meta.span, origin)
+}
+
+fn generated_param(param: &Param, span: Span, origin: AstOrigin) -> Param {
+    let meta = AstNodeMeta::inherited(span, origin);
+    Param {
+        meta,
+        name: param.name.clone(),
+        ty: param.ty.clone().deep_reorigin(meta),
+        mut_: param.mut_,
+        default_value: param
+            .default_value
+            .clone()
+            .map(|value| generated_expr(value, origin, span)),
+        borrow: param.borrow,
+    }
+}
+
+fn generated_record_meta(rule: &'static str) -> AstNodeMeta {
+    AstNodeMeta::synthetic(AstOrigin::RuntimeSystem(rule))
+}
+
+fn generated_expr(expr: Expr, origin: AstOrigin, span: Span) -> Expr {
+    let expr = match expr.into_unlocated() {
+        Expr::Field(target, field) => {
+            Expr::Field(Box::new(generated_expr(*target, origin, span)), field)
+        }
+        Expr::Record { ty, fields } => Expr::Record {
+            ty,
+            fields: fields
+                .into_iter()
+                .map(|field| RecordFieldExpr {
+                    meta: AstNodeMeta::inherited(span, origin),
+                    name: field.name,
+                    value: generated_expr(field.value, origin, span),
+                })
+                .collect(),
+        },
+        Expr::Call(callee, args) => Expr::Call(
+            Box::new(generated_expr(*callee, origin, span)),
+            args.into_iter()
+                .map(|arg| generated_expr(arg, origin, span))
+                .collect(),
+        ),
+        Expr::Tuple(items) => Expr::Tuple(
+            items
+                .into_iter()
+                .map(|item| generated_expr(item, origin, span))
+                .collect(),
+        ),
+        Expr::List(items) => Expr::List(
+            items
+                .into_iter()
+                .map(|item| generated_expr(item, origin, span))
+                .collect(),
+        ),
+        Expr::SetLiteral(items) => Expr::SetLiteral(
+            items
+                .into_iter()
+                .map(|item| generated_expr(item, origin, span))
+                .collect(),
+        ),
+        expr => expr,
+    };
+    expr.with_meta(AstNodeMeta::new(span, origin))
+}
+
+fn generated_stmt(stmt: Stmt, origin: AstOrigin, span: Span) -> Stmt {
+    let stmt = match stmt.into_unlocated() {
+        Stmt::Return(value) => Stmt::Return(value.map(|expr| generated_expr(expr, origin, span))),
+        stmt => stmt,
+    };
+    stmt.with_meta(AstNodeMeta::new(span, origin))
+}
 
 /// Expand every `flow` in `file` in place (including nested modules).
 ///
@@ -113,14 +190,24 @@ fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
             if defined.contains(&(state.clone(), event.clone())) {
                 continue;
             }
-            let body = fault_return_body(flow, state, event, shapes);
+            let body = fault_return_body(
+                flow,
+                state,
+                event,
+                shapes,
+                AstOrigin::PrototypeFallback("flow.matrix.fallback"),
+            );
+            let origin = AstOrigin::PrototypeFallback("flow.matrix.fallback");
             fallbacks.push(TransitionDef {
+                meta: flow_generated_meta(flow, origin),
                 name: event.clone(),
                 from_state: state.clone(),
-                params: params.clone(),
+                params: params
+                    .iter()
+                    .map(|param| generated_param(param, flow.meta.span, origin))
+                    .collect(),
                 to_states: vec!["Fault".to_string()],
                 body: Some(body),
-                pos: flow.pos,
                 is_fallback: true,
                 is_ffi_pinned: false,
             });
@@ -153,6 +240,7 @@ fn rebuild_root_body(
     root: &str,
     keep_persistent: bool,
     shapes: &HashMap<String, Vec<Field>>,
+    origin: AstOrigin,
 ) -> Block {
     let fields = flow
         .states
@@ -170,6 +258,7 @@ fn rebuild_root_body(
                         default_type_value(&f.ty, shapes)
                     };
                     RecordFieldExpr {
+                        meta: flow_generated_meta(flow, origin),
                         name: f.name.clone(),
                         value,
                     }
@@ -178,10 +267,14 @@ fn rebuild_root_body(
         })
         .unwrap_or_default();
 
-    vec![Stmt::Return(Some(Expr::Record {
-        ty: Some(root.to_string()),
-        fields,
-    }))]
+    vec![generated_stmt(
+        Stmt::Return(Some(Expr::Record {
+            ty: Some(root.to_string()),
+            fields,
+        })),
+        origin,
+        flow.meta.span,
+    )]
 }
 
 /// Default expression for a type used by injected reset/recover/Fault bodies.
@@ -195,7 +288,7 @@ fn default_type_value(ty: &Type, shapes: &HashMap<String, Vec<Field>>) -> Expr {
 const MAX_DEFAULT_NESTING: usize = 8;
 
 fn default_type_value_depth(ty: &Type, shapes: &HashMap<String, Vec<Field>>, depth: usize) -> Expr {
-    match ty {
+    match ty.unlocated() {
         Type::Name(n, _) if n == "string" || n == "String" => {
             Expr::Literal(Lit::String(String::new()))
         }
@@ -217,6 +310,7 @@ fn default_type_value_depth(ty: &Type, shapes: &HashMap<String, Vec<Field>>, dep
                 fields: fields
                     .into_iter()
                     .map(|f| RecordFieldExpr {
+                        meta: generated_record_meta("flow.default.record_field"),
                         name: f.name,
                         value: default_type_value_depth(&f.ty, shapes, depth + 1),
                     })
@@ -290,14 +384,21 @@ fn inject_peer_fault_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
             continue;
         }
         // Default cascade: peer_fault(State) → Fault with SystemTrace payload.
-        let body = fault_return_body(flow, &state, "peer_fault", shapes);
+        let body = fault_return_body(
+            flow,
+            &state,
+            "peer_fault",
+            shapes,
+            AstOrigin::RuntimeSystem("flow.peer_fault"),
+        );
+        let origin = AstOrigin::RuntimeSystem("flow.peer_fault");
         injected.push(TransitionDef {
+            meta: flow_generated_meta(flow, origin),
             name: "peer_fault".to_string(),
             from_state: state,
             params: vec![],
             to_states: vec!["Fault".to_string()],
             body: Some(body),
-            pos: flow.pos,
             is_fallback: true,
             is_ffi_pinned: false,
         });
@@ -305,14 +406,21 @@ fn inject_peer_fault_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
 
     // C5: peer_fault(Fault) → Fault no-op self-loop (if not user-defined).
     if !defined.contains("Fault") && flow.states.iter().any(|s| s.name == "Fault") {
-        let body = fault_return_body(flow, "Fault", "peer_fault", shapes);
+        let body = fault_return_body(
+            flow,
+            "Fault",
+            "peer_fault",
+            shapes,
+            AstOrigin::RuntimeSystem("flow.peer_fault"),
+        );
+        let origin = AstOrigin::RuntimeSystem("flow.peer_fault");
         injected.push(TransitionDef {
+            meta: flow_generated_meta(flow, origin),
             name: "peer_fault".to_string(),
             from_state: "Fault".to_string(),
             params: vec![],
             to_states: vec!["Fault".to_string()],
             body: Some(body),
-            pos: flow.pos,
             is_fallback: true,
             is_ffi_pinned: false,
         });
@@ -350,7 +458,8 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
     };
 
     // Build payload-passthrough body: return Target { field: self.field, ... }
-    let make_passthrough_body = |target: &str| -> Block {
+    let flow_span = flow.meta.span;
+    let make_passthrough_body = |target: &str, origin: AstOrigin| -> Block {
         let fields = flow
             .states
             .iter()
@@ -360,6 +469,7 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
                 payload
                     .iter()
                     .map(|f| RecordFieldExpr {
+                        meta: AstNodeMeta::inherited(flow_span, origin),
                         name: f.name.clone(),
                         value: Expr::Field(
                             Box::new(Expr::Ident("self".to_string())),
@@ -369,10 +479,14 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        vec![Stmt::Return(Some(Expr::Record {
-            ty: Some(target.to_string()),
-            fields,
-        }))]
+        vec![generated_stmt(
+            Stmt::Return(Some(Expr::Record {
+                ty: Some(target.to_string()),
+                fields,
+            })),
+            origin,
+            flow.meta.span,
+        )]
     };
 
     // T-H12: only auto-inject enter/exit when Active and FFI_Pinned share a
@@ -406,13 +520,17 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
         .iter()
         .any(|t| t.name == "enter_ffi" && t.from_state == active);
     if !has_enter && payloads_compatible {
+        let origin = AstOrigin::RuntimeSystem("flow.ffi.enter");
         flow.transitions.push(TransitionDef {
+            meta: flow_generated_meta(flow, origin),
             name: "enter_ffi".to_string(),
             from_state: active.clone(),
             params: vec![],
             to_states: vec!["FFI_Pinned".to_string()],
-            body: Some(make_passthrough_body("FFI_Pinned")),
-            pos: flow.pos,
+            body: Some(make_passthrough_body(
+                "FFI_Pinned",
+                AstOrigin::RuntimeSystem("flow.ffi.enter"),
+            )),
             is_fallback: false,
             is_ffi_pinned: true,
         });
@@ -424,13 +542,17 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
         .iter()
         .any(|t| t.name == "exit_ffi" && t.from_state == "FFI_Pinned");
     if !has_exit && payloads_compatible {
+        let origin = AstOrigin::RuntimeSystem("flow.ffi.exit");
         flow.transitions.push(TransitionDef {
+            meta: flow_generated_meta(flow, origin),
             name: "exit_ffi".to_string(),
             from_state: "FFI_Pinned".to_string(),
             params: vec![],
             to_states: vec![active.clone()],
-            body: Some(make_passthrough_body(&active)),
-            pos: flow.pos,
+            body: Some(make_passthrough_body(
+                &active,
+                AstOrigin::RuntimeSystem("flow.ffi.exit"),
+            )),
             is_fallback: false,
             is_ffi_pinned: true,
         });
@@ -442,14 +564,21 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
         .iter()
         .any(|t| t.name == "ffi_crash" && t.from_state == "FFI_Pinned");
     if !has_crash {
-        let body = fault_return_body(flow, "FFI_Pinned", "ffi_crash", shapes);
+        let body = fault_return_body(
+            flow,
+            "FFI_Pinned",
+            "ffi_crash",
+            shapes,
+            AstOrigin::RuntimeSystem("flow.ffi.crash"),
+        );
+        let origin = AstOrigin::RuntimeSystem("flow.ffi.crash");
         flow.transitions.push(TransitionDef {
+            meta: flow_generated_meta(flow, origin),
             name: "ffi_crash".to_string(),
             from_state: "FFI_Pinned".to_string(),
             params: vec![],
             to_states: vec!["Fault".to_string()],
             body: Some(body),
-            pos: flow.pos,
             is_fallback: true,
             is_ffi_pinned: true,
         });
@@ -470,14 +599,21 @@ fn inject_system_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>)
 
     if !has_reset {
         // reset: rebuild root from type defaults (SystemTrace destroyed by not copying).
-        let body = rebuild_root_body(flow, &root, false, shapes);
+        let body = rebuild_root_body(
+            flow,
+            &root,
+            false,
+            shapes,
+            AstOrigin::RuntimeSystem("flow.reset"),
+        );
+        let origin = AstOrigin::RuntimeSystem("flow.reset");
         flow.transitions.push(TransitionDef {
+            meta: flow_generated_meta(flow, origin),
             name: "reset".to_string(),
             from_state: "Fault".to_string(),
             params: vec![],
             to_states: vec![root.clone()],
             body: Some(body),
-            pos: flow.pos,
             is_fallback: true,
             is_ffi_pinned: false,
         });
@@ -490,14 +626,21 @@ fn inject_system_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>)
         // dirtied mid-turn (`persistent_dirty_for_recover`); that path needs a
         // live WAL snapshot which only the interpreter maintains.
         let keep = !flow.persistent_fields.is_empty();
-        let body = rebuild_root_body(flow, &root, keep, shapes);
+        let body = rebuild_root_body(
+            flow,
+            &root,
+            keep,
+            shapes,
+            AstOrigin::RuntimeSystem("flow.recover"),
+        );
+        let origin = AstOrigin::RuntimeSystem("flow.recover");
         flow.transitions.push(TransitionDef {
+            meta: flow_generated_meta(flow, origin),
             name: "recover".to_string(),
             from_state: "Fault".to_string(),
             params: vec![],
             to_states: vec![root],
             body: Some(body),
-            pos: flow.pos,
             is_fallback: true,
             is_ffi_pinned: false,
         });
@@ -520,26 +663,31 @@ fn inject_system_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>)
 /// structured view for user `match self.trace` recovery paths.
 fn ensure_fault_state(flow: &mut FlowDef) {
     if !flow.states.iter().any(|s| s.name == "Fault") {
+        let origin = AstOrigin::RuntimeSystem("flow.fault_state");
+        let meta = flow_generated_meta(flow, origin);
         flow.states.push(StateDef {
+            meta,
             name: "Fault".to_string(),
-            pos: flow.pos,
-            origin: AstOrigin::RuntimeSystem,
             payload: Some(vec![
                 Field {
+                    meta,
                     name: "last_state".to_string(),
-                    ty: Type::Name("string".to_string(), vec![]),
+                    ty: Type::Name("string".to_string(), vec![]).deep_reorigin(meta),
                 },
                 Field {
+                    meta,
                     name: "unexpected_event".to_string(),
-                    ty: Type::Name("string".to_string(), vec![]),
+                    ty: Type::Name("string".to_string(), vec![]).deep_reorigin(meta),
                 },
                 Field {
+                    meta,
                     name: "snapshot".to_string(),
-                    ty: Type::Name("string".to_string(), vec![]),
+                    ty: Type::Name("string".to_string(), vec![]).deep_reorigin(meta),
                 },
                 Field {
+                    meta,
                     name: "trace".to_string(),
-                    ty: Type::Name("SystemTrace".to_string(), vec![]),
+                    ty: Type::Name("SystemTrace".to_string(), vec![]).deep_reorigin(meta),
                 },
             ]),
         });
@@ -568,11 +716,16 @@ fn attach_persistent_shadows(flow: &mut FlowDef) {
         Some(s) => s,
         None => return,
     };
+    let fault_span = fault.meta.span;
     let payload = fault.payload.get_or_insert_with(Vec::new);
     for name in &flow.persistent_fields {
         if payload.iter().any(|f| &f.name == name) {
             continue;
         }
+        let meta = AstNodeMeta::inherited(
+            fault_span,
+            AstOrigin::RuntimeSystem("flow.persistent_shadow"),
+        );
         let ty = types
             .get(name)
             .cloned()
@@ -587,8 +740,10 @@ fn attach_persistent_shadows(flow: &mut FlowDef) {
                     name
                 );
                 Type::Name("unit".to_string(), vec![])
-            });
+            })
+            .deep_reorigin(meta);
         payload.push(Field {
+            meta,
             name: name.clone(),
             ty,
         });
@@ -602,28 +757,34 @@ pub fn system_trace_expr(from_state: &str, event: &str, snapshot: &str) -> Expr 
         ty: Some("SystemTrace".to_string()),
         fields: vec![
             RecordFieldExpr {
+                meta: generated_record_meta("flow.system_trace.last_state"),
                 name: "last_state_name".to_string(),
                 value: Expr::Literal(Lit::String(from_state.to_string())),
             },
             RecordFieldExpr {
+                meta: generated_record_meta("flow.system_trace.unexpected_event"),
                 name: "unexpected_event".to_string(),
                 value: Expr::Literal(Lit::String(event.to_string())),
             },
             RecordFieldExpr {
+                meta: generated_record_meta("flow.system_trace.snapshot"),
                 name: "snapshot".to_string(),
                 value: Expr::Literal(Lit::String(snapshot.to_string())),
             },
             // v0.29.39: MemoryDump
             RecordFieldExpr {
+                meta: generated_record_meta("flow.system_trace.memory_dump"),
                 name: "memory_dump".to_string(),
                 value: Expr::Record {
                     ty: Some("MemoryDump".to_string()),
                     fields: vec![
                         RecordFieldExpr {
+                            meta: generated_record_meta("flow.memory_dump.fields"),
                             name: "fields".to_string(),
                             value: Expr::Literal(Lit::String(String::new())),
                         },
                         RecordFieldExpr {
+                            meta: generated_record_meta("flow.memory_dump.count"),
                             name: "count".to_string(),
                             value: Expr::Literal(Lit::Int(0)),
                         },
@@ -632,23 +793,28 @@ pub fn system_trace_expr(from_state: &str, event: &str, snapshot: &str) -> Expr 
             },
             // v0.29.39: PanicPayload
             RecordFieldExpr {
+                meta: generated_record_meta("flow.system_trace.panic_payload"),
                 name: "panic_payload".to_string(),
                 value: Expr::Record {
                     ty: Some("PanicPayload".to_string()),
                     fields: vec![
                         RecordFieldExpr {
+                            meta: generated_record_meta("flow.panic_payload.error_type"),
                             name: "error_type".to_string(),
                             value: Expr::Literal(Lit::String(event.to_string())),
                         },
                         RecordFieldExpr {
+                            meta: generated_record_meta("flow.panic_payload.file"),
                             name: "file".to_string(),
                             value: Expr::Literal(Lit::String(String::new())),
                         },
                         RecordFieldExpr {
+                            meta: generated_record_meta("flow.panic_payload.line"),
                             name: "line".to_string(),
                             value: Expr::Literal(Lit::Int(0)),
                         },
                         RecordFieldExpr {
+                            meta: generated_record_meta("flow.panic_payload.stack"),
                             name: "stack".to_string(),
                             value: Expr::Literal(Lit::String(snapshot.to_string())),
                         },
@@ -666,6 +832,7 @@ fn fault_return_body(
     from_state: &str,
     event: &str,
     shapes: &HashMap<String, Vec<Field>>,
+    origin: AstOrigin,
 ) -> Block {
     // M1-fix: When Fault→Fault (i.e. the Fault state receives another event),
     // preserve the existing SystemTrace by reading from self.trace instead
@@ -708,6 +875,7 @@ fn fault_return_body(
                         default_field_value(&f.name, &f.ty, from_state, event, &snapshot, shapes)
                     };
                     RecordFieldExpr {
+                        meta: flow_generated_meta(flow, origin),
                         name: f.name.clone(),
                         value,
                     }
@@ -716,10 +884,14 @@ fn fault_return_body(
         })
         .unwrap_or_default();
 
-    vec![Stmt::Return(Some(Expr::Record {
-        ty: Some("Fault".to_string()),
-        fields,
-    }))]
+    vec![generated_stmt(
+        Stmt::Return(Some(Expr::Record {
+            ty: Some("Fault".to_string()),
+            fields,
+        })),
+        origin,
+        flow.meta.span,
+    )]
 }
 
 fn default_field_value(
@@ -743,7 +915,7 @@ fn default_field_value(
         }
         "trace" => {
             // Structured SystemTrace record (v0.29.12).
-            if matches!(ty, Type::Name(n, _) if n == "SystemTrace") {
+            if matches!(ty.unlocated(), Type::Name(n, _) if n == "SystemTrace") {
                 return system_trace_expr(from_state, event, snapshot);
             }
             // User-defined Fault { trace: string } — encode a compact reason.
@@ -751,15 +923,17 @@ fn default_field_value(
         }
         // v0.29.39: MemoryDump field in SystemTrace
         "memory_dump" => {
-            if matches!(ty, Type::Name(n, _) if n == "MemoryDump") {
+            if matches!(ty.unlocated(), Type::Name(n, _) if n == "MemoryDump") {
                 return Expr::Record {
                     ty: Some("MemoryDump".to_string()),
                     fields: vec![
                         RecordFieldExpr {
+                            meta: generated_record_meta("flow.memory_dump.fields"),
                             name: "fields".to_string(),
                             value: Expr::Literal(Lit::String(String::new())),
                         },
                         RecordFieldExpr {
+                            meta: generated_record_meta("flow.memory_dump.count"),
                             name: "count".to_string(),
                             value: Expr::Literal(Lit::Int(0)),
                         },
@@ -769,23 +943,27 @@ fn default_field_value(
         }
         // v0.29.39: PanicPayload field in SystemTrace
         "panic_payload" => {
-            if matches!(ty, Type::Name(n, _) if n == "PanicPayload") {
+            if matches!(ty.unlocated(), Type::Name(n, _) if n == "PanicPayload") {
                 return Expr::Record {
                     ty: Some("PanicPayload".to_string()),
                     fields: vec![
                         RecordFieldExpr {
+                            meta: generated_record_meta("flow.panic_payload.error_type"),
                             name: "error_type".to_string(),
                             value: Expr::Literal(Lit::String(event.to_string())),
                         },
                         RecordFieldExpr {
+                            meta: generated_record_meta("flow.panic_payload.file"),
                             name: "file".to_string(),
                             value: Expr::Literal(Lit::String(String::new())),
                         },
                         RecordFieldExpr {
+                            meta: generated_record_meta("flow.panic_payload.line"),
                             name: "line".to_string(),
                             value: Expr::Literal(Lit::Int(0)),
                         },
                         RecordFieldExpr {
+                            meta: generated_record_meta("flow.panic_payload.stack"),
                             name: "stack".to_string(),
                             value: Expr::Literal(Lit::String(snapshot.to_string())),
                         },
@@ -869,48 +1047,77 @@ pub fn make_peer_fault_value(peer_id: &str, reason: &str) -> crate::interp::Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::span::SourceId;
+
+    const TEST_SOURCE: SourceId = SourceId::new(41);
+
+    fn user_meta(line: usize) -> AstNodeMeta {
+        AstNodeMeta::new(
+            Span::single(line, 1).with_source(TEST_SOURCE),
+            AstOrigin::User,
+        )
+    }
+
+    fn nested_user_param() -> Param {
+        let meta = user_meta(4);
+        Param {
+            meta,
+            name: "items".into(),
+            ty: Type::Name(
+                "List".into(),
+                vec![
+                    Type::Option(Box::new(Type::Name("i32".into(), vec![]).with_meta(meta)))
+                        .with_meta(meta),
+                ],
+            )
+            .with_meta(meta),
+            mut_: false,
+            default_value: None,
+            borrow: None,
+        }
+    }
 
     fn sample_flow() -> FlowDef {
         FlowDef {
+            meta: user_meta(1),
             name: "Counter".to_string(),
-            pos: (1, 1),
-            origin: AstOrigin::User,
             pub_: false,
             generics: vec![],
             annotations: vec![],
             states: vec![
                 StateDef {
+                    meta: user_meta(2),
                     name: "Zero".to_string(),
-                    pos: (2, 1),
-                    origin: AstOrigin::User,
                     payload: Some(vec![Field {
+                        meta: user_meta(2),
                         name: "count".to_string(),
-                        ty: Type::Name("i32".to_string(), vec![]),
+                        ty: Type::Name("i32".to_string(), vec![]).with_meta(user_meta(2)),
                     }]),
                 },
                 StateDef {
+                    meta: user_meta(3),
                     name: "Positive".to_string(),
-                    pos: (3, 1),
-                    origin: AstOrigin::User,
                     payload: Some(vec![Field {
+                        meta: user_meta(3),
                         name: "count".to_string(),
-                        ty: Type::Name("i32".to_string(), vec![]),
+                        ty: Type::Name("i32".to_string(), vec![]).with_meta(user_meta(3)),
                     }]),
                 },
             ],
             transitions: vec![TransitionDef {
+                meta: user_meta(1),
                 name: "inc".to_string(),
                 from_state: "Zero".to_string(),
-                params: vec![],
+                params: vec![nested_user_param()],
                 to_states: vec!["Positive".to_string()],
                 body: Some(vec![Stmt::Return(Some(Expr::Record {
                     ty: Some("Positive".to_string()),
                     fields: vec![RecordFieldExpr {
+                        meta: user_meta(1),
                         name: "count".to_string(),
                         value: Expr::Literal(Lit::Int(1)),
                     }],
                 }))]),
-                pos: (1, 1),
                 is_fallback: false,
                 is_ffi_pinned: false,
             }],
@@ -953,21 +1160,151 @@ mod tests {
             .transitions
             .iter()
             .any(|t| !t.is_fallback && t.from_state == "Zero" && t.name == "inc"));
+
+        let matrix_fallback = flow
+            .transitions
+            .iter()
+            .find(|t| t.from_state == "Positive" && t.name == "inc")
+            .expect("matrix fallback");
+        let matrix_meta = matrix_fallback.body.as_ref().expect("body")[0]
+            .meta()
+            .expect("generated statement metadata");
+        assert_eq!(
+            matrix_meta.origin,
+            AstOrigin::PrototypeFallback("flow.matrix.fallback")
+        );
+        assert_eq!(matrix_meta.span, flow.meta.span);
+        assert_eq!(
+            matrix_fallback.meta.origin,
+            AstOrigin::PrototypeFallback("flow.matrix.fallback")
+        );
+        assert_eq!(matrix_fallback.meta.parent, AstParentHint::Enclosing);
+        let Stmt::Return(Some(matrix_value)) =
+            matrix_fallback.body.as_ref().unwrap()[0].unlocated()
+        else {
+            panic!("matrix fallback return")
+        };
+        assert_eq!(matrix_value.meta().unwrap().origin, matrix_meta.origin);
+        let generated_param = &matrix_fallback.params[0];
+        assert_eq!(generated_param.meta, matrix_fallback.meta);
+        assert_eq!(generated_param.ty.meta(), Some(matrix_fallback.meta));
+        let Type::Name(_, args) = generated_param.ty.unlocated() else {
+            panic!("generated list parameter")
+        };
+        assert_eq!(args[0].meta(), Some(matrix_fallback.meta));
+        let Type::Option(inner) = args[0].unlocated() else {
+            panic!("generated option parameter")
+        };
+        assert_eq!(inner.meta(), Some(matrix_fallback.meta));
+
+        let user_transition = flow
+            .transitions
+            .iter()
+            .find(|t| t.from_state == "Zero" && t.name == "inc")
+            .expect("user transition");
+        assert_eq!(user_transition.params[0].meta.origin, AstOrigin::User);
+        assert_eq!(
+            user_transition.params[0].ty.meta().unwrap().origin,
+            AstOrigin::User
+        );
+
+        let reset = flow
+            .transitions
+            .iter()
+            .find(|t| t.from_state == "Fault" && t.name == "reset")
+            .expect("reset transition");
+        let reset_meta = reset.body.as_ref().expect("reset body")[0]
+            .meta()
+            .expect("generated statement metadata");
+        assert_eq!(reset_meta.origin, AstOrigin::RuntimeSystem("flow.reset"));
+        assert_eq!(reset_meta.span, flow.meta.span);
+        assert_eq!(reset.meta.origin, AstOrigin::RuntimeSystem("flow.reset"));
+        let Stmt::Return(Some(reset_value)) = reset.body.as_ref().unwrap()[0].unlocated() else {
+            panic!("reset return")
+        };
+        assert_eq!(reset_value.meta().unwrap().origin, reset_meta.origin);
+
+        let fault = flow
+            .states
+            .iter()
+            .find(|state| state.name == "Fault")
+            .expect("generated Fault state");
+        assert_eq!(fault.meta.parent, AstParentHint::Enclosing);
+        for field in fault
+            .payload
+            .as_ref()
+            .expect("Fault payload")
+            .iter()
+            .take(4)
+        {
+            assert_eq!(field.meta, fault.meta);
+            assert_eq!(field.ty.meta(), Some(fault.meta));
+            assert_eq!(field.ty.meta().unwrap().span.source_id, TEST_SOURCE);
+            assert_eq!(
+                field.ty.meta().unwrap().origin.rule(),
+                Some("flow.fault_state")
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_shadow_types_are_generated_without_retagging_user_types() {
+        let mut flow = sample_flow();
+        flow.persistent_fields = vec!["count".into(), "missing".into()];
+        expand_flow(&mut flow);
+
+        let fault = flow
+            .states
+            .iter()
+            .find(|state| state.name == "Fault")
+            .expect("Fault state");
+        for name in ["count", "missing"] {
+            let field = fault
+                .payload
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|field| field.name == name)
+                .expect("persistent shadow");
+            assert_eq!(field.ty.meta(), Some(field.meta));
+            assert_eq!(field.meta.span, fault.meta.span);
+            assert_eq!(
+                field.meta.origin,
+                AstOrigin::RuntimeSystem("flow.persistent_shadow")
+            );
+        }
+
+        let missing = fault
+            .payload
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|field| field.name == "missing")
+            .unwrap();
+        assert!(
+            matches!(missing.ty.unlocated(), Type::Name(name, args) if name == "unit" && args.is_empty())
+        );
+
+        let user_count = &flow.states[0].payload.as_ref().unwrap()[0];
+        assert_eq!(user_count.meta.origin, AstOrigin::User);
+        assert_eq!(user_count.ty.meta().unwrap().origin, AstOrigin::User);
+        assert_eq!(user_count.ty.meta().unwrap().span, user_meta(2).span);
     }
 
     #[test]
     fn does_not_override_user_fault_transition() {
         let mut flow = sample_flow();
         flow.states.push(StateDef {
+            meta: user_meta(1),
             name: "Fault".to_string(),
-            pos: flow.pos,
-            origin: AstOrigin::User,
             payload: Some(vec![Field {
+                meta: user_meta(1),
                 name: "trace".to_string(),
-                ty: Type::Name("string".to_string(), vec![]),
+                ty: Type::Name("string".to_string(), vec![]).with_meta(user_meta(1)),
             }]),
         });
         flow.transitions.push(TransitionDef {
+            meta: user_meta(2),
             name: "inc".to_string(),
             from_state: "Positive".to_string(),
             params: vec![],
@@ -975,11 +1312,11 @@ mod tests {
             body: Some(vec![Stmt::Return(Some(Expr::Record {
                 ty: Some("Fault".to_string()),
                 fields: vec![RecordFieldExpr {
+                    meta: user_meta(2),
                     name: "trace".to_string(),
                     value: Expr::Literal(Lit::String("user".into())),
                 }],
             }))]),
-            pos: (2, 1),
             is_fallback: false,
             is_ffi_pinned: false,
         });

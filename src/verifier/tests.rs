@@ -12,6 +12,65 @@ macro_rules! require_z3 {
 }
 
 #[test]
+fn verifier_memory_sources_are_stable_registered_and_label_isolated() {
+    let source = "func main() -> i32 { let value = 1; value }";
+    let first = parse_memory_source(source, "contracts").expect("first parse");
+    let second = parse_memory_source(source, "contracts").expect("second parse");
+    let other = parse_memory_source(source, "other-file").expect("other parse");
+
+    let first_func = first
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Func(function) if function.name == "main" => Some(function),
+            _ => None,
+        })
+        .expect("main function");
+    assert!(first_func.meta.span.source_id.is_known());
+    assert!(first
+        .sources
+        .record(first_func.meta.span.source_id)
+        .is_some());
+
+    let source_key = |file: &File| {
+        let source_id = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Func(function) => Some(function.meta.span.source_id),
+                _ => None,
+            })
+            .expect("function source");
+        file.sources
+            .key(source_id)
+            .expect("registered source key")
+            .as_str()
+            .to_string()
+    };
+    assert_eq!(source_key(&first), source_key(&second));
+    assert_ne!(source_key(&first), source_key(&other));
+
+    let anonymous_ids = |file: &File| {
+        crate::core::check_program(file)
+            .expect("checked source")
+            .node_meta()
+            .keys()
+            .filter(|node_id| node_id.0.contains("/node:"))
+            .map(|node_id| node_id.0.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let first_ids = anonymous_ids(&first);
+    let second_ids = anonymous_ids(&second);
+    let other_ids = anonymous_ids(&other);
+    assert!(!first_ids.is_empty());
+    assert_eq!(first_ids, second_ids);
+    assert!(first_ids
+        .iter()
+        .all(|node_id| !node_id.contains("unknown-source")));
+    assert!(first_ids.is_disjoint(&other_ids));
+}
+
+#[test]
 fn verify_simple_pass() {
     require_z3!();
     let src = r#"
@@ -94,6 +153,7 @@ fn verify_body_satisfies_ensures() {
     let src = r#"
 func double(x: i32) -> i32 {
     requires: x >= 0
+    requires: x <= 1073741823
     ensures: result == x * 2
     x * 2
 }
@@ -346,6 +406,11 @@ func main() -> i64 { 0 }
         ext[0].message
     );
     assert!(ext[0].message.contains("unsatisfiable"));
+    let diagnostic = ext[0].diagnostic.as_ref().expect("extern diagnostic");
+    assert_eq!(diagnostic.span.start_line, 3);
+    assert_eq!(diagnostic.span.start_col, 5);
+    assert!(diagnostic.span.end_line >= diagnostic.span.start_line);
+    assert!(diagnostic.span.end_col > 0);
 }
 
 #[test]
@@ -588,6 +653,14 @@ func bad_caller(size: i64) -> i64 {
         VerifStatus::Failed,
         "read(-1, 0, size) should fail: fd is negative"
     );
+    let diagnostic = results[0]
+        .diagnostic
+        .as_ref()
+        .expect("extern call-site diagnostic");
+    assert_eq!(diagnostic.span.start_line, 7);
+    assert_eq!(diagnostic.span.start_col, 5);
+    assert_eq!(diagnostic.span.end_line, 7);
+    assert_eq!(diagnostic.span.end_col, 22);
 }
 
 #[test]
@@ -1076,6 +1149,32 @@ func main() -> i32 { 0 }
         "caller_bad should fail: {:?}",
         caller.unwrap()
     );
+}
+
+#[test]
+fn verify_callee_precondition_failure_has_diagnostic_span() {
+    require_z3!();
+    let src = r#"
+func positive(x: i32) -> i32 {
+    requires: x > 0
+    x
+}
+func caller() -> i32 {
+    positive(-1)
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("verify callee precondition");
+    let caller = results
+        .iter()
+        .find(|result| result.func_name == "caller")
+        .expect("caller result");
+    assert_eq!(caller.status, VerifStatus::Failed);
+    let diagnostic = caller.diagnostic.as_ref().expect("structured diagnostic");
+    assert_eq!(diagnostic.span.start_line, 7);
+    assert_eq!(diagnostic.span.start_col, 5);
+    assert_eq!(diagnostic.span.end_line, 7);
+    assert_eq!(diagnostic.span.end_col, 17);
 }
 
 #[test]
@@ -1901,10 +2000,7 @@ func f(x: i32) -> i32 {
 }
 func main() -> i32 { 0 }
 "#;
-    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
-    let file = crate::parser::Parser::new(tokens)
-        .parse_file()
-        .expect("parse");
+    let file = parse_memory_source(src, "ill-typed-test").expect("parse");
     let r = crate::core::check(&file);
     assert!(r.is_err(), "expected typecheck failure for ill-typed body");
 }

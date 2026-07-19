@@ -311,7 +311,7 @@ impl PyBindGenerator {
     }
 
     fn mimi_type_to_python_field(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" | "i64" => "int".to_string(),
                 "f64" => "float".to_string(),
@@ -463,7 +463,7 @@ impl PyBindGenerator {
 
     fn callback_python_type(&self, param_types: &[Type], ret_type: &Type) -> String {
         let args: Vec<String> = param_types.iter().map(|_| "int".to_string()).collect();
-        let ret = match ret_type {
+        let ret = match ret_type.unlocated() {
             Type::Name(name, _) if name == "f64" => "float".to_string(),
             Type::Name(name, _) if name == "unit" => "None".to_string(),
             _ => "int".to_string(),
@@ -489,7 +489,7 @@ impl PyBindGenerator {
     fn callback_c_type(&self, ty: &Type) -> String {
         // Use the original Mimi scalar widths so generated C trampolines match
         // the function-pointer ABI expected by the compiled extern function.
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) if name == "i32" => "int32_t".to_string(),
             Type::Name(name, _) if name == "i64" => "int64_t".to_string(),
             Type::Name(name, _) if name == "f64" => "double".to_string(),
@@ -500,7 +500,7 @@ impl PyBindGenerator {
     }
 
     fn callback_default_ret(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) if name == "f64" => "0.0".to_string(),
             Type::Name(name, _) if name == "unit" => "".to_string(),
             _ => "0".to_string(),
@@ -523,7 +523,7 @@ impl PyBindGenerator {
     // ---- Type mapping helpers ----
 
     fn mimi_type_to_cpp(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => "int32_t".to_string(),
                 "i64" => "int64_t".to_string(),
@@ -723,19 +723,26 @@ target_link_libraries({module_name} PRIVATE ${{MIMI_RUNTIME_LIB}})
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{ExternFunc, ExternParam, Type};
+    use crate::ast::{AstNodeMeta, AstOrigin, ExternFunc, ExternParam, Type};
+
+    fn fixture_meta() -> AstNodeMeta {
+        AstNodeMeta::synthetic(AstOrigin::RuntimeSystem("test.ffi_fixture"))
+    }
 
     fn sample_funcs() -> Vec<ExternFunc> {
         vec![
             ExternFunc {
+                meta: fixture_meta(),
                 name: "mimi_add".to_string(),
                 params: vec![
                     ExternParam {
+                        meta: fixture_meta(),
                         name: "a".to_string(),
                         ty: Type::Name("i64".into(), Vec::new()),
                         cap_mode: None,
                     },
                     ExternParam {
+                        meta: fixture_meta(),
                         name: "b".to_string(),
                         ty: Type::Name("i64".into(), Vec::new()),
                         cap_mode: None,
@@ -748,8 +755,10 @@ mod tests {
                 no_panic: false,
             },
             ExternFunc {
+                meta: fixture_meta(),
                 name: "mimi_greet".to_string(),
                 params: vec![ExternParam {
+                    meta: fixture_meta(),
                     name: "name".to_string(),
                     ty: Type::Name("string".into(), Vec::new()),
                     cap_mode: None,

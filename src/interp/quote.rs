@@ -13,10 +13,10 @@ impl<'a> Interpreter<'a> {
 
     /// Convert a single statement into a quoted AST (None for desc/rule/etc)
     fn quote_stmt(&mut self, stmt: &Stmt) -> Result<Option<QuotedAst>, InterpError> {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Let { pat, init, .. } => {
-                let name = match pat {
-                    Pattern::Variable(n) => n.clone(),
+                let name = match &pat.kind {
+                    PatternKind::Variable(n) => n.clone(),
                     _ => return Ok(None),
                 };
                 let value = if let Some(e) = init {
@@ -120,12 +120,13 @@ impl<'a> Interpreter<'a> {
             | Stmt::Do(_)
             | Stmt::Delegate { .. }
             | Stmt::Pinned { .. } => Ok(None),
+            Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
         }
     }
 
     /// Convert an expression into a quoted AST
     fn quote_expr(&mut self, expr: &Expr) -> Result<QuotedAst, InterpError> {
-        match expr {
+        match expr.unlocated() {
             Expr::Literal(l) => Ok(QuotedAst::Literal(l.clone())),
             Expr::Ident(name) => Ok(QuotedAst::Ident(name.clone())),
             Expr::Binary(op, l, r) => Ok(QuotedAst::Binary(
@@ -349,6 +350,7 @@ impl<'a> Interpreter<'a> {
                 Box::new(self.quote_expr(inner)?),
                 target_type.clone(),
             )),
+            Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
         }
     }
 

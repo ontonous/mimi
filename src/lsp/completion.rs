@@ -543,13 +543,15 @@ impl LspServer {
             if let Item::Func(f) = item {
                 for stmt in &f.body {
                     if let Stmt::Let {
-                        pat: crate::ast::Pattern::Variable(name),
-                        ty: Some(Type::Name(type_name, _)),
-                        ..
-                    } = stmt
+                        pat, ty: Some(ty), ..
+                    } = stmt.unlocated()
                     {
-                        if name == target {
-                            return Some(type_name.clone());
+                        if let Type::Name(type_name, _) = ty.unlocated() {
+                            if let crate::ast::PatternKind::Variable(name) = &pat.kind {
+                                if name == target {
+                                    return Some(type_name.clone());
+                                }
+                            }
                         }
                     }
                 }

@@ -325,7 +325,7 @@ impl RustBindGenerator {
         // Match the original Mimi scalar widths in the extern "C" function-pointer ABI.
         let arg_types: Vec<String> = param_types
             .iter()
-            .map(|ty| match ty {
+            .map(|ty| match ty.unlocated() {
                 Type::Name(name, _) if name == "i32" => "i32".to_string(),
                 Type::Name(name, _) if name == "i64" => "i64".to_string(),
                 Type::Name(name, _) if name == "f64" => "f64".to_string(),
@@ -333,7 +333,7 @@ impl RustBindGenerator {
                 _ => "c_longlong".to_string(),
             })
             .collect();
-        let ret = match ret_type {
+        let ret = match ret_type.unlocated() {
             Type::Name(name, _) if name == "i32" => "i32".to_string(),
             Type::Name(name, _) if name == "i64" => "i64".to_string(),
             Type::Name(name, _) if name == "f64" => "f64".to_string(),
@@ -402,7 +402,7 @@ impl RustBindGenerator {
 
     /// Map a Mimi type used inside a #[repr(C)] record field to a Rust type.
     fn mimi_type_to_rust_field(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => "i32".to_string(),
                 "i64" => "i64".to_string(),

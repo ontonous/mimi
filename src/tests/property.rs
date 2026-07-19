@@ -95,7 +95,7 @@ proptest! {
         // Infer should NOT be compatible with non-Infer types (except the "unknown" placeholder
         // and Newtype(_, Infer) which is transparently equivalent to Infer, recursively).
         fn is_infer_like(ty: &Type) -> bool {
-            match ty {
+            match ty.unlocated() {
                 Type::Infer => true,
                 Type::Name(n, _) if n == "unknown" => true,
                 Type::Newtype(_, inner) => is_infer_like(inner),
@@ -113,7 +113,7 @@ proptest! {
         let unknown = Type::Name("unknown".into(), vec![]);
         /// Check if a type is effectively "unknown" (including through Newtype transparency)
         fn is_unknown_like(ty: &Type) -> bool {
-            match ty {
+            match ty.unlocated() {
                 Type::Name(n, _) if n == "unknown" => true,
                 Type::Newtype(_, inner) => is_unknown_like(inner),
                 _ => false,

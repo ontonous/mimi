@@ -5232,7 +5232,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     &v.payload,
                     Some(crate::ast::VariantPayload::Tuple(ts))
                         if ts.len() == 1
-                            && matches!(&ts[0], crate::ast::Type::Name(n, _) if n == "string")
+                            && matches!(ts[0].unlocated(), crate::ast::Type::Name(n, _) if n == "string")
                 );
                 if is_str_payload {
                     let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -5385,7 +5385,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .get_field_type_at_index(*i as u32)
                 .ok_or_else(|| CompileError::LlvmError("missing field".into()))?;
             let field_val = self.build_load(ft, gep, &format!("disp_{}", field.name))?;
-            match &field.ty {
+            match field.ty.unlocated() {
                 crate::ast::Type::Name(n, _) if n == "string" => {
                     fmt.push_str(&format!("{}: %s", field.name));
                     let sv = field_val.into_struct_value();

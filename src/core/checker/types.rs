@@ -1,7 +1,6 @@
 use crate::ast::*;
 use crate::core::helpers::*;
 use crate::diagnostic::Diagnostic;
-use crate::span::Span;
 use std::collections::HashMap;
 
 use super::Checker;
@@ -9,6 +8,7 @@ use super::Checker;
 impl<'a> Checker<'a> {
     pub(crate) fn resolve_type(&self, ty: &Type) -> Type {
         match ty {
+            Type::Located { meta, ty } => self.resolve_type(ty).with_meta(*meta),
             Type::Name(name, args) => {
                 if let Some(aliased) = self.aliases.get(name) {
                     if let Some(generics) = self.type_generics.get(name) {
@@ -20,15 +20,14 @@ impl<'a> Checker<'a> {
                                 .map(|(g, a)| (g.name.clone(), a.clone()))
                                 .collect();
                             return subst_type_params(aliased, generics, &type_map);
-                        } else if args.is_empty() {
-                            // Bug-1 fix: when args is empty but generics exist, use unknown type
-                            // e.g., `type Foo[T] = List[T]; let x: Foo` should resolve to List[unknown]
-                            let type_map: HashMap<String, Type> = generics
-                                .iter()
-                                .map(|g| (g.name.clone(), Type::Name("unknown".into(), vec![])))
-                                .collect();
-                            return subst_type_params(aliased, generics, &type_map);
                         }
+                        // Arity is diagnosed by check_type_well_formed. Preserve
+                        // the invalid application so final resolution cannot
+                        // mistake an injected `unknown` for a concrete type.
+                        return Type::Name(
+                            name.clone(),
+                            args.iter().map(|arg| self.resolve_type(arg)).collect(),
+                        );
                     }
                     aliased.clone()
                 } else if let Some(inner_ty) = self.newtypes.get(name) {
@@ -81,14 +80,11 @@ impl<'a> Checker<'a> {
             Type::ImplTrait(traits) => Type::ImplTrait(traits.clone()),
             Type::DynTrait(traits) => Type::DynTrait(traits.clone()),
             Type::TypeVar(_) => {
-                // M4: release builds previously returned the unresolved TypeVar
-                // silently (debug_assert erased). Prefer Infer so later checks
-                // treat it as an escape hatch rather than a concrete type.
                 mimi_debug_assert!(
                     false,
                     "resolve_type: unexpected TypeVar — should have been unified"
                 );
-                Type::Infer
+                ty.clone()
             }
             Type::ForAll(params, body) => {
                 Type::ForAll(params.clone(), Box::new(self.resolve_type(body)))
@@ -100,6 +96,7 @@ impl<'a> Checker<'a> {
     /// extern function signature.
     pub(crate) fn is_valid_extern_type(&self, ty: &Type, _in_pointer: bool) -> bool {
         match ty {
+            Type::Located { ty, .. } => self.is_valid_extern_type(ty, _in_pointer),
             // Scalars and #[repr(C)] user types (Enum, Record, Union)
             Type::Name(name, _) => {
                 matches!(
@@ -208,10 +205,15 @@ impl<'a> Checker<'a> {
             return;
         }
         match ty {
+            Type::Located { meta, ty } => {
+                let previous_span = self.replace_span(Some(meta.span));
+                self.check_type_well_formed_inner(ty, context, allow_passport);
+                self.set_span(previous_span);
+            }
             Type::Name(name, args) => {
                 // SessionChan<S>: S must name a declared session (v0.29.19).
                 if name == "SessionChan" || name == "session_chan" {
-                    if let Some(Type::Name(s, _)) = args.first() {
+                    if let Some(Type::Name(s, _)) = args.first().map(Type::unlocated) {
                         if !self.session_types.contains_key(s) {
                             self.emit_code(
                                 crate::diagnostic::codes::E0413,
@@ -241,10 +243,25 @@ impl<'a> Checker<'a> {
                         Diagnostic::error_code(
                             crate::diagnostic::codes::E0407,
                             format!("unknown type '{}' in {}", name, context),
-                            Span::single(self.current_line, self.current_col),
+                            self.diagnostic_span(),
                         )
                         .with_help(help),
                     );
+                }
+                if let Some(generics) = self.type_generics.get(name) {
+                    if args.len() != generics.len() {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0231,
+                            format!(
+                                "type '{}' expects {} generic argument{}, found {} in {}",
+                                name,
+                                generics.len(),
+                                if generics.len() == 1 { "" } else { "s" },
+                                args.len(),
+                                context
+                            ),
+                        );
+                    }
                 }
                 for arg in args {
                     self.check_type_well_formed_inner(arg, context, allow_passport);
@@ -339,6 +356,7 @@ impl<'a> Checker<'a> {
     /// FFI boundary passport types.
     pub(crate) fn type_contains_passport(ty: &Type) -> bool {
         match ty {
+            Type::Located { ty, .. } => Self::type_contains_passport(ty),
             Type::RawPtr(_)
             | Type::RawPtrMut(_)
             | Type::CShared(_)
@@ -382,7 +400,7 @@ impl<'a> Checker<'a> {
             return true;
         }
         // Check user-defined trait implementations
-        match ty {
+        match ty.unlocated() {
             Type::Name(type_name, _) => self
                 .impls
                 .contains_key(&(trait_name.to_string(), type_name.clone())),
@@ -396,7 +414,7 @@ impl<'a> Checker<'a> {
             "Clone" => {
                 // All types in Mimi are cloneable via assignment copy
                 matches!(
-                    ty,
+                    ty.unlocated(),
                     Type::Name(_, _)
                         | Type::Tuple(_)
                         | Type::Option(_)
@@ -420,7 +438,7 @@ impl<'a> Checker<'a> {
 
     /// Check if a type is a primitive scalar (i32, i64, f64, bool, unit)
     fn type_is_primitive_scalar(&self, ty: &Type) -> bool {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => matches!(name.as_str(), "i32" | "i64" | "f64" | "bool" | "unit"),
             _ => false,
         }
@@ -428,7 +446,7 @@ impl<'a> Checker<'a> {
 
     /// Check if a type has a default value
     fn type_has_default(&self, ty: &Type) -> bool {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, args) => {
                 if matches!(
                     name.as_str(),
@@ -453,7 +471,7 @@ impl<'a> Checker<'a> {
 
     /// Check if a type supports equality comparison
     fn type_is_eq_comparable(&self, ty: &Type) -> bool {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => matches!(
                 name.as_str(),
                 "i32" | "i64" | "f64" | "bool" | "string" | "unit"

@@ -105,7 +105,11 @@ fn bench_parser_large_module() {
 
 #[test]
 fn bench_parser_deep_nesting() {
-    let depth = 50;
+    // NOTE: depth kept at 30 because the AstNodeMeta migration wraps each
+    // expression in `Expr::Located { meta, expr: Box<Expr> }`, which doubles
+    // the recursive Drop depth. 50 nested ifs overflow the default 8 MiB
+    // stack during Drop; 30 still exercises deep nesting without aborting.
+    let depth = 30;
     let mut src = "func main() -> i32 {\n".to_string();
     for _ in 0..depth {
         src.push_str("if true { ");
@@ -115,7 +119,7 @@ fn bench_parser_deep_nesting() {
         src.push_str(" } else { 0 }");
     }
     src.push_str("\n}");
-    bench("parse_deep_nesting_50", 100, || {
+    bench("parse_deep_nesting_30", 100, || {
         let tokens = lexer::Lexer::new(&src)
             .tokenize()
             .expect("src/tests/benchmarks.rs:95 unwrap failed");

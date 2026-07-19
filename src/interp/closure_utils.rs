@@ -19,7 +19,7 @@ pub(crate) fn collect_stmt_free_vars(
     free: &mut std::collections::HashSet<String>,
     local_bound: &mut std::collections::HashSet<String>,
 ) {
-    match stmt {
+    match stmt.unlocated() {
         Stmt::Let { pat, init, .. } => {
             if let Some(e) = init {
                 collect_expr_free_vars(e, bound, free);
@@ -90,7 +90,7 @@ pub(crate) fn collect_expr_free_vars(
     bound: &std::collections::HashSet<String>,
     free: &mut std::collections::HashSet<String>,
 ) {
-    match expr {
+    match expr.unlocated() {
         Expr::Ident(name) => {
             if !bound.contains(name) {
                 free.insert(name.clone());
@@ -239,16 +239,16 @@ pub(crate) fn collect_expr_free_vars(
 }
 
 pub(crate) fn collect_pattern_names(pat: &Pattern, names: &mut std::collections::HashSet<String>) {
-    match pat {
-        Pattern::Variable(name) => {
+    match &pat.kind {
+        PatternKind::Variable(name) => {
             names.insert(name.clone());
         }
-        Pattern::Tuple(pats) => {
+        PatternKind::Tuple(pats) => {
             for p in pats {
                 collect_pattern_names(p, names);
             }
         }
-        Pattern::Constructor(_, pats) => {
+        PatternKind::Constructor(_, pats) => {
             for (_, p) in pats {
                 collect_pattern_names(p, names);
             }

@@ -95,14 +95,14 @@ impl VerifierCtx {
         let returns_real = func
             .ret
             .as_ref()
-            .is_some_and(|t| matches!(t, Type::Name(n, _) if n == "f64"));
+            .is_some_and(|t| matches!(t.unlocated(), Type::Name(n, _) if n == "f64"));
 
         let mut vars = Z3VarMap::new();
 
         for p in &func.params {
-            if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
+            if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "f64") {
                 vars.insert_real(p.name.as_str(), Z3Real::new_const(p.name.as_str()));
-            } else if matches!(&p.ty, Type::Name(n, _) if n == "string") {
+            } else if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "string") {
                 // V-H5: strings get dedicated string vars (plus length/nonempty).
                 vars.insert_string_var(p.name.as_str(), Z3String::new_const(p.name.as_str()));
                 vars.insert_string_nonempty(
@@ -113,7 +113,7 @@ impl VerifierCtx {
                     p.name.as_str(),
                     Z3Int::new_const(format!("{}_len", p.name)),
                 );
-            } else if matches!(&p.ty, Type::Name(n, _) if n == "bool" || n == "Bool") {
+            } else if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "bool" || n == "Bool") {
                 // V-H5: bools are Z3 Bool, not opaque Int.
                 vars.insert_bool(p.name.as_str(), Z3Bool::new_const(p.name.as_str()));
             } else {
@@ -151,10 +151,9 @@ impl VerifierCtx {
                 status: VerifStatus::Failed,
                 message: "preconditions are unsatisfiable".into(),
                 diagnostic: Some(
-                    // ExternFunc lacks a pos field; add one to AST for proper span propagation
                     Diagnostic::error(
                         format!("extern function '{}' has unsatisfiable requires", func.name),
-                        Span::single(0, 0),
+                        func.meta.span,
                     )
                     .with_help("check that your requires conditions can actually be satisfied"),
                 ),
@@ -261,18 +260,33 @@ impl VerifierCtx {
         let mut parse_errors: Vec<String> = Vec::new();
 
         for stmt in &func.body {
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::Requires(expr, span) => {
                     requires_exprs.push(expr.clone());
-                    requires_spans.push(*span);
+                    requires_spans.push(
+                        expr.meta()
+                            .map(|meta| meta.span)
+                            .or_else(|| stmt.meta().map(|meta| meta.span))
+                            .unwrap_or(*span),
+                    );
                 }
                 Stmt::Ensures(expr, span) => {
                     ensures_exprs.push(expr.clone());
-                    ensures_spans.push(*span);
+                    ensures_spans.push(
+                        expr.meta()
+                            .map(|meta| meta.span)
+                            .or_else(|| stmt.meta().map(|meta| meta.span))
+                            .unwrap_or(*span),
+                    );
                 }
                 Stmt::Invariant(expr, span) => {
                     invariant_exprs.push(expr.clone());
-                    invariant_spans.push(*span);
+                    invariant_spans.push(
+                        expr.meta()
+                            .map(|meta| meta.span)
+                            .or_else(|| stmt.meta().map(|meta| meta.span))
+                            .unwrap_or(*span),
+                    );
                 }
                 Stmt::Math(exprs) => math_exprs.extend(exprs.clone()),
                 // MmsBlock is a super-comment; contracts must use top-level
@@ -288,7 +302,7 @@ impl VerifierCtx {
             // solver context.
             let mut vars = Z3VarMap::new();
             for p in &func.params {
-                if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
+                if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "f64") {
                     vars.insert_real(p.name.as_str(), z3::ast::Real::new_const(p.name.as_str()));
                 } else {
                     vars.insert_int(p.name.as_str(), z3::ast::Int::new_const(p.name.as_str()));
@@ -309,12 +323,12 @@ impl VerifierCtx {
                 &mut call_site_errors,
             );
             if !call_site_errors.is_empty() {
-                let (_, msg, _) = &call_site_errors[0];
+                let (_, msg, span) = &call_site_errors[0];
                 return VerificationResult {
                     func_name: func.name.clone(),
                     status: VerifStatus::Failed,
                     message: msg.clone(),
-                    diagnostic: None,
+                    diagnostic: Some(Diagnostic::error(msg.clone(), *span)),
                     duration_us: start.elapsed().as_micros() as u64,
                     constraint_count: 0,
                 };
@@ -337,23 +351,22 @@ impl VerifierCtx {
         let returns_real = func
             .ret
             .as_ref()
-            .is_some_and(|t| matches!(t, Type::Name(n, _) if n == "f64"));
-        let returns_bool = func
-            .ret
-            .as_ref()
-            .is_some_and(|t| matches!(t, Type::Name(n, _) if n == "bool" || n == "Bool"));
+            .is_some_and(|t| matches!(t.unlocated(), Type::Name(n, _) if n == "f64"));
+        let returns_bool = func.ret.as_ref().is_some_and(
+            |t| matches!(t.unlocated(), Type::Name(n, _) if n == "bool" || n == "Bool"),
+        );
         let returns_i32 = func
             .ret
             .as_ref()
-            .is_some_and(|t| matches!(t, Type::Name(n, _) if n == "i32" || n == "Int"));
+            .is_some_and(|t| matches!(t.unlocated(), Type::Name(n, _) if n == "i32" || n == "Int"));
 
         let mut vars = Z3VarMap::new();
         let mut old_names: Vec<String> = Vec::with_capacity(func.params.len());
 
         for p in &func.params {
-            if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
+            if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "f64") {
                 vars.insert_real(p.name.as_str(), Z3Real::new_const(p.name.as_str()));
-            } else if matches!(&p.ty, Type::Name(n, _) if n == "string") {
+            } else if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "string") {
                 // V-H5: strings use dedicated string vars (not opaque Int).
                 vars.insert_string_nonempty(
                     p.name.as_str(),
@@ -364,10 +377,11 @@ impl VerifierCtx {
                     Z3Int::new_const(format!("{}_len", p.name)),
                 );
                 vars.insert_string_var(p.name.as_str(), Z3String::new_const(p.name.as_str()));
-            } else if matches!(&p.ty, Type::Name(n, _) if n == "bool" || n == "Bool") {
+            } else if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "bool" || n == "Bool") {
                 // V-H5: bools are Z3 Bool.
                 vars.insert_bool(p.name.as_str(), Z3Bool::new_const(p.name.as_str()));
-            } else if matches!(&p.ty, Type::Name(n, args) if n == "List" && !args.is_empty()) {
+            } else if matches!(p.ty.unlocated(), Type::Name(n, args) if n == "List" && !args.is_empty())
+            {
                 // List parameters get a length variable for modeling sort() etc.
                 vars.insert_int(p.name.as_str(), Z3Int::new_const(p.name.as_str()));
                 let len_var = Z3Int::new_const(format!("{}_len", p.name));
@@ -382,7 +396,7 @@ impl VerifierCtx {
                 vars.insert_int(p.name.as_str(), iv.clone());
                 // V-H4 (partial): constrain i32 params to machine range so
                 // unbounded Z3 Int does not prove false modular properties.
-                if matches!(&p.ty, Type::Name(n, _) if n == "i32" || n == "Int") {
+                if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "i32" || n == "Int") {
                     let lo = Z3Int::from_i64(i32::MIN as i64);
                     let hi = Z3Int::from_i64(i32::MAX as i64);
                     session.solver.assert(iv.ge(&lo));
@@ -411,18 +425,19 @@ impl VerifierCtx {
 
         for (i, p) in func.params.iter().enumerate() {
             let old_name = old_names[i].as_str();
-            if matches!(&p.ty, Type::Name(n, _) if n == "f64") {
+            if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "f64") {
                 vars.insert_real(old_name, Z3Real::new_const(old_name));
-            } else if matches!(&p.ty, Type::Name(n, _) if n == "string") {
+            } else if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "string") {
                 vars.insert_string_nonempty(
                     old_name,
                     Z3Bool::new_const(format!("{}_ne", old_name)),
                 );
                 vars.insert_string_len(old_name, Z3Int::new_const(format!("{}_len", old_name)));
                 vars.insert_string_var(old_name, Z3String::new_const(old_name));
-            } else if matches!(&p.ty, Type::Name(n, _) if n == "bool" || n == "Bool") {
+            } else if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "bool" || n == "Bool") {
                 vars.insert_bool(old_name, Z3Bool::new_const(old_name));
-            } else if matches!(&p.ty, Type::Name(n, args) if n == "List" && !args.is_empty()) {
+            } else if matches!(p.ty.unlocated(), Type::Name(n, args) if n == "List" && !args.is_empty())
+            {
                 vars.insert_int(old_name, Z3Int::new_const(old_name));
                 let old_len_var = Z3Int::new_const(format!("{}_len", old_name));
                 let zero = Z3Int::from_i64(0);
@@ -437,7 +452,7 @@ impl VerifierCtx {
         // integer-encoded string_len/string_nonempty variables.
         // This ensures that s.length() == string_len[s] and (s != "") == string_nonempty[s].
         for p in &func.params {
-            if matches!(&p.ty, Type::Name(n, _) if n == "string") {
+            if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "string") {
                 if let Some(z3_s) = vars.get_string_var(p.name.as_str()) {
                     if let Some(len_var) = vars.get_string_len(p.name.as_str()) {
                         session.assert(z3_s.length().eq(len_var));
@@ -454,7 +469,7 @@ impl VerifierCtx {
         }
         // Same for old_* snapshots
         for (i, p) in func.params.iter().enumerate() {
-            if matches!(&p.ty, Type::Name(n, _) if n == "string") {
+            if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "string") {
                 let old_name = old_names[i].as_str();
                 if let Some(z3_s) = vars.get_string_var(old_name) {
                     if let Some(len_var) = vars.get_string_len(old_name) {
@@ -514,7 +529,10 @@ impl VerifierCtx {
                         diagnostic: Some(
                             Diagnostic::error(
                                 format!("unproven math obligation in '{}'", func.name),
-                                Span::single(func.pos.0, func.pos.1),
+                                math
+                                    .meta()
+                                    .map(|meta| meta.span)
+                                    .unwrap_or(func.meta.span),
                             )
                             .with_help(
                                 "add the necessary requires condition or weaken the math obligation",
@@ -592,7 +610,9 @@ impl VerifierCtx {
                                     "invariant not established at entry in '{}'",
                                     func.name
                                 ),
-                                Span::single(func.pos.0, func.pos.1),
+                                inv.meta()
+                                    .map(|meta| meta.span)
+                                    .unwrap_or(func.meta.span),
                             )
                             .with_help(
                                 "strengthen requires so the invariant holds before the loop, or weaken the invariant",
@@ -667,7 +687,10 @@ impl VerifierCtx {
                                 diagnostic: Some(
                                     Diagnostic::error(
                                         obligation.failure,
-                                        Span::single(func.pos.0, func.pos.1),
+                                        return_expr
+                                            .meta()
+                                            .map(|meta| meta.span)
+                                            .unwrap_or(func.meta.span),
                                     )
                                     .with_help("strengthen requires so the operation is defined"),
                                 ),
@@ -767,12 +790,12 @@ impl VerifierCtx {
         );
 
         if !call_site_errors.is_empty() {
-            let (_, msg, _) = &call_site_errors[0];
+            let (_, msg, span) = &call_site_errors[0];
             return VerificationResult {
                 func_name: func.name.clone(),
                 status: VerifStatus::Failed,
                 message: msg.clone(),
-                diagnostic: None,
+                diagnostic: Some(Diagnostic::error(msg.clone(), *span)),
                 duration_us: start.elapsed().as_micros() as u64,
                 constraint_count: 0,
             };
@@ -781,7 +804,7 @@ impl VerifierCtx {
         let num_real_params = func
             .params
             .iter()
-            .filter(|p| matches!(&p.ty, Type::Name(n, _) if n == "f64"))
+            .filter(|p| matches!(p.ty.unlocated(), Type::Name(n, _) if n == "f64"))
             .count();
         let constraint_count = requires_exprs.len()
             + invariant_exprs.len()
@@ -796,12 +819,12 @@ impl VerifierCtx {
                     let mut d = diag.unwrap_or_else(|| {
                         Diagnostic::error(
                             format!("contract errors in '{}'", func.name),
-                            Span::single(func.pos.0, func.pos.1),
+                            func.meta.span,
                         )
                     });
                     d = d.with_note(
                         format!("contract errors: {}", errs.join("; ")),
-                        Span::single(func.pos.0, func.pos.1),
+                        func.meta.span,
                     );
                     Some(d)
                 } else {
@@ -938,10 +961,7 @@ impl VerifierCtx {
                 }
             }
             SatResult::Unsat => {
-                let req_span = requires_spans
-                    .first()
-                    .copied()
-                    .unwrap_or_else(|| Span::single(func.pos.0, func.pos.1));
+                let req_span = requires_spans.first().copied().unwrap_or(func.meta.span);
                 let diagnostic = Diagnostic::error(
                     format!("preconditions are unsatisfiable for '{}'", func.name),
                     req_span,
@@ -1079,7 +1099,7 @@ impl VerifierCtx {
     /// Try to resolve an expression to a concrete i64 value from the model.
     /// Try to resolve an expression to a concrete string value from the model.
     fn resolve_to_string(expr: &Expr, model: &z3::Model, vars: &Z3VarMap) -> Option<String> {
-        match expr {
+        match expr.unlocated() {
             Expr::Literal(Lit::String(s)) => Some(s.clone()),
             Expr::Ident(name) => vars.get_string_var(name).and_then(|z3_var| {
                 model
@@ -1087,7 +1107,7 @@ impl VerifierCtx {
                     .and_then(|v| v.as_string().map(|s| s.to_string()))
             }),
             Expr::Old(inner) => {
-                if let Expr::Ident(name) = inner.as_ref() {
+                if let Expr::Ident(name) = inner.unlocated() {
                     let old_name = format!("old_{}", name);
                     vars.get_string_var(&old_name).and_then(|z3_var| {
                         model
@@ -1103,13 +1123,13 @@ impl VerifierCtx {
     }
 
     fn resolve_to_i64(expr: &Expr, model: &z3::Model, vars: &Z3VarMap) -> Option<i64> {
-        match expr {
+        match expr.unlocated() {
             Expr::Literal(Lit::Int(n)) => Some(*n),
             Expr::Ident(name) => vars
                 .get_int(name)
                 .and_then(|z3_var| model.eval(z3_var, true).and_then(|v| v.as_i64())),
             Expr::Old(inner) => {
-                if let Expr::Ident(name) = inner.as_ref() {
+                if let Expr::Ident(name) = inner.unlocated() {
                     let old_name = format!("old_{}", name);
                     vars.get_int(&old_name)
                         .and_then(|z3_var| model.eval(z3_var, true).and_then(|v| v.as_i64()))
@@ -1138,7 +1158,7 @@ impl VerifierCtx {
 
     /// Try to resolve an expression to a concrete f64 value from the model.
     fn resolve_to_f64(expr: &Expr, model: &z3::Model, vars: &Z3VarMap) -> Option<f64> {
-        match expr {
+        match expr.unlocated() {
             Expr::Literal(Lit::Int(n)) => Some(*n as f64),
             Expr::Literal(Lit::Float(f)) => Some(*f),
             Expr::Ident(name) => vars
@@ -1162,7 +1182,7 @@ impl VerifierCtx {
                         .map(|v| v as f64)
                 }),
             Expr::Old(inner) => {
-                if let Expr::Ident(name) = inner.as_ref() {
+                if let Expr::Ident(name) = inner.unlocated() {
                     let old_name = format!("old_{}", name);
                     vars.get_real(&old_name)
                         .and_then(|z3_var| {
@@ -1208,7 +1228,7 @@ impl VerifierCtx {
     }
 
     fn eval_expr_on_model(expr: &Expr, model: &z3::Model, vars: &Z3VarMap) -> bool {
-        match expr {
+        match expr.unlocated() {
             Expr::Literal(Lit::Bool(b)) => *b,
             Expr::Ident(name) => {
                 if let Some(z3_var) = vars.get_int(name) {
@@ -1227,7 +1247,7 @@ impl VerifierCtx {
                 }
             }
             Expr::Old(inner) => {
-                if let Expr::Ident(name) = inner.as_ref() {
+                if let Expr::Ident(name) = inner.unlocated() {
                     let old_name = format!("old_{}", name);
                     if let Some(z3_var) = vars.get_int(&old_name) {
                         match model.eval(z3_var, true) {
@@ -1455,19 +1475,13 @@ impl VerifierCtx {
             }
         }
 
-        let primary_span = ensures_spans
-            .first()
-            .copied()
-            .unwrap_or_else(|| Span::single(func.pos.0, func.pos.1));
+        let primary_span = ensures_spans.first().copied().unwrap_or(func.meta.span);
         let mut diag = Diagnostic::error(message, primary_span).with_code("E0500");
 
         // Add preconditions as a note
         if !requires_exprs.is_empty() {
             let req_strs: Vec<String> = requires_exprs.iter().map(format_expr).collect();
-            let req_span = requires_spans
-                .first()
-                .copied()
-                .unwrap_or_else(|| Span::single(func.pos.0, func.pos.1));
+            let req_span = requires_spans.first().copied().unwrap_or(func.meta.span);
             diag = diag.with_note(
                 format!("preconditions (all satisfied): {}", req_strs.join(", ")),
                 req_span,
@@ -1477,10 +1491,7 @@ impl VerifierCtx {
         // Add each violated postcondition as a note
         for &idx in counterexample.violated_indices.iter() {
             if let Some(ens) = ensures_exprs.get(idx) {
-                let ens_span = ensures_spans
-                    .get(idx)
-                    .copied()
-                    .unwrap_or_else(|| Span::single(func.pos.0, func.pos.1));
+                let ens_span = ensures_spans.get(idx).copied().unwrap_or(func.meta.span);
                 diag = diag.with_note(
                     format!("postcondition '{}' evaluates to false", format_expr(ens)),
                     ens_span,
@@ -1504,11 +1515,11 @@ impl VerifierCtx {
             .map(|(_, val)| *val);
 
         if let Some(result) = result_val {
-            let body_is_trivial = func.body.iter().all(|s| {
-                matches!(
-                    s,
-                    Stmt::Expr(Expr::Literal(..)) | Stmt::Return(Some(Expr::Literal(..)))
-                )
+            let body_is_trivial = func.body.iter().all(|s| match s.unlocated() {
+                Stmt::Expr(expr) | Stmt::Return(Some(expr)) => {
+                    matches!(expr.unlocated(), Expr::Literal(..))
+                }
+                _ => false,
             });
             if body_is_trivial {
                 return Some(format!(
@@ -1536,11 +1547,11 @@ impl VerifierCtx {
             ));
         }
 
-        let body_is_simple = func.body.iter().all(|s| {
-            matches!(
-                s,
-                Stmt::Expr(Expr::Binary(..)) | Stmt::Return(Some(Expr::Binary(..)))
-            )
+        let body_is_simple = func.body.iter().all(|s| match s.unlocated() {
+            Stmt::Expr(expr) | Stmt::Return(Some(expr)) => {
+                matches!(expr.unlocated(), Expr::Binary(..))
+            }
+            _ => false,
         });
 
         if body_is_simple && !counterexample.violated_ensures.is_empty() {
@@ -1564,9 +1575,9 @@ impl VerifierCtx {
         expr: &Expr,
         vars: &mut Z3VarMap,
     ) {
-        match expr {
+        match expr.unlocated() {
             Expr::Call(callee, call_args) => {
-                if let Expr::Ident(name) = callee.as_ref() {
+                if let Expr::Ident(name) = callee.unlocated() {
                     // V-C4: only admit ensures from callees that already
                     // verified successfully. Failed/Unknown/unverified
                     // callees must not become axioms for the caller.
@@ -1584,7 +1595,7 @@ impl VerifierCtx {
                                 .body
                                 .iter()
                                 .filter_map(|s| {
-                                    if let Stmt::Ensures(e, _) = s {
+                                    if let Stmt::Ensures(e, _) = s.unlocated() {
                                         Some(e.clone())
                                     } else {
                                         None
@@ -1633,7 +1644,7 @@ impl VerifierCtx {
             }
             Expr::Block(stmts) => {
                 for stmt in stmts {
-                    if let Stmt::Expr(e) = stmt {
+                    if let Stmt::Expr(e) = stmt.unlocated() {
                         self.assert_callee_ensures_in_expr(session, e, vars);
                     }
                 }
@@ -1658,9 +1669,9 @@ impl VerifierCtx {
         expr: &Expr,
         vars: &mut Z3VarMap,
     ) {
-        match expr {
+        match expr.unlocated() {
             Expr::Call(callee, call_args) => {
-                if let Expr::Ident(name) = callee.as_ref() {
+                if let Expr::Ident(name) = callee.unlocated() {
                     if (name == "sort" || name == "reverse") && call_args.len() == 1 {
                         // len(sort(xs)) == len(xs)
                         if let Some(input_len) = expr::resolve_list_len(&call_args[0], vars) {
@@ -1712,7 +1723,7 @@ impl VerifierCtx {
         vars: &mut Z3VarMap,
     ) {
         for stmt in block {
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::Expr(e) => self.assert_builtin_length_preserving(session, e, vars),
                 Stmt::Return(Some(e)) => self.assert_builtin_length_preserving(session, e, vars),
                 Stmt::If { cond, then_, else_ } => {
@@ -1773,7 +1784,7 @@ impl VerifierCtx {
         stmt: &Stmt,
         vars: &mut Z3VarMap,
     ) {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Expr(e) | Stmt::Return(Some(e)) => {
                 self.assert_callee_ensures_in_expr(session, e, vars);
             }
@@ -1844,7 +1855,7 @@ impl VerifierCtx {
         caller_name: &str,
         errors: &mut Vec<(String, String, crate::span::Span)>,
     ) {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Break(Some(e)) => {
                 self.check_callee_requires_in_expr(session, e, vars, caller_name, errors);
             }
@@ -1886,9 +1897,9 @@ impl VerifierCtx {
         caller_name: &str,
         errors: &mut Vec<(String, String, crate::span::Span)>,
     ) {
-        match expr {
+        match expr.unlocated() {
             Expr::Call(callee, call_args) => {
-                if let Expr::Ident(name) = callee.as_ref() {
+                if let Expr::Ident(name) = callee.unlocated() {
                     // Clone callee data to avoid borrow conflict with self.*
                     let callee_data: Option<(Vec<crate::ast::Param>, Vec<Expr>)> =
                         self.func_defs.get(name).map(|f| {
@@ -1897,7 +1908,7 @@ impl VerifierCtx {
                                 .body
                                 .iter()
                                 .filter_map(|s| {
-                                    if let Stmt::Requires(e, _) = s {
+                                    if let Stmt::Requires(e, _) = s.unlocated() {
                                         Some(e.clone())
                                     } else {
                                         None
@@ -1920,7 +1931,14 @@ impl VerifierCtx {
                                     errors.push((
                                         caller_name.to_string(),
                                         format!("call to '{}' may violate precondition", name),
-                                        crate::span::Span::single(0, 0),
+                                        expr.meta()
+                                            .map(|meta| meta.span)
+                                            .or_else(|| {
+                                                self.func_defs
+                                                    .get(caller_name)
+                                                    .map(|caller| caller.meta.span)
+                                            })
+                                            .unwrap_or(Span::UNKNOWN),
                                     ));
                                     return;
                                 }
@@ -1957,9 +1975,13 @@ impl VerifierCtx {
 
     fn build_let_subst_in_block(stmts: &[Stmt], subst: &mut HashMap<String, Expr>) {
         for stmt in stmts {
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::Let {
-                    pat: Pattern::Variable(name),
+                    pat:
+                        Pattern {
+                            kind: PatternKind::Variable(name),
+                            ..
+                        },
                     init: Some(init),
                     ..
                 } => {
@@ -1991,7 +2013,7 @@ impl VerifierCtx {
                     // V-C2: simple `name = expr` updates the substitution so
                     // later uses of `name` see the assigned value, not the
                     // original let-init (flat store model, no SSA).
-                    if let Expr::Ident(name) = target {
+                    if let Expr::Ident(name) = target.unlocated() {
                         let value_expr: &Expr = value;
                         subst.insert(name.clone(), value_expr.clone());
                     }
@@ -2013,7 +2035,7 @@ impl VerifierCtx {
     }
 
     fn build_let_subst_in_expr(expr: &Expr, subst: &mut HashMap<String, Expr>) {
-        match expr {
+        match expr.unlocated() {
             Expr::Binary(_, lhs, rhs) => {
                 Self::build_let_subst_in_expr(lhs, subst);
                 Self::build_let_subst_in_expr(rhs, subst);
@@ -2045,14 +2067,16 @@ impl VerifierCtx {
 
     /// Recursively expand let-variables in an expression using the substitution map.
     fn expand_lets_in_expr(expr: &Expr, subst: &HashMap<String, Expr>) -> Expr {
-        match expr {
-            Expr::Ident(name) => {
-                if let Some(replacement) = subst.get(name) {
-                    Self::expand_lets_in_expr(replacement, subst)
-                } else {
-                    expr.clone()
-                }
+        // When a tail identifier expands to its let initializer, the call
+        // expression's own source location is authoritative. Do not overwrite
+        // it with the identifier's later use-site metadata.
+        if let Expr::Ident(name) = expr.unlocated() {
+            if let Some(replacement) = subst.get(name) {
+                return Self::expand_lets_in_expr(replacement, subst);
             }
+        }
+        let transformed = match expr.unlocated() {
+            Expr::Ident(_) => expr.unlocated().clone(),
             Expr::Binary(op, lhs, rhs) => Expr::Binary(
                 *op,
                 Box::new(Self::expand_lets_in_expr(lhs, subst)),
@@ -2094,6 +2118,7 @@ impl VerifierCtx {
                 Box::new(Self::expand_lets_in_expr(scrutinee, subst)),
                 arms.iter()
                     .map(|arm| crate::ast::MatchArm {
+                        meta: arm.meta,
                         pat: arm.pat.clone(),
                         guard: arm
                             .guard
@@ -2126,17 +2151,25 @@ impl VerifierCtx {
                     .as_ref()
                     .map(|g| Box::new(Self::expand_lets_in_expr(g, subst))),
             },
-            _ => expr.clone(),
+            _ => expr.unlocated().clone(),
+        };
+        match expr.meta() {
+            Some(meta) => transformed.with_meta(meta),
+            None => transformed,
         }
     }
 
     fn expand_lets_in_stmt(stmt: &Stmt, subst: &HashMap<String, Expr>) -> Stmt {
-        match stmt {
+        let transformed = match stmt.unlocated() {
             Stmt::Expr(e) => Stmt::Expr(Self::expand_lets_in_expr(e, subst)),
             Stmt::Return(e) => {
                 Stmt::Return(e.as_ref().map(|e| Self::expand_lets_in_expr(e, subst)))
             }
-            _ => stmt.clone(),
+            _ => stmt.unlocated().clone(),
+        };
+        match stmt.meta() {
+            Some(meta) => transformed.with_meta(meta),
+            None => transformed,
         }
     }
 
@@ -2152,7 +2185,7 @@ impl VerifierCtx {
         // Simple recursive substitution. For `result`, replace with a fresh
         // Ident that matches the Z3 variable naming from expr::call_var_key.
         // For param names, replace with the actual call argument expressions.
-        match ensures {
+        match ensures.unlocated() {
             Expr::Ident(name) if name == "result" => Expr::Ident(call_key.to_string()),
             Expr::Ident(name) => {
                 if let Some(idx) = params.iter().position(|p| p.name == *name) {
@@ -2188,7 +2221,7 @@ impl VerifierCtx {
     /// in a loop, we cannot claim Verified without a body⇒inv' proof.
     fn collect_loop_assigned_idents(stmts: &[Stmt], out: &mut Vec<String>) {
         for stmt in stmts {
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::While { body, .. }
                 | Stmt::WhileLet { body, .. }
                 | Stmt::For { body, .. }
@@ -2218,13 +2251,12 @@ impl VerifierCtx {
 
     fn collect_assigned_idents_in_block(stmts: &[Stmt], out: &mut Vec<String>) {
         for stmt in stmts {
-            match stmt {
-                Stmt::Assign {
-                    target: Expr::Ident(name),
-                    ..
-                } => {
-                    if !out.contains(name) {
-                        out.push(name.clone());
+            match stmt.unlocated() {
+                Stmt::Assign { target, .. } => {
+                    if let Expr::Ident(name) = target.unlocated() {
+                        if !out.contains(name) {
+                            out.push(name.clone());
+                        }
                     }
                 }
                 Stmt::If { then_, else_, .. } => {

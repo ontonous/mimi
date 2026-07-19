@@ -8,7 +8,7 @@ mod stmt;
 impl<'a> Interpreter<'a> {
     /// Cast a value to a target type
     pub(crate) fn cast_value(&self, val: Value, target_type: &Type) -> Result<Value, InterpError> {
-        match target_type {
+        match target_type.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => match val {
                     Value::Int(v) => Ok(Value::Int(v as i32 as i64)),
@@ -64,7 +64,7 @@ impl<'a> Interpreter<'a> {
     fn eval_block_inner(&mut self, block: &Block) -> Result<Option<Value>, InterpError> {
         for (i, stmt) in block.iter().enumerate() {
             let is_last = i == block.len() - 1;
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::Expr(e) if is_last => {
                     let result = self.eval_expr(e);
                     // `exit()` inside the final expression must abort the block.
@@ -130,7 +130,7 @@ impl<'a> Interpreter<'a> {
     }
 
     pub(crate) fn eval_stmt(&mut self, stmt: &Stmt) -> Result<Option<Value>, InterpError> {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Let {
                 pat,
                 init,
@@ -426,6 +426,7 @@ impl<'a> Interpreter<'a> {
                     return Ok(Some(v));
                 }
             }
+            Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
         }
         Ok(None)
     }
@@ -447,7 +448,7 @@ impl<'a> Interpreter<'a> {
     }
 
     pub(crate) fn eval_expr_body(&mut self, expr: &Expr) -> Result<Value, InterpError> {
-        match expr {
+        match expr.unlocated() {
             Expr::Literal(l) => Ok(match l {
                 Lit::Int(v) => Value::Int(*v),
                 Lit::Float(v) => Value::Float(*v),
@@ -511,7 +512,7 @@ impl<'a> Interpreter<'a> {
             }
             Expr::Old(expr) => {
                 // old(x) looks up the snapshot value from before function execution
-                if let Expr::Ident(name) = expr.as_ref() {
+                if let Expr::Ident(name) = expr.unlocated() {
                     let old_name = format!("old_{}", name);
                     if let Some(v) = self.lookup(&old_name) {
                         return Ok(v);
@@ -533,6 +534,7 @@ impl<'a> Interpreter<'a> {
                 let val = self.eval_expr(inner)?;
                 self.cast_value(val, target_type)
             }
+            Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
         }
     }
 
@@ -635,7 +637,7 @@ impl<'a> Interpreter<'a> {
                     if let Value::Record(_, fields) = &restored {
                         for name in &persistent_fields {
                             if let Some(v) = fields.get(name) {
-                                if let Value::Record(Some(ref n), ref mut f) = fault {
+                                if let Value::Record(Some(_), ref mut f) = fault {
                                     f.insert(name.clone(), v.clone());
                                 }
                             }
@@ -669,7 +671,7 @@ impl<'a> Interpreter<'a> {
             // from the tx snapshot so it is not silently lost on fault entry.
             let restored = self.abort_persistent_tx_restore_or_empty(&flow.name, flow);
             let mut out_fault = out;
-            if let Value::Record(_, fields) = &restored {
+            if matches!(&restored, Value::Record(_, _)) {
                 if matches!(&out_fault, Value::Record(Some(n), _) if n == "Fault") {
                     shadow_persistent_into_fault(&mut out_fault, &restored, &persistent_fields);
                 }
@@ -830,7 +832,7 @@ impl<'a> Interpreter<'a> {
         for (name, v) in &tx.snapshot {
             fields.insert(name.clone(), v.clone());
         }
-        for (name, &orig_len) in &tx.metadata_snapshot {
+        for (name, &_orig_len) in &tx.metadata_snapshot {
             if !fields.contains_key(name) {
                 // Restore metadata length only for list-like values.
                 fields.insert(name.clone(), Value::List(vec![]));
@@ -1069,7 +1071,7 @@ fn writeback_delegate_result(
     let mut fields: Vec<&str> = Vec::new();
     let mut cur = expr;
     loop {
-        match cur {
+        match cur.unlocated() {
             Expr::Field(container, field_name) => {
                 fields.push(field_name.as_str());
                 cur = container.as_ref();

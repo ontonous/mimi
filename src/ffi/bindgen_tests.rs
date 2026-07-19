@@ -8,23 +8,32 @@
 mod tests {
     use std::collections::HashMap;
 
-    use crate::ast::{ExternFunc, ExternParam, Field, Type, TypeAttribute, TypeDef, TypeDefKind};
+    use crate::ast::{
+        AstNodeMeta, AstOrigin, ExternFunc, ExternParam, Field, Type, TypeAttribute, TypeDef,
+        TypeDefKind,
+    };
     use crate::ffi::{c_header, cpp_bind, go_bind, jni_bind, node_bind, py_bind, rust_bind};
+
+    fn fixture_meta() -> AstNodeMeta {
+        AstNodeMeta::synthetic(AstOrigin::RuntimeSystem("test.ffi_fixture"))
+    }
 
     fn sample_type_defs() -> HashMap<String, TypeDef> {
         let mut map = HashMap::new();
         map.insert(
             "Point".to_string(),
             TypeDef {
+                meta: fixture_meta(),
                 name: "Point".to_string(),
-                decl_pos: None,
                 pub_: true,
                 kind: TypeDefKind::Record(vec![
                     Field {
+                        meta: fixture_meta(),
                         name: "x".to_string(),
                         ty: Type::Name("i32".to_string(), vec![]),
                     },
                     Field {
+                        meta: fixture_meta(),
                         name: "y".to_string(),
                         ty: Type::Name("i32".to_string(), vec![]),
                     },
@@ -40,14 +49,17 @@ mod tests {
     fn sample_extern_funcs() -> Vec<ExternFunc> {
         vec![
             ExternFunc {
+                meta: fixture_meta(),
                 name: "add".to_string(),
                 params: vec![
                     ExternParam {
+                        meta: fixture_meta(),
                         name: "a".to_string(),
                         ty: Type::Name("i32".to_string(), vec![]),
                         cap_mode: None,
                     },
                     ExternParam {
+                        meta: fixture_meta(),
                         name: "b".to_string(),
                         ty: Type::Name("i32".to_string(), vec![]),
                         cap_mode: None,
@@ -60,8 +72,10 @@ mod tests {
                 no_panic: false,
             },
             ExternFunc {
+                meta: fixture_meta(),
                 name: "greet".to_string(),
                 params: vec![ExternParam {
+                    meta: fixture_meta(),
                     name: "name".to_string(),
                     ty: Type::Name("string".to_string(), vec![]),
                     cap_mode: None,
@@ -73,8 +87,10 @@ mod tests {
                 no_panic: false,
             },
             ExternFunc {
+                meta: fixture_meta(),
                 name: "point_sum".to_string(),
                 params: vec![ExternParam {
+                    meta: fixture_meta(),
                     name: "p".to_string(),
                     ty: Type::Name("Point".to_string(), vec![]),
                     cap_mode: None,
@@ -86,9 +102,11 @@ mod tests {
                 no_panic: false,
             },
             ExternFunc {
+                meta: fixture_meta(),
                 name: "apply_callback".to_string(),
                 params: vec![
                     ExternParam {
+                        meta: fixture_meta(),
                         name: "f".to_string(),
                         ty: Type::Func(
                             vec![
@@ -100,6 +118,7 @@ mod tests {
                         cap_mode: None,
                     },
                     ExternParam {
+                        meta: fixture_meta(),
                         name: "x".to_string(),
                         ty: Type::Name("i32".to_string(), vec![]),
                         cap_mode: None,
@@ -274,9 +293,11 @@ mod tests {
     fn node_callback_float_smoke() {
         let gen = node_bind::NodeBindGenerator::new(sample_type_defs(), "math");
         let funcs = vec![ExternFunc {
+            meta: fixture_meta(),
             name: "apply_f64_cb".to_string(),
             params: vec![
                 ExternParam {
+                    meta: fixture_meta(),
                     name: "f".to_string(),
                     ty: Type::Func(
                         vec![Type::Name("f64".to_string(), vec![])],
@@ -285,6 +306,7 @@ mod tests {
                     cap_mode: None,
                 },
                 ExternParam {
+                    meta: fixture_meta(),
                     name: "x".to_string(),
                     ty: Type::Name("f64".to_string(), vec![]),
                     cap_mode: None,

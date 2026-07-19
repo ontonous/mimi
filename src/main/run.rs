@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::{is_production, is_sketch, resolve_path};
 use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
-use mimi::{interp, lexer, loader, parser};
+use mimi::{interp, lexer, loader};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
@@ -86,7 +86,7 @@ fn run_once(
         ));
     }
     let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let (file, parse_errors) = parser::Parser::new(tokens).parse_file_with_recovery();
+    let (file, parse_errors) = loader::parser_for_path(tokens, path)?.parse_file_with_recovery();
     if !parse_errors.is_empty() {
         let use_color = colors_enabled();
         let src_ref = Some(source.as_str());
@@ -109,7 +109,7 @@ fn run_once(
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
         let mut loader = loader::ModuleLoader::new(base_dir);
-        loader.load_main(path)?;
+        loader.load_main_with_file(path, file)?;
         loader.merge_all()?
     } else {
         file

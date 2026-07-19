@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::resolve_path;
 use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
 use mimi::verifier::VerifStatus;
-use mimi::{lexer, loader, parser};
+use mimi::{lexer, loader};
 
 fn verification_blocks_success(
     status: &VerifStatus,
@@ -20,7 +20,7 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let file = parser::Parser::new(tokens).parse_file()?;
+    let file = loader::parser_for_path(tokens, &path)?.parse_file()?;
 
     let merged_file = if !file.imports.is_empty() {
         let base_dir = path
@@ -28,7 +28,7 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
         let mut loader = loader::ModuleLoader::new(base_dir);
-        loader.load_main(&path)?;
+        loader.load_main_with_file(&path, file)?;
         loader.merge_all()?
     } else {
         file

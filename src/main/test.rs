@@ -4,7 +4,7 @@ use crate::{is_sketch, resolve_path};
 use mimi::ast::Item;
 use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
 
-use mimi::{interp, lexer, loader, parser};
+use mimi::{interp, lexer, loader};
 
 pub(crate) fn test(
     path: Option<&Path>,
@@ -19,7 +19,7 @@ pub(crate) fn test(
         return Err("cannot test a .mms sketch file directly; promote to .mimi first".into());
     }
     let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let file = parser::Parser::new(tokens).parse_file()?;
+    let file = loader::parser_for_path(tokens, &path)?.parse_file()?;
 
     // Load imports if any
     let mut merged_file = if !file.imports.is_empty() {
@@ -28,7 +28,7 @@ pub(crate) fn test(
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
         let mut loader = loader::ModuleLoader::new(base_dir);
-        loader.load_main(&path)?;
+        loader.load_main_with_file(&path, file)?;
         loader.merge_all()?
     } else {
         file

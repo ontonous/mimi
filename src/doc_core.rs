@@ -3,7 +3,7 @@ use crate::{lexer, parser};
 
 fn item_line(item: &Item) -> usize {
     match item {
-        Item::Func(f) => f.pos.0,
+        Item::Func(f) => f.meta.span.start_line,
         _ => 0,
     }
 }
@@ -29,6 +29,7 @@ fn extract_preceding_comments(source: &str, item: &Item) -> String {
 
 fn type_to_string(ty: &Type) -> String {
     match ty {
+        Type::Located { ty, .. } => type_to_string(ty),
         Type::Name(name, generics) => {
             if generics.is_empty() {
                 name.clone()
@@ -99,7 +100,9 @@ fn type_to_string(ty: &Type) -> String {
 /// Generate Markdown from a .mimi source (Mimi parser).
 pub fn generate_markdown(source: &str) -> Result<String, String> {
     let tokens = lexer::Lexer::new(source).tokenize()?;
-    let file = parser::Parser::new(tokens).parse_file()?;
+    let file = parser::Parser::new_memory(tokens, "doc_core", "markdown", source)
+        .map_err(|error| error.to_string())?
+        .parse_file()?;
 
     let mut out = String::new();
 
@@ -129,10 +132,10 @@ pub fn generate_markdown(source: &str) -> Result<String, String> {
                     ret
                 ));
                 for stmt in &f.body {
-                    if let Stmt::Desc(desc, _) = stmt {
+                    if let Stmt::Desc(desc, _) = stmt.unlocated() {
                         out.push_str(&format!("{}\n\n", desc));
                     }
-                    if let Stmt::Rule(text, _) = stmt {
+                    if let Stmt::Rule(text, _) = stmt.unlocated() {
                         out.push_str(&format!("rule: {}\n\n", text));
                     }
                 }
@@ -221,10 +224,10 @@ pub fn generate_markdown(source: &str) -> Result<String, String> {
                                 ret
                             ));
                             for stmt in &f.body {
-                                if let Stmt::Desc(desc, _) = stmt {
+                                if let Stmt::Desc(desc, _) = stmt.unlocated() {
                                     out.push_str(&format!("{}\n\n", desc));
                                 }
-                                if let Stmt::Rule(text, _) = stmt {
+                                if let Stmt::Rule(text, _) = stmt.unlocated() {
                                     out.push_str(&format!("rule: {}\n\n", text));
                                 }
                             }
@@ -414,4 +417,18 @@ pub fn generate_mms(source: &str) -> Result<String, String> {
         return Err(format!("{:?}", err));
     }
     Ok(render_file(&result.file))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generate_markdown;
+
+    #[test]
+    fn markdown_uses_registered_declaration_metadata_for_comments() {
+        let source = "// Adds one.\nfunc add_one(value: i32) -> i32 { value + 1 }\n";
+        let markdown = generate_markdown(source).expect("generate Mimi markdown");
+
+        assert!(markdown.contains("> *Adds one.*"));
+        assert!(markdown.contains("## `func add_one(value: i32) -> i32`"));
+    }
 }

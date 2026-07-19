@@ -3,7 +3,7 @@
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 use crate::lexer::{Token, TokenKind};
-use crate::span::Span;
+use crate::span::{SourceContext, SourceId, SourceRegistry, SourceRegistryError, Span};
 
 mod flow;
 pub use flow::{flow_parse, flow_parse_with_recovery};
@@ -19,6 +19,7 @@ pub struct ParseError {
     pub message: String,
     pub line: usize,
     pub col: usize,
+    pub source_id: SourceId,
     pub span: Option<Span>,
 }
 
@@ -28,15 +29,22 @@ impl ParseError {
             message: message.into(),
             line,
             col,
+            source_id: SourceId::UNKNOWN,
             span: None,
         }
+    }
+
+    fn with_source(mut self, source_id: SourceId) -> Self {
+        self.source_id = source_id;
+        self.span = self.span.map(|span| span.with_source(source_id));
+        self
     }
 
     /// Convert to the new Diagnostic type.
     pub fn to_diagnostic(&self) -> Diagnostic {
         let span = self
             .span
-            .unwrap_or_else(|| Span::single(self.line, self.col));
+            .unwrap_or_else(|| Span::single(self.line, self.col).with_source(self.source_id));
         Diagnostic::error(&self.message, span)
     }
 }
@@ -85,6 +93,8 @@ pub struct Parser {
     /// When true, uppercase identifiers followed by `{` are parsed as record literals.
     /// When false (e.g., inside a match scrutinee), `{` is left unconsumed.
     allow_record_literal: bool,
+    source_id: SourceId,
+    source_registry: SourceRegistry,
 }
 
 impl Parser {
@@ -92,8 +102,50 @@ impl Parser {
         Self::with_mode(tokens, ParseMode::Production)
     }
 
+    pub fn new_with_source(tokens: Vec<Token>, source_id: SourceId) -> Self {
+        Self::with_mode(tokens, ParseMode::Production).with_source(source_id)
+    }
+
+    pub fn new_with_source_registry(
+        tokens: Vec<Token>,
+        source_id: SourceId,
+        source_registry: SourceRegistry,
+    ) -> Self {
+        Self::with_mode(tokens, ParseMode::Production)
+            .with_source(source_id)
+            .with_source_registry(source_registry)
+    }
+
+    /// Create a production parser from an inseparable registered source pair.
+    pub fn new_with_source_context(tokens: Vec<Token>, context: SourceContext) -> Self {
+        let (source_id, source_registry) = context.into_parts();
+        Self::new_with_source_registry(tokens, source_id, source_registry)
+    }
+
+    /// Create a parser for anonymous source text under an explicit memory
+    /// namespace and logical label.
+    pub fn new_memory(
+        tokens: Vec<Token>,
+        namespace: &str,
+        label: &str,
+        source: &str,
+    ) -> Result<Self, SourceRegistryError> {
+        Ok(Self::new_with_source_context(
+            tokens,
+            SourceContext::memory(namespace, label, source)?,
+        ))
+    }
+
     pub fn new_sketch(tokens: Vec<Token>) -> Self {
         Self::with_mode(tokens, ParseMode::Sketch)
+    }
+
+    /// Create a sketch parser while retaining its registered source identity.
+    pub fn new_sketch_with_source_context(tokens: Vec<Token>, context: SourceContext) -> Self {
+        let (source_id, source_registry) = context.into_parts();
+        Self::with_mode(tokens, ParseMode::Sketch)
+            .with_source(source_id)
+            .with_source_registry(source_registry)
     }
 
     fn with_mode(tokens: Vec<Token>, mode: ParseMode) -> Self {
@@ -105,7 +157,19 @@ impl Parser {
             recursion_depth: std::cell::Cell::new(0),
             errors: Vec::new(),
             allow_record_literal: true,
+            source_id: SourceId::UNKNOWN,
+            source_registry: SourceRegistry::default(),
         }
+    }
+
+    fn with_source(mut self, source_id: SourceId) -> Self {
+        self.source_id = source_id;
+        self
+    }
+
+    fn with_source_registry(mut self, source_registry: SourceRegistry) -> Self {
+        self.source_registry = source_registry;
+        self
     }
 
     /// Create a parser in recovery mode: statement-level errors are caught and skipped.
@@ -119,6 +183,8 @@ impl Parser {
             recursion_depth: std::cell::Cell::new(0),
             errors: Vec::new(),
             allow_record_literal: true,
+            source_id: SourceId::UNKNOWN,
+            source_registry: SourceRegistry::default(),
         }
     }
 
@@ -126,7 +192,13 @@ impl Parser {
     /// Used by the Flow parser prototype to create temporary parsers
     /// within state transitions.
     #[doc(hidden)]
-    pub(crate) fn splice(tokens: &[Token], pos: usize, mode: ParseMode, recovery: bool) -> Self {
+    pub(crate) fn splice(
+        tokens: &[Token],
+        pos: usize,
+        mode: ParseMode,
+        recovery: bool,
+        source_id: SourceId,
+    ) -> Self {
         Self {
             tokens: tokens.to_vec(),
             pos,
@@ -135,11 +207,13 @@ impl Parser {
             recursion_depth: std::cell::Cell::new(0),
             errors: Vec::new(),
             allow_record_literal: true,
+            source_id,
+            source_registry: SourceRegistry::default(),
         }
     }
 
     pub fn parse_file(self) -> Result<File, ParseError> {
-        flow_parse(self.tokens, self.mode)
+        flow_parse(self.tokens, self.mode, self.source_id, self.source_registry)
     }
 
     #[cfg(test)]
@@ -159,6 +233,7 @@ impl Parser {
             items.push(self.parse_item()?);
         }
         let mut file = File {
+            sources: self.source_registry.clone(),
             imports,
             items,
             implicit_single: false,
@@ -172,7 +247,7 @@ impl Parser {
     /// Parse a file with error recovery, collecting multiple errors.
     /// Returns the parsed file (possibly partial) and all errors encountered.
     pub fn parse_file_with_recovery(self) -> (File, Vec<ParseError>) {
-        flow_parse_with_recovery(self.tokens, self.mode)
+        flow_parse_with_recovery(self.tokens, self.mode, self.source_id, self.source_registry)
     }
 
     #[cfg(test)]
@@ -250,6 +325,7 @@ impl Parser {
 
         errors.extend(std::mem::take(&mut self.errors));
         let mut file = File {
+            sources: self.source_registry.clone(),
             imports,
             items,
             implicit_single: false,
@@ -274,5 +350,27 @@ impl Parser {
     /// Return the current token position (number of tokens consumed so far).
     pub fn pos(&self) -> usize {
         self.pos
+    }
+}
+
+#[cfg(test)]
+mod source_context_tests {
+    use super::Parser;
+
+    #[test]
+    fn memory_parser_errors_keep_registered_source_id() {
+        let source = "func broken(value: i32 -> i32 { value }";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let error = Parser::new_memory(tokens, "parser.tests", "broken", source)
+            .expect("register source")
+            .parse_file()
+            .expect_err("malformed signature must fail");
+
+        assert!(error.source_id.is_known());
+        assert_eq!(
+            error.to_diagnostic().span.source_id,
+            error.source_id,
+            "structured parse diagnostics must route to the parser source"
+        );
     }
 }

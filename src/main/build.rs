@@ -4,7 +4,7 @@ use crate::resolve_path;
 use mimi::ast::Item;
 use mimi::codegen;
 use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
-use mimi::{lexer, loader, parser, verifier};
+use mimi::{lexer, loader, verifier};
 
 /// Extract the OS component from a target triple (e.g. "x86_64-pc-windows-gnu" -> "windows")
 fn target_os(triple: &str) -> &str {
@@ -77,7 +77,7 @@ pub(crate) fn build(
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let (file, parse_errors) = parser::Parser::new(tokens).parse_file_with_recovery();
+    let (file, parse_errors) = loader::parser_for_path(tokens, &path)?.parse_file_with_recovery();
     if !parse_errors.is_empty() {
         let use_color = colors_enabled();
         let src_ref = Some(source.as_str());
@@ -100,7 +100,7 @@ pub(crate) fn build(
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
         let mut loader = loader::ModuleLoader::new(base_dir);
-        loader.load_main(&path)?;
+        loader.load_main_with_file(&path, file)?;
         loader.merge_all()?
     } else {
         file

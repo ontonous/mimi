@@ -408,7 +408,7 @@ impl<'a> Interpreter<'a> {
         &self,
         ty: &crate::ast::Type,
     ) -> Result<FfiType, String> {
-        match ty {
+        match ty.unlocated() {
             crate::ast::Type::Name(name, _) => match name.as_str() {
                 "i32" => Ok(FfiType::i32()),
                 "i64" => Ok(FfiType::i64()),
@@ -442,7 +442,7 @@ impl<'a> Interpreter<'a> {
 
     /// Compute the size and alignment of a Mimi type in #[repr(C)] layout.
     fn mimi_type_size_align(&self, ty: &crate::ast::Type) -> Result<(usize, usize), String> {
-        match ty {
+        match ty.unlocated() {
             crate::ast::Type::Name(name, _) => match name.as_str() {
                 "i32" => Ok((4, 4)),
                 "i64" => Ok((8, 8)),
@@ -530,7 +530,7 @@ impl<'a> Interpreter<'a> {
         buf: &mut [u8],
         offset: usize,
     ) -> Result<(), String> {
-        let type_name = match ty {
+        let type_name = match ty.unlocated() {
             crate::ast::Type::Name(n, _) => n.as_str(),
             _ => {
                 return Err(format!(
@@ -630,7 +630,7 @@ impl<'a> Interpreter<'a> {
         ty: &crate::ast::Type,
         offset: usize,
     ) -> Result<Value, Errno> {
-        let type_name = match ty {
+        let type_name = match ty.unlocated() {
             crate::ast::Type::Name(n, _) => n.as_str(),
             _ => {
                 return Err(Errno::Generic(format!(

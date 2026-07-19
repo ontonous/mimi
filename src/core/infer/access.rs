@@ -2,7 +2,6 @@ use crate::ast::*;
 use crate::core::checker::Checker;
 use crate::core::helpers::{fmt_type, suggest_name};
 use crate::diagnostic::Diagnostic;
-use crate::span::Span;
 use std::collections::HashMap;
 
 /// Replace type parameters in `ty` according to `subst`.
@@ -21,6 +20,9 @@ fn subst_with_depth(ty: &Type, subst: &HashMap<String, Type>, depth: u32) -> Typ
     }
     let next = depth + 1;
     match ty {
+        Type::Located { meta, ty } => {
+            subst_with_depth(ty, subst, next).with_meta(*meta)
+        }
         Type::Name(name, args) if args.is_empty() && subst.contains_key(name) => {
             subst[name].clone()
         }
@@ -99,7 +101,7 @@ impl<'a> Checker<'a> {
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
         // v0.29.49: reject direct field access on multi-target transition results.
-        if let Expr::Ident(name) = obj {
+        if let Expr::Ident(name) = obj.unlocated() {
             if self.multi_target_vars.contains_key(name) {
                 self.errors.push(
                     Diagnostic::error_code(
@@ -108,7 +110,7 @@ impl<'a> Checker<'a> {
                             "multi-target transition result '{}' must be exhaustively matched before accessing field '{}'",
                             name, field
                         ),
-                        Span::single(self.current_line, self.current_col),
+                        self.diagnostic_span(),
                     )
                     .with_help("use `match` to handle all possible return states"),
                 );
@@ -124,7 +126,7 @@ impl<'a> Checker<'a> {
         field: &str,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        match obj_ty {
+        match obj_ty.unlocated() {
             Type::Name(name, _) => {
                 if let Some(actor_def) = self.file.items.iter().find_map(|item| {
                     if let Item::Actor(a) = item {
@@ -152,7 +154,7 @@ impl<'a> Checker<'a> {
                         Diagnostic::error_code(
                             crate::diagnostic::codes::E0220,
                             format!("actor '{}' has no field '{}'", name, field),
-                            Span::single(self.current_line, self.current_col),
+                            self.diagnostic_span(),
                         )
                         .with_help(&help),
                     );
@@ -166,7 +168,7 @@ impl<'a> Checker<'a> {
                                 // If the object type carries concrete type arguments,
                                 // instantiate the field type by substituting the type
                                 // parameters with those arguments.
-                                if let Type::Name(_, args) = obj_ty {
+                                if let Type::Name(_, args) = obj_ty.unlocated() {
                                     if !args.is_empty() && tdef.generics.len() == args.len() {
                                         let subst: HashMap<String, Type> = tdef
                                             .generics
@@ -200,7 +202,7 @@ impl<'a> Checker<'a> {
                                 Diagnostic::error_code(
                                     crate::diagnostic::codes::E0220,
                                     format!("type '{}' has no field '{}'", name, field),
-                                    Span::single(self.current_line, self.current_col),
+                                    self.diagnostic_span(),
                                 )
                                 .with_help(
                                     suggestion
@@ -238,7 +240,7 @@ impl<'a> Checker<'a> {
                                                 variant_names.join(", ")
                                             )
                                         },
-                                        Span::single(self.current_line, self.current_col),
+                                        self.diagnostic_span(),
                                     )
                                     .with_help("check the variant name spelling"),
                                 );
@@ -301,7 +303,7 @@ impl<'a> Checker<'a> {
                             "field access requires record type, found {}",
                             fmt_type(obj_ty)
                         ),
-                        Span::single(self.current_line, self.current_col),
+                        self.diagnostic_span(),
                     )
                     .with_help("only record types support field access with '.'"),
                 );
@@ -326,7 +328,7 @@ impl<'a> Checker<'a> {
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
         let obj_ty = self.infer_expr(obj, scopes);
-        match &obj_ty {
+        match obj_ty.unlocated() {
             Type::Tuple(elems) => {
                 if idx < elems.len() {
                     elems[idx].clone()
@@ -371,11 +373,11 @@ impl<'a> Checker<'a> {
                 format!("index must be integer, found {}", fmt_type(&idx_ty)),
             );
         }
-        match obj_ty {
+        match obj_ty.unlocated() {
             Type::Name(n, args) if n == "List" && args.len() == 1 => args[0].clone(),
             Type::Name(n, _) if n == "string" => Type::Name("string".into(), vec![]),
             // Support indexing through references: &List<T>, &mut List<T>, &string, &mut string
-            Type::Ref(_, ref inner) | Type::RefMut(_, ref inner) => match inner.as_ref() {
+            Type::Ref(_, inner) | Type::RefMut(_, inner) => match inner.unlocated() {
                 Type::Name(n, args) if n == "List" && args.len() == 1 => args[0].clone(),
                 Type::Name(n, _) if n == "string" => Type::Name("string".into(), vec![]),
                 _ => {

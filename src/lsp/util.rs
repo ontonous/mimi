@@ -72,14 +72,28 @@ pub(crate) fn percent_decode(s: &str) -> String {
     result
 }
 
-/// Compute a hash of the function body source text for cache invalidation.
-/// func.pos.0 is 1-indexed (from lexer), so we subtract 1 to convert to 0-indexed.
+/// Compute the verification-cache identity for a function.
+///
+/// Diagnostics store absolute source ranges, so text alone is insufficient:
+/// inserting unchanged lines before a function preserves its body text while
+/// moving every cached range. Include the parser-provided declaration anchor
+/// to invalidate that stale location cache. The URI/SourceKey remains part of
+/// the caller's cache key; session-local `SourceId` deliberately is not hashed.
+/// func.meta.span.start_line is 1-indexed (from lexer), so we subtract 1 to convert to 0-indexed.
 /// find_func_end_line returns 0-indexed line number.
 pub(crate) fn hash_func_body(text: &str, func: &FuncDef) -> u64 {
-    let start_idx = func.pos.0.saturating_sub(1); // Convert 1-indexed to 0-indexed
-    let end_idx = find_func_end_line(text, func.pos.0); // Returns 0-indexed
+    let start_idx = func.meta.span.start_line.saturating_sub(1); // Convert 1-indexed to 0-indexed
+    let end_idx = find_func_end_line(text, func.meta.span.start_line); // Returns 0-indexed
     let lines: Vec<&str> = text.lines().collect();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // Keep a tag in the in-memory identity too, independently of the on-disk
+    // cache schema, so future hash-layout changes are explicit.
+    "mimi-lsp-verification-anchor-v1".hash(&mut hasher);
+    let anchor = func.meta.span;
+    anchor.start_line.hash(&mut hasher);
+    anchor.start_col.hash(&mut hasher);
+    anchor.end_line.hash(&mut hasher);
+    anchor.end_col.hash(&mut hasher);
     // end_idx is 0-indexed, so we take (end_idx - start_idx + 1) lines
     let count = (end_idx.saturating_sub(start_idx) + 1).min(lines.len().saturating_sub(start_idx));
     for line in lines.iter().skip(start_idx).take(count) {
@@ -127,8 +141,8 @@ pub(crate) fn find_enclosing_func_in_items<'a>(
     for item in items {
         match item {
             Item::Func(f) => {
-                let end = find_func_end_line(text, f.pos.0);
-                if cursor_line >= f.pos.0 && cursor_line <= end {
+                let end = find_func_end_line(text, f.meta.span.start_line);
+                if cursor_line >= f.meta.span.start_line && cursor_line <= end {
                     return Some(f);
                 }
             }

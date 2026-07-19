@@ -26,7 +26,7 @@ impl<'a> Interpreter<'a> {
         };
 
         // Convert List to Array when type annotation is [T; n]
-        let v = match (ty, &v) {
+        let v = match (ty.as_ref().map(Type::unlocated), &v) {
             (Some(Type::Array(_, size)), Value::List(list)) => {
                 if list.len() != *size {
                     return Err(InterpError::new(format!(
@@ -50,9 +50,11 @@ impl<'a> Interpreter<'a> {
         };
 
         // Move semantics: if init is a simple identifier and value is non-Copy, mark source as moved
-        if let Some(Expr::Ident(name)) = init {
-            if !is_copy(&v) && !self.is_moved(name) {
-                self.mark_moved(name);
+        if let Some(init) = init {
+            if let Expr::Ident(name) = init.unlocated() {
+                if !is_copy(&v) && !self.is_moved(name) {
+                    self.mark_moved(name);
+                }
             }
         }
 
@@ -257,14 +259,14 @@ impl<'a> Interpreter<'a> {
 
     fn check_invariants(&mut self, block: &Block) -> Result<(), InterpError> {
         for stmt in block {
-            if let Stmt::Invariant(expr, _) = stmt {
+            if let Stmt::Invariant(expr, _) = stmt.unlocated() {
                 let val = self.eval_expr(expr)?;
                 if !is_truthy(&val) {
                     return Err(InterpError::new(format!("invariant violated: {:?}", expr)));
                 }
             }
             // Recursively check nested structures that contain blocks
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::If { then_, else_, .. } => {
                     self.check_invariants(then_)?;
                     if let Some(eb) = else_ {
@@ -513,12 +515,12 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Option<Value>, InterpError> {
         let v = self.eval_expr(value)?;
         // Move semantics: if value is a simple identifier and non-Copy, mark source as moved
-        if let Expr::Ident(name) = value {
+        if let Expr::Ident(name) = value.unlocated() {
             if !is_copy(&v) && !self.is_moved(name) {
                 self.mark_moved(name);
             }
         }
-        match target {
+        match target.unlocated() {
             Expr::Ident(name) => self.assign(name, v)?,
             Expr::Unary(UnOp::Deref, inner) => {
                 // *r = value: assign through mutable reference or shared pointer
@@ -582,7 +584,7 @@ impl<'a> Interpreter<'a> {
             }
             Expr::Field(obj, field) => {
                 // Special case: if assigning to self.field, update actor directly
-                if let Expr::Ident(name) = obj.as_ref() {
+                if let Expr::Ident(name) = obj.unlocated() {
                     if name == "self" {
                         // Find the actor handle in scope and update its field
                         if let Some(Value::Actor(handle)) = self.lookup("self") {
@@ -712,7 +714,7 @@ impl<'a> Interpreter<'a> {
                     Value::List(mut items) => {
                         assign_list_index(&mut items, index, v)?;
                         // Update the binding
-                        if let Expr::Ident(name) = obj.as_ref() {
+                        if let Expr::Ident(name) = obj.unlocated() {
                             let mut found = false;
                             for scope in self.scope_env.env.iter_mut().rev() {
                                 if scope.contains_key(name) {
@@ -846,8 +848,11 @@ impl<'a> Interpreter<'a> {
         let mut spawn_bindings: HashMap<String, SpawnFuture> = HashMap::new();
 
         for stmt in block {
-            match stmt {
-                Stmt::Expr(Expr::Spawn(expr)) => {
+            match stmt.unlocated() {
+                Stmt::Expr(spawn_expr) if matches!(spawn_expr.unlocated(), Expr::Spawn(_)) => {
+                    let Expr::Spawn(expr) = spawn_expr.unlocated() else {
+                        unreachable!("spawn guard accepted a non-spawn expression")
+                    };
                     // Run the spawn expression only once — in the worker thread.
                     // The previous implementation evaluated `expr` on the main
                     // thread (to scan for LocalShared) and again in the worker,
@@ -895,7 +900,10 @@ impl<'a> Interpreter<'a> {
                 Stmt::Let { pat, init, .. } => {
                     // Handle let bindings that might contain spawn
                     let v = match init {
-                        Some(Expr::Spawn(expr)) => {
+                        Some(spawn_expr) if matches!(spawn_expr.unlocated(), Expr::Spawn(_)) => {
+                            let Expr::Spawn(expr) = spawn_expr.unlocated() else {
+                                unreachable!("spawn guard accepted a non-spawn expression")
+                            };
                             // Create a future for concurrent execution
                             let (tx, rx) = std::sync::mpsc::channel();
                             let expr = expr.clone();
@@ -929,7 +937,7 @@ impl<'a> Interpreter<'a> {
                             // Add to futures for proper await at block end
                             futures.push(fut_arc.clone());
                             // Store in spawn_bindings for name->future lookup
-                            if let Pattern::Variable(name) = pat {
+                            if let PatternKind::Variable(name) = &pat.kind {
                                 spawn_bindings.insert(name.clone(), fut_arc.clone());
                             }
                             Value::Future(fut_arc)

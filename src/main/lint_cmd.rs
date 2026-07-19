@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use mimi::diagnostic::Severity;
-use mimi::{lexer, lint, parser};
+use mimi::{lexer, lint, loader};
 
 pub(crate) fn lint_files(files: &[PathBuf], fail_on_warnings: bool) -> Result<(), String> {
     let linter = lint::Linter::new();
@@ -17,7 +17,8 @@ pub(crate) fn lint_files(files: &[PathBuf], fail_on_warnings: bool) -> Result<()
         let tokens = lexer::Lexer::new(&source)
             .tokenize()
             .map_err(|e| format!("lexer error in {}: {}", path.display(), e))?;
-        let (file, _parse_errors) = parser::Parser::new(tokens).parse_file_with_recovery();
+        let (file, _parse_errors) =
+            loader::parser_for_path(tokens, path)?.parse_file_with_recovery();
         let result = linter.lint(&file, &source);
 
         for diag in &result.diagnostics {

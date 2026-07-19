@@ -16,7 +16,7 @@ use crate::error::{CompileError, MimiResult};
 fn collect_ensures(stmts: &[Stmt]) -> Vec<Expr> {
     let mut result = Vec::new();
     for s in stmts {
-        match s {
+        match s.unlocated() {
             Stmt::Ensures(expr, _) => result.push(expr.clone()),
             Stmt::If { then_, else_, .. } => {
                 result.extend(collect_ensures(then_));
@@ -28,9 +28,12 @@ fn collect_ensures(stmts: &[Stmt]) -> Vec<Expr> {
             Stmt::Loop(body) => result.extend(collect_ensures(body)),
             Stmt::For { body, .. } => result.extend(collect_ensures(body)),
             Stmt::Parasteps(body) => result.extend(collect_ensures(body)),
-            Stmt::Expr(Expr::Lambda { body, .. }) => result.extend(collect_ensures(body)),
-            Stmt::Expr(Expr::Block(body)) => result.extend(collect_ensures(body)),
-            Stmt::Return(Some(Expr::Block(body))) => result.extend(collect_ensures(body)),
+            Stmt::Expr(expr) | Stmt::Return(Some(expr)) => match expr.unlocated() {
+                Expr::Lambda { body, .. } | Expr::Block(body) => {
+                    result.extend(collect_ensures(body));
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -60,7 +63,7 @@ fn collect_old_idents(expr: &crate::ast::Expr) -> Vec<String> {
 /// variables that need to be snapshotted at function entry.
 fn collect_old_idents_walker(expr: &crate::ast::Expr, out: &mut Vec<String>) {
     use crate::ast::Expr;
-    match expr {
+    match expr.unlocated() {
         Expr::Old(inner) => {
             // Found an `old(...)` — collect all identifiers inside it.
             collect_idents_in_old(inner, out);
@@ -182,6 +185,7 @@ fn collect_old_idents_walker(expr: &crate::ast::Expr, out: &mut Vec<String>) {
             }
         }
         Expr::TypeInfo(_) | Expr::Literal(_) | Expr::Ident(_) => {}
+        Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
     }
 }
 
@@ -190,7 +194,7 @@ fn collect_old_idents_walker(expr: &crate::ast::Expr, out: &mut Vec<String>) {
 /// snapshot `x`. For `old(old(x))`, we recurse and snapshot `x`.
 fn collect_idents_in_old(expr: &crate::ast::Expr, out: &mut Vec<String>) {
     use crate::ast::Expr;
-    match expr {
+    match expr.unlocated() {
         Expr::Ident(name) => out.push(name.clone()),
         Expr::Field(inner, _) | Expr::Index(inner, _) | Expr::TupleIndex(inner, _) => {
             collect_idents_in_old(inner, out);
@@ -241,7 +245,7 @@ fn collect_all_idents_depth(expr: &crate::ast::Expr, out: &mut Vec<String>, dept
     }
     use crate::ast::Expr;
     let d = depth + 1;
-    match expr {
+    match expr.unlocated() {
         Expr::Ident(name) => out.push(name.clone()),
         Expr::Binary(_, l, r) => {
             collect_all_idents_depth(l, out, d);
@@ -346,6 +350,7 @@ fn collect_all_idents_depth(expr: &crate::ast::Expr, out: &mut Vec<String>, dept
             }
         }
         Expr::TypeInfo(_) | Expr::Literal(_) => {}
+        Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
     }
 }
 
@@ -353,7 +358,7 @@ fn collect_all_idents_depth(expr: &crate::ast::Expr, out: &mut Vec<String>, dept
 /// If/While/For/Match bodies, etc.
 fn collect_old_idents_in_stmt(stmt: &crate::ast::Stmt, out: &mut Vec<String>) {
     use crate::ast::Stmt;
-    match stmt {
+    match stmt.unlocated() {
         Stmt::Expr(e) => collect_old_idents_walker(e, out),
         Stmt::Let { init: Some(e), .. } => collect_old_idents_walker(e, out),
         Stmt::Return(Some(e)) => collect_old_idents_walker(e, out),
@@ -363,7 +368,7 @@ fn collect_old_idents_in_stmt(stmt: &crate::ast::Stmt, out: &mut Vec<String>) {
 
 fn collect_all_idents_in_stmt_depth(stmt: &crate::ast::Stmt, out: &mut Vec<String>, depth: u32) {
     use crate::ast::Stmt;
-    match stmt {
+    match stmt.unlocated() {
         Stmt::Expr(e) => collect_all_idents_depth(e, out, depth),
         Stmt::Let { init: Some(e), .. } => collect_all_idents_depth(e, out, depth),
         Stmt::Return(Some(e)) => collect_all_idents_depth(e, out, depth),
@@ -391,6 +396,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // 1. Compile the actual body as a hidden regular function
         let body_name = format!("{}__async_body", func.name);
         let body_func = FuncDef {
+            meta: AstNodeMeta::inherited(
+                func.meta.span,
+                AstOrigin::RuntimeSystem("codegen.async_body"),
+            ),
             name: body_name.clone(),
             pub_: false,
             params: func.params.clone(),
@@ -402,7 +411,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             is_comptime: false,
             is_async: false,
             extern_abi: None,
-            pos: (0, 0),
         };
         self.compile_func(&body_func)?;
 
@@ -503,11 +511,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| CompileError::LlvmError("poll body returned void".into()))?;
 
         // Store result at future + 8
-        if !func
-            .ret
-            .as_ref()
-            .map_or(true, |t| matches!(t, Type::Name(n, _) if n == "unit"))
-        {
+        if !func.ret.as_ref().map_or(
+            true,
+            |t| matches!(t.unlocated(), Type::Name(n, _) if n == "unit"),
+        ) {
             let result_ptr_i8 = self
                 .gep()
                 .build_gep(
@@ -574,7 +581,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .ok_or_else(|| CompileError::LlvmError(format!("param {} not found", i)))?;
                 self.build_store(alloca, param_val)?;
                 vars.insert(param.name.clone(), (alloca, ty));
-                if let Type::Name(tn, args) = &param.ty {
+                if let Type::Name(tn, args) = param.ty.unlocated() {
                     if tn == "List" && !args.is_empty() {
                         if let Some(full) = self.get_full_type_name(&param.ty) {
                             self.var_type_names.insert(param.name.clone(), full);
@@ -668,11 +675,11 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// from the function body (e.g., a record literal's type annotation).
     fn concrete_return_type_for_impl_trait(body: &[Stmt]) -> Option<String> {
         let last = body.last()?;
-        match last {
-            Stmt::Expr(expr) | Stmt::Return(Some(expr)) => match expr {
+        match last.unlocated() {
+            Stmt::Expr(expr) | Stmt::Return(Some(expr)) => match expr.unlocated() {
                 Expr::Record { ty, .. } => ty.clone(),
                 Expr::Call(callee, _) => {
-                    if let Expr::Ident(_fname) = callee.as_ref() {
+                    if let Expr::Ident(_fname) = callee.unlocated() {
                         None
                     } else {
                         None
@@ -744,7 +751,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         if self.verify_contracts {
             for stmt in &func.body {
-                if let Stmt::Requires(expr, _) = stmt {
+                if let Stmt::Requires(expr, _) = stmt.unlocated() {
                     self.compile_contract_assert(
                         expr,
                         vars,
@@ -791,13 +798,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// to avoid the prefix-collision case; the remaining risk is a deliberate
     /// user name collision.
     fn is_string_temp_expr(expr: &Expr, val: &BasicValueEnum<'ctx>) -> bool {
-        match expr {
+        match expr.unlocated() {
             Expr::Binary(BinOp::Add, _, _) => true,
             Expr::Literal(Lit::FString(_)) => true,
             Expr::Call(callee, _) => {
                 matches!(val, BasicValueEnum::PointerValue(_))
                     || matches!(
-                        callee.as_ref(),
+                        callee.unlocated(),
                         Expr::Ident(name)
                             if matches!(
                                 name.as_str(),
@@ -882,11 +889,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Check if the expression is a constructor wrapping a string temp,
                 // e.g. `Ok(s + "-wrapped")`.  The inner string temp's heap pointer
                 // must be popped so free_heap_allocs doesn't free it before return.
-                if let Some(Expr::Call(callee, args)) = expr {
-                    if args.len() == 1 && Self::is_string_temp_expr(&args[0], &val) {
-                        if let Expr::Ident(name) = callee.as_ref() {
-                            if matches!(name.as_str(), "Ok" | "Err" | "Some" | "None") {
-                                let _ = self.pop_last_heap_ptr();
+                if let Some(expr) = expr {
+                    if let Expr::Call(callee, args) = expr.unlocated() {
+                        if args.len() == 1 && Self::is_string_temp_expr(&args[0], &val) {
+                            if let Expr::Ident(name) = callee.unlocated() {
+                                if matches!(name.as_str(), "Ok" | "Err" | "Some" | "None") {
+                                    let _ = self.pop_last_heap_ptr();
+                                }
                             }
                         }
                     }
@@ -897,32 +906,34 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Returning a string variable: load the struct value and null out the
         // variable slot's data pointer so the slot is not freed before return.
-        if let Some(Expr::Ident(name)) = expr {
-            if self
-                .var_type_names
-                .get(name)
-                .map(|t| t == "string")
-                .unwrap_or(false)
-            {
-                if let Some(&(alloca, ty)) = vars.get(name) {
-                    let loaded = self.build_load(ty, alloca, &format!("{}_ret", name))?;
-                    let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
-                    if let BasicTypeEnum::StructType(st) = ty {
-                        if let Ok(data_gep) = self.gep().build_struct_gep(
-                            st,
-                            alloca,
-                            0,
-                            &format!("{}_ret_null", name),
-                        ) {
-                            let _ = self.builder.build_store(data_gep, null_ptr);
+        if let Some(expr) = expr {
+            if let Expr::Ident(name) = expr.unlocated() {
+                if self
+                    .var_type_names
+                    .get(name)
+                    .map(|t| t == "string")
+                    .unwrap_or(false)
+                {
+                    if let Some(&(alloca, ty)) = vars.get(name) {
+                        let loaded = self.build_load(ty, alloca, &format!("{}_ret", name))?;
+                        let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+                        if let BasicTypeEnum::StructType(st) = ty {
+                            if let Ok(data_gep) = self.gep().build_struct_gep(
+                                st,
+                                alloca,
+                                0,
+                                &format!("{}_ret_null", name),
+                            ) {
+                                let _ = self.builder.build_store(data_gep, null_ptr);
+                            }
                         }
+                        // CLOSE-GAP-5: heap-copy the loaded struct so the caller
+                        // side has unambiguous ownership. The original data may be
+                        // a `.rodata` global (for `let s = "hi"; s`), in which case
+                        // without this copy the caller would `free()` a global
+                        // pointer.
+                        return self.heap_copy_string_value(loaded);
                     }
-                    // CLOSE-GAP-5: heap-copy the loaded struct so the caller
-                    // side has unambiguous ownership. The original data may be
-                    // a `.rodata` global (for `let s = "hi"; s`), in which case
-                    // without this copy the caller would `free()` a global
-                    // pointer.
-                    return self.heap_copy_string_value(loaded);
                 }
             }
         }
@@ -930,13 +941,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         // For concat / fstring / builtin raw returns, the most-recent heap
         // registration owns the returned data; pop it so free_heap_allocs
         // doesn't release it before the caller sees it.
-        let is_string_temp = match expr {
+        let is_string_temp = match expr.map(Expr::unlocated) {
             Some(Expr::Binary(BinOp::Add, _, _)) => true,
             Some(Expr::Literal(Lit::FString(_))) => true,
             Some(Expr::Call(callee, _)) => {
                 matches!(val, BasicValueEnum::PointerValue(_))
                     || matches!(
-                        callee.as_ref(),
+                        callee.unlocated(),
                         Expr::Ident(name) if name.starts_with("str_") || name == "to_string"
                     )
             }
@@ -1158,10 +1169,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             Some(t) => t,
             None => return Ok(val),
         };
-        let is_result = matches!(ast_ty, Type::Result(_, _))
-            || matches!(ast_ty, Type::Name(n, args) if n == "Result" && args.len() == 2);
-        let is_option = matches!(ast_ty, Type::Option(_))
-            || matches!(ast_ty, Type::Name(n, args) if n == "Option" && args.len() == 1);
+        let is_result = matches!(ast_ty.unlocated(), Type::Result(_, _))
+            || matches!(ast_ty.unlocated(), Type::Name(n, args) if n == "Result" && args.len() == 2);
+        let is_option = matches!(ast_ty.unlocated(), Type::Option(_))
+            || matches!(ast_ty.unlocated(), Type::Name(n, args) if n == "Option" && args.len() == 1);
         if !is_result && !is_option {
             return Ok(val);
         }
@@ -1300,7 +1311,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // literals or list indexing). Wrap them in the canonical
                     // {i8*, i64} struct so the rest of the function body sees a
                     // well-formed Mimi string.
-                    if let Type::Name(tn, _) = &resolved {
+                    if let Type::Name(tn, _) = resolved.unlocated() {
                         if tn == "string" {
                             if let BasicValueEnum::PointerValue(pv) = param_val {
                                 let strlen_fn = self.get_runtime_fn("strlen")?;
@@ -1323,7 +1334,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 vars.insert(param.name.clone(), (alloca, ty));
 
                 // Track type name for method dispatch
-                if let Type::Name(tn, args) = &resolved {
+                if let Type::Name(tn, args) = resolved.unlocated() {
                     if tn == "List" && !args.is_empty() {
                         if let Some(full) = self.get_full_type_name(&resolved) {
                             self.var_type_names.insert(param.name.clone(), full);
@@ -1333,8 +1344,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     self.var_types.insert(param.name.clone(), resolved.clone());
                 }
-                if let Type::Ref(_, inner) | Type::RefMut(_, inner) = &resolved {
-                    if let Type::Name(tn, args) = inner.as_ref() {
+                if let Type::Ref(_, inner) | Type::RefMut(_, inner) = resolved.unlocated() {
+                    if let Type::Name(tn, args) = inner.unlocated() {
                         if tn == "List" && !args.is_empty() {
                             if let Some(full) = self.get_full_type_name(inner) {
                                 self.var_type_names.insert(param.name.clone(), full);
@@ -1346,17 +1357,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .insert(param.name.clone(), inner.as_ref().clone());
                     }
                 }
-                if let Type::DynTrait(_) = &resolved {
+                if let Type::DynTrait(_) = resolved.unlocated() {
                     self.var_type_names
                         .insert(param.name.clone(), crate::core::fmt_type(&resolved));
                     self.var_types.insert(param.name.clone(), resolved.clone());
                 }
-                if let Type::ImplTrait(_) = &resolved {
+                if let Type::ImplTrait(_) = resolved.unlocated() {
                     self.var_type_names
                         .insert(param.name.clone(), crate::core::fmt_type(&resolved));
                     self.var_types.insert(param.name.clone(), resolved.clone());
                 }
-                if let Type::Func(_, _) | Type::ExternFunc(_, _) = &resolved {
+                if let Type::Func(_, _) | Type::ExternFunc(_, _) = resolved.unlocated() {
                     self.var_type_names
                         .insert(param.name.clone(), crate::core::fmt_type(&resolved));
                     self.var_types.insert(param.name.clone(), resolved.clone());
@@ -1366,7 +1377,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.register_list_elem_type(&param.name, &resolved);
 
                 // Track capability parameters
-                if matches!(&param.ty, Type::Cap(_)) {
+                if matches!(param.ty.unlocated(), Type::Cap(_)) {
                     self.register_cap(&param.name, alloca);
                 }
             }
@@ -1415,14 +1426,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut last_val: BasicValueEnum<'ctx> = default_val;
         for stmt in &func.body {
             // Run compensations before exit()
-            if let Stmt::Expr(Expr::Call(callee, _)) = stmt {
-                if let Expr::Ident(name) = &**callee {
-                    if name == "exit" {
-                        self.compile_compensations(vars)?;
+            if let Stmt::Expr(expr) = stmt.unlocated() {
+                if let Expr::Call(callee, _) = expr.unlocated() {
+                    if let Expr::Ident(name) = callee.unlocated() {
+                        if name == "exit" {
+                            self.compile_compensations(vars)?;
+                        }
                     }
                 }
             }
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::Expr(expr) => {
                     last_val = self.compile_expr(expr, vars)?;
                     last_val = self.adjust_int_val(last_val, ret_type)?;
@@ -1452,9 +1465,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ..
                 } => {
                     // dyn Trait let-binding: build fat pointer from concrete value (requires Variable pattern)
-                    if let Some(Type::DynTrait(trait_names)) = &ty {
-                        let name = match pat {
-                            Pattern::Variable(n) => n.clone(),
+                    if let Some(Type::DynTrait(trait_names)) = ty.as_ref().map(Type::unlocated) {
+                        let name = match &pat.kind {
+                            PatternKind::Variable(n) => n.clone(),
                             _ => {
                                 return Err(CompileError::LlvmError(
                                     "dyn Trait binding requires a simple variable pattern"
@@ -1463,7 +1476,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         };
                         let concrete_val = self.compile_expr(init, vars)?;
-                        let concrete_type = match init {
+                        let concrete_type = match init.unlocated() {
                             Expr::Record { ty: Some(tn), .. } => tn.clone(),
                             Expr::Ident(var_name) => self
                                 .var_type_names
@@ -1545,14 +1558,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let dyn_type_str = crate::core::fmt_type(ty_ref);
                         self.var_type_names.insert(name.clone(), dyn_type_str);
                         vars.insert(name.clone(), (fat_alloca, fat_ty));
-                        if let Some(Type::Cap(_)) = &ty {
+                        if let Some(Type::Cap(_)) = ty.as_ref().map(Type::unlocated) {
                             self.register_cap(&name, fat_alloca);
                         }
                         continue;
                     }
                     // Shared ref copy: let v = shared_var
-                    if let Pattern::Variable(name) = pat {
-                        if let Expr::Ident(src_name) = init {
+                    if let PatternKind::Variable(name) = &pat.kind {
+                        if let Expr::Ident(src_name) = init.unlocated() {
                             if self.shared_var_names.contains(src_name.as_str()) {
                                 self.compile_shared_ref_copy(name, src_name, vars)?;
                                 continue;
@@ -1560,12 +1573,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     // Shared var clone: let v = shared_var.clone()
-                    if let Pattern::Variable(name) = pat {
-                        if let Expr::Call(callee, cargs) = init {
+                    if let PatternKind::Variable(name) = &pat.kind {
+                        if let Expr::Call(callee, cargs) = init.unlocated() {
                             if cargs.is_empty() {
-                                if let Expr::Field(obj, method_name) = callee.as_ref() {
+                                if let Expr::Field(obj, method_name) = callee.unlocated() {
                                     if method_name == "clone" {
-                                        if let Expr::Ident(src_name) = obj.as_ref() {
+                                        if let Expr::Ident(src_name) = obj.unlocated() {
                                             if self.shared_var_names.contains(src_name.as_str()) {
                                                 self.compile_shared_ref_copy(name, src_name, vars)?;
                                                 continue;
@@ -1578,9 +1591,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     // Non-dyn Trait: compile init and bind via recursive pattern matching
                     let saved_list_elem = self.pending_list_elem_type.take();
-                    if matches!(init, Expr::List(_)) {
+                    if matches!(init.unlocated(), Expr::List(_)) {
                         if let Some(decl_ty) = ty.as_ref() {
-                            if let Type::Name(n, args) = decl_ty {
+                            if let Type::Name(n, args) = decl_ty.unlocated() {
                                 if n == "List" && args.len() == 1 {
                                     self.pending_list_elem_type = Some(args[0].clone());
                                 }
@@ -1598,9 +1611,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // {i8*, i64} struct so variable allocas have consistent type.
                     val = self.normalize_string_value(val, init)?;
                     // Track type info for simple Variable patterns
-                    if let Pattern::Variable(name) = pat {
+                    if let PatternKind::Variable(name) = &pat.kind {
                         if let Some(ty_ref) = &ty {
-                            if let Type::Name(tn, args) = ty_ref {
+                            if let Type::Name(tn, args) = ty_ref.unlocated() {
                                 if !args.is_empty() {
                                     // Store full generic type name for method dispatch
                                     if let Some(full) = self.get_full_type_name(ty_ref) {
@@ -1616,7 +1629,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         } else if let Expr::Record {
                             ty: Some(tn),
                             fields,
-                        } = init
+                        } = init.unlocated()
                         {
                             self.var_type_names.insert(name.clone(), tn.clone());
                             // Infer concrete generic args from field values (e.g.
@@ -1647,9 +1660,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                 }
                             }
-                        } else if matches!(init, Expr::SetLiteral(_)) {
+                        } else if matches!(init.unlocated(), Expr::SetLiteral(_)) {
                             self.var_type_names.insert(name.clone(), "set".to_string());
-                        } else if let Expr::List(list_elems) = init {
+                        } else if let Expr::List(list_elems) = init.unlocated() {
                             // D1: infer List<T> type from first element
                             if let Some(first) = list_elems.first() {
                                 let elem_type = self.infer_object_type(first, vars);
@@ -1658,14 +1671,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         .insert(name.clone(), format!("List<{}>", elem_type));
                                 }
                             }
-                        } else if let Expr::Index(_, _) = init {
+                        } else if let Expr::Index(_, _) = init.unlocated() {
                             // D1: infer element type via infer_object_type (handles List<T> stripping)
                             let elem_type = self.infer_object_type(init, vars);
                             if !elem_type.is_empty() {
                                 self.var_type_names.insert(name.clone(), elem_type);
                             }
-                        } else if let Expr::Call(callee, call_args) = init {
-                            if let Expr::Field(obj, method_name) = callee.as_ref() {
+                        } else if let Expr::Call(callee, call_args) = init.unlocated() {
+                            if let Expr::Field(obj, method_name) = callee.unlocated() {
                                 if method_name == "spawn" || method_name == "spawn_detached" {
                                     let obj_type = self.infer_object_type(obj, vars);
                                     if !obj_type.is_empty() {
@@ -1694,7 +1707,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     let obj_type = self.infer_object_type(obj, vars);
                                     if obj_type.starts_with("Set") || obj_type == "set" {
                                         self.var_type_names.insert(name.clone(), obj_type);
-                                    } else if let Expr::Ident(flow_name) = obj.as_ref() {
+                                    } else if let Expr::Ident(flow_name) = obj.unlocated() {
                                         // Flow::transition — insert/remove may be flow
                                         // transition names, not Set operations.
                                         if let Some(flow) = self.flow_defs.get(flow_name) {
@@ -1724,7 +1737,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if !ret_type.is_empty() {
                                             self.var_type_names.insert(name.clone(), ret_type);
                                         }
-                                    } else if let Expr::Ident(flow_name) = obj.as_ref() {
+                                    } else if let Expr::Ident(flow_name) = obj.unlocated() {
                                         // Flow::transition(from, ...) → matching overload's to-state
                                         if let Some(flow) = self.flow_defs.get(flow_name) {
                                             let from_type = call_args
@@ -1743,7 +1756,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                     }
                                 }
-                            } else if let Expr::Ident(func_name) = callee.as_ref() {
+                            } else if let Expr::Ident(func_name) = callee.unlocated() {
                                 match func_name.as_str() {
                                     "values" => {
                                         self.var_type_names
@@ -1813,7 +1826,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             .map(|fdef| (fdef.ret.clone(), fdef.is_async))
                                         {
                                             if let Some(ret_ty) = ret_ty {
-                                                match &ret_ty {
+                                                match ret_ty.unlocated() {
                                                     Type::ImplTrait(traits) => {
                                                         self.var_type_names.insert(
                                                             name.clone(),
@@ -1845,6 +1858,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             .extern_func_defs
                                             .get(func_name)
                                             .and_then(|ef| ef.ret.as_ref())
+                                            .map(crate::ast::Type::unlocated)
                                         {
                                             self.var_type_names.insert(name.clone(), tn.clone());
                                         }
@@ -1945,9 +1959,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                 }
                             }
-                        } else if let Expr::Turbofish(_func_name, turbo_type_args, _) = init {
+                        } else if let Expr::Turbofish(_func_name, turbo_type_args, _) =
+                            init.unlocated()
+                        {
                             if let Some(ta) = turbo_type_args.first() {
-                                if let Type::Name(tn, args) = ta {
+                                if let Type::Name(tn, args) = ta.unlocated() {
                                     // Prefer full type name for containers so later
                                     // dispatch (to_json Map, List helpers) can match.
                                     if !args.is_empty()
@@ -1973,7 +1989,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.register_list_elem_type(name, decl_ty);
                         }
                         // Track capability variables
-                        if let Some(Type::Cap(_)) = &ty {
+                        if let Some(Type::Cap(_)) = ty.as_ref().map(Type::unlocated) {
                             if let Some(&(alloca, _)) = vars.get(name) {
                                 self.register_cap(name, alloca);
                             }
@@ -1981,10 +1997,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     // For tuple patterns, push the tuple type onto tuple_type_stack
                     // so that compile_pattern_bind can load the struct correctly
-                    if let Pattern::Tuple(sub_pats) = pat {
+                    if let PatternKind::Tuple(sub_pats) = &pat.kind {
                         if !sub_pats.is_empty() {
                             // Try to infer tuple type from declared type or init expression
-                            let tuple_ty = if let Some(Type::Tuple(elem_tys)) = &ty {
+                            let tuple_ty = if let Some(Type::Tuple(elem_tys)) =
+                                ty.as_ref().map(Type::unlocated)
+                            {
                                 let field_tys: Vec<BasicTypeEnum> = elem_tys
                                     .iter()
                                     .map(|t| {
@@ -2007,13 +2025,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     self.compile_pattern_bind(pat, val, vars)?;
                     // Pop tuple type stack if we pushed it
-                    if let Pattern::Tuple(sub_pats) = pat {
+                    if let PatternKind::Tuple(sub_pats) = &pat.kind {
                         if !sub_pats.is_empty() {
                             self.tuple_type_stack.pop();
                         }
                     }
-                    if let Pattern::Variable(name) = pat {
-                        if let Expr::Ident(fn_name) = init {
+                    if let PatternKind::Variable(name) = &pat.kind {
+                        if let Expr::Ident(fn_name) = init.unlocated() {
                             if self.module.get_function(fn_name.as_str()).is_some() {
                                 self.fn_ptr_var_names.insert(name.clone());
                             }
@@ -2278,7 +2296,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Drop: evaluate expression and mark capability as consumed
                     let _val = self.compile_expr(expr, vars)?;
                     // If the expression is a variable, mark it as consumed and call mimi_cap_consume
-                    if let Expr::Ident(name) = expr {
+                    if let Expr::Ident(name) = expr.unlocated() {
                         self.consume_cap(name)?;
                         // Generate runtime cap consume call
                         if self.is_cap_var(name) {
@@ -2696,12 +2714,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<(inkwell::values::FunctionValue<'ctx>, BasicTypeEnum<'ctx>)> {
         // For impl Trait return types, determine the concrete type from the body
         // so the function's LLVM signature uses the right type.
-        let effective_ret_override = if let Some(Type::ImplTrait(_)) = &func.ret {
-            Self::concrete_return_type_for_impl_trait(&func.body)
-                .and_then(|tn| self.type_llvm.get(&tn).cloned())
-        } else {
-            None
-        };
+        let effective_ret_override =
+            if let Some(Type::ImplTrait(_)) = func.ret.as_ref().map(Type::unlocated) {
+                Self::concrete_return_type_for_impl_trait(&func.body)
+                    .and_then(|tn| self.type_llvm.get(&tn).cloned())
+            } else {
+                None
+            };
 
         let ret_type = effective_ret_override
             .or_else(|| match &func.ret {
@@ -2807,7 +2826,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.snapshot_old_values(&vars)?;
 
         let ret_ty_ast = func.ret.as_ref();
-        let last_expr = func.body.last().and_then(|s| match s {
+        let last_expr = func.body.last().and_then(|s| match s.unlocated() {
             Stmt::Expr(e) => Some(e),
             _ => None,
         });
@@ -2863,12 +2882,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // For impl Trait return types, determine the concrete type from the body
-        let effective_ret_override = if let Some(Type::ImplTrait(_)) = &func.ret {
-            Self::concrete_return_type_for_impl_trait(&func.body)
-                .and_then(|tn| self.type_llvm.get(&tn).cloned())
-        } else {
-            None
-        };
+        let effective_ret_override =
+            if let Some(Type::ImplTrait(_)) = func.ret.as_ref().map(Type::unlocated) {
+                Self::concrete_return_type_for_impl_trait(&func.body)
+                    .and_then(|tn| self.type_llvm.get(&tn).cloned())
+            } else {
+                None
+            };
 
         // Substitute generic params in ret type and param types
         let ret_type = effective_ret_override
@@ -2920,7 +2940,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.snapshot_old_values(&vars)?;
 
         let ret_ty_ast = func.ret.as_ref();
-        let last_expr = func.body.last().and_then(|s| match s {
+        let last_expr = func.body.last().and_then(|s| match s.unlocated() {
             Stmt::Expr(e) => Some(e),
             _ => None,
         });

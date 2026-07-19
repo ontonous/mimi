@@ -7,6 +7,23 @@ use std::collections::HashMap;
 use super::Checker;
 
 impl<'a> Checker<'a> {
+    fn item_span(item: &Item) -> Span {
+        match item {
+            Item::Func(value) => value.meta.span,
+            Item::Module(value) => value.meta.span,
+            Item::Type(value) => value.meta.span,
+            Item::Actor(value) => value.meta.span,
+            Item::Cap(value) => value.meta.span,
+            Item::Trait(value) => value.meta.span,
+            Item::Impl(value) => value.meta.span,
+            Item::ExternBlock(value) => value.meta.span,
+            Item::Const { meta, .. } => meta.span,
+            Item::Flow(value) => value.meta.span,
+            Item::Protocol(value) => value.meta.span,
+            Item::Session(value) => value.meta.span,
+        }
+    }
+
     pub(crate) fn collect_decls(&mut self) {
         // Process imports: add module names to use_imports
         for import in &self.file.imports {
@@ -29,24 +46,30 @@ impl<'a> Checker<'a> {
     }
 
     fn register_builtin_types(&mut self) {
+        let builtin_meta = AstNodeMeta::synthetic(AstOrigin::RuntimeSystem("checker.builtin_type"));
+        let builtin_type =
+            |name: &str| Type::Name(name.to_string(), vec![]).deep_reorigin(builtin_meta);
         // ExecResult { exit_code: i32, stdout: string, stderr: string }
         if !self.types.contains_key("ExecResult") {
             let td = TypeDef {
+                meta: builtin_meta,
                 name: "ExecResult".to_string(),
-                decl_pos: None,
                 pub_: false,
                 kind: TypeDefKind::Record(vec![
                     Field {
+                        meta: builtin_meta,
                         name: "exit_code".to_string(),
-                        ty: Type::Name("i32".to_string(), vec![]),
+                        ty: builtin_type("i32"),
                     },
                     Field {
+                        meta: builtin_meta,
                         name: "stdout".to_string(),
-                        ty: Type::Name("string".to_string(), vec![]),
+                        ty: builtin_type("string"),
                     },
                     Field {
+                        meta: builtin_meta,
                         name: "stderr".to_string(),
-                        ty: Type::Name("string".to_string(), vec![]),
+                        ty: builtin_type("string"),
                     },
                 ]),
                 generics: vec![],
@@ -58,25 +81,29 @@ impl<'a> Checker<'a> {
         // StatResult { size: i64, modified: i64, is_file: bool, is_dir: bool }
         if !self.types.contains_key("StatResult") {
             let td = TypeDef {
+                meta: builtin_meta,
                 name: "StatResult".to_string(),
-                decl_pos: None,
                 pub_: false,
                 kind: TypeDefKind::Record(vec![
                     Field {
+                        meta: builtin_meta,
                         name: "size".to_string(),
-                        ty: Type::Name("i64".to_string(), vec![]),
+                        ty: builtin_type("i64"),
                     },
                     Field {
+                        meta: builtin_meta,
                         name: "modified".to_string(),
-                        ty: Type::Name("i64".to_string(), vec![]),
+                        ty: builtin_type("i64"),
                     },
                     Field {
+                        meta: builtin_meta,
                         name: "is_file".to_string(),
-                        ty: Type::Name("bool".to_string(), vec![]),
+                        ty: builtin_type("bool"),
                     },
                     Field {
+                        meta: builtin_meta,
                         name: "is_dir".to_string(),
-                        ty: Type::Name("bool".to_string(), vec![]),
+                        ty: builtin_type("bool"),
                     },
                 ]),
                 generics: vec![],
@@ -89,17 +116,19 @@ impl<'a> Checker<'a> {
         // { peer_id: string, reason: string }
         if !self.types.contains_key("PeerFault") {
             let td = TypeDef {
+                meta: builtin_meta,
                 name: "PeerFault".to_string(),
-                decl_pos: None,
                 pub_: false,
                 kind: TypeDefKind::Record(vec![
                     Field {
+                        meta: builtin_meta,
                         name: "peer_id".to_string(),
-                        ty: Type::Name("string".to_string(), vec![]),
+                        ty: builtin_type("string"),
                     },
                     Field {
+                        meta: builtin_meta,
                         name: "reason".to_string(),
-                        ty: Type::Name("string".to_string(), vec![]),
+                        ty: builtin_type("string"),
                     },
                 ]),
                 generics: vec![],
@@ -114,29 +143,34 @@ impl<'a> Checker<'a> {
         //   memory_dump: MemoryDump, panic_payload: PanicPayload }
         if !self.types.contains_key("SystemTrace") {
             let td = TypeDef {
+                meta: builtin_meta,
                 name: "SystemTrace".to_string(),
-                decl_pos: None,
                 pub_: false,
                 kind: TypeDefKind::Record(vec![
                     Field {
+                        meta: builtin_meta,
                         name: "last_state_name".to_string(),
-                        ty: Type::Name("string".to_string(), vec![]),
+                        ty: builtin_type("string"),
                     },
                     Field {
+                        meta: builtin_meta,
                         name: "unexpected_event".to_string(),
-                        ty: Type::Name("string".to_string(), vec![]),
+                        ty: builtin_type("string"),
                     },
                     Field {
+                        meta: builtin_meta,
                         name: "snapshot".to_string(),
-                        ty: Type::Name("string".to_string(), vec![]),
+                        ty: builtin_type("string"),
                     },
                     Field {
+                        meta: builtin_meta,
                         name: "memory_dump".to_string(),
-                        ty: Type::Name("MemoryDump".to_string(), vec![]),
+                        ty: builtin_type("MemoryDump"),
                     },
                     Field {
+                        meta: builtin_meta,
                         name: "panic_payload".to_string(),
-                        ty: Type::Name("PanicPayload".to_string(), vec![]),
+                        ty: builtin_type("PanicPayload"),
                     },
                 ]),
                 generics: vec![],
@@ -149,25 +183,29 @@ impl<'a> Checker<'a> {
         // { error_type: string, file: string, line: i32, stack: string }
         if !self.types.contains_key("PanicPayload") {
             let td = TypeDef {
+                meta: builtin_meta,
                 name: "PanicPayload".to_string(),
-                decl_pos: None,
                 pub_: false,
                 kind: TypeDefKind::Record(vec![
                     Field {
+                        meta: builtin_meta,
                         name: "error_type".to_string(),
-                        ty: Type::Name("string".to_string(), vec![]),
+                        ty: builtin_type("string"),
                     },
                     Field {
+                        meta: builtin_meta,
                         name: "file".to_string(),
-                        ty: Type::Name("string".to_string(), vec![]),
+                        ty: builtin_type("string"),
                     },
                     Field {
+                        meta: builtin_meta,
                         name: "line".to_string(),
-                        ty: Type::Name("i32".to_string(), vec![]),
+                        ty: builtin_type("i32"),
                     },
                     Field {
+                        meta: builtin_meta,
                         name: "stack".to_string(),
-                        ty: Type::Name("string".to_string(), vec![]),
+                        ty: builtin_type("string"),
                     },
                 ]),
                 generics: vec![],
@@ -180,17 +218,19 @@ impl<'a> Checker<'a> {
         // { fields: string, count: i32 }
         if !self.types.contains_key("MemoryDump") {
             let td = TypeDef {
+                meta: builtin_meta,
                 name: "MemoryDump".to_string(),
-                decl_pos: None,
                 pub_: false,
                 kind: TypeDefKind::Record(vec![
                     Field {
+                        meta: builtin_meta,
                         name: "fields".to_string(),
-                        ty: Type::Name("string".to_string(), vec![]),
+                        ty: builtin_type("string"),
                     },
                     Field {
+                        meta: builtin_meta,
                         name: "count".to_string(),
-                        ty: Type::Name("i32".to_string(), vec![]),
+                        ty: builtin_type("i32"),
                     },
                 ]),
                 generics: vec![],
@@ -208,10 +248,12 @@ impl<'a> Checker<'a> {
             let mut visited = std::collections::HashSet::new();
             visited.insert(name.clone());
             if self.follows_alias_cycle(name, &visited) {
-                self.emit_code(
+                let span = self.alias_spans.get(name).copied().unwrap_or(Span::UNKNOWN);
+                self.errors.push(Diagnostic::error_code(
                     crate::diagnostic::codes::E0409,
                     format!("type alias cycle detected: '{}' forms a cycle", name),
-                );
+                    span,
+                ));
             }
         }
     }
@@ -243,6 +285,7 @@ impl<'a> Checker<'a> {
     /// Extract all top-level type names referenced in a type (recursing into containers).
     fn extract_type_names(ty: &Type) -> Vec<String> {
         match ty {
+            Type::Located { ty, .. } => Self::extract_type_names(ty),
             Type::Name(name, args) => {
                 let mut names = vec![name.clone()];
                 for a in args {
@@ -291,9 +334,10 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn collect_item_decls(&mut self, item: &Item) {
+        self.set_span(Self::item_span(item));
         match item {
             Item::Func(f) => {
-                self.set_pos(f.pos.0, f.pos.1);
+                self.set_span(f.meta.span);
                 let qualified_name = if self.module_path.is_empty() {
                     f.name.clone()
                 } else {
@@ -420,6 +464,7 @@ impl<'a> Checker<'a> {
                         let resolved = self.resolve_type(ty);
                         self.check_type_well_formed(&resolved, &format!("alias '{}'", t.name));
                         self.aliases.insert(t.name.clone(), resolved);
+                        self.alias_spans.insert(t.name.clone(), t.meta.span);
                     }
                     TypeDefKind::Newtype(ty) => {
                         // Store the newtype with its inner type (unresolved for now)
@@ -509,14 +554,21 @@ impl<'a> Checker<'a> {
             Item::Actor(actor) => {
                 // Register actor type so it can be used as a type
                 let actor_type_def = TypeDef {
+                    meta: AstNodeMeta::inherited(
+                        actor.meta.span,
+                        AstOrigin::Desugared("checker.actor_record_projection"),
+                    ),
                     name: actor.name.clone(),
-                    decl_pos: None,
                     pub_: actor.pub_,
                     kind: TypeDefKind::Record(
                         actor
                             .fields
                             .iter()
                             .map(|f| Field {
+                                meta: AstNodeMeta::inherited(
+                                    f.meta.span,
+                                    AstOrigin::Desugared("checker.actor_field_projection"),
+                                ),
                                 name: f.name.clone(),
                                 ty: f.ty.clone(),
                             })
@@ -530,6 +582,7 @@ impl<'a> Checker<'a> {
 
                 // Collect actor methods as functions
                 for method in &actor.methods {
+                    self.set_span(method.meta.span);
                     let qualified = format!("{}::{}", actor.name, method.name);
                     if self.funcs.contains_key(&qualified) {
                         self.emit_code(
@@ -570,7 +623,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Cap(c) => {
-                self.set_pos(c.pos.0, c.pos.1);
+                self.set_span(c.meta.span);
                 if !self.declared_caps.insert(c.name.clone()) {
                     self.emit_code(
                         crate::diagnostic::codes::E0402,
@@ -579,7 +632,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Trait(trait_def) => {
-                self.set_pos(trait_def.pos.0, trait_def.pos.1);
+                self.set_span(trait_def.meta.span);
                 let method_names: Vec<String> =
                     trait_def.methods.iter().map(|m| m.name.clone()).collect();
                 self.traits
@@ -609,7 +662,7 @@ impl<'a> Checker<'a> {
                     .truncate(self.generic_scope.len() - generic_names.len());
             }
             Item::Impl(impl_def) => {
-                self.set_pos(impl_def.pos.0, impl_def.pos.1);
+                self.set_span(impl_def.meta.span);
                 let method_names: Vec<String> =
                     impl_def.methods.iter().map(|m| m.name.clone()).collect();
                 self.impls.insert(
@@ -629,6 +682,7 @@ impl<'a> Checker<'a> {
                 self.generic_scope
                     .extend(impl_generic_names.iter().cloned());
                 for method in &impl_def.methods {
+                    self.set_span(method.meta.span);
                     let generic_names: Vec<String> =
                         method.generics.iter().map(|g| g.name.clone()).collect();
                     self.generic_scope.extend(generic_names.iter().cloned());
@@ -672,10 +726,12 @@ impl<'a> Checker<'a> {
                     .truncate(self.generic_scope.len() - impl_generic_names.len());
             }
             Item::ExternBlock(block) => {
-                self.set_pos(block.pos.0, block.pos.1);
+                self.set_span(block.meta.span);
                 // Register extern functions for type checking
                 for func in &block.funcs {
+                    self.set_span(func.meta.span);
                     for param in &func.params {
+                        self.set_span(param.meta.span);
                         if block.unsafe_ {
                             // unsafe extern: skip passport-type validation.
                             // User takes responsibility for ABI compatibility.
@@ -714,13 +770,13 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Const {
+                meta,
                 name,
-                pos,
                 ty,
                 value,
                 ..
             } => {
-                self.set_pos(pos.0, pos.1);
+                self.set_span(meta.span);
                 // Infer the type of the constant value
                 let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
                 let value_ty = self.infer_expr(value, &mut scopes);
@@ -755,8 +811,11 @@ impl<'a> Checker<'a> {
                     self.types.entry(type_name.clone()).or_insert_with(|| {
                         let fields = state.payload.clone().unwrap_or_default();
                         TypeDef {
+                            meta: AstNodeMeta::inherited(
+                                state.meta.span,
+                                AstOrigin::Desugared("checker.flow_state_type_projection"),
+                            ),
                             name: type_name.clone(),
-                            decl_pos: None,
                             pub_: false,
                             kind: TypeDefKind::Record(fields),
                             generics: vec![],
@@ -808,8 +867,11 @@ impl<'a> Checker<'a> {
                     } else {
                         let fields2 = state.payload.clone().unwrap_or_default();
                         let td2 = TypeDef {
+                            meta: AstNodeMeta::inherited(
+                                state.meta.span,
+                                AstOrigin::Desugared("checker.flow_state_type_projection"),
+                            ),
                             name: state.name.clone(),
-                            decl_pos: None,
                             pub_: false,
                             kind: TypeDefKind::Record(fields2),
                             generics: vec![],
@@ -883,8 +945,11 @@ impl<'a> Checker<'a> {
                 // Existence check uses `types` keys with prefix `proto::{name}`.
                 if !self.types.contains_key(&qualified) {
                     let marker = TypeDef {
+                        meta: AstNodeMeta::inherited(
+                            p.meta.span,
+                            AstOrigin::Desugared("checker.protocol_marker_projection"),
+                        ),
                         name: qualified.clone(),
-                        decl_pos: None,
                         pub_: false,
                         kind: TypeDefKind::Record(vec![]),
                         generics: vec![],
@@ -902,6 +967,12 @@ impl<'a> Checker<'a> {
                     self.types.entry(type_name.clone()).or_insert_with(|| {
                         let fields = match &state.payload_type {
                             Some(payload_ty) => vec![Field {
+                                meta: AstNodeMeta::inherited(
+                                    state.meta.span,
+                                    AstOrigin::Desugared(
+                                        "checker.protocol_payload_field_projection",
+                                    ),
+                                ),
                                 name: state
                                     .payload_name
                                     .clone()
@@ -911,8 +982,11 @@ impl<'a> Checker<'a> {
                             None => vec![],
                         };
                         TypeDef {
+                            meta: AstNodeMeta::inherited(
+                                state.meta.span,
+                                AstOrigin::Desugared("checker.protocol_state_type_projection"),
+                            ),
                             name: type_name.clone(),
-                            decl_pos: None,
                             pub_: false,
                             kind: TypeDefKind::Record(fields),
                             generics: vec![],
@@ -931,12 +1005,16 @@ impl<'a> Checker<'a> {
                 }
                 // Also expose SessionChan marker type so SessionChan<S> is well-formed.
                 if !self.types.contains_key("SessionChan") {
+                    let session_marker_meta = AstNodeMeta::synthetic(AstOrigin::RuntimeSystem(
+                        "checker.session_channel_marker",
+                    ));
                     let td = TypeDef {
+                        meta: session_marker_meta,
                         name: "SessionChan".to_string(),
-                        decl_pos: None,
                         pub_: false,
                         kind: TypeDefKind::Record(vec![]),
                         generics: vec![GenericParam {
+                            meta: session_marker_meta,
                             name: "S".to_string(),
                             bounds: vec![],
                         }],
@@ -949,13 +1027,14 @@ impl<'a> Checker<'a> {
         }
     }
     pub(crate) fn check_item(&mut self, item: &Item) {
+        self.set_span(Self::item_span(item));
         match item {
             Item::Func(f) => {
-                self.set_pos(f.pos.0, f.pos.1);
+                self.set_span(f.meta.span);
                 self.check_func(f)
             }
             Item::Module(m) => {
-                self.set_pos(m.pos.0, m.pos.1);
+                self.set_span(m.meta.span);
                 self.module_path.push(m.name.clone());
                 for inner in &m.items {
                     self.check_item(inner);
@@ -963,9 +1042,10 @@ impl<'a> Checker<'a> {
                 self.module_path.pop();
             }
             Item::Actor(actor) => {
-                self.set_pos(actor.pos.0, actor.pos.1);
+                self.set_span(actor.meta.span);
                 // Check actor fields
                 for field in &actor.fields {
+                    self.set_span(field.meta.span);
                     let field_ty = self.resolve_type(&field.ty);
                     // Validate field type is well-formed
                     self.check_type_well_formed(
@@ -991,7 +1071,7 @@ impl<'a> Checker<'a> {
                 }
                 // Check actor methods
                 for method in &actor.methods {
-                    self.set_pos(method.pos.0, method.pos.1);
+                    self.set_span(method.meta.span);
                     // Add implicit self parameter to scope for actor methods
                     let self_ty = Type::Name(actor.name.clone(), vec![]);
                     let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
@@ -1037,13 +1117,11 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Type(type_def) => {
-                if let Some(pos) = type_def.decl_pos {
-                    self.set_pos(pos.0, pos.1);
-                }
+                self.set_span(type_def.meta.span);
             }
-            Item::Cap(cap) => self.set_pos(cap.pos.0, cap.pos.1),
+            Item::Cap(cap) => self.set_span(cap.meta.span),
             Item::Trait(trait_def) => {
-                self.set_pos(trait_def.pos.0, trait_def.pos.1);
+                self.set_span(trait_def.meta.span);
                 // Check that all trait method types are well-formed
                 let generic_names: Vec<String> =
                     trait_def.generics.iter().map(|g| g.name.clone()).collect();
@@ -1074,7 +1152,7 @@ impl<'a> Checker<'a> {
                     .truncate(self.generic_scope.len() - generic_names.len());
             }
             Item::Impl(impl_def) => {
-                self.set_pos(impl_def.pos.0, impl_def.pos.1);
+                self.set_span(impl_def.meta.span);
                 // Check that the trait exists
                 if !self.traits.contains_key(&impl_def.trait_name) {
                     self.emit_code(
@@ -1090,7 +1168,7 @@ impl<'a> Checker<'a> {
                         Diagnostic::error_code(
                             crate::diagnostic::codes::E0407,
                             format!("undefined type '{}'", impl_def.type_name),
-                            Span::single(self.current_line, self.current_col),
+                            self.diagnostic_span(),
                         ).with_help("types must be defined before use — check the type name spelling or add a 'type' declaration")
                     );
                 }
@@ -1183,8 +1261,18 @@ impl<'a> Checker<'a> {
                     impl_def.generics.iter().map(|g| g.name.clone()).collect();
                 self.generic_scope
                     .extend(impl_generic_names.iter().cloned());
+                let impl_qualified_name = if self.module_path.is_empty() {
+                    format!("{}:for:{}", impl_def.trait_name, impl_def.type_name)
+                } else {
+                    format!(
+                        "{}::{}:for:{}",
+                        self.module_path.join("::"),
+                        impl_def.trait_name,
+                        impl_def.type_name
+                    )
+                };
                 for method in &impl_def.methods {
-                    self.set_pos(method.pos.0, method.pos.1);
+                    self.set_span(method.meta.span);
                     let method_generic_names: Vec<String> =
                         method.generics.iter().map(|g| g.name.clone()).collect();
                     self.generic_scope
@@ -1212,10 +1300,7 @@ impl<'a> Checker<'a> {
                         .map(|p| (p.name.clone(), self.resolve_type(&p.ty)))
                         .collect();
                     let previous_owner = self.begin_callable_ownership(
-                        crate::core::NodeId(format!(
-                            "function:{}::{}::{}",
-                            impl_def.type_name, impl_def.trait_name, method.name
-                        )),
+                        crate::core::resolved::impl_method_owner(&impl_qualified_name, method),
                         &ownership_params,
                     );
                     let implicit_return =
@@ -1239,11 +1324,12 @@ impl<'a> Checker<'a> {
                     .truncate(self.generic_scope.len() - impl_generic_names.len());
             }
             Item::ExternBlock(block) => {
-                self.set_pos(block.pos.0, block.pos.1);
+                self.set_span(block.meta.span);
                 // CK-H4: validate return types in the check pass (params already
                 // validated during collect). Skip body (extern has no body).
                 if !block.unsafe_ {
                     for func in &block.funcs {
+                        self.set_span(func.meta.span);
                         if let Some(ret_ty) = &func.ret {
                             let resolved = self.resolve_type(ret_ty);
                             if !self.is_valid_extern_type(&resolved, false) {
@@ -1261,13 +1347,13 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Const {
+                meta,
                 name,
-                pos,
                 ty,
                 value,
                 ..
             } => {
-                self.set_pos(pos.0, pos.1);
+                self.set_span(meta.span);
                 let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
                 let value_ty = self.infer_expr(value, &mut scopes);
                 let const_ty = if let Some(declared_ty) = ty {
@@ -1293,8 +1379,7 @@ impl<'a> Checker<'a> {
                 self.const_types.insert(name.clone(), const_ty);
             }
             Item::Flow(f) => {
-                let qualified = format!("flow::{}", f.name);
-                self.set_pos(f.pos.0, f.pos.1);
+                self.set_span(f.meta.span);
                 // Check state name uniqueness
                 let mut seen_states: std::collections::HashSet<&str> =
                     std::collections::HashSet::new();
@@ -1603,11 +1688,12 @@ impl<'a> Checker<'a> {
                         let Some(proto_ty) = ps.payload_type.as_ref() else {
                             continue;
                         };
-                        let is_mutate = matches!(proto_ty, crate::ast::Type::RefMut(_, _))
-                            || matches!(
-                                proto_ty,
-                                crate::ast::Type::Name(n, _) if n == "mutate"
-                            );
+                        let is_mutate =
+                            matches!(proto_ty.unlocated(), crate::ast::Type::RefMut(_, _))
+                                || matches!(
+                                    proto_ty.unlocated(),
+                                    crate::ast::Type::Name(n, _) if n == "mutate"
+                                );
                         if !is_mutate {
                             continue;
                         }
@@ -1617,7 +1703,7 @@ impl<'a> Checker<'a> {
                         // Exact payload type match: if protocol names a payload field,
                         // flow field must unify exactly (no extra fields for mutate).
                         if let (Some(pname), Some(fields)) = (&ps.payload_name, &fs.payload) {
-                            let expected = self.resolve_type(match proto_ty {
+                            let expected = self.resolve_type(match proto_ty.unlocated() {
                                 crate::ast::Type::RefMut(_, inner) => inner.as_ref(),
                                 other => other,
                             });
@@ -1655,7 +1741,7 @@ impl<'a> Checker<'a> {
                         if let Some(fs) = flow_state {
                             if let Some(ref payload) = fs.payload {
                                 for field in payload {
-                                    let field_ty_name = match &field.ty {
+                                    let field_ty_name = match field.ty.unlocated() {
                                         crate::ast::Type::Name(n, _) => n.clone(),
                                         _ => continue,
                                     };
@@ -1738,7 +1824,7 @@ impl<'a> Checker<'a> {
                                         "state '{}' in flow '{}' is unreachable (no transition targets to it)",
                                         s.name, f.name
                                     ),
-                                    Span::single(self.current_line, self.current_col),
+                                    s.meta.span,
                                 )
                             );
                         }
@@ -1759,14 +1845,14 @@ impl<'a> Checker<'a> {
                                     "state '{}' in flow '{}' has no outgoing transitions (terminal state)",
                                     s.name, f.name
                                 ),
-                                Span::single(self.current_line, self.current_col),
+                                s.meta.span,
                             )
                         );
                     }
                 }
             }
             Item::Protocol(p) => {
-                self.set_pos(p.pos.0, p.pos.1);
+                self.set_span(p.meta.span);
                 // Check state name uniqueness
                 let mut seen_states: std::collections::HashSet<&str> =
                     std::collections::HashSet::new();
@@ -1787,7 +1873,7 @@ impl<'a> Checker<'a> {
                         // v0.29.18 flatness: protocol payloads must not nest other
                         // protocol states (session subtyping is undecidable on nested
                         // pushdown automata). Reject Type::Name matching a peer state.
-                        if let Type::Name(n, _) = &resolved {
+                        if let Type::Name(n, _) = resolved.unlocated() {
                             if p.states.iter().any(|ps| ps.name == *n) {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0412,
@@ -1832,7 +1918,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Item::Session(s) => {
-                self.set_pos(s.pos.0, s.pos.1);
+                self.set_span(s.meta.span);
                 // Duplicate session names
                 let count = self
                     .file
@@ -1860,13 +1946,13 @@ impl<'a> Checker<'a> {
     ) {
         let Some(actual) = implicit else { return };
         let actual = self.unification.resolve(&actual);
-        let actual = match actual {
+        let actual = match actual.into_unlocated() {
             Type::Shared(inner) | Type::LocalShared(inner) | Type::CShared(inner) => *inner,
             other => other,
         };
         if !is_numeric_coercion(declared, &actual)
             && self.unification.unify(declared, &actual).is_err()
-            && !matches!(declared, Type::Name(name, _) if name == "unit")
+            && !matches!(declared.unlocated(), Type::Name(name, _) if name == "unit")
         {
             self.emit_code(
                 crate::diagnostic::codes::E0207,
@@ -1883,7 +1969,7 @@ impl<'a> Checker<'a> {
     /// Well-formedness for a session type expression (v0.29.19).
     fn check_session_type_wf(&mut self, st: &crate::ast::SessionType, context: &str) {
         use crate::ast::SessionType;
-        match st {
+        match st.unlocated() {
             SessionType::Send(t, cont) | SessionType::Recv(t, cont) => {
                 let resolved = self.resolve_type(t);
                 self.check_type_well_formed(
@@ -1904,6 +1990,9 @@ impl<'a> Checker<'a> {
                         ),
                     );
                 }
+            }
+            SessionType::Located { .. } => {
+                unreachable!("SessionType::unlocated returned Located")
             }
         }
     }

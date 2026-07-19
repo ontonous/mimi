@@ -269,6 +269,7 @@ fn raw_string_uses_string_owned_contract() {
     use crate::ffi::contract::{FfiContract, FfiRetContract};
 
     let func = ExternFunc {
+        meta: crate::ast::AstNodeMeta::synthetic(crate::ast::AstOrigin::User),
         name: "get_string".to_string(),
         params: vec![],
         ret: Some(Type::RawString),
@@ -293,8 +294,10 @@ fn list_type_uses_json_contract() {
     use crate::ffi::contract::{FfiArgContract, FfiContract};
 
     let func = ExternFunc {
+        meta: crate::ast::AstNodeMeta::synthetic(crate::ast::AstOrigin::User),
         name: "process_list".to_string(),
         params: vec![ExternParam {
+            meta: crate::ast::AstNodeMeta::synthetic(crate::ast::AstOrigin::User),
             name: "xs".to_string(),
             ty: Type::Name(
                 "List".to_string(),

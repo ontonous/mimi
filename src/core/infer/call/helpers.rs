@@ -11,7 +11,7 @@ impl<'a> Checker<'a> {
         expr: &Expr,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Option<(Vec<Type>, Type)> {
-        match self.infer_expr(expr, scopes) {
+        match self.infer_expr(expr, scopes).into_unlocated() {
             Type::Func(params, ret) => Some((params, *ret)),
             Type::ExternFunc(params, ret) => Some((params, *ret)),
             _ => None,
@@ -126,7 +126,7 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                match &ret {
+                match ret.unlocated() {
                     Type::Option(_) => ret,
                     Type::Name(name, args) if name == "Option" && args.len() == 1 => {
                         Type::Option(Box::new(args[0].clone()))
@@ -271,7 +271,7 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                match &ret {
+                match ret.unlocated() {
                     Type::Result(_, _) => ret,
                     Type::Name(name, args) if name == "Result" && args.len() == 2 => {
                         Type::Result(Box::new(args[0].clone()), Box::new(args[1].clone()))
