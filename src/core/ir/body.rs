@@ -180,6 +180,12 @@ pub enum ResolvedLiteral {
     Unit,
 }
 
+#[derive(Debug, Clone)]
+pub enum ResolvedFStringPart {
+    Text(String),
+    Interpolation(ResolvedExpr),
+}
+
 impl ResolvedLiteral {
     pub fn float(value: f64) -> Self {
         Self::FloatBits(value.to_bits())
@@ -254,6 +260,7 @@ pub struct ResolvedExpr {
 #[derive(Debug, Clone)]
 pub enum ResolvedExprKind {
     Literal(ResolvedLiteral),
+    FString(Vec<ResolvedFStringPart>),
     Load(ResolvedPlace),
     Constant(NodeId),
     Binary {
@@ -776,6 +783,13 @@ impl BodyValidator<'_> {
         }
         match &expression.kind {
             ResolvedExprKind::Literal(_) => {}
+            ResolvedExprKind::FString(parts) => {
+                for part in parts {
+                    if let ResolvedFStringPart::Interpolation(expression) = part {
+                        self.visit_expr(expression);
+                    }
+                }
+            }
             ResolvedExprKind::Load(place) => self.visit_place(&expression.node_id, place),
             ResolvedExprKind::Constant(item)
             | ResolvedExprKind::Lambda(item)

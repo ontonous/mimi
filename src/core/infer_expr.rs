@@ -164,6 +164,14 @@ impl<'a> Checker<'a> {
 
     fn infer_expr_inner(&mut self, expr: &Expr, scopes: &mut Vec<HashMap<String, Type>>) -> Type {
         match expr.unlocated() {
+            Expr::Literal(Lit::FString(parts)) => {
+                for part in parts {
+                    if let FStringPart::Interp(expression) = part {
+                        self.infer_expr(expression, scopes);
+                    }
+                }
+                Type::Name("string".into(), Vec::new())
+            }
             Expr::Literal(l) => self.infer_literal(l),
             Expr::Ident(name) => self.lookup_var(name, scopes),
             Expr::Call(callee, args) => self.infer_call_expr(callee, args, scopes),

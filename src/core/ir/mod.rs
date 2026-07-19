@@ -13,10 +13,10 @@ pub use body::{
     AllocatorKind, BackendRequirement, BuiltinId, CheckedConversion, CheckedConversionKind,
     ContractKind, DelegateTarget, EffectId, MatchArm, MethodId, Permission, ResolvedArgument,
     ResolvedBinaryOp, ResolvedBlock, ResolvedBody, ResolvedBodyError, ResolvedCall, ResolvedCallee,
-    ResolvedExpr, ResolvedExprKind, ResolvedIndex, ResolvedLiteral, ResolvedLocal, ResolvedLocalId,
-    ResolvedParameterId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedProjection,
-    ResolvedRecordField, ResolvedScopeKind, ResolvedStmt, ResolvedStmtKind, ResolvedUnaryOp,
-    SessionResidualId, SessionTransition,
+    ResolvedExpr, ResolvedExprKind, ResolvedFStringPart, ResolvedIndex, ResolvedLiteral,
+    ResolvedLocal, ResolvedLocalId, ResolvedParameterId, ResolvedPattern, ResolvedPatternKind,
+    ResolvedPlace, ResolvedProjection, ResolvedRecordField, ResolvedScopeKind, ResolvedStmt,
+    ResolvedStmtKind, ResolvedUnaryOp, SessionResidualId, SessionTransition,
 };
 pub use callable::{ResolvedParameter, ResolvedSignature, ResolvedSignatureError};
 

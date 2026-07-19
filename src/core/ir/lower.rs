@@ -16,9 +16,9 @@ use crate::ast::{
     AstOrigin, BinOp, Expr, File, FuncDef, Item, Lit, Pattern, PatternKind, Stmt, UnOp,
 };
 use crate::core::resolved::{
-    expr_kind, expr_sibling_role, impl_method_owner, map_entry_role, match_arm_role,
-    nested_function_owner, pattern_kind, pattern_sibling_role, stable_id_fragment, stmt_anchor,
-    stmt_kind, stmt_sibling_role, type_kind, type_sibling_role, NodeIdBuilder,
+    expr_kind, expr_sibling_role, impl_method_owner, interpolation_role, map_entry_role,
+    match_arm_role, nested_function_owner, pattern_kind, pattern_sibling_role, stable_id_fragment,
+    stmt_anchor, stmt_kind, stmt_sibling_role, type_kind, type_sibling_role, NodeIdBuilder,
 };
 use crate::core::{
     CheckedProgram, NodeId, NodeMeta, Origin, ResolvedActor, ResolvedCallKind, ResolvedCallSite,
@@ -707,6 +707,23 @@ impl BodyLowerer<'_> {
             )]
         })?;
         let kind = match expr.unlocated() {
+            Expr::Literal(Lit::FString(parts)) => {
+                let mut lowered = Vec::with_capacity(parts.len());
+                for (index, part) in parts.iter().enumerate() {
+                    lowered.push(match part {
+                        crate::ast::FStringPart::Text(text) => {
+                            super::ResolvedFStringPart::Text(text.clone())
+                        }
+                        crate::ast::FStringPart::Interp(expression) => {
+                            super::ResolvedFStringPart::Interpolation(self.lower_expr(
+                                expression,
+                                &interpolation_role(&format!("{role}.interpolation"), parts, index),
+                            )?)
+                        }
+                    });
+                }
+                ResolvedExprKind::FString(lowered)
+            }
             Expr::Literal(literal) => {
                 ResolvedExprKind::Literal(self.lower_literal(&node_id, literal)?)
             }
@@ -3096,6 +3113,29 @@ mod tests {
         assert_eq!(program.resolved_field_type(field), Some(field_type));
         body.validate(program.resolved_types())
             .expect("valid optional chain");
+    }
+
+    #[test]
+    fn formatted_string_retains_typed_interpolation_nodes() {
+        let file = parse("func render(value: i32) -> string { f\"value={value + 1}\" }");
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower f-string");
+        let body = &bodies[&NodeId("function:render".into())];
+        let ResolvedExprKind::FString(parts) = &body.root.result.as_ref().unwrap().kind else {
+            panic!("formatted string expected");
+        };
+        assert!(matches!(
+            parts.as_slice(),
+            [
+                crate::core::ir::ResolvedFStringPart::Text(text),
+                crate::core::ir::ResolvedFStringPart::Interpolation(ResolvedExpr {
+                    kind: ResolvedExprKind::Binary { .. },
+                    ..
+                })
+            ] if text == "value="
+        ));
+        body.validate(program.resolved_types())
+            .expect("valid formatted string");
     }
 
     #[test]
