@@ -3,6 +3,7 @@
 //! CFG identities are semantic `NodeId`s. They never expose insertion-order or
 //! vector indexes, so declaration reordering cannot silently retarget a fact.
 
+mod dataflow;
 mod lower;
 mod validate;
 
@@ -15,6 +16,7 @@ use crate::span::Span;
 use super::NodeId;
 
 pub use lower::lower_file;
+pub use dataflow::analyze_cfgs;
 pub use validate::validate_cfg;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
