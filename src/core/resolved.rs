@@ -2108,7 +2108,7 @@ fn match_arm_semantic_key(arm: &crate::ast::MatchArm) -> String {
     )
 }
 
-fn match_arm_role(context: &str, arms: &[crate::ast::MatchArm], index: usize) -> String {
+pub(crate) fn match_arm_role(context: &str, arms: &[crate::ast::MatchArm], index: usize) -> String {
     semantic_sibling_role(context, arms, index, match_arm_semantic_key)
 }
 

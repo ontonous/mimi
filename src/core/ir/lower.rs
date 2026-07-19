@@ -5,16 +5,17 @@
 //! checker-finalized types.  It must never infer a type or resolve a name.
 
 use super::{
-    CheckedConversion, CheckedConversionKind, EffectId, ResolvedArgument, ResolvedBinaryOp,
-    ResolvedBlock, ResolvedBody, ResolvedBodyError, ResolvedCall, ResolvedCallee, ResolvedExpr,
-    ResolvedExprKind, ResolvedLiteral, ResolvedLocal, ResolvedLocalId, ResolvedPattern,
-    ResolvedPatternKind, ResolvedPlace, ResolvedProjection, ResolvedSignature, ResolvedStmt,
-    ResolvedStmtKind, ResolvedType, ResolvedTypeId, ResolvedTypeTable, ResolvedUnaryOp,
+    CheckedConversion, CheckedConversionKind, EffectId, MatchArm as ResolvedMatchArm,
+    ResolvedArgument, ResolvedBinaryOp, ResolvedBlock, ResolvedBody, ResolvedBodyError,
+    ResolvedCall, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLiteral, ResolvedLocal,
+    ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedProjection,
+    ResolvedSignature, ResolvedStmt, ResolvedStmtKind, ResolvedType, ResolvedTypeId,
+    ResolvedTypeTable, ResolvedUnaryOp,
 };
 use crate::ast::{AstOrigin, BinOp, Expr, FuncDef, Lit, Pattern, PatternKind, Stmt, UnOp};
 use crate::core::resolved::{
-    expr_kind, expr_sibling_role, pattern_kind, stable_id_fragment, stmt_anchor, stmt_kind,
-    stmt_sibling_role, NodeIdBuilder,
+    expr_kind, expr_sibling_role, match_arm_role, pattern_kind, stable_id_fragment, stmt_anchor,
+    stmt_kind, stmt_sibling_role, NodeIdBuilder,
 };
 use crate::core::{
     NodeId, NodeMeta, Origin, ResolvedCallKind, ResolvedCallSite, ResolvedFunction, ResolvedTypeDef,
@@ -436,8 +437,15 @@ impl BodyLowerer<'_> {
             Expr::Call(_, arguments) => {
                 ResolvedExprKind::Call(self.lower_call(&node_id, arguments, role)?)
             }
+            Expr::Match(scrutinee, arms) => {
+                let scrutinee = self.lower_expr(scrutinee, &format!("{role}.scrutinee"))?;
+                let arms = self.lower_match_arms(arms, role, &scrutinee.ty, &ty)?;
+                ResolvedExprKind::Match {
+                    scrutinee: Box::new(scrutinee),
+                    arms,
+                }
+            }
             Expr::Comprehension { .. }
-            | Expr::Match(_, _)
             | Expr::Record { .. }
             | Expr::Try(_)
             | Expr::OptionalChain(_, _)
@@ -467,6 +475,67 @@ impl BodyLowerer<'_> {
             backend_requirements: Vec::new(),
             kind,
         })
+    }
+
+    fn lower_match_arms(
+        &mut self,
+        arms: &[crate::ast::MatchArm],
+        role: &str,
+        pattern_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<Vec<ResolvedMatchArm>, Vec<ResolvedBodyError>> {
+        let mut lowered = Vec::with_capacity(arms.len());
+        for index in 0..arms.len() {
+            let arm = &arms[index];
+            let arm_role = match_arm_role(&format!("{role}.arm"), arms, index);
+            let mut diagnostics = Vec::new();
+            let node_id = self.ids.anonymous(
+                &self.owner,
+                "match.arm",
+                &arm_role,
+                usable_span(arm.meta.span),
+                arm.meta.origin,
+                &mut diagnostics,
+            );
+            if !diagnostics.is_empty() || !self.node_meta.contains_key(&node_id) {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id,
+                    "match arm has no stable semantic identity",
+                )]);
+            }
+            let origin = self.origin(&node_id)?;
+            self.scopes.push(BTreeMap::new());
+            let arm_result = (|| {
+                let pattern = self.lower_binding_pattern(
+                    &arm.pat,
+                    &format!("{arm_role}.pattern"),
+                    pattern_ty.clone(),
+                    false,
+                )?;
+                let guard = arm
+                    .guard
+                    .as_ref()
+                    .map(|guard| self.lower_expr(guard, &format!("{arm_role}.guard")))
+                    .transpose()?;
+                let body = self.lower_expr(&arm.body, &format!("{arm_role}.body"))?;
+                if &body.ty != result_ty {
+                    return Err(vec![ResolvedBodyError::new(
+                        body.node_id.clone(),
+                        "match arm body type disagrees with match result type",
+                    )]);
+                }
+                Ok(ResolvedMatchArm {
+                    node_id,
+                    origin,
+                    pattern,
+                    guard,
+                    body,
+                })
+            })();
+            self.scopes.pop();
+            lowered.push(arm_result?);
+        }
+        Ok(lowered)
     }
 
     fn lower_call(
@@ -1237,5 +1306,42 @@ mod tests {
         };
         assert!(field.0.starts_with("type:Point/node:decl.field@"));
         assert!(program.node_meta().contains_key(field));
+    }
+
+    #[test]
+    fn match_arms_own_lexical_pattern_bindings() {
+        let file =
+            parse("func choose(value: i32) -> i32 { match value { 0 => 1, other => other } }");
+        let program = crate::core::check_program(&file).expect("check");
+        let resolved = program.function("choose").expect("resolved choose");
+        let body = lower_function_body(FunctionBodyInput {
+            function: function(&file, "choose"),
+            signature: program.resolved_signature(&resolved.node_id).unwrap(),
+            signatures: program.resolved_signatures(),
+            functions: program.functions(),
+            type_defs: program.type_defs(),
+            call_sites: program.call_sites(),
+            node_types: program.resolved_node_types(),
+            types: program.resolved_types(),
+            node_meta: program.node_meta(),
+            sources: &file.sources,
+        })
+        .expect("lower match");
+        let ResolvedExprKind::Match { arms, .. } = &body.root.result.as_ref().unwrap().kind else {
+            panic!("match result expected");
+        };
+        assert_eq!(arms.len(), 2);
+        let ResolvedPatternKind::Binding { local, .. } = &arms[1].pattern.kind else {
+            panic!("second arm must bind");
+        };
+        let ResolvedExprKind::Block(block) = &arms[1].body.kind else {
+            panic!("arm body block expected");
+        };
+        let ResolvedExprKind::Load(place) = &block.result.as_ref().unwrap().kind else {
+            panic!("arm body must load binding");
+        };
+        assert_eq!(&place.base, local);
+        body.validate(program.resolved_types())
+            .expect("valid match body");
     }
 }
