@@ -20,6 +20,7 @@
 
 - **0.31.2 已收口**：canonical unification、binder-aware traversal、mandatory zonk、泛型 fresh instantiate 与 zonked function artifacts 已通过聚焦门禁；raw-body consumer 迁移按路线留给 0.31.4–0.31.5。
 - **0.31.3 实现完成、门禁待清零**：所有 callable 均持久化 stable-ID CFG；ownership 使用 reachable-predecessor fixed point，borrow 使用独立 LoanId、CFG liveness end edge 与结构化 Place overlap。nested field/tuple/constant/dynamic-index 引用已通过 interpreter/native ABI 回归，`ownership_cfg.mimi` 覆盖 branch、terminal、nested place 与循环内 loan。legacy `OwnershipLedger` 仍作为 canonical action extraction 的兼容投影，完整 typed-body consumer 迁移按边界留给 0.31.4–0.31.5。当前 real-world/Z3/focused 门禁已绿，但全量仍有独立 codegen/JSON/verifier 失败且 Clippy 1.93 基线未清，因此暂不升版 0.31.4-dev。
+- **0.31.4 集中迁移规则**：冻结 Flow/Component/自举新功能，先将 CheckedProgram 改为 owned typed-body artifact，再依次迁移 consumer。允许版本总改动超过 3,000 LOC，但每个 commit 的 diff 必须小于 3,000 行且保持可编译、可定向验证。
 
 ## 不变量
 
@@ -32,3 +33,5 @@
 - Resolved IR schema/golden、ID 重排测试、unification 性质测试。
 - 所有生产 CLI 入口必须调用 checked API。
 - unchecked AST API 只能是明确 test-only/experimental。
+- consumer 迁移后立即删除其 raw-AST 入口，禁止生产双读。
+- 0.31.6 退出前全量、Clippy、Z3、real-world 和文档门禁必须连续两次全绿。

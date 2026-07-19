@@ -21,6 +21,19 @@
 - 首次全量：3826 passed / 101 failed / 10 ignored。其中 stdlib JSON loader 失败由 nested CFG role 碰撞引起，已修复并增加回归；代表性复测确认余下失败分属既有 native if assignment、named-argument fail-closed、JSON 容器 ABI 和 verifier overflow/call-contract 基线。
 - 未通过：Clippy 1.93 `--all-targets -D warnings` 在跨 runtime/codegen/resolved 既有代码上报 181 项 lint；未用全局 `allow` 掩盖。因此版本保持 `0.31.3-dev`，待这两项独立门禁清零后再执行 0.31.4-dev 切换。
 
+### v0.31.4 基线分类（新设计为准）
+
+| 失败簇 | 规范绑定 | 处理方式 |
+|---|---|---|
+| native `if`/nested assignment 轨迹不一致 | `TOOL-RESOLUTION-001` | typed local/place lowering 的真回归，不改期望值 |
+| named/default argument 被 codegen fail-closed | `LANG-FUNCTION-001`, `TOOL-RESOLUTION-001` | checker 生成已排序 `ResolvedCall` |
+| JSON/container 组合只有部分 native ABI | `TOOL-RESOLUTION-001`, `TOOL-SUPPORT-001` | stable 能力实现 typed lowering；非 stable 能力在 checker capability gate 拒绝 |
+| verifier overflow/call-summary 旧期望 | `VERIFY-CORE-001` | 按 exact integer/definedness 改写；unsupported 返回 `NotInTrustedSubset` |
+| parser/Flow AST 形状断言 | `TOOL-SUPPORT-001`, `SYNTAX-REMOVED-001` | 仅当旧断言与 normalized target 冲突时改写 |
+| Clippy 1.93 存量 | RC tooling gate | 删除旧路径后局部修复，禁止 blanket allow |
+
+从此表开始，不允许未分类失败进入 0.31.6 证据；修改旧测试必须在提交中引用对应 requirement ID。
+
 ## Flow 范式 MCDD — 阶段二+三 (v0.29.9–0.29.41)
 
 | 指标 | 通过/总数 | 比例 |
