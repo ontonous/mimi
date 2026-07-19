@@ -180,6 +180,101 @@ pub fn lower_checked_function_bodies(
     }
 }
 
+/// Lower every user-implemented Flow transition represented by the canonical
+/// signature catalog. Bodyless and runtime-generated matrix transitions remain
+/// declaration-only until their generated expression roles are type-keyed.
+pub fn lower_checked_transition_bodies(
+    file: &File,
+    program: &CheckedProgram,
+) -> Result<BTreeMap<NodeId, ResolvedBody>, Vec<ResolvedBodyError>> {
+    let mut syntax = BTreeMap::new();
+    collect_transition_syntax(&file.items, "", &mut syntax);
+    let mut bodies = BTreeMap::new();
+    let mut errors = Vec::new();
+    for (owner, transition) in syntax {
+        let Some(body) = &transition.body else {
+            continue;
+        };
+        let Some(signature) = program.resolved_signature(&owner) else {
+            errors.push(ResolvedBodyError::new(
+                owner.clone(),
+                "implemented transition has no canonical signature",
+            ));
+            continue;
+        };
+        let function = FuncDef {
+            meta: transition.meta,
+            name: transition.name.clone(),
+            pub_: false,
+            params: transition.params.clone(),
+            ret: None,
+            body: body.clone(),
+            where_clause: Vec::new(),
+            generics: Vec::new(),
+            effects: Vec::new(),
+            is_comptime: false,
+            is_async: false,
+            extern_abi: None,
+        };
+        match lower_function_body(FunctionBodyInput {
+            function: &function,
+            signature,
+            signatures: program.resolved_signatures(),
+            functions: program.functions(),
+            type_defs: program.type_defs(),
+            actors: program.actors(),
+            flows: program.flows(),
+            traits: program.traits(),
+            impls: program.impls(),
+            field_types: program.resolved_field_types(),
+            call_sites: program.call_sites(),
+            extern_blocks: program.extern_blocks(),
+            constants: program.constants(),
+            node_types: program.resolved_node_types(),
+            type_operands: program.resolved_type_operands(),
+            type_arguments: program.resolved_type_arguments(),
+            types: program.resolved_types(),
+            node_meta: program.node_meta(),
+            sources: &file.sources,
+        }) {
+            Ok(body) => {
+                bodies.insert(owner, body);
+            }
+            Err(mut body_errors) => errors.append(&mut body_errors),
+        }
+    }
+    if errors.is_empty() {
+        Ok(bodies)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Transactionally lower every function/method and user-implemented
+/// transition currently admitted to the owned typed-body boundary.
+pub fn lower_checked_callable_bodies(
+    file: &File,
+    program: &CheckedProgram,
+) -> Result<BTreeMap<NodeId, ResolvedBody>, Vec<ResolvedBodyError>> {
+    let functions = lower_checked_function_bodies(file, program)?;
+    let transitions = lower_checked_transition_bodies(file, program)?;
+    let mut bodies = functions;
+    let mut errors = Vec::new();
+    for (owner, body) in transitions {
+        if bodies.insert(owner.clone(), body).is_some() {
+            errors.push(ResolvedBodyError::new(
+                owner,
+                "callable body identity is shared by a function and transition",
+            ));
+        }
+    }
+    if errors.is_empty() {
+        Ok(bodies)
+    } else {
+        Err(errors)
+    }
+}
+
 fn collect_function_syntax<'a>(
     items: &'a [Item],
     module: &str,
@@ -227,6 +322,45 @@ fn collect_function_syntax<'a>(
                 };
                 for method in &impl_def.methods {
                     out.insert(impl_method_owner(&qualified, method), method);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_transition_syntax<'a>(
+    items: &'a [Item],
+    module: &str,
+    out: &mut BTreeMap<NodeId, &'a crate::ast::TransitionDef>,
+) {
+    for item in items {
+        match item {
+            Item::Module(module_def) => {
+                let qualified = if module.is_empty() {
+                    module_def.name.clone()
+                } else {
+                    format!("{module}::{}", module_def.name)
+                };
+                collect_transition_syntax(&module_def.items, &qualified, out);
+            }
+            Item::Flow(flow) => {
+                let qualified = if module.is_empty() {
+                    flow.name.clone()
+                } else {
+                    format!("{module}::{}", flow.name)
+                };
+                for transition in &flow.transitions {
+                    if !matches!(transition.meta.origin, AstOrigin::User) {
+                        continue;
+                    }
+                    out.insert(
+                        NodeId(format!(
+                            "transition:{qualified}::{}::{}",
+                            transition.name, transition.from_state
+                        )),
+                        transition,
+                    );
                 }
             }
             _ => {}
@@ -4599,6 +4733,48 @@ mod tests {
         ));
         body.validate(program.resolved_types())
             .expect("valid typed flow state records");
+    }
+
+    #[test]
+    fn implemented_transition_body_retains_typed_self_and_payload_construction() {
+        let file = parse(
+            "flow Calc { state Zero { v: i32 } state Value { v: i32 } transition add(Zero, amount: i32) -> Value { do { return Value { v: self.v + amount } } } }\nfunc main() -> i32 { 0 }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_transition_bodies(&file, &program).expect("lower transition");
+        let owner = NodeId("transition:Calc::add::Zero".into());
+        let body = &bodies[&owner];
+        assert!(body
+            .locals
+            .values()
+            .any(|local| local.display_name == "self"));
+        assert!(body
+            .locals
+            .values()
+            .any(|local| local.display_name == "amount"));
+        let ResolvedStmtKind::Scope { body: do_body, .. } = &body.root.statements[0].kind else {
+            panic!("normalized transition do scope expected");
+        };
+        let ResolvedStmtKind::Return {
+            value: Some(value), ..
+        } = &do_body.statements[0].kind
+        else {
+            panic!("transition return expected");
+        };
+        let ResolvedExprKind::Record { fields, .. } = &value.kind else {
+            panic!("typed target-state construction expected");
+        };
+        assert_eq!(fields.len(), 1);
+        assert!(matches!(
+            fields[0].value.kind,
+            ResolvedExprKind::Binary { .. }
+        ));
+        body.validate(program.resolved_types())
+            .expect("valid typed transition body");
+        let callables = lower_checked_callable_bodies(&file, &program)
+            .expect("transactional callable lowering");
+        assert!(callables.contains_key(&owner));
+        assert!(callables.contains_key(&NodeId("function:main".into())));
     }
 
     #[test]

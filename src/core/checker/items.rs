@@ -1590,15 +1590,21 @@ impl<'a> Checker<'a> {
                         } else {
                             format!("{}::{}", self.module_path.join("::"), f.name)
                         };
-                        let previous_owner = self.begin_callable_ownership(
-                            crate::core::NodeId(format!(
-                                "transition:{}::{}::{}",
-                                flow_name, t.name, t.from_state
-                            )),
-                            &ownership_params,
-                        );
+                        let transition_owner = crate::core::NodeId(format!(
+                            "transition:{}::{}::{}",
+                            flow_name, t.name, t.from_state
+                        ));
+                        let previous_owner = self
+                            .begin_callable_ownership(transition_owner.clone(), &ownership_params);
+                        let capture_typed_body = matches!(t.meta.origin, AstOrigin::User);
+                        if capture_typed_body {
+                            self.begin_expression_type_capture(transition_owner);
+                        }
                         // Type-check the body as a block
                         self.check_block(body, &ret_type, &mut scopes);
+                        if capture_typed_body {
+                            self.finish_expression_type_capture();
+                        }
                         self.check_unconsumed_caps();
                         self.end_callable_ownership(previous_owner);
                         self.cap_vars.pop();
