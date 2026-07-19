@@ -295,6 +295,11 @@ pub enum ResolvedExprKind {
         fields: Vec<ResolvedRecordField>,
     },
     Block(Box<ResolvedBlock>),
+    Scope {
+        kind: ResolvedScopeKind,
+        body: Box<ResolvedBlock>,
+    },
+    Comptime(Box<ResolvedBlock>),
     If {
         condition: Box<ResolvedExpr>,
         then_block: Box<ResolvedBlock>,
@@ -868,8 +873,19 @@ impl BodyValidator<'_> {
                     );
                 }
             }
-            ResolvedExprKind::Block(block) | ResolvedExprKind::Quote(block) => {
+            ResolvedExprKind::Block(block)
+            | ResolvedExprKind::Comptime(block)
+            | ResolvedExprKind::Quote(block) => {
                 self.visit_block(block);
+            }
+            ResolvedExprKind::Scope { body, .. } => {
+                self.visit_block(body);
+                if body.ty != expression.ty {
+                    self.error(
+                        &expression.node_id,
+                        "expression scope body type disagrees with expression type",
+                    );
+                }
             }
             ResolvedExprKind::If {
                 condition,
