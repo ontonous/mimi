@@ -131,6 +131,21 @@ pub(crate) struct Checker<'a> {
             crate::core::phase::ZonkedTy,
         ),
     >,
+    /// Per-callable expression types while the callable's unification table is live.
+    pub(crate) current_expr_types: Option<(
+        super::NodeId,
+        HashMap<super::resolved::ExpressionTypeKey, Type>,
+    )>,
+    /// Final checker expression types, keyed temporarily by clone-stable source
+    /// identity. The resolved walker replaces keys with stable NodeIds before
+    /// ownership leaves `check_program`.
+    pub(crate) zonked_expr_types: std::collections::BTreeMap<
+        super::NodeId,
+        std::collections::BTreeMap<
+            super::resolved::ExpressionTypeKey,
+            crate::core::phase::ZonkedTy,
+        >,
+    >,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -229,6 +244,58 @@ impl<'a> Checker<'a> {
             ownership_control_path: Vec::new(),
             schemes: HashMap::new(),
             zonked_func_types: HashMap::new(),
+            current_expr_types: None,
+            zonked_expr_types: std::collections::BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn begin_expression_type_capture(&mut self, owner: super::NodeId) {
+        if self
+            .current_expr_types
+            .replace((owner, HashMap::new()))
+            .is_some()
+        {
+            self.errors.push(Diagnostic::error(
+                "TOOL-RESOLUTION-001: nested expression type capture is not supported",
+                self.diagnostic_span(),
+            ));
+        }
+    }
+
+    pub(crate) fn finish_expression_type_capture(&mut self) {
+        let Some((owner, expression_types)) = self.current_expr_types.take() else {
+            return;
+        };
+        let mut zonked = std::collections::BTreeMap::new();
+        for (key, ty) in expression_types {
+            match crate::core::phase::ZonkedTy::from_expression_type(
+                &ty,
+                &mut self.unification,
+            ) {
+                Ok(ty) => {
+                    zonked.insert(key, ty);
+                }
+                Err(error) => self.errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: expression {:?} in '{}' did not finalize to a monotype: {}",
+                        key, owner.0, error
+                    ),
+                    self.diagnostic_span(),
+                )),
+            }
+        }
+        self.zonked_expr_types.insert(owner, zonked);
+    }
+
+    pub(crate) fn record_expression_type(&mut self, expr: &Expr, ty: &Type) {
+        let Some((_, expression_types)) = &mut self.current_expr_types else {
+            return;
+        };
+        expression_types.insert(super::resolved::expression_type_key(expr), ty.clone());
+        if let Expr::Call(callee, _) = expr.unlocated() {
+            // The surface callee expression is normalized into a closed
+            // ResolvedCallee identity and is not a value node in ResolvedBody.
+            expression_types.remove(&super::resolved::expression_type_key(callee));
         }
     }
 

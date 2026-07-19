@@ -69,6 +69,30 @@ impl ZonkedTy {
     pub fn as_type(&self) -> &Type {
         &self.0
     }
+
+    /// Finalize an executable value type. Unbound inference variables at this
+    /// boundary denote payloads which cannot be materialized by the expression
+    /// (`None`, the error side of `Ok`, or an empty collection), so their
+    /// canonical residual is `Nothing`. Escape placeholders remain errors.
+    pub(crate) fn from_expression_type(
+        ty: &Type,
+        table: &mut crate::core::unification::UnificationTable,
+    ) -> Result<Self, ResolveError> {
+        struct CompleteUninhabited;
+
+        impl crate::core::type_folder::TypeFolder for CompleteUninhabited {
+            fn fold_leaf(&mut self, ty: Type) -> Type {
+                match ty {
+                    Type::TypeVar(_) => Type::Nothing,
+                    ty => ty,
+                }
+            }
+        }
+
+        let resolved = table.resolve_infer(ty)?;
+        let completed = crate::core::type_folder::walk_type(resolved, &mut CompleteUninhabited);
+        Self::from_resolved(completed)
+    }
 }
 
 impl From<ZonkedTy> for Type {
@@ -371,6 +395,30 @@ mod tests {
     #[test]
     fn zonked_from_resolved_rejects_underscore() {
         assert!(ZonkedTy::from_resolved(Type::Name("_".into(), vec![])).is_err());
+    }
+
+    #[test]
+    fn expression_zonk_completes_uninhabited_variant_slots() {
+        let mut table = crate::core::unification::UnificationTable::new();
+        let unresolved = Type::Result(
+            Box::new(i32_ty()),
+            Box::new(Type::TypeVar(table.fresh_var())),
+        );
+        let completed = ZonkedTy::from_expression_type(&unresolved, &mut table).unwrap();
+        assert_eq!(
+            completed.as_type(),
+            &Type::Result(Box::new(i32_ty()), Box::new(Type::Nothing))
+        );
+    }
+
+    #[test]
+    fn expression_zonk_still_rejects_unknown_escape() {
+        let mut table = crate::core::unification::UnificationTable::new();
+        assert!(ZonkedTy::from_expression_type(
+            &Type::Name("unknown".into(), Vec::new()),
+            &mut table,
+        )
+        .is_err());
     }
 
     #[test]

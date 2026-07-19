@@ -54,7 +54,10 @@ impl<'a> Checker<'a> {
             }
             if i + 1 == block.len() {
                 if let Stmt::Expr(expr) = stmt.unlocated() {
-                    last_expr_type = Some(self.infer_expr(expr, scopes));
+                    // The final expression is checked bidirectionally against
+                    // the callable result so None/Some/Ok/Err residuals are
+                    // fully constrained before typed artifacts are captured.
+                    last_expr_type = Some(self.check_expr(ret, expr, scopes));
                     continue;
                 }
             }
