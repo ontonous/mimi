@@ -13,10 +13,12 @@ use super::{
 };
 use crate::ast::{AstOrigin, BinOp, Expr, FuncDef, Lit, Pattern, PatternKind, Stmt, UnOp};
 use crate::core::resolved::{
-    expr_kind, expr_sibling_role, pattern_kind, stmt_anchor, stmt_kind, stmt_sibling_role,
-    NodeIdBuilder,
+    expr_kind, expr_sibling_role, pattern_kind, stable_id_fragment, stmt_anchor, stmt_kind,
+    stmt_sibling_role, NodeIdBuilder,
 };
-use crate::core::{NodeId, NodeMeta, Origin, ResolvedCallKind, ResolvedCallSite, ResolvedFunction};
+use crate::core::{
+    NodeId, NodeMeta, Origin, ResolvedCallKind, ResolvedCallSite, ResolvedFunction, ResolvedTypeDef,
+};
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
 use std::collections::{BTreeMap, HashMap};
@@ -29,6 +31,7 @@ pub struct FunctionBodyInput<'a> {
     pub signature: &'a ResolvedSignature,
     pub signatures: &'a BTreeMap<NodeId, ResolvedSignature>,
     pub functions: &'a HashMap<NodeId, ResolvedFunction>,
+    pub type_defs: &'a HashMap<NodeId, ResolvedTypeDef>,
     pub call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
     pub node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     pub types: &'a ResolvedTypeTable,
@@ -59,8 +62,10 @@ pub fn lower_function_body(
         signature: input.signature,
         signatures: input.signatures,
         functions: input.functions,
+        type_defs: input.type_defs,
         call_sites: input.call_sites,
         node_types: input.node_types,
+        types: input.types,
         node_meta: input.node_meta,
         ids: NodeIdBuilder::new(input.sources),
         unit,
@@ -91,8 +96,10 @@ struct BodyLowerer<'a> {
     signature: &'a ResolvedSignature,
     signatures: &'a BTreeMap<NodeId, ResolvedSignature>,
     functions: &'a HashMap<NodeId, ResolvedFunction>,
+    type_defs: &'a HashMap<NodeId, ResolvedTypeDef>,
     call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
     node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
+    types: &'a ResolvedTypeTable,
     node_meta: &'a HashMap<NodeId, NodeMeta>,
     ids: NodeIdBuilder<'a>,
     unit: ResolvedTypeId,
@@ -356,9 +363,10 @@ impl BodyLowerer<'_> {
                 left: Box::new(self.lower_expr(left, &format!("{role}.left"))?),
                 right: Box::new(self.lower_expr(right, &format!("{role}.right"))?),
             },
-            Expr::Unary(UnOp::Deref, _) | Expr::Index(_, _) | Expr::TupleIndex(_, _) => {
-                ResolvedExprKind::Load(self.lower_place(expr, role)?)
-            }
+            Expr::Unary(UnOp::Deref, _)
+            | Expr::Field(_, _)
+            | Expr::Index(_, _)
+            | Expr::TupleIndex(_, _) => ResolvedExprKind::Load(self.lower_place(expr, role)?),
             Expr::Unary(op, operand) => ResolvedExprKind::Unary {
                 op: self.lower_unary(*op),
                 operand: Box::new(self.lower_expr(operand, &format!("{role}.inner"))?),
@@ -428,8 +436,7 @@ impl BodyLowerer<'_> {
             Expr::Call(_, arguments) => {
                 ResolvedExprKind::Call(self.lower_call(&node_id, arguments, role)?)
             }
-            Expr::Field(_, _)
-            | Expr::Comprehension { .. }
+            Expr::Comprehension { .. }
             | Expr::Match(_, _)
             | Expr::Record { .. }
             | Expr::Try(_)
@@ -663,6 +670,16 @@ impl BodyLowerer<'_> {
                     .push(ResolvedProjection::Tuple { index: *index, ty });
                 Ok(place)
             }
+            Expr::Field(base, name) => {
+                let mut place = self.lower_place(base, &format!("{role}.inner"))?;
+                let base_ty = self.place_type(&node_id, &place)?;
+                let field = self.resolve_field(&node_id, &base_ty, name)?;
+                let ty = self.expression_type(&node_id)?;
+                place
+                    .projections
+                    .push(ResolvedProjection::Field { field, ty });
+                Ok(place)
+            }
             Expr::Index(base, index) => {
                 let mut place = self.lower_place(base, &format!("{role}.left"))?;
                 let ty = self.expression_type(&node_id)?;
@@ -702,6 +719,61 @@ impl BodyLowerer<'_> {
                 "place expression has no checker-finalized canonical type",
             )]
         })
+    }
+
+    fn resolve_field(
+        &self,
+        node_id: &NodeId,
+        base_ty: &ResolvedTypeId,
+        name: &str,
+    ) -> Result<NodeId, Vec<ResolvedBodyError>> {
+        let nominal = match self.types.get(base_ty) {
+            Some(ResolvedType::Nominal { item, .. }) | Some(ResolvedType::Newtype { item, .. }) => {
+                item
+            }
+            _ => return self.unsupported(node_id, "field projection on non-nominal type"),
+        };
+        let owner = NodeId(nominal.as_str().to_string());
+        let definition = self.type_defs.get(&owner).ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "nominal owner '{}' has no resolved type definition",
+                    owner.0
+                ),
+            )]
+        })?;
+        let fields = match &definition.declaration.kind {
+            crate::ast::TypeDefKind::Record(fields) | crate::ast::TypeDefKind::Union(fields) => {
+                fields
+            }
+            _ => return self.unsupported(node_id, "field projection on non-record nominal type"),
+        };
+        let field = fields
+            .iter()
+            .find(|field| field.name == name)
+            .ok_or_else(|| {
+                vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("field '{name}' is absent from nominal owner '{}'", owner.0),
+                )]
+            })?;
+        let mut diagnostics = Vec::new();
+        let field_id = self.ids.anonymous(
+            &owner,
+            "decl.field",
+            &format!("field.{}", stable_id_fragment(name)),
+            usable_span(field.meta.span),
+            field.meta.origin,
+            &mut diagnostics,
+        );
+        if !diagnostics.is_empty() || !self.node_meta.contains_key(&field_id) {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!("field '{name}' has no stable declaration identity"),
+            )]);
+        }
+        Ok(field_id)
     }
 
     fn place_type(
@@ -966,6 +1038,7 @@ mod tests {
             signature,
             signatures: program.resolved_signatures(),
             functions: program.functions(),
+            type_defs: program.type_defs(),
             call_sites: program.call_sites(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
@@ -998,6 +1071,7 @@ mod tests {
             signature,
             signatures: program.resolved_signatures(),
             functions: program.functions(),
+            type_defs: program.type_defs(),
             call_sites: program.call_sites(),
             node_types: &empty,
             types: program.resolved_types(),
@@ -1022,6 +1096,7 @@ mod tests {
                 .expect("signature"),
             signatures: program.resolved_signatures(),
             functions: program.functions(),
+            type_defs: program.type_defs(),
             call_sites: program.call_sites(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
@@ -1060,6 +1135,7 @@ mod tests {
                 .expect("signature"),
             signatures: program.resolved_signatures(),
             functions: program.functions(),
+            type_defs: program.type_defs(),
             call_sites: program.call_sites(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
@@ -1094,6 +1170,7 @@ mod tests {
                 .expect("signature"),
             signatures: program.resolved_signatures(),
             functions: program.functions(),
+            type_defs: program.type_defs(),
             call_sites: program.call_sites(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
@@ -1132,5 +1209,33 @@ mod tests {
             call.callee,
             ResolvedCallee::Function(ref node) if node == &NodeId("function:subtract".into())
         ));
+    }
+
+    #[test]
+    fn field_place_reuses_the_declaration_identity() {
+        let file = parse("type Point { x: i32 }\nfunc read(point: Point) -> i32 { point.x }");
+        let program = crate::core::check_program(&file).expect("check");
+        let resolved = program.function("read").expect("resolved read");
+        let body = lower_function_body(FunctionBodyInput {
+            function: function(&file, "read"),
+            signature: program.resolved_signature(&resolved.node_id).unwrap(),
+            signatures: program.resolved_signatures(),
+            functions: program.functions(),
+            type_defs: program.type_defs(),
+            call_sites: program.call_sites(),
+            node_types: program.resolved_node_types(),
+            types: program.resolved_types(),
+            node_meta: program.node_meta(),
+            sources: &file.sources,
+        })
+        .expect("lower field load");
+        let ResolvedExprKind::Load(place) = &body.root.result.as_ref().unwrap().kind else {
+            panic!("field read must be a place load");
+        };
+        let ResolvedProjection::Field { field, .. } = &place.projections[0] else {
+            panic!("field projection expected");
+        };
+        assert!(field.0.starts_with("type:Point/node:decl.field@"));
+        assert!(program.node_meta().contains_key(field));
     }
 }
