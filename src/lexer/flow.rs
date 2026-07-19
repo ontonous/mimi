@@ -1178,15 +1178,30 @@ mod tests {
     fn token_end_positions_follow_source_text_not_decoded_values() {
         let tokens = flow_tokenize("\"a\\n\\\"b\" -> value", LexerMode::Production).unwrap();
         assert_eq!(
-            (tokens[0].line, tokens[0].col, tokens[0].end_line, tokens[0].end_col),
+            (
+                tokens[0].line,
+                tokens[0].col,
+                tokens[0].end_line,
+                tokens[0].end_col
+            ),
             (1, 1, 1, 9)
         );
         assert_eq!(
-            (tokens[1].line, tokens[1].col, tokens[1].end_line, tokens[1].end_col),
+            (
+                tokens[1].line,
+                tokens[1].col,
+                tokens[1].end_line,
+                tokens[1].end_col
+            ),
             (1, 10, 1, 12)
         );
         assert_eq!(
-            (tokens[2].line, tokens[2].col, tokens[2].end_line, tokens[2].end_col),
+            (
+                tokens[2].line,
+                tokens[2].col,
+                tokens[2].end_line,
+                tokens[2].end_col
+            ),
             (1, 13, 1, 18)
         );
     }

@@ -422,15 +422,12 @@ impl LspServer {
             // still mean that no legal document range exists. Keep both
             // unknown-source and known-source/unknown-range failures in the
             // URI-less batch so they surface via window/showMessage.
-            let has_known_range =
-                diagnostic.span.start_line > 0 && diagnostic.span.start_col > 0;
+            let has_known_range = diagnostic.span.start_line > 0 && diagnostic.span.start_col > 0;
             let target_uri = has_known_range
                 .then(|| record.and_then(|record| record.canonical_uri.clone()))
                 .flatten();
             let source_text = has_known_range
-                .then(|| {
-                    self.source_text_for_diagnostic(record, target_uri.as_deref(), uri, text)
-                })
+                .then(|| self.source_text_for_diagnostic(record, target_uri.as_deref(), uri, text))
                 .flatten();
             grouped
                 .entry(target_uri)
@@ -587,7 +584,12 @@ impl LspServer {
         }
 
         // Dynamic timeout based on function complexity
-        let func_body_lines = func.meta.span.start_col.saturating_sub(func.meta.span.start_line).max(1);
+        let func_body_lines = func
+            .meta
+            .span
+            .start_col
+            .saturating_sub(func.meta.span.start_line)
+            .max(1);
         let param_count = func.params.len();
         let dynamic_timeout = (func_body_lines * 50 + param_count * 100).clamp(200, 5000) as u64;
 

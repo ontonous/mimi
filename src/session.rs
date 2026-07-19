@@ -250,7 +250,9 @@ mod tests {
         let (r1, t1) = apply_action(&s, SessionAction::Send).unwrap();
         assert!(matches!(t1.as_ref().map(Type::unlocated), Some(Type::Name(n, _)) if n == "i32"));
         let (r2, t2) = apply_action(&r1, SessionAction::Recv).unwrap();
-        assert!(matches!(t2.as_ref().map(Type::unlocated), Some(Type::Name(n, _)) if n == "string"));
+        assert!(
+            matches!(t2.as_ref().map(Type::unlocated), Some(Type::Name(n, _)) if n == "string")
+        );
         let (r3, _) = apply_action(&r2, SessionAction::Close).unwrap();
         assert_eq!(r3, SessionType::End);
     }

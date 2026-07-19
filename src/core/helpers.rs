@@ -127,9 +127,7 @@ pub fn subst_type_params(
     type_map: &HashMap<String, Type>,
 ) -> Type {
     match ty {
-        Type::Located { meta, ty } => {
-            subst_type_params(ty, generics, type_map).with_meta(*meta)
-        }
+        Type::Located { meta, ty } => subst_type_params(ty, generics, type_map).with_meta(*meta),
         Type::Name(name, args) => {
             if is_type_param(name, generics) {
                 if let Some(concrete) = type_map.get(name) {

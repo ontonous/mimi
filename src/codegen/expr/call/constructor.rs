@@ -291,11 +291,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Type::Name(n, _) if n == "Result" => Some((**inner).clone()),
                     _ => None,
                 },
-                Type::Name(n, args) if n == "Option" && args.len() == 1 => match args[0].unlocated() {
-                    Type::Result(_, _) => Some(args[0].clone()),
-                    Type::Name(rn, _) if rn == "Result" => Some(args[0].clone()),
-                    _ => None,
-                },
+                Type::Name(n, args) if n == "Option" && args.len() == 1 => {
+                    match args[0].unlocated() {
+                        Type::Result(_, _) => Some(args[0].clone()),
+                        Type::Name(rn, _) if rn == "Result" => Some(args[0].clone()),
+                        _ => None,
+                    }
+                }
                 _ => None,
             };
             if let Some(res_ty) = result_ty {
@@ -795,9 +797,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // pointer rather than returning the pointer itself.
         if let Some(name) = &ctx.obj_name {
             if self.upgrade_option_vars.contains(name.as_str()) {
-                if let Some(Type::Option(inner)) =
-                    self.var_types.get(name).map(Type::unlocated)
-                {
+                if let Some(Type::Option(inner)) = self.var_types.get(name).map(Type::unlocated) {
                     let loaded = self.load_upgrade_payload(ctx.payload, inner)?;
                     return Ok(loaded);
                 }

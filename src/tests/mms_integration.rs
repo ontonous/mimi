@@ -56,10 +56,9 @@ fn mms_block_has_content() {
         .iter()
         .find(|s| matches!(s.unlocated(), Stmt::MmsBlock { .. }));
     assert!(mms_stmt.is_some());
-    if let Stmt::MmsBlock { content, .. } =
-        mms_stmt
-            .expect("src/tests/mms_integration.rs:37 unwrap failed")
-            .unlocated()
+    if let Stmt::MmsBlock { content, .. } = mms_stmt
+        .expect("src/tests/mms_integration.rs:37 unwrap failed")
+        .unlocated()
     {
         assert!(!content.is_empty(), "content should not be empty");
     }

@@ -474,11 +474,7 @@ fn detect_eq_bool(block: &[Stmt], diagnostics: &mut Vec<Diagnostic>, func_pos: S
     }
 }
 
-fn detect_eq_bool_in_stmt(
-    stmt: &Stmt,
-    diagnostics: &mut Vec<Diagnostic>,
-    func_pos: Span,
-) {
+fn detect_eq_bool_in_stmt(stmt: &Stmt, diagnostics: &mut Vec<Diagnostic>, func_pos: Span) {
     match stmt.unlocated() {
         Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Break(Some(e)) => {
             detect_eq_bool_in_expr(e, diagnostics, func_pos);
@@ -532,11 +528,7 @@ fn is_bool_lit(e: &Expr) -> bool {
     matches!(e.unlocated(), Expr::Literal(Lit::Bool(_)))
 }
 
-fn detect_eq_bool_in_expr(
-    expr: &Expr,
-    diagnostics: &mut Vec<Diagnostic>,
-    func_pos: Span,
-) {
+fn detect_eq_bool_in_expr(expr: &Expr, diagnostics: &mut Vec<Diagnostic>, func_pos: Span) {
     match expr.unlocated() {
         Expr::Binary(op, lhs, rhs) if *op == BinOp::EqCmp && is_bool_lit(rhs) => {
             let msg = match rhs.unlocated() {
@@ -545,22 +537,14 @@ fn detect_eq_bool_in_expr(
                 }
                 _ => "comparison to `false`; use `!expr` instead",
             };
-            diagnostics.push(Diagnostic::warning_code(
-                W008,
-                msg,
-                func_pos,
-            ));
+            diagnostics.push(Diagnostic::warning_code(W008, msg, func_pos));
         }
         Expr::Binary(op, lhs, rhs) if *op == BinOp::NeCmp && is_bool_lit(rhs) => {
             let msg = match rhs.unlocated() {
                 Expr::Literal(Lit::Bool(true)) => "comparison to `true`; use `!expr` instead",
                 _ => "comparison to `false` is unnecessary; use the expression directly",
             };
-            diagnostics.push(Diagnostic::warning_code(
-                W008,
-                msg,
-                func_pos,
-            ));
+            diagnostics.push(Diagnostic::warning_code(W008, msg, func_pos));
         }
         // Recurse into sub-expressions
         Expr::Binary(_, lhs, rhs) => {
@@ -1578,10 +1562,7 @@ func main() -> i32 {
                 _ => None,
             })
             .expect("expected main function");
-        let expected_span = func.body[0]
-            .meta()
-            .expect("parsed let metadata")
-            .span;
+        let expected_span = func.body[0].meta().expect("parsed let metadata").span;
         let linter = Linter::new();
         let result = linter.lint(&file, src);
         let diagnostic = result
