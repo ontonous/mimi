@@ -1233,6 +1233,7 @@ impl<'a> Checker<'a> {
                             );
                         }
                         let target_ty = self.lookup_var(name, scopes);
+                        self.record_expression_type(target, &target_ty);
                         // Re-check value with expected type so empty lists (and other
                         // context-sensitive literals) inherit the variable's element type.
                         value_ty = self.check_expr(&target_ty, value, scopes);
@@ -1290,6 +1291,7 @@ impl<'a> Checker<'a> {
                         let inner_ty = self.infer_expr(inner, scopes);
                         match inner_ty.unlocated() {
                             Type::RefMut(_, inner_inner) => {
+                                self.record_expression_type(target, inner_inner);
                                 // CK-H1: unify (not same_type) for TypeVar resolution.
                                 if self.unification.unify(&value_ty, inner_inner).is_err() {
                                     self.emit_code(
@@ -1303,6 +1305,7 @@ impl<'a> Checker<'a> {
                                 }
                             }
                             Type::Shared(inner_inner) | Type::LocalShared(inner_inner) => {
+                                self.record_expression_type(target, inner_inner);
                                 // CK-H1: unify (not same_type) for TypeVar resolution.
                                 if self.unification.unify(&value_ty, inner_inner).is_err() {
                                     self.emit_code(
@@ -1344,17 +1347,16 @@ impl<'a> Checker<'a> {
                         let resolved_obj_ty = self.unification.resolve(&obj_ty);
                         // Validate field exists and check type compatibility (Bug 8 fix)
                         if let Type::Name(name, _) = resolved_obj_ty.unlocated() {
-                            if let Some(type_def) = self.types.get(name) {
+                            if let Some(type_def) = self.types.get(name).cloned() {
                                 match &type_def.kind {
                                     TypeDefKind::Record(fields) => {
                                         if let Some(field_def) =
                                             fields.iter().find(|f| f.name == *field)
                                         {
+                                            let field_ty = field_def.ty.clone();
+                                            self.record_expression_type(target, &field_ty);
                                             // Bug 8 fix: unify value type with field's declared type
-                                            if self
-                                                .unification
-                                                .unify(&field_def.ty, &value_ty)
-                                                .is_err()
+                                            if self.unification.unify(&field_ty, &value_ty).is_err()
                                             {
                                                 self.emit_code(
                                                     crate::diagnostic::codes::E0209,
@@ -1427,6 +1429,7 @@ impl<'a> Checker<'a> {
                             _ => None,
                         };
                         if let Some(elem_ty) = list_elem_ty {
+                            self.record_expression_type(target, &elem_ty);
                             // CK residual: unify so TypeVars resolve on index assign.
                             if self.unification.unify(&value_ty, &elem_ty).is_err() {
                                 self.errors.push(
