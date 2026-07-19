@@ -16,9 +16,9 @@ use crate::ast::{
     AstOrigin, BinOp, Expr, File, FuncDef, Item, Lit, Pattern, PatternKind, Stmt, UnOp,
 };
 use crate::core::resolved::{
-    expr_kind, expr_sibling_role, map_entry_role, match_arm_role, pattern_kind,
-    pattern_sibling_role, stable_id_fragment, stmt_anchor, stmt_kind, stmt_sibling_role,
-    NodeIdBuilder,
+    expr_kind, expr_sibling_role, map_entry_role, match_arm_role, nested_function_owner,
+    pattern_kind, pattern_sibling_role, stable_id_fragment, stmt_anchor, stmt_kind,
+    stmt_sibling_role, NodeIdBuilder,
 };
 use crate::core::{
     CheckedProgram, NodeId, NodeMeta, Origin, ResolvedCallKind, ResolvedCallSite,
@@ -366,6 +366,49 @@ impl BodyLowerer<'_> {
                 self.unit.clone(),
                 false,
             )?),
+            Stmt::For {
+                var,
+                iterable,
+                body,
+            } => {
+                let iterable = self.lower_expr(iterable, &format!("{role}.iterable"))?;
+                let element_ty = self.iterable_element_type(&node_id, &iterable.ty)?;
+                let pattern_id = NodeId(format!("{}/for-pattern", node_id.0));
+                let local_id = ResolvedLocalId(NodeId(format!("{}/local", pattern_id.0)));
+                let pattern_origin = Origin::Desugared {
+                    parent: node_id.clone(),
+                    rule: "resolved_body.for_binding".into(),
+                    span: origin.user_span(),
+                };
+                self.scopes.push(BTreeMap::new());
+                self.insert_local(
+                    var.clone(),
+                    ResolvedLocal {
+                        id: local_id.clone(),
+                        display_name: var.clone(),
+                        ty: element_ty.clone(),
+                        mutable: false,
+                        origin: pattern_origin.clone(),
+                    },
+                    &pattern_id,
+                )?;
+                let lowered_body =
+                    self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false);
+                self.scopes.pop();
+                ResolvedStmtKind::For {
+                    pattern: ResolvedPattern {
+                        node_id: pattern_id,
+                        origin: pattern_origin,
+                        ty: element_ty,
+                        kind: ResolvedPatternKind::Binding {
+                            local: local_id,
+                            by_reference: None,
+                        },
+                    },
+                    iterable,
+                    body: lowered_body?,
+                }
+            }
             Stmt::Block(body) | Stmt::Do(body) => ResolvedStmtKind::Scope {
                 kind: super::ResolvedScopeKind::Lexical,
                 body: self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?,
@@ -378,6 +421,25 @@ impl BodyLowerer<'_> {
                 kind: super::ResolvedScopeKind::FailureGuard,
                 body: self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?,
             },
+            Stmt::Arena(body) => ResolvedStmtKind::Scope {
+                kind: super::ResolvedScopeKind::Arena,
+                body: self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?,
+            },
+            Stmt::Parasteps(body) => ResolvedStmtKind::Scope {
+                kind: super::ResolvedScopeKind::Parallel,
+                body: self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?,
+            },
+            Stmt::Alloc { kind, body } => ResolvedStmtKind::Scope {
+                kind: super::ResolvedScopeKind::Allocator(match kind {
+                    crate::ast::AllocKind::System => super::AllocatorKind::System,
+                    crate::ast::AllocKind::Arena => super::AllocatorKind::Arena,
+                    crate::ast::AllocKind::Bump => super::AllocatorKind::Bump,
+                }),
+                body: self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?,
+            },
+            Stmt::Func(function) => {
+                ResolvedStmtKind::NestedCallable(nested_function_owner(&self.owner, function))
+            }
             Stmt::Requires(expr, _) => ResolvedStmtKind::Contract {
                 kind: super::ContractKind::Requires,
                 condition: self.lower_expr(expr, &format!("{role}.expression"))?,
@@ -395,15 +457,10 @@ impl BodyLowerer<'_> {
             }
             Stmt::Desc(..) | Stmt::Rule(..) | Stmt::MmsBlock { .. } => return Ok(None),
             Stmt::WhileLet { .. }
-            | Stmt::For { .. }
-            | Stmt::Arena(_)
             | Stmt::Math(_)
             | Stmt::SharedLet { .. }
             | Stmt::Delegate { .. }
             | Stmt::Pinned { .. }
-            | Stmt::Parasteps(_)
-            | Stmt::Func(_)
-            | Stmt::Alloc { .. }
             | Stmt::Ellipsis => return self.unsupported(&node_id, stmt_kind(stmt)),
             Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
         };
@@ -1207,6 +1264,27 @@ impl BodyLowerer<'_> {
             })
     }
 
+    fn iterable_element_type(
+        &self,
+        node_id: &NodeId,
+        iterable: &ResolvedTypeId,
+    ) -> Result<ResolvedTypeId, Vec<ResolvedBodyError>> {
+        match self.types.get(iterable) {
+            Some(ResolvedType::Array { element, .. }) | Some(ResolvedType::Slice(element)) => {
+                Ok(element.clone())
+            }
+            Some(ResolvedType::Nominal { item, arguments })
+                if matches!(
+                    item.as_str(),
+                    "builtin:type:List" | "builtin:type:Set" | "builtin:type:Range"
+                ) && arguments.len() == 1 =>
+            {
+                Ok(arguments[0].clone())
+            }
+            _ => self.unsupported(node_id, "for loop over non-canonical iterable type"),
+        }
+    }
+
     fn lower_literal(
         &self,
         node_id: &NodeId,
@@ -1906,5 +1984,27 @@ mod tests {
             .0
              .0
             .contains("decl.extern_parameter"));
+    }
+
+    #[test]
+    fn for_binding_uses_canonical_iterable_element_type() {
+        let file = parse(
+            "func total(values: List<i32>) -> i32 { let mut sum = 0; for value in values { sum = sum + value; } sum }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower for loop");
+        let function_body = &bodies[&NodeId("function:total".into())];
+        let ResolvedStmtKind::For { pattern, body, .. } = &function_body.root.statements[1].kind
+        else {
+            panic!("for statement expected");
+        };
+        let ResolvedPatternKind::Binding { local, .. } = &pattern.kind else {
+            panic!("for binding expected");
+        };
+        assert_eq!(function_body.locals[local].ty, pattern.ty);
+        assert_eq!(body.statements.len(), 1);
+        function_body
+            .validate(program.resolved_types())
+            .expect("valid for body");
     }
 }
