@@ -1,4 +1,4 @@
-use super::{NominalTypeId, ResolvedTypeId, ResolvedTypeTable};
+use super::{NominalTypeId, ResolvedType, ResolvedTypeId, ResolvedTypeTable};
 use crate::core::{NodeId, Origin, TransitionId};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -136,6 +136,7 @@ pub enum ResolvedCallee {
     Function(NodeId),
     Extern(NodeId),
     Builtin(BuiltinId),
+    LocalClosure(ResolvedLocalId),
     ActorMethod { actor: NodeId, method: MethodId },
     ProtocolMethod { protocol: NodeId, method: MethodId },
     Transition(TransitionId),
@@ -260,6 +261,14 @@ pub struct ResolvedExpr {
 }
 
 #[derive(Debug, Clone)]
+pub struct ResolvedLambda {
+    pub owner: NodeId,
+    pub parameters: Vec<ResolvedLocalId>,
+    pub captures: Vec<ResolvedLocalId>,
+    pub body: ResolvedBlock,
+}
+
+#[derive(Debug, Clone)]
 pub enum ResolvedExprKind {
     Literal(ResolvedLiteral),
     FString(Vec<ResolvedFStringPart>),
@@ -334,7 +343,7 @@ pub enum ResolvedExprKind {
     },
     Spawn(Box<ResolvedExpr>),
     Await(Box<ResolvedExpr>),
-    Lambda(NodeId),
+    Lambda(Box<ResolvedLambda>),
     ComptimeValue(NodeId),
     Quote(Box<ResolvedBlock>),
     TypeValue(ResolvedTypeId),
@@ -812,12 +821,31 @@ impl BodyValidator<'_> {
                 }
             }
             ResolvedExprKind::Load(place) => self.visit_place(&expression.node_id, place),
-            ResolvedExprKind::Constant(item)
-            | ResolvedExprKind::Lambda(item)
-            | ResolvedExprKind::ComptimeValue(item) => {
+            ResolvedExprKind::Constant(item) | ResolvedExprKind::ComptimeValue(item) => {
                 if item.0.trim().is_empty() {
                     self.error(&expression.node_id, "resolved item identity is empty");
                 }
+            }
+            ResolvedExprKind::Lambda(lambda) => {
+                self.register_node(&lambda.owner);
+                let mut parameters = BTreeSet::new();
+                for parameter in &lambda.parameters {
+                    if !parameters.insert(parameter) {
+                        self.error(
+                            &expression.node_id,
+                            "lambda parameter identity is duplicated",
+                        );
+                    }
+                    self.require_local(&expression.node_id, parameter);
+                }
+                let mut captures = BTreeSet::new();
+                for capture in &lambda.captures {
+                    if !captures.insert(capture) || parameters.contains(capture) {
+                        self.error(&expression.node_id, "lambda capture identity is invalid");
+                    }
+                    self.require_local(&expression.node_id, capture);
+                }
+                self.visit_block(&lambda.body);
             }
             ResolvedExprKind::DefaultArgument {
                 callable,
@@ -1018,6 +1046,22 @@ impl BodyValidator<'_> {
                 !item.0.trim().is_empty()
             }
             ResolvedCallee::Builtin(item) => !item.as_str().trim().is_empty(),
+            ResolvedCallee::LocalClosure(local) => {
+                self.require_local(owner, local);
+                let callable = self.body.locals.get(local).is_some_and(|local| {
+                    matches!(
+                        self.types.get(&local.ty),
+                        Some(ResolvedType::Function { .. })
+                    )
+                });
+                if !callable && self.body.locals.contains_key(local) {
+                    self.error(
+                        owner,
+                        "local callee does not have a canonical function type",
+                    );
+                }
+                !local.0 .0.trim().is_empty() && callable
+            }
             ResolvedCallee::ActorMethod { actor, method } => {
                 !actor.0.trim().is_empty() && !method.as_str().trim().is_empty()
             }
