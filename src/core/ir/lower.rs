@@ -21,8 +21,8 @@ use crate::core::resolved::{
     NodeIdBuilder,
 };
 use crate::core::{
-    CheckedProgram, NodeId, NodeMeta, Origin, ResolvedCallKind, ResolvedCallSite, ResolvedFunction,
-    ResolvedTypeDef,
+    CheckedProgram, NodeId, NodeMeta, Origin, ResolvedCallKind, ResolvedCallSite,
+    ResolvedExternBlock, ResolvedFunction, ResolvedTypeDef,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
@@ -39,6 +39,7 @@ pub struct FunctionBodyInput<'a> {
     pub type_defs: &'a HashMap<NodeId, ResolvedTypeDef>,
     pub field_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     pub call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
+    pub extern_blocks: &'a HashMap<NodeId, ResolvedExternBlock>,
     pub node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     pub types: &'a ResolvedTypeTable,
     pub node_meta: &'a HashMap<NodeId, NodeMeta>,
@@ -71,6 +72,7 @@ pub fn lower_function_body(
         type_defs: input.type_defs,
         field_types: input.field_types,
         call_sites: input.call_sites,
+        extern_blocks: input.extern_blocks,
         node_types: input.node_types,
         types: input.types,
         node_meta: input.node_meta,
@@ -123,6 +125,7 @@ pub fn lower_checked_function_bodies(
             type_defs: program.type_defs(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
+            extern_blocks: program.extern_blocks(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -178,6 +181,7 @@ struct BodyLowerer<'a> {
     type_defs: &'a HashMap<NodeId, ResolvedTypeDef>,
     field_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
+    extern_blocks: &'a HashMap<NodeId, ResolvedExternBlock>,
     node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     types: &'a ResolvedTypeTable,
     node_meta: &'a HashMap<NodeId, NodeMeta>,
@@ -747,6 +751,64 @@ impl BodyLowerer<'_> {
             }
             return Ok(ResolvedCall {
                 callee: ResolvedCallee::Builtin(builtin),
+                arguments: lowered,
+                permission: None,
+                effects: Vec::new(),
+                session: Vec::new(),
+            });
+        }
+        if site.kind == ResolvedCallKind::Extern {
+            let candidates = self
+                .extern_blocks
+                .values()
+                .flat_map(|block| block.signatures.iter())
+                .filter(|function| function.name == site.callee)
+                .collect::<Vec<_>>();
+            let [function] = candidates.as_slice() else {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "extern call '{}' does not resolve to exactly one declaration",
+                        site.callee
+                    ),
+                )]);
+            };
+            let arity_valid = if function.variadic {
+                arguments.len() >= function.parameter_ids.len()
+            } else {
+                arguments.len() == function.parameter_ids.len()
+            };
+            if !arity_valid {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    "extern argument count disagrees with canonical declaration",
+                )]);
+            }
+            let mut lowered = Vec::with_capacity(arguments.len());
+            for index in 0..arguments.len() {
+                if matches!(arguments[index].unlocated(), Expr::NamedArg(_, _)) {
+                    return self.unsupported(node_id, "named arguments for extern call");
+                }
+                let argument_role =
+                    expr_sibling_role(&format!("{role}.argument"), arguments, index);
+                let value = self.lower_expr(&arguments[index], &argument_role)?;
+                let parameter = function
+                    .parameter_ids
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| NodeId(format!("{}/variadic:{index}", function.node_id.0)));
+                lowered.push(ResolvedArgument {
+                    parameter: super::ResolvedParameterId(parameter),
+                    conversion: CheckedConversion {
+                        kind: CheckedConversionKind::Identity,
+                        from: value.ty.clone(),
+                        to: value.ty.clone(),
+                    },
+                    value,
+                });
+            }
+            return Ok(ResolvedCall {
+                callee: ResolvedCallee::Extern(function.node_id.clone()),
                 arguments: lowered,
                 permission: None,
                 effects: Vec::new(),
@@ -1449,6 +1511,7 @@ mod tests {
             type_defs: program.type_defs(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
+            extern_blocks: program.extern_blocks(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1483,6 +1546,7 @@ mod tests {
             type_defs: program.type_defs(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
+            extern_blocks: program.extern_blocks(),
             node_types: &empty,
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1509,6 +1573,7 @@ mod tests {
             type_defs: program.type_defs(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
+            extern_blocks: program.extern_blocks(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1549,6 +1614,7 @@ mod tests {
             type_defs: program.type_defs(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
+            extern_blocks: program.extern_blocks(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1585,6 +1651,7 @@ mod tests {
             type_defs: program.type_defs(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
+            extern_blocks: program.extern_blocks(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1637,6 +1704,7 @@ mod tests {
             type_defs: program.type_defs(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
+            extern_blocks: program.extern_blocks(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1668,6 +1736,7 @@ mod tests {
             type_defs: program.type_defs(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
+            extern_blocks: program.extern_blocks(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1705,6 +1774,7 @@ mod tests {
             type_defs: program.type_defs(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
+            extern_blocks: program.extern_blocks(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1736,6 +1806,7 @@ mod tests {
             type_defs: program.type_defs(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
+            extern_blocks: program.extern_blocks(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1771,6 +1842,7 @@ mod tests {
             type_defs: program.type_defs(),
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
+            extern_blocks: program.extern_blocks(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1808,5 +1880,31 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn extern_call_uses_declaration_and_parameter_identities() {
+        let file = parse(
+            "extern \"C\" { func c_abs(value: i32) -> i32 }\nfunc main() -> i32 { c_abs(-4) }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower extern call");
+        let result = bodies[&NodeId("function:main".into())]
+            .root
+            .result
+            .as_ref()
+            .unwrap();
+        let ResolvedExprKind::Call(call) = &result.kind else {
+            panic!("extern call expected");
+        };
+        let ResolvedCallee::Extern(callee) = &call.callee else {
+            panic!("extern identity expected");
+        };
+        assert!(callee.0.contains("/function:c_abs:"));
+        assert!(call.arguments[0]
+            .parameter
+            .0
+             .0
+            .contains("decl.extern_parameter"));
     }
 }

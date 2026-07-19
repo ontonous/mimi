@@ -532,10 +532,12 @@ pub struct ResolvedTypeDef {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedExternFunc {
+    pub node_id: NodeId,
     pub name: String,
     pub span: Span,
     pub params: Vec<(String, String)>,
     pub typed_params: Vec<(String, Type, Option<crate::ast::CapMode>)>,
+    pub parameter_ids: Vec<NodeId>,
     pub ret: String,
     pub ret_type: Option<Type>,
     pub requires: Option<Expr>,
@@ -1752,6 +1754,7 @@ fn collect_items(
                 let funcs = block.funcs.iter().map(|func| func.name.clone()).collect();
                 let mut signatures = Vec::new();
                 for func in &block.funcs {
+                    let function_id = extern_function_owner(&node_id, func);
                     for param in &func.params {
                         if contains_unresolved_type(&param.ty) {
                             errors.push(Diagnostic::error(
@@ -1777,6 +1780,7 @@ fn collect_items(
                         }
                     }
                     signatures.push(ResolvedExternFunc {
+                        node_id: function_id.clone(),
                         name: func.name.clone(),
                         span: func.meta.span,
                         params: func
@@ -1788,6 +1792,20 @@ fn collect_items(
                             .params
                             .iter()
                             .map(|param| (param.name.clone(), param.ty.clone(), param.cap_mode))
+                            .collect(),
+                        parameter_ids: func
+                            .params
+                            .iter()
+                            .map(|param| {
+                                ids.anonymous(
+                                    &function_id,
+                                    "decl.extern_parameter",
+                                    &format!("parameter.{}", stable_id_fragment(&param.name)),
+                                    usable_span(param.meta.span),
+                                    param.meta.origin,
+                                    errors,
+                                )
+                            })
                             .collect(),
                         ret: func
                             .ret
