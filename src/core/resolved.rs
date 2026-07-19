@@ -597,6 +597,7 @@ pub struct CheckedProgram {
     resolved_type_operands: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     resolved_type_arguments: BTreeMap<NodeId, Vec<crate::core::ResolvedTypeId>>,
     resolved_field_types: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    resolved_bodies: BTreeMap<NodeId, crate::core::ResolvedBody>,
     callable_cfgs: BTreeMap<NodeId, crate::core::cfg::CallableCfg>,
     resource_analyses: BTreeMap<NodeId, crate::core::ResourceAnalysis>,
 }
@@ -700,6 +701,23 @@ impl CheckedProgram {
         program.resolved_type_operands = resolved_type_operands;
         program.resolved_field_types = resolved_field_types;
         program.resolved_type_arguments = resolved_type_arguments;
+        program.resolved_bodies =
+            match crate::core::ir::lower::lower_checked_callable_bodies(file, &program) {
+                Ok(bodies) => bodies,
+                Err(body_errors) => {
+                    return Err(body_errors
+                        .into_iter()
+                        .map(|error| {
+                            let span = program
+                                .node_meta
+                                .get(&error.node_id)
+                                .map(|meta| meta.origin.user_span())
+                                .unwrap_or(Span::UNKNOWN);
+                            Diagnostic::error(format!("TOOL-RESOLUTION-001: {error}"), span)
+                        })
+                        .collect())
+                }
+            };
         program.callable_cfgs = callable_cfgs;
         program.resource_analyses = resource_analyses;
         Ok(program)
@@ -892,6 +910,7 @@ impl CheckedProgram {
             resolved_type_operands: BTreeMap::new(),
             resolved_type_arguments: BTreeMap::new(),
             resolved_field_types: BTreeMap::new(),
+            resolved_bodies: BTreeMap::new(),
             callable_cfgs: BTreeMap::new(),
             resource_analyses: BTreeMap::new(),
         })
@@ -1178,6 +1197,14 @@ impl CheckedProgram {
 
     pub fn resolved_field_type(&self, field: &NodeId) -> Option<&crate::core::ResolvedTypeId> {
         self.resolved_field_types.get(field)
+    }
+
+    pub fn resolved_bodies(&self) -> &BTreeMap<NodeId, crate::core::ResolvedBody> {
+        &self.resolved_bodies
+    }
+
+    pub fn resolved_body(&self, owner: &NodeId) -> Option<&crate::core::ResolvedBody> {
+        self.resolved_bodies.get(owner)
     }
 
     pub fn callable_cfgs(&self) -> &BTreeMap<NodeId, crate::core::cfg::CallableCfg> {
@@ -2604,6 +2631,17 @@ fn collect_type_meta(
         out,
         errors,
     );
+    if let Some(node_meta) = out.get_mut(&node_id) {
+        if node_meta.type_operand.replace(ty.clone()).is_some() {
+            errors.push(Diagnostic::error(
+                format!(
+                    "TOOL-RESOLUTION-001: type NodeId '{}' has more than one canonical operand",
+                    node_id.0
+                ),
+                anchor.map(|(span, _)| span).unwrap_or(fallback),
+            ));
+        }
+    }
     match ty.unlocated() {
         Type::Name(_, args) => {
             for index in 0..args.len() {
@@ -6800,6 +6838,55 @@ fn build_canonical_function_signatures(
                         type_arguments.insert(node_id.clone(), canonical);
                     }
                 }
+            }
+        }
+
+        // Persist every explicit type annotation owned by the callable, not
+        // only type operands attached to expressions. ResolvedBody uses this
+        // table to type local bindings and conversions without consulting raw
+        // `ast::Type` after construction.
+        let owner_prefix = format!("{}/", function.node_id.0);
+        let annotated_types = program
+            .node_meta
+            .iter()
+            .filter_map(|(node_id, meta)| {
+                meta.type_operand
+                    .as_ref()
+                    .filter(|_| node_id.0.starts_with(&owner_prefix))
+                    .map(|annotation| (node_id.clone(), annotation.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (node_id, annotation) in annotated_types {
+            if matches!(
+                annotation.unlocated(),
+                Type::Infer | Type::TypeVar(_) | Type::ForAll(_, _)
+            ) {
+                continue;
+            }
+            let zonked = match ZonkedTy::from_resolved(annotation) {
+                Ok(annotation) => annotation,
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: callable annotation '{}' is not zonked: {error}",
+                            node_id.0
+                        ),
+                        program.node_meta[&node_id].origin.user_span(),
+                    ));
+                    continue;
+                }
+            };
+            match types.intern_zonked(&zonked, &capabilities, &mut resolve_name) {
+                Ok(annotation) => {
+                    type_operands.insert(node_id, annotation);
+                }
+                Err(error) => errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: callable annotation '{}' is not canonical: {error}",
+                        node_id.0
+                    ),
+                    program.node_meta[&node_id].origin.user_span(),
+                )),
             }
         }
 

@@ -16,7 +16,8 @@ pub use body::{
     ResolvedExpr, ResolvedExprKind, ResolvedFStringPart, ResolvedIndex, ResolvedLambda,
     ResolvedLiteral, ResolvedLocal, ResolvedLocalId, ResolvedParameterId, ResolvedPattern,
     ResolvedPatternKind, ResolvedPlace, ResolvedProjection, ResolvedRecordField, ResolvedScopeKind,
-    ResolvedStmt, ResolvedStmtKind, ResolvedUnaryOp, SessionResidualId, SessionTransition,
+    ResolvedStmt, ResolvedStmtKind, ResolvedUnaryOp, ResolvedValueProjection, SessionResidualId,
+    SessionTransition,
 };
 pub use callable::{ResolvedParameter, ResolvedSignature, ResolvedSignatureError};
 
