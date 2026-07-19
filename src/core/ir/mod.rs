@@ -6,6 +6,7 @@
 
 mod body;
 mod callable;
+pub mod lower;
 mod types;
 
 pub use body::{

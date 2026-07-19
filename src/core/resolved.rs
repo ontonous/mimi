@@ -2075,7 +2075,7 @@ fn collect_block_meta(
     }
 }
 
-fn stmt_sibling_role(context: &str, block: &[Stmt], index: usize) -> String {
+pub(crate) fn stmt_sibling_role(context: &str, block: &[Stmt], index: usize) -> String {
     semantic_sibling_role(
         &format!("{context}.statement"),
         block,
@@ -2084,11 +2084,11 @@ fn stmt_sibling_role(context: &str, block: &[Stmt], index: usize) -> String {
     )
 }
 
-fn expr_sibling_role(context: &str, exprs: &[Expr], index: usize) -> String {
+pub(crate) fn expr_sibling_role(context: &str, exprs: &[Expr], index: usize) -> String {
     semantic_sibling_role(context, exprs, index, expr_semantic_key)
 }
 
-fn pattern_sibling_role(context: &str, patterns: &[Pattern], index: usize) -> String {
+pub(crate) fn pattern_sibling_role(context: &str, patterns: &[Pattern], index: usize) -> String {
     semantic_sibling_role(context, patterns, index, pattern_semantic_key)
 }
 
@@ -3386,7 +3386,7 @@ fn stmt_semantic_key(stmt: &Stmt) -> String {
     }
 }
 
-fn stmt_kind(stmt: &Stmt) -> &'static str {
+pub(crate) fn stmt_kind(stmt: &Stmt) -> &'static str {
     match stmt.unlocated() {
         Stmt::Let { .. } => "stmt.let",
         Stmt::Return(_) => "stmt.return",
@@ -3445,7 +3445,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
     expr.meta().and_then(|meta| usable_span(meta.span))
 }
 
-fn stmt_anchor(stmt: &Stmt, fallback: Span) -> Option<(Span, SpanPrecision)> {
+pub(crate) fn stmt_anchor(stmt: &Stmt, fallback: Span) -> Option<(Span, SpanPrecision)> {
     if let Some(anchor) = stmt.meta().and_then(ast_meta_anchor) {
         return Some(anchor);
     }
@@ -3878,7 +3878,7 @@ fn expr_semantic_key(expr: &Expr) -> String {
     }
 }
 
-fn expr_kind(expr: &Expr) -> &'static str {
+pub(crate) fn expr_kind(expr: &Expr) -> &'static str {
     match expr.unlocated() {
         Expr::Literal(_) => "expr.literal",
         Expr::Ident(_) => "expr.identifier",
@@ -4389,7 +4389,7 @@ fn pattern_semantic_key(pattern: &Pattern) -> String {
     }
 }
 
-fn pattern_kind(pattern: &Pattern) -> &'static str {
+pub(crate) fn pattern_kind(pattern: &Pattern) -> &'static str {
     match &pattern.kind {
         PatternKind::Wildcard => "pattern.wildcard",
         PatternKind::Variable(_) => "pattern.variable",
@@ -6230,6 +6230,17 @@ fn build_canonical_function_signatures(
     let capabilities =
         crate::core::ResolvedTypeCapabilities::with_dynamic_any("type.dynamic_value")
             .map_err(|error| vec![Diagnostic::error(error.to_string(), Span::UNKNOWN)])?;
+    // Statement and structural block nodes are always typed as unit in
+    // ResolvedBody, even when no callable signature mentions unit directly.
+    let unit = ZonkedTy::from_resolved(Type::Name("unit".into(), Vec::new()))
+        .expect("unit is a fully resolved primitive type");
+    types
+        .intern_zonked(
+            &unit,
+            &capabilities,
+            crate::core::ResolvedTypeName::primitive,
+        )
+        .map_err(|error| vec![Diagnostic::error(error.to_string(), Span::UNKNOWN)])?;
     let ids = NodeIdBuilder::new(&program.legacy_file.sources);
     let mut signatures = BTreeMap::new();
     let mut node_types = BTreeMap::new();
