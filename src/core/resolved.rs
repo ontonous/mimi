@@ -2279,7 +2279,11 @@ pub(crate) fn map_entry_role(context: &str, entries: &[(Expr, Expr)], index: usi
     semantic_sibling_role(context, entries, index, map_entry_semantic_key)
 }
 
-fn interpolation_role(context: &str, parts: &[FStringPart], part_index: usize) -> String {
+pub(crate) fn interpolation_role(
+    context: &str,
+    parts: &[FStringPart],
+    part_index: usize,
+) -> String {
     let FStringPart::Interp(expr) = &parts[part_index] else {
         unreachable!("interpolation role requested for text")
     };
