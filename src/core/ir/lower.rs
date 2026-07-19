@@ -14,8 +14,8 @@ use super::{
 };
 use crate::ast::{AstOrigin, BinOp, Expr, FuncDef, Lit, Pattern, PatternKind, Stmt, UnOp};
 use crate::core::resolved::{
-    expr_kind, expr_sibling_role, match_arm_role, pattern_kind, stable_id_fragment, stmt_anchor,
-    stmt_kind, stmt_sibling_role, NodeIdBuilder,
+    expr_kind, expr_sibling_role, match_arm_role, pattern_kind, pattern_sibling_role,
+    stable_id_fragment, stmt_anchor, stmt_kind, stmt_sibling_role, NodeIdBuilder,
 };
 use crate::core::{
     NodeId, NodeMeta, Origin, ResolvedCallKind, ResolvedCallSite, ResolvedFunction, ResolvedTypeDef,
@@ -701,10 +701,70 @@ impl BodyLowerer<'_> {
             PatternKind::Literal(literal) => {
                 ResolvedPatternKind::Literal(self.lower_literal(&node_id, literal)?)
             }
-            PatternKind::Constructor(_, _)
-            | PatternKind::Tuple(_)
-            | PatternKind::Array(_)
-            | PatternKind::Slice(_, _) => return self.unsupported(&node_id, pattern_kind(pattern)),
+            PatternKind::Tuple(patterns) => {
+                let element_types = match self.types.get(&ty) {
+                    Some(ResolvedType::Tuple(elements)) if elements.len() == patterns.len() => {
+                        elements.clone()
+                    }
+                    _ => {
+                        return Err(vec![ResolvedBodyError::new(
+                            node_id.clone(),
+                            "tuple pattern shape disagrees with canonical scrutinee type",
+                        )])
+                    }
+                };
+                ResolvedPatternKind::Tuple(self.lower_pattern_list(
+                    patterns,
+                    role,
+                    &element_types,
+                    mutable,
+                )?)
+            }
+            PatternKind::Array(patterns) => {
+                let element = match self.types.get(&ty) {
+                    Some(ResolvedType::Array { element, length }) if *length == patterns.len() => {
+                        element.clone()
+                    }
+                    _ => {
+                        return Err(vec![ResolvedBodyError::new(
+                            node_id.clone(),
+                            "array pattern shape disagrees with canonical scrutinee type",
+                        )])
+                    }
+                };
+                let element_types = vec![element; patterns.len()];
+                ResolvedPatternKind::Array(self.lower_pattern_list(
+                    patterns,
+                    role,
+                    &element_types,
+                    mutable,
+                )?)
+            }
+            PatternKind::Slice(patterns, rest) => {
+                let element = match self.types.get(&ty) {
+                    Some(ResolvedType::Array { element, .. })
+                    | Some(ResolvedType::Slice(element)) => element.clone(),
+                    _ => return self.unsupported(&node_id, "slice pattern on non-sequence type"),
+                };
+                let element_types = vec![element; patterns.len()];
+                let prefix = self.lower_pattern_list(patterns, role, &element_types, mutable)?;
+                let rest = rest
+                    .as_ref()
+                    .map(|rest| {
+                        self.lower_binding_pattern(
+                            rest,
+                            &format!("{role}.rest"),
+                            ty.clone(),
+                            mutable,
+                        )
+                        .map(Box::new)
+                    })
+                    .transpose()?;
+                ResolvedPatternKind::Slice { prefix, rest }
+            }
+            PatternKind::Constructor(_, _) => {
+                return self.unsupported(&node_id, pattern_kind(pattern))
+            }
         };
         Ok(ResolvedPattern {
             node_id,
@@ -712,6 +772,27 @@ impl BodyLowerer<'_> {
             ty,
             kind,
         })
+    }
+
+    fn lower_pattern_list(
+        &mut self,
+        patterns: &[Pattern],
+        role: &str,
+        types: &[ResolvedTypeId],
+        mutable: bool,
+    ) -> Result<Vec<ResolvedPattern>, Vec<ResolvedBodyError>> {
+        patterns
+            .iter()
+            .enumerate()
+            .map(|(index, pattern)| {
+                self.lower_binding_pattern(
+                    pattern,
+                    &pattern_sibling_role(&format!("{role}.element"), patterns, index),
+                    types[index].clone(),
+                    mutable,
+                )
+            })
+            .collect()
     }
 
     fn lower_place(
@@ -1343,5 +1424,34 @@ mod tests {
         assert_eq!(&place.base, local);
         body.validate(program.resolved_types())
             .expect("valid match body");
+    }
+
+    #[test]
+    fn tuple_binding_uses_canonical_element_types() {
+        let file = parse("func pick(pair: (i32, i64)) -> i64 { let (left, right) = pair; right }");
+        let program = crate::core::check_program(&file).expect("check");
+        let resolved = program.function("pick").expect("resolved pick");
+        let body = lower_function_body(FunctionBodyInput {
+            function: function(&file, "pick"),
+            signature: program.resolved_signature(&resolved.node_id).unwrap(),
+            signatures: program.resolved_signatures(),
+            functions: program.functions(),
+            type_defs: program.type_defs(),
+            call_sites: program.call_sites(),
+            node_types: program.resolved_node_types(),
+            types: program.resolved_types(),
+            node_meta: program.node_meta(),
+            sources: &file.sources,
+        })
+        .expect("lower tuple binding");
+        let ResolvedStmtKind::Bind { pattern, .. } = &body.root.statements[0].kind else {
+            panic!("tuple bind expected");
+        };
+        let ResolvedPatternKind::Tuple(elements) = &pattern.kind else {
+            panic!("tuple pattern expected");
+        };
+        assert_ne!(elements[0].ty, elements[1].ty);
+        body.validate(program.resolved_types())
+            .expect("valid tuple bind");
     }
 }
