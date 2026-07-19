@@ -4,6 +4,7 @@ use crate::diagnostic::Diagnostic;
 pub(crate) use std::collections::HashMap;
 
 mod borrow;
+pub mod cfg;
 mod checker;
 pub(crate) mod helpers;
 pub mod phase;
@@ -22,7 +23,9 @@ pub(crate) use helpers::{is_bool, is_numeric_coercion, is_trait_coercion};
 #[cfg(test)]
 pub(crate) use helpers::{is_int, is_numeric, is_string, same_type};
 pub use ownership::{
-    BranchMerge, OwnershipLedger, ResourceAction, ResourceActionKind, ResourceState,
+    Availability, BranchMerge, CanonicalActionKind, CanonicalResourceAction, CfgLocation,
+    IndexProjection, Loan, LoanId, LoanKind, LocalId, OwnershipLedger, Place, PlaceProjection,
+    ResourceAction, ResourceActionKind, ResourceAnalysis, ResourceFact, ResourceId, ResourceState,
 };
 pub use resolved::{
     BackendProfile, CheckedProgram, FlowId, NodeId, NodeMeta, Origin, ResolvedActor,

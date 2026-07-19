@@ -3,6 +3,7 @@ use crate::core::phase::TypeScheme;
 use crate::core::phase::ZonkedTy;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -27,6 +28,8 @@ pub struct FlowAcc {
     pub schemes: HashMap<crate::core::NodeId, TypeScheme>,
     /// v0.31.2: Zonked function signatures for backend consumption.
     pub zonked_func_types: HashMap<String, (Vec<ZonkedTy>, ZonkedTy)>,
+    /// v0.31.3: Stable CFGs for every callable body.
+    pub callable_cfgs: BTreeMap<crate::core::NodeId, crate::core::cfg::CallableCfg>,
 }
 
 /// Checker state machine — 宽松 Flow.
@@ -118,6 +121,13 @@ impl<'a> CheckerState<'a> {
 fn extract_acc(checker: &mut Checker) -> FlowAcc {
     // v0.31.2: Finalize zonked function types before extraction.
     checker.finalize_zonked_func_types();
+    let callable_cfgs = match crate::core::cfg::lower_file(checker.file) {
+        Ok(cfgs) => cfgs,
+        Err(errors) => {
+            checker.errors.extend(errors);
+            BTreeMap::new()
+        }
+    };
     let mut seen: HashSet<super::DiagnosticDedupKey> = HashSet::new();
     let mut deduped: Vec<Diagnostic> = Vec::with_capacity(checker.errors.len());
     for e in std::mem::take(&mut checker.errors) {
@@ -132,6 +142,7 @@ fn extract_acc(checker: &mut Checker) -> FlowAcc {
         ownership_ledgers: std::mem::take(&mut checker.ownership_ledgers),
         schemes: std::mem::take(&mut checker.schemes),
         zonked_func_types: std::mem::take(&mut checker.zonked_func_types),
+        callable_cfgs,
     }
 }
 

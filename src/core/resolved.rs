@@ -6,13 +6,13 @@ use crate::core::checker::flow::FlowAcc;
 use crate::core::phase::{TypeScheme, ZonkedTy};
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::OwnershipLedger;
 
 pub const RESOLVED_IR_VERSION: &str = "mimi-resolved-ir-1";
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub String);
 
 /// The single canonical builder for anonymous semantic node identities.
@@ -22,16 +22,16 @@ pub struct NodeId(pub String);
 /// order changes.  User nodes are anchored by their stable `SourceKey`, source
 /// range, syntax kind, and semantic role.  Nodes without an honest source
 /// range use a controlled role discriminator supplied by the walker.
-struct NodeIdBuilder<'a> {
+pub(crate) struct NodeIdBuilder<'a> {
     sources: &'a SourceRegistry,
 }
 
 impl<'a> NodeIdBuilder<'a> {
-    fn new(sources: &'a SourceRegistry) -> Self {
+    pub(crate) fn new(sources: &'a SourceRegistry) -> Self {
         Self { sources }
     }
 
-    fn anonymous(
+    pub(crate) fn anonymous(
         &self,
         owner: &NodeId,
         kind: &str,
@@ -562,6 +562,7 @@ pub struct CheckedProgram<'a> {
     ownership_ledgers: HashMap<NodeId, OwnershipLedger>,
     type_schemes: HashMap<NodeId, TypeScheme>,
     zonked_function_types: HashMap<NodeId, (Vec<ZonkedTy>, ZonkedTy)>,
+    callable_cfgs: BTreeMap<NodeId, crate::core::cfg::CallableCfg>,
 }
 
 impl<'a> CheckedProgram<'a> {
@@ -578,6 +579,7 @@ impl<'a> CheckedProgram<'a> {
             ownership_ledgers,
             schemes,
             zonked_func_types,
+            callable_cfgs,
             ..
         } = acc;
         let mut program = Self::from_checked_file_with_ownership(file, ownership_ledgers)?;
@@ -618,8 +620,27 @@ impl<'a> CheckedProgram<'a> {
         if !errors.is_empty() {
             return Err(errors);
         }
+        for owner in callable_cfgs.keys() {
+            if !program.node_meta.contains_key(owner) {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: CFG owner '{}' is not a callable NodeId",
+                        owner.0
+                    ),
+                    callable_cfgs
+                        .get(owner)
+                        .and_then(|cfg| cfg.block(&cfg.entry))
+                        .map(|block| block.source.span)
+                        .unwrap_or(Span::UNKNOWN),
+                ));
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
         program.type_schemes = schemes;
         program.zonked_function_types = zonked_by_node;
+        program.callable_cfgs = callable_cfgs;
         Ok(program)
     }
 
@@ -803,6 +824,7 @@ impl<'a> CheckedProgram<'a> {
             ownership_ledgers,
             type_schemes: HashMap::new(),
             zonked_function_types: HashMap::new(),
+            callable_cfgs: BTreeMap::new(),
         })
     }
 
@@ -1040,6 +1062,14 @@ impl<'a> CheckedProgram<'a> {
 
     pub fn zonked_function_type(&self, function: &NodeId) -> Option<&(Vec<ZonkedTy>, ZonkedTy)> {
         self.zonked_function_types.get(function)
+    }
+
+    pub fn callable_cfgs(&self) -> &BTreeMap<NodeId, crate::core::cfg::CallableCfg> {
+        &self.callable_cfgs
+    }
+
+    pub fn callable_cfg(&self, owner: &NodeId) -> Option<&crate::core::cfg::CallableCfg> {
+        self.callable_cfgs.get(owner)
     }
 
     pub fn entry_span(&self) -> Option<Span> {
@@ -2069,7 +2099,7 @@ fn semantic_sibling_role<T>(
     )
 }
 
-fn stable_text_hash(value: &str) -> u64 {
+pub(crate) fn stable_text_hash(value: &str) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
     value.bytes().fold(FNV_OFFSET, |hash, byte| {
