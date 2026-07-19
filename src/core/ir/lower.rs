@@ -517,6 +517,18 @@ impl BodyLowerer<'_> {
                 kind: super::ContractKind::Invariant,
                 condition: self.lower_expr(expr, &format!("{role}.expression"))?,
             },
+            Stmt::Math(expressions) => ResolvedStmtKind::Math(
+                expressions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, expression)| {
+                        self.lower_expr(
+                            expression,
+                            &expr_sibling_role(&format!("{role}.math"), expressions, index),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
             Stmt::Drop(expr) => {
                 ResolvedStmtKind::Drop(self.lower_place(expr, &format!("{role}.expression"))?)
             }
@@ -656,16 +668,22 @@ impl BodyLowerer<'_> {
                 }
             }
             Stmt::Desc(..) | Stmt::Rule(..) | Stmt::MmsBlock { .. } => return Ok(None),
-            Stmt::Math(_) | Stmt::Ellipsis => return self.unsupported(&node_id, stmt_kind(stmt)),
+            Stmt::Ellipsis => return self.unsupported(&node_id, stmt_kind(stmt)),
             Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
         };
-        let backend_requirements = matches!(&kind, ResolvedStmtKind::Pinned { .. })
-            .then(|| super::BackendRequirement {
+        let backend_requirements = match &kind {
+            ResolvedStmtKind::Pinned { .. } => Some(super::BackendRequirement {
                 requirement_id: "RESOURCE-LINEAR-001".into(),
                 capability: "ffi.pinned".into(),
-            })
-            .into_iter()
-            .collect();
+            }),
+            ResolvedStmtKind::Math(_) => Some(super::BackendRequirement {
+                requirement_id: "VERIFY-CORE-001".into(),
+                capability: "verification.math".into(),
+            }),
+            _ => None,
+        }
+        .into_iter()
+        .collect();
         Ok(Some(ResolvedStmt {
             node_id,
             origin,
@@ -2902,6 +2920,30 @@ mod tests {
             .any(|requirement| requirement.capability == "ffi.pinned"));
         body.validate(program.resolved_types())
             .expect("valid pinned scope");
+    }
+
+    #[test]
+    fn math_block_retains_typed_verification_expressions() {
+        let file = parse(
+            "func prove(value: i32) -> i32 { math: { value + 1 > value; value >= 0; }; value }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower math");
+        let body = &bodies[&NodeId("function:prove".into())];
+        let statement = &body.root.statements[0];
+        let ResolvedStmtKind::Math(expressions) = &statement.kind else {
+            panic!("math statement expected");
+        };
+        assert_eq!(expressions.len(), 2);
+        assert!(expressions
+            .iter()
+            .all(|expression| program.resolved_types().get(&expression.ty).is_some()));
+        assert!(statement
+            .backend_requirements
+            .iter()
+            .any(|requirement| requirement.capability == "verification.math"));
+        body.validate(program.resolved_types())
+            .expect("valid math block");
     }
 
     #[test]
