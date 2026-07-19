@@ -2247,7 +2247,7 @@ pub(crate) fn pattern_sibling_role(context: &str, patterns: &[Pattern], index: u
     semantic_sibling_role(context, patterns, index, pattern_semantic_key)
 }
 
-fn type_sibling_role(context: &str, types: &[Type], index: usize) -> String {
+pub(crate) fn type_sibling_role(context: &str, types: &[Type], index: usize) -> String {
     semantic_sibling_role(context, types, index, type_semantic_key)
 }
 
@@ -2490,7 +2490,7 @@ fn type_semantic_key(ty: &Type) -> String {
     crate::core::fmt_type(ty)
 }
 
-fn type_kind(ty: &Type) -> &'static str {
+pub(crate) fn type_kind(ty: &Type) -> &'static str {
     match ty.unlocated() {
         Type::Name(_, _) => "type.name",
         Type::Ref(_, _) => "type.ref",
@@ -6706,46 +6706,100 @@ fn build_canonical_function_signatures(
             }
             builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal)
         };
-        let fields = match &definition.declaration.kind {
+        match &definition.declaration.kind {
             crate::ast::TypeDefKind::Record(fields) | crate::ast::TypeDefKind::Union(fields) => {
-                fields
-            }
-            _ => continue,
-        };
-        for field in fields {
-            let field_id = ids.anonymous(
-                &definition.node_id,
-                "decl.field",
-                &format!("field.{}", stable_id_fragment(&field.name)),
-                usable_span(field.meta.span),
-                field.meta.origin,
-                &mut errors,
-            );
-            let zonked = match ZonkedTy::from_resolved(field.ty.clone()) {
-                Ok(ty) => ty,
-                Err(error) => {
-                    errors.push(Diagnostic::error(
-                        format!(
-                            "TOOL-RESOLUTION-001: field '{}' in '{}' is not zonked: {error}",
-                            field.name, definition.qualified_name
-                        ),
-                        definition.origin.user_span(),
-                    ));
-                    continue;
+                for field in fields {
+                    let field_id = ids.anonymous(
+                        &definition.node_id,
+                        "decl.field",
+                        &format!("field.{}", stable_id_fragment(&field.name)),
+                        usable_span(field.meta.span),
+                        field.meta.origin,
+                        &mut errors,
+                    );
+                    canonicalize_declaration_member(
+                        field_id,
+                        &field.name,
+                        &field.ty,
+                        definition,
+                        &mut DeclarationMemberContext {
+                            types: &mut types,
+                            capabilities: &capabilities,
+                            resolve_name: &mut resolve_name,
+                            field_types: &mut field_types,
+                            errors: &mut errors,
+                        },
+                    );
                 }
-            };
-            match types.intern_zonked(&zonked, &capabilities, &mut resolve_name) {
-                Ok(ty) => {
-                    field_types.insert(field_id, ty);
-                }
-                Err(error) => errors.push(Diagnostic::error(
-                    format!(
-                        "TOOL-RESOLUTION-001: field '{}' in '{}' is not canonical: {error}",
-                        field.name, definition.qualified_name
-                    ),
-                    definition.origin.user_span(),
-                )),
             }
+            crate::ast::TypeDefKind::Enum(variants) => {
+                for variant in variants {
+                    let variant_id = ids.anonymous(
+                        &definition.node_id,
+                        "decl.variant",
+                        &format!("variant.{}", stable_id_fragment(&variant.name)),
+                        usable_span(variant.meta.span),
+                        variant.meta.origin,
+                        &mut errors,
+                    );
+                    match &variant.payload {
+                        Some(crate::ast::VariantPayload::Tuple(payload)) => {
+                            for index in 0..payload.len() {
+                                let role = type_sibling_role("payload.element", payload, index);
+                                let meta = payload[index].meta();
+                                let member_id = ids.anonymous(
+                                    &variant_id,
+                                    type_kind(&payload[index]),
+                                    &role,
+                                    meta.and_then(|meta| usable_span(meta.span)),
+                                    meta.map(|meta| meta.origin).unwrap_or(AstOrigin::User),
+                                    &mut errors,
+                                );
+                                canonicalize_declaration_member(
+                                    member_id,
+                                    &format!("{}[{index}]", variant.name),
+                                    &payload[index],
+                                    definition,
+                                    &mut DeclarationMemberContext {
+                                        types: &mut types,
+                                        capabilities: &capabilities,
+                                        resolve_name: &mut resolve_name,
+                                        field_types: &mut field_types,
+                                        errors: &mut errors,
+                                    },
+                                );
+                            }
+                        }
+                        Some(crate::ast::VariantPayload::Record(fields)) => {
+                            for field in fields {
+                                let member_id = ids.anonymous(
+                                    &variant_id,
+                                    "decl.field",
+                                    &format!("payload.field.{}", stable_id_fragment(&field.name)),
+                                    usable_span(field.meta.span),
+                                    field.meta.origin,
+                                    &mut errors,
+                                );
+                                canonicalize_declaration_member(
+                                    member_id,
+                                    &field.name,
+                                    &field.ty,
+                                    definition,
+                                    &mut DeclarationMemberContext {
+                                        types: &mut types,
+                                        capabilities: &capabilities,
+                                        resolve_name: &mut resolve_name,
+                                        field_types: &mut field_types,
+                                        errors: &mut errors,
+                                    },
+                                );
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            crate::ast::TypeDefKind::Alias(_) | crate::ast::TypeDefKind::Newtype(_) => {}
         }
     }
 
@@ -6837,6 +6891,53 @@ fn build_canonical_function_signatures(
         Ok((types, signatures, node_types, field_types))
     } else {
         Err(errors)
+    }
+}
+
+struct DeclarationMemberContext<'a, R> {
+    types: &'a mut crate::core::ResolvedTypeTable,
+    capabilities: &'a crate::core::ResolvedTypeCapabilities,
+    resolve_name: &'a mut R,
+    field_types: &'a mut BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    errors: &'a mut Vec<Diagnostic>,
+}
+
+fn canonicalize_declaration_member<R>(
+    member_id: NodeId,
+    member_name: &str,
+    member_type: &Type,
+    definition: &ResolvedTypeDef,
+    context: &mut DeclarationMemberContext<'_, R>,
+) where
+    R: FnMut(&str) -> Option<crate::core::ResolvedTypeName>,
+{
+    let zonked = match ZonkedTy::from_resolved(member_type.clone()) {
+        Ok(ty) => ty,
+        Err(error) => {
+            context.errors.push(Diagnostic::error(
+                format!(
+                    "TOOL-RESOLUTION-001: member '{}' in '{}' is not zonked: {error}",
+                    member_name, definition.qualified_name
+                ),
+                definition.origin.user_span(),
+            ));
+            return;
+        }
+    };
+    match context
+        .types
+        .intern_zonked(&zonked, context.capabilities, &mut *context.resolve_name)
+    {
+        Ok(ty) => {
+            context.field_types.insert(member_id, ty);
+        }
+        Err(error) => context.errors.push(Diagnostic::error(
+            format!(
+                "TOOL-RESOLUTION-001: member '{}' in '{}' is not canonical: {error}",
+                member_name, definition.qualified_name
+            ),
+            definition.origin.user_span(),
+        )),
     }
 }
 

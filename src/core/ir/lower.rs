@@ -18,7 +18,7 @@ use crate::ast::{
 use crate::core::resolved::{
     expr_kind, expr_sibling_role, impl_method_owner, map_entry_role, match_arm_role,
     nested_function_owner, pattern_kind, pattern_sibling_role, stable_id_fragment, stmt_anchor,
-    stmt_kind, stmt_sibling_role, NodeIdBuilder,
+    stmt_kind, stmt_sibling_role, type_kind, type_sibling_role, NodeIdBuilder,
 };
 use crate::core::{
     CheckedProgram, NodeId, NodeMeta, Origin, ResolvedActor, ResolvedCallKind, ResolvedCallSite,
@@ -1360,6 +1360,16 @@ impl BodyLowerer<'_> {
         let kind = match &pattern.kind {
             PatternKind::Wildcard => ResolvedPatternKind::Wildcard,
             PatternKind::Variable(name) => {
+                if let Some(constructor) =
+                    self.lower_constructor_pattern(&node_id, name, &[], role, &ty, mutable)?
+                {
+                    return Ok(ResolvedPattern {
+                        node_id,
+                        origin,
+                        ty,
+                        kind: constructor,
+                    });
+                }
                 let local_id = ResolvedLocalId(NodeId(format!("{}/local", node_id.0)));
                 self.insert_local(
                     name.clone(),
@@ -1441,9 +1451,17 @@ impl BodyLowerer<'_> {
                     .transpose()?;
                 ResolvedPatternKind::Slice { prefix, rest }
             }
-            PatternKind::Constructor(_, _) => {
-                return self.unsupported(&node_id, pattern_kind(pattern))
-            }
+            PatternKind::Constructor(name, fields) => self
+                .lower_constructor_pattern(&node_id, name, fields, role, &ty, mutable)?
+                .ok_or_else(|| {
+                    vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        format!(
+                            "constructor '{name}' is absent from canonical scrutinee type '{}'",
+                            ty.as_str()
+                        ),
+                    )]
+                })?,
         };
         Ok(ResolvedPattern {
             node_id,
@@ -1451,6 +1469,234 @@ impl BodyLowerer<'_> {
             ty,
             kind,
         })
+    }
+
+    fn lower_constructor_pattern(
+        &mut self,
+        node_id: &NodeId,
+        name: &str,
+        fields: &[(String, Pattern)],
+        role: &str,
+        ty: &ResolvedTypeId,
+        mutable: bool,
+    ) -> Result<Option<ResolvedPatternKind>, Vec<ResolvedBodyError>> {
+        if let Some(ResolvedType::Nominal { item, .. }) = self.types.get(ty) {
+            let owner = NodeId(item.as_str().to_string());
+            if let Some(definition) = self.type_defs.get(&owner) {
+                if let crate::ast::TypeDefKind::Enum(variants) = &definition.declaration.kind {
+                    let Some(variant) = variants.iter().find(|variant| variant.name == name) else {
+                        return Ok(None);
+                    };
+                    let mut diagnostics = Vec::new();
+                    let variant_id = self.ids.anonymous(
+                        &owner,
+                        "decl.variant",
+                        &format!("variant.{}", stable_id_fragment(name)),
+                        usable_span(variant.meta.span),
+                        variant.meta.origin,
+                        &mut diagnostics,
+                    );
+                    if !diagnostics.is_empty() || !self.node_meta.contains_key(&variant_id) {
+                        return Err(vec![ResolvedBodyError::new(
+                            node_id.clone(),
+                            format!("variant '{name}' has no stable declaration identity"),
+                        )]);
+                    }
+                    let declared = match &variant.payload {
+                        Some(crate::ast::VariantPayload::Tuple(payload)) => {
+                            let mut declared = Vec::with_capacity(payload.len());
+                            for index in 0..payload.len() {
+                                let meta = payload[index].meta();
+                                let field = self.ids.anonymous(
+                                    &variant_id,
+                                    type_kind(&payload[index]),
+                                    &type_sibling_role("payload.element", payload, index),
+                                    meta.and_then(|meta| usable_span(meta.span)),
+                                    meta.map(|meta| meta.origin).unwrap_or(AstOrigin::User),
+                                    &mut diagnostics,
+                                );
+                                let field_ty =
+                                    self.field_types.get(&field).cloned().ok_or_else(|| {
+                                        vec![ResolvedBodyError::new(
+                                            field.clone(),
+                                            "enum tuple payload has no canonical declaration type",
+                                        )]
+                                    })?;
+                                declared.push((format!("_{index}"), field, field_ty));
+                            }
+                            declared
+                        }
+                        Some(crate::ast::VariantPayload::Record(payload)) => {
+                            let mut declared = Vec::with_capacity(payload.len());
+                            for field in payload {
+                                let field_id = self.ids.anonymous(
+                                    &variant_id,
+                                    "decl.field",
+                                    &format!("payload.field.{}", stable_id_fragment(&field.name)),
+                                    usable_span(field.meta.span),
+                                    field.meta.origin,
+                                    &mut diagnostics,
+                                );
+                                let field_ty =
+                                    self.field_types.get(&field_id).cloned().ok_or_else(|| {
+                                        vec![ResolvedBodyError::new(
+                                            field_id.clone(),
+                                            "enum record payload has no canonical declaration type",
+                                        )]
+                                    })?;
+                                declared.push((field.name.clone(), field_id, field_ty));
+                            }
+                            declared
+                        }
+                        None => Vec::new(),
+                    };
+                    if !diagnostics.is_empty() {
+                        return Err(vec![ResolvedBodyError::new(
+                            node_id.clone(),
+                            format!("variant '{name}' payload identities are not stable"),
+                        )]);
+                    }
+                    let lowered =
+                        self.lower_constructor_fields(node_id, fields, role, &declared, mutable)?;
+                    return Ok(Some(ResolvedPatternKind::Constructor {
+                        variant: variant_id,
+                        fields: lowered,
+                    }));
+                }
+            }
+        }
+
+        let builtin = match (name, self.types.get(ty)) {
+            ("Some", Some(ResolvedType::Option(inner))) => Some((
+                "builtin:variant:Option::Some",
+                vec![(
+                    "_0".to_string(),
+                    NodeId("builtin:variant:Option::Some/payload:0".into()),
+                    inner.clone(),
+                )],
+            )),
+            ("None", Some(ResolvedType::Option(_))) => {
+                Some(("builtin:variant:Option::None", Vec::new()))
+            }
+            ("Ok", Some(ResolvedType::Result { ok, .. })) => Some((
+                "builtin:variant:Result::Ok",
+                vec![(
+                    "_0".to_string(),
+                    NodeId("builtin:variant:Result::Ok/payload:0".into()),
+                    ok.clone(),
+                )],
+            )),
+            ("Err", Some(ResolvedType::Result { error, .. })) => Some((
+                "builtin:variant:Result::Err",
+                vec![(
+                    "_0".to_string(),
+                    NodeId("builtin:variant:Result::Err/payload:0".into()),
+                    error.clone(),
+                )],
+            )),
+            ("Some", Some(ResolvedType::Nominal { item, arguments }))
+                if item.as_str() == "builtin:type:Option" && arguments.len() == 1 =>
+            {
+                Some((
+                    "builtin:variant:Option::Some",
+                    vec![(
+                        "_0".to_string(),
+                        NodeId("builtin:variant:Option::Some/payload:0".into()),
+                        arguments[0].clone(),
+                    )],
+                ))
+            }
+            ("None", Some(ResolvedType::Nominal { item, arguments }))
+                if item.as_str() == "builtin:type:Option" && arguments.len() == 1 =>
+            {
+                Some(("builtin:variant:Option::None", Vec::new()))
+            }
+            ("Ok", Some(ResolvedType::Nominal { item, arguments }))
+                if item.as_str() == "builtin:type:Result" && arguments.len() == 2 =>
+            {
+                Some((
+                    "builtin:variant:Result::Ok",
+                    vec![(
+                        "_0".to_string(),
+                        NodeId("builtin:variant:Result::Ok/payload:0".into()),
+                        arguments[0].clone(),
+                    )],
+                ))
+            }
+            ("Err", Some(ResolvedType::Nominal { item, arguments }))
+                if item.as_str() == "builtin:type:Result" && arguments.len() == 2 =>
+            {
+                Some((
+                    "builtin:variant:Result::Err",
+                    vec![(
+                        "_0".to_string(),
+                        NodeId("builtin:variant:Result::Err/payload:0".into()),
+                        arguments[1].clone(),
+                    )],
+                ))
+            }
+            _ => None,
+        };
+        let Some((variant, declared)) = builtin else {
+            return Ok(None);
+        };
+        let lowered = self.lower_constructor_fields(node_id, fields, role, &declared, mutable)?;
+        Ok(Some(ResolvedPatternKind::Constructor {
+            variant: NodeId(variant.into()),
+            fields: lowered,
+        }))
+    }
+
+    fn lower_constructor_fields(
+        &mut self,
+        node_id: &NodeId,
+        fields: &[(String, Pattern)],
+        role: &str,
+        declared: &[(String, NodeId, ResolvedTypeId)],
+        mutable: bool,
+    ) -> Result<Vec<(NodeId, ResolvedPattern)>, Vec<ResolvedBodyError>> {
+        if fields.len() != declared.len() {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "constructor payload count {} does not match canonical declaration count {}",
+                    fields.len(),
+                    declared.len()
+                ),
+            )]);
+        }
+        let mut supplied = BTreeMap::new();
+        for (name, pattern) in fields {
+            if supplied.insert(name.as_str(), pattern).is_some() {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("constructor field '{name}' is supplied more than once"),
+                )]);
+            }
+        }
+        let mut lowered = Vec::with_capacity(declared.len());
+        for (name, field, field_ty) in declared {
+            let pattern = supplied.remove(name.as_str()).ok_or_else(|| {
+                vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("constructor field '{name}' has no checked pattern"),
+                )]
+            })?;
+            let pattern = self.lower_binding_pattern(
+                pattern,
+                &format!("{role}.field.{}", stable_id_fragment(name)),
+                field_ty.clone(),
+                mutable,
+            )?;
+            lowered.push((field.clone(), pattern));
+        }
+        if let Some(extra) = supplied.keys().next() {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!("constructor field '{extra}' has no declaration"),
+            )]);
+        }
+        Ok(lowered)
     }
 
     fn lower_pattern_list(
@@ -2303,6 +2549,69 @@ mod tests {
         assert_ne!(elements[0].ty, elements[1].ty);
         body.validate(program.resolved_types())
             .expect("valid tuple bind");
+    }
+
+    #[test]
+    fn enum_patterns_use_variant_and_payload_declaration_identities() {
+        let file = parse(
+            "type Choice {\nValue(i32)\nPair { left: i32, right: i32 }\nEmpty\n}\nfunc read(choice: Choice) -> i32 { match choice { Value(value) => value, Pair { right: right, left: left } => left + right, Empty => 0 } }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower enum patterns");
+        let body = &bodies[&NodeId("function:read".into())];
+        let ResolvedExprKind::Match { arms, .. } = &body.root.result.as_ref().unwrap().kind else {
+            panic!("match expected");
+        };
+        let ResolvedPatternKind::Constructor { variant, fields } = &arms[0].pattern.kind else {
+            panic!("tuple variant expected");
+        };
+        assert!(variant.0.starts_with("type:Choice/node:decl.variant@"));
+        assert_eq!(fields.len(), 1);
+        assert!(program.resolved_field_type(&fields[0].0).is_some());
+
+        let ResolvedPatternKind::Constructor { fields, .. } = &arms[1].pattern.kind else {
+            panic!("record variant expected");
+        };
+        assert_eq!(fields.len(), 2);
+        assert!(fields[0].0 .0.contains("decl.field"));
+        let ResolvedPatternKind::Binding { local: left, .. } = &fields[0].1.kind else {
+            panic!("left binding expected");
+        };
+        assert_eq!(body.locals[left].display_name, "left");
+
+        assert!(matches!(
+            arms[2].pattern.kind,
+            ResolvedPatternKind::Constructor { ref fields, .. } if fields.is_empty()
+        ));
+        body.validate(program.resolved_types())
+            .expect("valid enum patterns");
+    }
+
+    #[test]
+    fn builtin_option_patterns_retain_payload_type() {
+        let file = parse(
+            "func unwrap(value: Option<i32>) -> i32 { match value { Some(inner) => inner, None => 0 } }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower option pattern");
+        let body = &bodies[&NodeId("function:unwrap".into())];
+        let ResolvedExprKind::Match { arms, .. } = &body.root.result.as_ref().unwrap().kind else {
+            panic!("match expected");
+        };
+        let ResolvedPatternKind::Constructor { variant, fields } = &arms[0].pattern.kind else {
+            panic!("Some expected");
+        };
+        assert_eq!(variant.0, "builtin:variant:Option::Some");
+        let ResolvedPatternKind::Binding { local, .. } = &fields[0].1.kind else {
+            panic!("Some payload binding expected");
+        };
+        assert_eq!(body.locals[local].ty, fields[0].1.ty);
+        assert!(matches!(
+            arms[1].pattern.kind,
+            ResolvedPatternKind::Constructor { ref fields, .. } if fields.is_empty()
+        ));
+        body.validate(program.resolved_types())
+            .expect("valid builtin patterns");
     }
 
     #[test]
