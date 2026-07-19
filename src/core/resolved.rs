@@ -564,6 +564,8 @@ pub struct CheckedProgram {
     ownership_ledgers: HashMap<NodeId, OwnershipLedger>,
     type_schemes: HashMap<NodeId, TypeScheme>,
     zonked_function_types: HashMap<NodeId, (Vec<ZonkedTy>, ZonkedTy)>,
+    resolved_types: crate::core::ResolvedTypeTable,
+    resolved_signatures: BTreeMap<NodeId, crate::core::ResolvedSignature>,
     callable_cfgs: BTreeMap<NodeId, crate::core::cfg::CallableCfg>,
     resource_analyses: BTreeMap<NodeId, crate::core::ResourceAnalysis>,
 }
@@ -644,6 +646,9 @@ impl CheckedProgram {
         }
         program.type_schemes = schemes;
         program.zonked_function_types = zonked_by_node;
+        let (resolved_types, resolved_signatures) = build_canonical_function_signatures(&program)?;
+        program.resolved_types = resolved_types;
+        program.resolved_signatures = resolved_signatures;
         program.callable_cfgs = callable_cfgs;
         program.resource_analyses = resource_analyses;
         Ok(program)
@@ -829,6 +834,8 @@ impl CheckedProgram {
             ownership_ledgers,
             type_schemes: HashMap::new(),
             zonked_function_types: HashMap::new(),
+            resolved_types: crate::core::ResolvedTypeTable::new(),
+            resolved_signatures: BTreeMap::new(),
             callable_cfgs: BTreeMap::new(),
             resource_analyses: BTreeMap::new(),
         })
@@ -1068,6 +1075,18 @@ impl CheckedProgram {
 
     pub fn zonked_function_type(&self, function: &NodeId) -> Option<&(Vec<ZonkedTy>, ZonkedTy)> {
         self.zonked_function_types.get(function)
+    }
+
+    pub fn resolved_types(&self) -> &crate::core::ResolvedTypeTable {
+        &self.resolved_types
+    }
+
+    pub fn resolved_signatures(&self) -> &BTreeMap<NodeId, crate::core::ResolvedSignature> {
+        &self.resolved_signatures
+    }
+
+    pub fn resolved_signature(&self, owner: &NodeId) -> Option<&crate::core::ResolvedSignature> {
+        self.resolved_signatures.get(owner)
     }
 
     pub fn callable_cfgs(&self) -> &BTreeMap<NodeId, crate::core::cfg::CallableCfg> {
@@ -5985,6 +6004,316 @@ fn materialize_const_value(expr: &crate::ast::Expr) -> ResolvedConstValue {
     }
 }
 
+fn build_canonical_function_signatures(
+    program: &CheckedProgram,
+) -> Result<
+    (
+        crate::core::ResolvedTypeTable,
+        BTreeMap<NodeId, crate::core::ResolvedSignature>,
+    ),
+    Vec<Diagnostic>,
+> {
+    fn register_nominal(
+        catalog: &mut BTreeMap<String, std::collections::BTreeSet<String>>,
+        qualified_name: &str,
+        identity: &NodeId,
+    ) {
+        let mut keys = vec![qualified_name.to_string()];
+        if let Some(short) = qualified_name.rsplit("::").next() {
+            keys.push(short.to_string());
+        }
+        for key in keys {
+            catalog.entry(key).or_default().insert(identity.0.clone());
+        }
+    }
+
+    fn builtin_nominal(name: &str) -> Option<crate::core::NominalTypeId> {
+        const BUILTIN_NOMINALS: &[&str] = &[
+            "AST",
+            "ExecResult",
+            "Fault",
+            "Future",
+            "List",
+            "Map",
+            "Option",
+            "Range",
+            "Record",
+            "Result",
+            "SessionChan",
+            "Set",
+            "StatResult",
+            "SystemTrace",
+            "Tuple",
+            "Type",
+            "TypeInfo",
+            "session_chan",
+        ];
+        BUILTIN_NOMINALS
+            .contains(&name)
+            .then(|| crate::core::NominalTypeId::new(format!("builtin:type:{name}")))
+            .transpose()
+            .ok()
+            .flatten()
+    }
+
+    let mut nominal_catalog = BTreeMap::new();
+    for definition in program.type_defs.values() {
+        register_nominal(
+            &mut nominal_catalog,
+            &definition.qualified_name,
+            &definition.node_id,
+        );
+    }
+    for actor in program.actors.values() {
+        register_nominal(&mut nominal_catalog, &actor.qualified_name, &actor.node_id);
+    }
+    for flow in program.flows.values() {
+        register_nominal(&mut nominal_catalog, &flow.id.0, &flow.node_id);
+        for state in flow.states.values() {
+            register_nominal(
+                &mut nominal_catalog,
+                &format!("{}::{}", flow.id.0, state.id.name),
+                &state.node_id,
+            );
+        }
+    }
+    for protocol in program.protocols.values() {
+        register_nominal(
+            &mut nominal_catalog,
+            &protocol.qualified_name,
+            &protocol.node_id,
+        );
+    }
+    for session in program.sessions.values() {
+        register_nominal(
+            &mut nominal_catalog,
+            &session.qualified_name,
+            &session.node_id,
+        );
+    }
+    for capability in program.capabilities.values() {
+        register_nominal(
+            &mut nominal_catalog,
+            &capability.qualified_name,
+            &capability.node_id,
+        );
+    }
+    for trait_def in program.traits.values() {
+        register_nominal(
+            &mut nominal_catalog,
+            &trait_def.qualified_name,
+            &trait_def.node_id,
+        );
+    }
+
+    let mut types = crate::core::ResolvedTypeTable::new();
+    let capabilities = crate::core::ResolvedTypeCapabilities::default();
+    let ids = NodeIdBuilder::new(&program.legacy_file.sources);
+    let mut signatures = BTreeMap::new();
+    let mut errors = Vec::new();
+    let mut functions = program.functions.values().collect::<Vec<_>>();
+    functions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+
+    for function in functions {
+        let Some((parameter_types, result_type)) =
+            program.zonked_function_types.get(&function.node_id)
+        else {
+            errors.push(Diagnostic::error(
+                format!(
+                    "TOOL-RESOLUTION-001: function '{}' has no checker-finalized signature",
+                    function.qualified_name
+                ),
+                function.origin.user_span(),
+            ));
+            continue;
+        };
+        if parameter_types.len() != function.param_decls.len() {
+            errors.push(Diagnostic::error(
+                format!(
+                    "TOOL-RESOLUTION-001: function '{}' canonical parameter count mismatch",
+                    function.qualified_name
+                ),
+                function.origin.user_span(),
+            ));
+            continue;
+        }
+
+        let mut generic_names = BTreeMap::new();
+        let mut generic_parameters = Vec::new();
+        for generic in &function.generics {
+            let id = ids.anonymous(
+                &function.node_id,
+                "decl.generic_parameter",
+                &format!("generic.{}", stable_id_fragment(&generic.name)),
+                usable_span(generic.meta.span),
+                generic.meta.origin,
+                &mut errors,
+            );
+            if !program.node_meta.contains_key(&id) {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: generic parameter '{}' is absent from NodeMeta",
+                        id.0
+                    ),
+                    function.origin.user_span(),
+                ));
+            }
+            generic_names.insert(generic.name.clone(), id.clone());
+            generic_parameters.push(id);
+        }
+
+        let module = function
+            .qualified_name
+            .rsplit_once("::")
+            .map(|(module, _)| module);
+        let mut resolve_name = |name: &str| {
+            if let Some(primitive) = crate::core::ResolvedTypeName::primitive(name) {
+                return Some(primitive);
+            }
+            if let Some(parameter) = generic_names.get(name) {
+                return Some(crate::core::ResolvedTypeName::GenericParameter(
+                    parameter.clone(),
+                ));
+            }
+            if let Some(module) = module {
+                let qualified = format!("{module}::{name}");
+                if let Some(candidates) = nominal_catalog.get(&qualified) {
+                    if candidates.len() == 1 {
+                        let identity = candidates.iter().next()?.clone();
+                        return crate::core::NominalTypeId::new(identity)
+                            .ok()
+                            .map(crate::core::ResolvedTypeName::Nominal);
+                    }
+                }
+            }
+            if let Some(candidates) = nominal_catalog.get(name) {
+                if candidates.len() == 1 {
+                    let identity = candidates.iter().next()?.clone();
+                    return crate::core::NominalTypeId::new(identity)
+                        .ok()
+                        .map(crate::core::ResolvedTypeName::Nominal);
+                }
+            }
+            builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal)
+        };
+
+        let mut canonical_parameter_types = Vec::with_capacity(parameter_types.len());
+        let mut signature_failed = false;
+        for ty in parameter_types {
+            match types.intern_zonked(ty, &capabilities, &mut resolve_name) {
+                Ok(ty) => canonical_parameter_types.push(ty),
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: function '{}' parameter type is not canonical: {}",
+                            function.qualified_name, error
+                        ),
+                        function.origin.user_span(),
+                    ));
+                    signature_failed = true;
+                }
+            }
+        }
+        let canonical_result =
+            match types.intern_zonked(result_type, &capabilities, &mut resolve_name) {
+                Ok(ty) => ty,
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: function '{}' result type is not canonical: {}",
+                            function.qualified_name, error
+                        ),
+                        function.origin.user_span(),
+                    ));
+                    continue;
+                }
+            };
+        if signature_failed {
+            continue;
+        }
+
+        let parameters = function
+            .param_decls
+            .iter()
+            .zip(canonical_parameter_types)
+            .map(|(parameter, ty)| {
+                let id = ids.anonymous(
+                    &function.node_id,
+                    "decl.parameter",
+                    &format!("parameter.{}", stable_id_fragment(&parameter.name)),
+                    usable_span(parameter.meta.span),
+                    parameter.meta.origin,
+                    &mut errors,
+                );
+                if !program.node_meta.contains_key(&id) {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: parameter '{}' is absent from NodeMeta",
+                            id.0
+                        ),
+                        function.origin.user_span(),
+                    ));
+                }
+                crate::core::ResolvedParameter {
+                    id: crate::core::ResolvedParameterId(id),
+                    name: parameter.name.clone(),
+                    ty,
+                    mutable: parameter.mut_,
+                    permission: parameter.borrow.map(|permission| match permission {
+                        crate::ast::ParamBorrow::View => crate::core::Permission::View,
+                        crate::ast::ParamBorrow::Mutate => crate::core::Permission::Mutate,
+                    }),
+                    has_default: parameter.default_value.is_some(),
+                }
+            })
+            .collect();
+        let mut effects = function.effects.clone();
+        effects.sort();
+        effects.dedup();
+        let effects = effects
+            .into_iter()
+            .filter_map(|effect| match crate::core::EffectId::new(effect) {
+                Ok(effect) => Some(effect),
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!("TOOL-RESOLUTION-001: {error}"),
+                        function.origin.user_span(),
+                    ));
+                    None
+                }
+            })
+            .collect();
+        let signature = crate::core::ResolvedSignature {
+            owner: function.node_id.clone(),
+            generic_parameters,
+            parameters,
+            result: canonical_result,
+            effects,
+        };
+        if let Err(signature_errors) = signature.validate(&types) {
+            errors.extend(signature_errors.into_iter().map(|error| {
+                Diagnostic::error(
+                    format!("TOOL-RESOLUTION-001: {error}"),
+                    function.origin.user_span(),
+                )
+            }));
+        } else {
+            signatures.insert(function.node_id.clone(), signature);
+        }
+    }
+
+    if let Err(type_errors) = types.validate() {
+        errors.extend(type_errors.into_iter().map(|error| {
+            Diagnostic::error(format!("TOOL-RESOLUTION-001: {error}"), Span::UNKNOWN)
+        }));
+    }
+    if errors.is_empty() {
+        Ok((types, signatures))
+    } else {
+        Err(errors)
+    }
+}
+
 fn contains_unresolved_type(ty: &Type) -> bool {
     match ty {
         Type::Located { ty, .. } => contains_unresolved_type(ty),
@@ -6106,6 +6435,78 @@ mod tests {
             interpreter.run().expect("run owned checked program"),
             crate::interp::Value::Int(42)
         ));
+    }
+
+    #[test]
+    fn checked_program_materializes_canonical_function_signature() {
+        let file = parse("func choose(value: List<i32>, fallback: i32) -> i32 { fallback }");
+        let program = crate::core::check_program(&file).expect("check");
+        let function = program.function("choose").expect("function");
+        let signature = program
+            .resolved_signature(&function.node_id)
+            .expect("canonical signature");
+
+        assert_eq!(signature.owner, function.node_id);
+        assert_eq!(signature.parameters.len(), 2);
+        assert!(signature
+            .parameters
+            .iter()
+            .all(|parameter| program.resolved_types().get(&parameter.ty).is_some()));
+        assert!(program.resolved_types().get(&signature.result).is_some());
+        assert!(signature.validate(program.resolved_types()).is_ok());
+    }
+
+    #[test]
+    fn canonical_generic_signature_uses_binder_identity() {
+        let file = parse("func identity<T>(value: T) -> T { value }");
+        let program = crate::core::check_program(&file).expect("check");
+        let function = program.function("identity").expect("function");
+        let signature = program
+            .resolved_signature(&function.node_id)
+            .expect("canonical signature");
+
+        assert_eq!(signature.generic_parameters.len(), 1);
+        assert_eq!(signature.parameters[0].ty, signature.result);
+        assert!(matches!(
+            program.resolved_types().get(&signature.result),
+            Some(crate::core::ResolvedType::GenericParameter(parameter))
+                if parameter == &signature.generic_parameters[0]
+        ));
+    }
+
+    #[test]
+    fn canonical_signatures_are_declaration_order_independent() {
+        let first = parse(
+            "func first(value: i32) -> i32 { value }\nfunc second(value: List<i32>) -> i32 { 0 }",
+        );
+        let second = parse(
+            "func second(value: List<i32>) -> i32 { 0 }\nfunc first(value: i32) -> i32 { value }",
+        );
+        let first = crate::core::check_program(&first).expect("first check");
+        let second = crate::core::check_program(&second).expect("second check");
+        for name in ["first", "second"] {
+            let first_function = first.function(name).expect("first function");
+            let second_function = second.function(name).expect("second function");
+            let first_signature = first
+                .resolved_signature(&first_function.node_id)
+                .expect("first signature");
+            let second_signature = second
+                .resolved_signature(&second_function.node_id)
+                .expect("second signature");
+            assert_eq!(
+                first_signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.ty.clone())
+                    .collect::<Vec<_>>(),
+                second_signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.ty.clone())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(first_signature.result, second_signature.result);
+        }
     }
 
     #[test]
