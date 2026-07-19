@@ -203,3 +203,7 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "regex_capture_groups"
     )
 }
+
+pub fn is_language_constructor(name: &str) -> bool {
+    matches!(name, "Some" | "None" | "Ok" | "Err")
+}

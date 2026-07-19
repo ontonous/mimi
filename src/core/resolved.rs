@@ -6032,7 +6032,9 @@ fn resolve_named_call_callee(
             Vec::new(),
             Some(ret.clone()),
         )
-    } else if crate::core::builtins::is_builtin_callable(name) {
+    } else if crate::core::builtins::is_builtin_callable(name)
+        || crate::core::builtins::is_language_constructor(name)
+    {
         (
             name.to_string(),
             ResolvedCallKind::Builtin,
