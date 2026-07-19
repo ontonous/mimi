@@ -459,10 +459,60 @@ impl BodyLowerer<'_> {
             Stmt::Drop(expr) => {
                 ResolvedStmtKind::Drop(self.lower_place(expr, &format!("{role}.expression"))?)
             }
+            Stmt::SharedLet {
+                kind, name, init, ..
+            } => {
+                let value = self.lower_expr(init, &format!("{role}.initializer"))?;
+                let local_ty = self.shared_binding_type(&node_id, *kind, &value.ty)?;
+                let pattern_id = NodeId(format!("{}/shared-pattern", node_id.0));
+                let local_id = ResolvedLocalId(NodeId(format!("{}/local", pattern_id.0)));
+                let pattern_origin = Origin::Desugared {
+                    parent: node_id.clone(),
+                    rule: "resolved_body.shared_binding".into(),
+                    span: origin.user_span(),
+                };
+                let initializer = ResolvedExpr {
+                    node_id: NodeId(format!("{}/ownership-wrap", node_id.0)),
+                    origin: pattern_origin.clone(),
+                    ty: local_ty.clone(),
+                    effects: Vec::new(),
+                    backend_requirements: Vec::new(),
+                    kind: ResolvedExprKind::Cast {
+                        conversion: CheckedConversion {
+                            kind: CheckedConversionKind::OwnershipWrap,
+                            from: value.ty.clone(),
+                            to: local_ty.clone(),
+                        },
+                        value: Box::new(value),
+                    },
+                };
+                self.insert_local(
+                    name.clone(),
+                    ResolvedLocal {
+                        id: local_id.clone(),
+                        display_name: name.clone(),
+                        ty: local_ty.clone(),
+                        mutable: false,
+                        origin: pattern_origin.clone(),
+                    },
+                    &pattern_id,
+                )?;
+                ResolvedStmtKind::Bind {
+                    pattern: ResolvedPattern {
+                        node_id: pattern_id,
+                        origin: pattern_origin,
+                        ty: local_ty,
+                        kind: ResolvedPatternKind::Binding {
+                            local: local_id,
+                            by_reference: None,
+                        },
+                    },
+                    initializer: Some(initializer),
+                }
+            }
             Stmt::Desc(..) | Stmt::Rule(..) | Stmt::MmsBlock { .. } => return Ok(None),
             Stmt::WhileLet { .. }
             | Stmt::Math(_)
-            | Stmt::SharedLet { .. }
             | Stmt::Delegate { .. }
             | Stmt::Pinned { .. }
             | Stmt::Ellipsis => return self.unsupported(&node_id, stmt_kind(stmt)),
@@ -1308,6 +1358,39 @@ impl BodyLowerer<'_> {
         }
     }
 
+    fn shared_binding_type(
+        &self,
+        node_id: &NodeId,
+        kind: crate::ast::SharedKind,
+        initializer: &ResolvedTypeId,
+    ) -> Result<ResolvedTypeId, Vec<ResolvedBodyError>> {
+        let expected = match kind {
+            crate::ast::SharedKind::Shared => super::OwnershipTypeKind::Shared,
+            crate::ast::SharedKind::LocalShared => super::OwnershipTypeKind::LocalShared,
+            crate::ast::SharedKind::Weak => super::OwnershipTypeKind::Weak,
+            crate::ast::SharedKind::WeakLocal => super::OwnershipTypeKind::WeakLocal,
+        };
+        let matches = self
+            .types
+            .iter()
+            .filter_map(|(id, ty)| match ty {
+                ResolvedType::Ownership { kind, target }
+                    if *kind == expected && target == initializer =>
+                {
+                    Some(id.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [ty] = matches.as_slice() else {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "shared binding has no unique canonical ownership type",
+            )]);
+        };
+        Ok(ty.clone())
+    }
+
     fn lower_literal(
         &self,
         node_id: &NodeId,
@@ -2066,5 +2149,27 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn shared_binding_has_explicit_ownership_wrap() {
+        let file = parse("func main() { shared value = 42; println(value) }");
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower shared");
+        let body = &bodies[&NodeId("function:main".into())];
+        let ResolvedStmtKind::Bind {
+            pattern,
+            initializer: Some(initializer),
+        } = &body.root.statements[0].kind
+        else {
+            panic!("shared binding expected");
+        };
+        let ResolvedExprKind::Cast { conversion, .. } = &initializer.kind else {
+            panic!("ownership wrap expected");
+        };
+        assert_eq!(conversion.kind, CheckedConversionKind::OwnershipWrap);
+        assert_eq!(conversion.to, pattern.ty);
+        body.validate(program.resolved_types())
+            .expect("valid shared body");
     }
 }
