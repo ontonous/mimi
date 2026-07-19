@@ -127,7 +127,16 @@ pub fn lower_checked_function_bodies(
     collect_function_syntax(&file.items, "", &mut syntax);
     let mut bodies = BTreeMap::new();
     let mut errors = Vec::new();
-    for (owner, signature) in program.resolved_signatures() {
+    let mut owners = program.functions().keys().collect::<Vec<_>>();
+    owners.sort();
+    for owner in owners {
+        let Some(signature) = program.resolved_signature(owner) else {
+            errors.push(ResolvedBodyError::new(
+                owner.clone(),
+                "resolved function has no canonical signature",
+            ));
+            continue;
+        };
         let Some(function) = syntax.get(owner) else {
             errors.push(ResolvedBodyError::new(
                 owner.clone(),
@@ -1356,6 +1365,20 @@ impl BodyLowerer<'_> {
                 "call has no checker-resolved call-site record",
             )]
         })?;
+        if let Expr::Field(flow, event) = callee.unlocated() {
+            if let Expr::Ident(flow) = flow.unlocated() {
+                if self.has_transition_callee(flow, event) {
+                    return self.lower_transition_call(
+                        node_id,
+                        flow,
+                        event,
+                        arguments,
+                        role,
+                        type_arguments,
+                    );
+                }
+            }
+        }
         if site.kind == ResolvedCallKind::Unknown {
             if let Expr::Ident(name) = callee.unlocated() {
                 if let Some(local) = self.lookup_local(name) {
@@ -1680,6 +1703,166 @@ impl BodyLowerer<'_> {
             arguments: lowered,
             permission: None,
             effects,
+            session: Vec::new(),
+        })
+    }
+
+    fn has_transition_callee(&self, flow: &str, event: &str) -> bool {
+        self.signatures.keys().any(|owner| {
+            parse_transition_owner(owner).is_some_and(|(candidate_flow, candidate_event, _)| {
+                candidate_event == event
+                    && (candidate_flow == flow
+                        || candidate_flow
+                            .rsplit_once("::")
+                            .is_some_and(|(_, short)| short == flow))
+            })
+        })
+    }
+
+    fn lower_transition_call(
+        &mut self,
+        node_id: &NodeId,
+        flow: &str,
+        event: &str,
+        arguments: &[Expr],
+        role: &str,
+        type_arguments: &[ResolvedTypeId],
+    ) -> Result<ResolvedCall, Vec<ResolvedBodyError>> {
+        if !type_arguments.is_empty() {
+            return self.unsupported(node_id, "generic arguments on transition call");
+        }
+        let Some(source_argument) = arguments.first() else {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "transition call has no source-state argument",
+            )]);
+        };
+        if matches!(source_argument.unlocated(), Expr::NamedArg(_, _)) {
+            return self.unsupported(node_id, "named transition source argument");
+        }
+        let source_role = expr_sibling_role(&format!("{role}.argument"), arguments, 0);
+        let source = self.lower_expr(source_argument, &source_role)?;
+        let mut candidates = self
+            .signatures
+            .iter()
+            .filter_map(|(owner, signature)| {
+                let (candidate_flow, candidate_event, source_state) =
+                    parse_transition_owner(owner)?;
+                let flow_matches = candidate_flow == flow
+                    || candidate_flow
+                        .rsplit_once("::")
+                        .is_some_and(|(_, short)| short == flow);
+                (flow_matches
+                    && candidate_event == event
+                    && signature
+                        .parameters
+                        .first()
+                        .is_some_and(|parameter| parameter.ty == source.ty))
+                .then_some((
+                    owner.clone(),
+                    signature.clone(),
+                    candidate_flow.to_string(),
+                    source_state.to_string(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.0.cmp(&right.0));
+        let [(_owner, signature, qualified_flow, source_state)] = candidates.as_slice() else {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "transition call '{flow}::{event}' does not resolve to exactly one source-state overload"
+                ),
+            )]);
+        };
+        if arguments.len() != signature.parameters.len() {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "transition argument count {} does not match canonical parameter count {}",
+                    arguments.len(),
+                    signature.parameters.len()
+                ),
+            )]);
+        }
+
+        let mut slots = vec![None; signature.parameters.len()];
+        slots[0] = Some((source, source_role));
+        let mut next_positional = 1;
+        for index in 1..arguments.len() {
+            let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
+            let (slot, value, value_role) = match arguments[index].unlocated() {
+                Expr::NamedArg(name, value) => {
+                    let slot = signature
+                        .parameters
+                        .iter()
+                        .position(|parameter| parameter.name == *name)
+                        .ok_or_else(|| {
+                            vec![ResolvedBodyError::new(
+                                node_id.clone(),
+                                format!("named transition argument '{name}' has no parameter"),
+                            )]
+                        })?;
+                    (slot, value.as_ref(), format!("{argument_role}.inner"))
+                }
+                _ => {
+                    while next_positional < slots.len() && slots[next_positional].is_some() {
+                        next_positional += 1;
+                    }
+                    let slot = next_positional;
+                    next_positional += 1;
+                    (slot, &arguments[index], argument_role)
+                }
+            };
+            if slot == 0 || slots[slot].is_some() {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "transition parameter '{}' is supplied more than once",
+                        signature.parameters[slot].name
+                    ),
+                )]);
+            }
+            let value = self.lower_expr(value, &value_role)?;
+            slots[slot] = Some((value, value_role));
+        }
+
+        let mut lowered = Vec::with_capacity(slots.len());
+        for (parameter, slot) in signature.parameters.iter().zip(slots) {
+            let Some((value, _)) = slot else {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("transition parameter '{}' has no argument", parameter.name),
+                )]);
+            };
+            let conversion = self.identity_conversion(node_id, &value.ty, &parameter.ty)?;
+            lowered.push(ResolvedArgument {
+                parameter: parameter.id.clone(),
+                value,
+                conversion,
+            });
+        }
+        let call_result = self.node_types.get(node_id).ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "transition call has no checker-finalized result type",
+            )]
+        })?;
+        self.identity_conversion(node_id, &signature.result, call_result)?;
+        let flow_id = crate::core::FlowId(qualified_flow.clone());
+        Ok(ResolvedCall {
+            callee: ResolvedCallee::Transition(crate::core::TransitionId {
+                flow: flow_id.clone(),
+                event: event.to_string(),
+                source: crate::core::StateId {
+                    flow: flow_id,
+                    name: source_state.clone(),
+                },
+            }),
+            type_arguments: Vec::new(),
+            arguments: lowered,
+            permission: Some(super::Permission::Consume),
+            effects: signature.effects.clone(),
             session: Vec::new(),
         })
     }
@@ -3173,6 +3356,13 @@ impl BodyLowerer<'_> {
     }
 }
 
+fn parse_transition_owner(owner: &NodeId) -> Option<(&str, &str, &str)> {
+    let raw = owner.0.strip_prefix("transition:")?;
+    let (prefix, source) = raw.rsplit_once("::")?;
+    let (flow, event) = prefix.rsplit_once("::")?;
+    Some((flow, event, source))
+}
+
 fn usable_span(span: Span) -> Option<Span> {
     (span.start_line > 0 && span.start_col > 0).then_some(span)
 }
@@ -3852,7 +4042,9 @@ mod tests {
         );
         let program = crate::core::check_program(&file).expect("check");
         let bodies = lower_checked_function_bodies(&file, &program).expect("all bodies lower");
-        assert_eq!(bodies.len(), program.resolved_signatures().len());
+        // TOOL-RESOLUTION-001: transition signatures share the canonical
+        // catalog, while this entry point intentionally lowers functions only.
+        assert_eq!(bodies.len(), program.functions().len());
         assert!(bodies.contains_key(&NodeId("function:increment".into())));
         assert!(bodies.contains_key(&NodeId("function:main".into())));
 
@@ -4286,6 +4478,43 @@ mod tests {
         assert!(call.arguments[0].parameter.0 .0.starts_with(&local.0 .0));
         body.validate(program.resolved_types())
             .expect("valid local closure call");
+    }
+
+    #[test]
+    fn transition_call_closes_source_overload_and_parameter_identities() {
+        let file = parse(
+            "flow Calc { state Zero { v: i32 } state Value { v: i32 } transition add(Zero, amount: i32) -> Value { do { return Value { v: self.v + amount } } } }\nfunc advance(current: Zero) -> Value { Calc::add(current, amount = 5) }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let transition_owner = NodeId("transition:Calc::add::Zero".into());
+        let signature = program
+            .resolved_signature(&transition_owner)
+            .expect("canonical transition signature");
+        assert_eq!(signature.parameters.len(), 2);
+        assert_eq!(
+            signature.parameters[0].permission,
+            Some(crate::core::Permission::Consume)
+        );
+
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower transition call");
+        let body = &bodies[&NodeId("function:advance".into())];
+        let ResolvedExprKind::Call(call) = &body.root.result.as_ref().expect("call result").kind
+        else {
+            panic!("typed transition call expected");
+        };
+        assert!(matches!(
+            &call.callee,
+            ResolvedCallee::Transition(transition)
+                if transition.flow.0 == "Calc"
+                    && transition.event == "add"
+                    && transition.source.name == "Zero"
+        ));
+        assert_eq!(call.permission, Some(crate::core::Permission::Consume));
+        assert_eq!(call.arguments.len(), 2);
+        assert_eq!(call.arguments[0].parameter, signature.parameters[0].id);
+        assert_eq!(call.arguments[1].parameter, signature.parameters[1].id);
+        body.validate(program.resolved_types())
+            .expect("valid transition call");
     }
 
     #[test]
