@@ -153,9 +153,11 @@ pub struct ResourceFact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Loan {
     pub id: LoanId,
+    pub parent: Option<LoanId>,
     pub kind: LoanKind,
     pub place: Place,
     pub reference: Option<LocalId>,
+    pub reference_name: Option<String>,
     pub start: CfgLocation,
     pub end_edges: Vec<EdgeId>,
     pub span: Span,

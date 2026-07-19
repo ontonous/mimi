@@ -563,6 +563,7 @@ pub struct CheckedProgram<'a> {
     type_schemes: HashMap<NodeId, TypeScheme>,
     zonked_function_types: HashMap<NodeId, (Vec<ZonkedTy>, ZonkedTy)>,
     callable_cfgs: BTreeMap<NodeId, crate::core::cfg::CallableCfg>,
+    resource_analyses: BTreeMap<NodeId, crate::core::ResourceAnalysis>,
 }
 
 impl<'a> CheckedProgram<'a> {
@@ -580,6 +581,7 @@ impl<'a> CheckedProgram<'a> {
             schemes,
             zonked_func_types,
             callable_cfgs,
+            resource_analyses,
             ..
         } = acc;
         let mut program = Self::from_checked_file_with_ownership(file, ownership_ledgers)?;
@@ -641,6 +643,7 @@ impl<'a> CheckedProgram<'a> {
         program.type_schemes = schemes;
         program.zonked_function_types = zonked_by_node;
         program.callable_cfgs = callable_cfgs;
+        program.resource_analyses = resource_analyses;
         Ok(program)
     }
 
@@ -825,6 +828,7 @@ impl<'a> CheckedProgram<'a> {
             type_schemes: HashMap::new(),
             zonked_function_types: HashMap::new(),
             callable_cfgs: BTreeMap::new(),
+            resource_analyses: BTreeMap::new(),
         })
     }
 
@@ -1070,6 +1074,14 @@ impl<'a> CheckedProgram<'a> {
 
     pub fn callable_cfg(&self, owner: &NodeId) -> Option<&crate::core::cfg::CallableCfg> {
         self.callable_cfgs.get(owner)
+    }
+
+    pub fn resource_analyses(&self) -> &BTreeMap<NodeId, crate::core::ResourceAnalysis> {
+        &self.resource_analyses
+    }
+
+    pub fn resource_analysis(&self, owner: &NodeId) -> Option<&crate::core::ResourceAnalysis> {
+        self.resource_analyses.get(owner)
     }
 
     pub fn entry_span(&self) -> Option<Span> {
