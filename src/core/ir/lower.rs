@@ -9,8 +9,8 @@ use super::{
     ResolvedArgument, ResolvedBinaryOp, ResolvedBlock, ResolvedBody, ResolvedBodyError,
     ResolvedCall, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLiteral, ResolvedLocal,
     ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedProjection,
-    ResolvedSignature, ResolvedStmt, ResolvedStmtKind, ResolvedType, ResolvedTypeId,
-    ResolvedTypeTable, ResolvedUnaryOp,
+    ResolvedRecordField, ResolvedSignature, ResolvedStmt, ResolvedStmtKind, ResolvedType,
+    ResolvedTypeId, ResolvedTypeTable, ResolvedUnaryOp,
 };
 use crate::ast::{AstOrigin, BinOp, Expr, FuncDef, Lit, Pattern, PatternKind, Stmt, UnOp};
 use crate::core::resolved::{
@@ -33,6 +33,7 @@ pub struct FunctionBodyInput<'a> {
     pub signatures: &'a BTreeMap<NodeId, ResolvedSignature>,
     pub functions: &'a HashMap<NodeId, ResolvedFunction>,
     pub type_defs: &'a HashMap<NodeId, ResolvedTypeDef>,
+    pub field_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     pub call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
     pub node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     pub types: &'a ResolvedTypeTable,
@@ -64,6 +65,7 @@ pub fn lower_function_body(
         signatures: input.signatures,
         functions: input.functions,
         type_defs: input.type_defs,
+        field_types: input.field_types,
         call_sites: input.call_sites,
         node_types: input.node_types,
         types: input.types,
@@ -98,6 +100,7 @@ struct BodyLowerer<'a> {
     signatures: &'a BTreeMap<NodeId, ResolvedSignature>,
     functions: &'a HashMap<NodeId, ResolvedFunction>,
     type_defs: &'a HashMap<NodeId, ResolvedTypeDef>,
+    field_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
     node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     types: &'a ResolvedTypeTable,
@@ -445,8 +448,8 @@ impl BodyLowerer<'_> {
                     arms,
                 }
             }
+            Expr::Record { fields, .. } => self.lower_record(&node_id, fields, role, &ty)?,
             Expr::Comprehension { .. }
-            | Expr::Record { .. }
             | Expr::Try(_)
             | Expr::OptionalChain(_, _)
             | Expr::Quote(_)
@@ -474,6 +477,78 @@ impl BodyLowerer<'_> {
             effects,
             backend_requirements: Vec::new(),
             kind,
+        })
+    }
+
+    fn lower_record(
+        &mut self,
+        node_id: &NodeId,
+        fields: &[crate::ast::RecordFieldExpr],
+        role: &str,
+        ty: &ResolvedTypeId,
+    ) -> Result<ResolvedExprKind, Vec<ResolvedBodyError>> {
+        let nominal = match self.types.get(ty) {
+            Some(ResolvedType::Nominal { item, .. }) => item.clone(),
+            _ => return self.unsupported(node_id, "record construction without nominal type"),
+        };
+        let owner = NodeId(nominal.as_str().to_string());
+        let definition = self.type_defs.get(&owner).ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!("record owner '{}' has no resolved definition", owner.0),
+            )]
+        })?;
+        let declared = match &definition.declaration.kind {
+            crate::ast::TypeDefKind::Record(fields) => fields,
+            _ => return self.unsupported(node_id, "non-record nominal construction"),
+        };
+        let mut surface = BTreeMap::new();
+        for field in fields {
+            if surface.insert(field.name.as_str(), field).is_some() {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("record field '{}' is supplied more than once", field.name),
+                )]);
+            }
+        }
+        let mut lowered = Vec::with_capacity(declared.len());
+        for declaration in declared {
+            let value = surface.remove(declaration.name.as_str()).ok_or_else(|| {
+                vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("record field '{}' has no checked value", declaration.name),
+                )]
+            })?;
+            let field_id = self.resolve_field(node_id, ty, &declaration.name)?;
+            let target_ty = self.field_types.get(&field_id).ok_or_else(|| {
+                vec![ResolvedBodyError::new(
+                    field_id.clone(),
+                    "record field has no canonical declaration type",
+                )]
+            })?;
+            let value = self.lower_expr(
+                &value.value,
+                &format!(
+                    "{role}.field.{}.value",
+                    stable_id_fragment(&declaration.name)
+                ),
+            )?;
+            let conversion = self.identity_conversion(node_id, &value.ty, target_ty)?;
+            lowered.push(ResolvedRecordField {
+                field: field_id,
+                value,
+                conversion,
+            });
+        }
+        if let Some(extra) = surface.keys().next() {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!("record field '{extra}' has no declaration"),
+            )]);
+        }
+        Ok(ResolvedExprKind::Record {
+            nominal,
+            fields: lowered,
         })
     }
 
@@ -1189,6 +1264,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
@@ -1222,6 +1298,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             node_types: &empty,
             types: program.resolved_types(),
@@ -1247,6 +1324,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
@@ -1286,6 +1364,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
@@ -1321,6 +1400,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
@@ -1372,6 +1452,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
@@ -1402,6 +1483,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
@@ -1438,6 +1520,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
@@ -1454,5 +1537,41 @@ mod tests {
         assert_ne!(elements[0].ty, elements[1].ty);
         body.validate(program.resolved_types())
             .expect("valid tuple bind");
+    }
+
+    #[test]
+    fn record_fields_are_sorted_by_declaration_identity() {
+        let file =
+            parse("type Point { x: i32, y: i32 }\nfunc make() -> Point { Point { y: 2, x: 1 } }");
+        let program = crate::core::check_program(&file).expect("check");
+        let resolved = program.function("make").expect("resolved make");
+        let body = lower_function_body(FunctionBodyInput {
+            function: function(&file, "make"),
+            signature: program.resolved_signature(&resolved.node_id).unwrap(),
+            signatures: program.resolved_signatures(),
+            functions: program.functions(),
+            type_defs: program.type_defs(),
+            field_types: program.resolved_field_types(),
+            call_sites: program.call_sites(),
+            node_types: program.resolved_node_types(),
+            types: program.resolved_types(),
+            node_meta: program.node_meta(),
+            sources: &file.sources,
+        })
+        .expect("lower record");
+        let ResolvedExprKind::Record { fields, .. } = &body.root.result.as_ref().unwrap().kind
+        else {
+            panic!("record expected");
+        };
+        let values = fields
+            .iter()
+            .map(|field| match field.value.kind {
+                ResolvedExprKind::Literal(ResolvedLiteral::Int(value)) => value,
+                _ => panic!("literal field expected"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![1, 2]);
+        body.validate(program.resolved_types())
+            .expect("valid record");
     }
 }
