@@ -1,6 +1,174 @@
+use std::collections::BTreeMap;
+
+use crate::ast::AstOrigin;
 use crate::span::Span;
 
+use super::cfg::{BasicBlockId, EdgeId};
 use super::NodeId;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LocalId(pub NodeId);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ResourceId(pub NodeId);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LoanId(pub NodeId);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum IndexProjection {
+    Constant(i64),
+    Dynamic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PlaceProjection {
+    Field(String),
+    Tuple(usize),
+    Index(IndexProjection),
+    Deref,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Place {
+    pub base: LocalId,
+    pub base_name: String,
+    pub projections: Vec<PlaceProjection>,
+}
+
+impl Place {
+    pub fn root(base: LocalId, base_name: impl Into<String>) -> Self {
+        Self {
+            base,
+            base_name: base_name.into(),
+            projections: Vec::new(),
+        }
+    }
+
+    pub fn conflicts_with(&self, other: &Self) -> bool {
+        if self.projections.contains(&PlaceProjection::Deref)
+            || other.projections.contains(&PlaceProjection::Deref)
+        {
+            return true;
+        }
+        if self.base != other.base {
+            return false;
+        }
+        for (left, right) in self.projections.iter().zip(other.projections.iter()) {
+            if left == right {
+                continue;
+            }
+            return match (left, right) {
+                (PlaceProjection::Field(left), PlaceProjection::Field(right)) => left == right,
+                (PlaceProjection::Tuple(left), PlaceProjection::Tuple(right)) => left == right,
+                (
+                    PlaceProjection::Index(IndexProjection::Constant(left)),
+                    PlaceProjection::Index(IndexProjection::Constant(right)),
+                ) => left == right,
+                (PlaceProjection::Index(_), PlaceProjection::Index(_)) => true,
+                _ => true,
+            };
+        }
+        // Equal paths and root/prefix relationships overlap.
+        true
+    }
+
+    pub fn display(&self) -> String {
+        let mut value = self.base_name.clone();
+        for projection in &self.projections {
+            match projection {
+                PlaceProjection::Field(field) => {
+                    value.push('.');
+                    value.push_str(field);
+                }
+                PlaceProjection::Tuple(index) => {
+                    value.push('.');
+                    value.push_str(&index.to_string());
+                }
+                PlaceProjection::Index(IndexProjection::Constant(index)) => {
+                    value.push('[');
+                    value.push_str(&index.to_string());
+                    value.push(']');
+                }
+                PlaceProjection::Index(IndexProjection::Dynamic) => value.push_str("[*]"),
+                PlaceProjection::Deref => value.insert(0, '*'),
+            }
+        }
+        value
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LoanKind {
+    Shared,
+    Mutable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CfgLocation {
+    pub block: BasicBlockId,
+    pub point: NodeId,
+    pub edge: Option<EdgeId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CanonicalActionKind {
+    Introduce,
+    Move,
+    Drop,
+    Return,
+    TransferSession,
+    TransferChild,
+    DelegateConsume,
+    BorrowShared,
+    BorrowMut,
+    BorrowEnd,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalResourceAction {
+    pub kind: CanonicalActionKind,
+    pub resource: ResourceId,
+    pub source: Option<Place>,
+    pub target: Option<Place>,
+    pub loan: Option<LoanId>,
+    pub location: CfgLocation,
+    pub span: Span,
+    pub origin: AstOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Availability {
+    Available,
+    Consumed,
+    MaybeConsumed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceFact {
+    pub availability: Availability,
+    pub owner: Option<Place>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Loan {
+    pub id: LoanId,
+    pub kind: LoanKind,
+    pub place: Place,
+    pub reference: Option<LocalId>,
+    pub start: CfgLocation,
+    pub end_edges: Vec<EdgeId>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceAnalysis {
+    pub owner: NodeId,
+    pub actions: Vec<CanonicalResourceAction>,
+    pub loans: Vec<Loan>,
+    pub in_states: BTreeMap<BasicBlockId, BTreeMap<ResourceId, ResourceFact>>,
+    pub out_states: BTreeMap<BasicBlockId, BTreeMap<ResourceId, ResourceFact>>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceState {
@@ -18,6 +186,9 @@ pub enum ResourceActionKind {
     BorrowShared,
     BorrowMut,
     BorrowEnd,
+    TransferSession,
+    TransferChild,
+    DelegateConsume,
 }
 
 impl ResourceActionKind {
@@ -30,6 +201,9 @@ impl ResourceActionKind {
             Self::BorrowShared => "borrow_shared",
             Self::BorrowMut => "borrow_mut",
             Self::BorrowEnd => "borrow_end",
+            Self::TransferSession => "transfer_session",
+            Self::TransferChild => "transfer_child",
+            Self::DelegateConsume => "delegate_consume",
         }
     }
 }
