@@ -21,7 +21,7 @@ use crate::core::resolved::{
     stmt_sibling_role, NodeIdBuilder,
 };
 use crate::core::{
-    CheckedProgram, NodeId, NodeMeta, Origin, ResolvedCallKind, ResolvedCallSite,
+    CheckedProgram, NodeId, NodeMeta, Origin, ResolvedCallKind, ResolvedCallSite, ResolvedConstant,
     ResolvedExternBlock, ResolvedFunction, ResolvedTypeDef,
 };
 use crate::diagnostic::Diagnostic;
@@ -40,6 +40,7 @@ pub struct FunctionBodyInput<'a> {
     pub field_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     pub call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
     pub extern_blocks: &'a HashMap<NodeId, ResolvedExternBlock>,
+    pub constants: &'a HashMap<NodeId, ResolvedConstant>,
     pub node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     pub types: &'a ResolvedTypeTable,
     pub node_meta: &'a HashMap<NodeId, NodeMeta>,
@@ -73,6 +74,7 @@ pub fn lower_function_body(
         field_types: input.field_types,
         call_sites: input.call_sites,
         extern_blocks: input.extern_blocks,
+        constants: input.constants,
         node_types: input.node_types,
         types: input.types,
         node_meta: input.node_meta,
@@ -126,6 +128,7 @@ pub fn lower_checked_function_bodies(
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
+            constants: program.constants(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -182,6 +185,7 @@ struct BodyLowerer<'a> {
     field_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     call_sites: &'a HashMap<NodeId, ResolvedCallSite>,
     extern_blocks: &'a HashMap<NodeId, ResolvedExternBlock>,
+    constants: &'a HashMap<NodeId, ResolvedConstant>,
     node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     types: &'a ResolvedTypeTable,
     node_meta: &'a HashMap<NodeId, NodeMeta>,
@@ -491,13 +495,32 @@ impl BodyLowerer<'_> {
                 ResolvedExprKind::Literal(self.lower_literal(&node_id, literal)?)
             }
             Expr::Ident(name) => {
-                let local = self.lookup_local(name).ok_or_else(|| {
-                    vec![ResolvedBodyError::new(
-                        node_id.clone(),
-                        format!("identifier '{name}' has no resolved local identity"),
-                    )]
-                })?;
-                ResolvedExprKind::Load(ResolvedPlace::root(local))
+                if let Some(local) = self.lookup_local(name) {
+                    ResolvedExprKind::Load(ResolvedPlace::root(local))
+                } else if name == "None" {
+                    ResolvedExprKind::Constant(NodeId("builtin:value:None".into()))
+                } else {
+                    let candidates = self
+                        .constants
+                        .values()
+                        .filter(|constant| {
+                            constant.qualified_name == *name
+                                || constant
+                                    .qualified_name
+                                    .rsplit_once("::")
+                                    .is_some_and(|(_, short)| short == name)
+                        })
+                        .collect::<Vec<_>>();
+                    let [constant] = candidates.as_slice() else {
+                        return Err(vec![ResolvedBodyError::new(
+                            node_id.clone(),
+                            format!(
+                                "identifier '{name}' does not resolve to exactly one local or constant"
+                            ),
+                        )]);
+                    };
+                    ResolvedExprKind::Constant(constant.node_id.clone())
+                }
             }
             Expr::Binary(op, left, right) => ResolvedExprKind::Binary {
                 op: self.lower_binary(&node_id, *op)?,
@@ -1590,6 +1613,7 @@ mod tests {
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
+            constants: program.constants(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1625,6 +1649,7 @@ mod tests {
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
+            constants: program.constants(),
             node_types: &empty,
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1652,6 +1677,7 @@ mod tests {
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
+            constants: program.constants(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1693,6 +1719,7 @@ mod tests {
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
+            constants: program.constants(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1730,6 +1757,7 @@ mod tests {
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
+            constants: program.constants(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1783,6 +1811,7 @@ mod tests {
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
+            constants: program.constants(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1815,6 +1844,7 @@ mod tests {
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
+            constants: program.constants(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1853,6 +1883,7 @@ mod tests {
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
+            constants: program.constants(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1885,6 +1916,7 @@ mod tests {
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
+            constants: program.constants(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -1921,6 +1953,7 @@ mod tests {
             field_types: program.resolved_field_types(),
             call_sites: program.call_sites(),
             extern_blocks: program.extern_blocks(),
+            constants: program.constants(),
             node_types: program.resolved_node_types(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
@@ -2006,5 +2039,32 @@ mod tests {
         function_body
             .validate(program.resolved_types())
             .expect("valid for body");
+    }
+
+    #[test]
+    fn constants_and_language_constructors_have_closed_identities() {
+        let file = parse(
+            "const ANSWER: i32 = 42;\nfunc answer() -> i32 { ANSWER }\nfunc some(value: i32) -> Option<i32> { Some(value) }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower identities");
+        let answer = bodies[&NodeId("function:answer".into())]
+            .root
+            .result
+            .as_ref()
+            .unwrap();
+        assert!(matches!(answer.kind, ResolvedExprKind::Constant(_)));
+        let some = bodies[&NodeId("function:some".into())]
+            .root
+            .result
+            .as_ref()
+            .unwrap();
+        assert!(matches!(
+            some.kind,
+            ResolvedExprKind::Call(ResolvedCall {
+                callee: ResolvedCallee::Builtin(_),
+                ..
+            })
+        ));
     }
 }
