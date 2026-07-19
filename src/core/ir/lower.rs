@@ -711,8 +711,8 @@ impl BodyLowerer<'_> {
             Expr::Await(value) => {
                 ResolvedExprKind::Await(Box::new(self.lower_expr(value, &format!("{role}.inner"))?))
             }
-            Expr::Call(_, arguments) => {
-                ResolvedExprKind::Call(self.lower_call(&node_id, arguments, role)?)
+            Expr::Call(callee, arguments) => {
+                ResolvedExprKind::Call(self.lower_call(&node_id, callee, arguments, role)?)
             }
             Expr::Match(scrutinee, arms) => {
                 let scrutinee = self.lower_expr(scrutinee, &format!("{role}.scrutinee"))?;
@@ -910,6 +910,7 @@ impl BodyLowerer<'_> {
     fn lower_call(
         &mut self,
         node_id: &NodeId,
+        callee: &Expr,
         arguments: &[Expr],
         role: &str,
     ) -> Result<ResolvedCall, Vec<ResolvedBodyError>> {
@@ -1008,6 +1009,9 @@ impl BodyLowerer<'_> {
                 effects: Vec::new(),
                 session: Vec::new(),
             });
+        }
+        if site.kind == ResolvedCallKind::Method {
+            return self.lower_actor_method_call(node_id, callee, arguments, role, site);
         }
         if site.kind != ResolvedCallKind::Function {
             return self.unsupported(node_id, &format!("closed {:?} call target", site.kind));
@@ -1109,6 +1113,153 @@ impl BodyLowerer<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ResolvedCall {
             callee: ResolvedCallee::Function(function.node_id.clone()),
+            arguments: lowered,
+            permission: None,
+            effects,
+            session: Vec::new(),
+        })
+    }
+
+    fn lower_actor_method_call(
+        &mut self,
+        node_id: &NodeId,
+        callee: &Expr,
+        arguments: &[Expr],
+        role: &str,
+        site: &ResolvedCallSite,
+    ) -> Result<ResolvedCall, Vec<ResolvedBodyError>> {
+        let Expr::Field(receiver, method_name) = callee.unlocated() else {
+            return self.unsupported(node_id, "method call without a receiver projection");
+        };
+        let receiver = self.lower_expr(receiver, &format!("{role}.callee.inner"))?;
+        let actor_id = match self.types.get(&receiver.ty) {
+            Some(ResolvedType::Nominal { item, .. }) => NodeId(item.as_str().to_string()),
+            _ => return self.unsupported(node_id, "method call on a non-nominal receiver"),
+        };
+        let actor = self.actors.get(&actor_id).ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!("method receiver '{}' is not a canonical actor", actor_id.0),
+            )]
+        })?;
+        let function_id = NodeId(format!(
+            "function:{}::{}",
+            actor.qualified_name, method_name
+        ));
+        let function = self.functions.get(&function_id).ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "actor method '{}::{}' has no callable identity",
+                    actor.qualified_name, method_name
+                ),
+            )]
+        })?;
+        let signature = self.signatures.get(&function.node_id).ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "actor method '{}' has no canonical signature",
+                    function_id.0
+                ),
+            )]
+        })?;
+        let Some(receiver_parameter) = signature.parameters.first() else {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "actor method signature has no receiver parameter",
+            )]);
+        };
+        if receiver_parameter.name != "self" {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "actor method receiver parameter is not canonical self",
+            )]);
+        }
+        let explicit_parameters = &signature.parameters[1..];
+        if arguments.len() != explicit_parameters.len() {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "method call argument count {} does not match canonical explicit parameter count {}",
+                    arguments.len(),
+                    explicit_parameters.len()
+                ),
+            )]);
+        }
+
+        let receiver_conversion =
+            self.identity_conversion(node_id, &receiver.ty, &receiver_parameter.ty)?;
+        let mut lowered = vec![ResolvedArgument {
+            parameter: receiver_parameter.id.clone(),
+            value: receiver,
+            conversion: receiver_conversion,
+        }];
+        let mut slots = vec![None; explicit_parameters.len()];
+        let mut next_positional = 0;
+        for index in 0..arguments.len() {
+            let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
+            let (slot, value, value_role) = match arguments[index].unlocated() {
+                Expr::NamedArg(name, value) => {
+                    let slot = explicit_parameters
+                        .iter()
+                        .position(|parameter| parameter.name == *name)
+                        .ok_or_else(|| {
+                            vec![ResolvedBodyError::new(
+                                node_id.clone(),
+                                format!("named argument '{name}' has no canonical parameter"),
+                            )]
+                        })?;
+                    (slot, value.as_ref(), format!("{argument_role}.inner"))
+                }
+                _ => {
+                    while next_positional < slots.len() && slots[next_positional].is_some() {
+                        next_positional += 1;
+                    }
+                    let slot = next_positional;
+                    next_positional += 1;
+                    (slot, &arguments[index], argument_role)
+                }
+            };
+            if slots[slot].replace((value, value_role)).is_some() {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "parameter '{}' is supplied more than once",
+                        explicit_parameters[slot].name
+                    ),
+                )]);
+            }
+        }
+        for (parameter, slot) in explicit_parameters.iter().zip(slots) {
+            let (value, value_role) = slot.ok_or_else(|| {
+                vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("parameter '{}' has no checked argument", parameter.name),
+                )]
+            })?;
+            let value = self.lower_expr(value, &value_role)?;
+            let conversion = self.identity_conversion(node_id, &value.ty, &parameter.ty)?;
+            lowered.push(ResolvedArgument {
+                parameter: parameter.id.clone(),
+                value,
+                conversion,
+            });
+        }
+        let effects = site
+            .effects
+            .iter()
+            .map(|effect| {
+                EffectId::new(effect.clone()).map_err(|error| {
+                    vec![ResolvedBodyError::new(node_id.clone(), error.to_string())]
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ResolvedCall {
+            callee: ResolvedCallee::ActorMethod {
+                actor: actor_id,
+                method: super::MethodId::new(function_id.0).map_err(|error| vec![error])?,
+            },
             arguments: lowered,
             permission: None,
             effects,
@@ -2301,5 +2452,38 @@ mod tests {
         };
         assert!(field.0.starts_with("actor:Counter/node:decl.actor_field@"));
         assert_eq!(program.resolved_field_type(field), Some(ty));
+    }
+
+    #[test]
+    fn actor_method_call_retains_typed_receiver_and_callable_identity() {
+        let file = parse(
+            "actor Counter { func add(value: i32) -> i32 { value } func next() -> i32 { self.add(value = 1) } }\nfunc main() -> i32 { 0 }",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let bodies = lower_checked_function_bodies(&file, &program).expect("lower actor calls");
+        let result = bodies[&NodeId("function:Counter::next".into())]
+            .root
+            .result
+            .as_ref()
+            .expect("method call result");
+        let ResolvedExprKind::Call(call) = &result.kind else {
+            panic!("resolved method call expected");
+        };
+        assert!(matches!(
+            &call.callee,
+            ResolvedCallee::ActorMethod { actor, method }
+                if actor == &NodeId("actor:Counter".into())
+                    && method.as_str() == "function:Counter::add"
+        ));
+        assert_eq!(call.arguments.len(), 2);
+        assert!(call.arguments[0].parameter.0 .0.contains("parameter.self"));
+        assert!(matches!(
+            call.arguments[0].value.kind,
+            ResolvedExprKind::Load(_)
+        ));
+        assert!(call.arguments[1].parameter.0 .0.contains("decl.parameter"));
+        bodies[&NodeId("function:Counter::next".into())]
+            .validate(program.resolved_types())
+            .expect("valid actor method call");
     }
 }
