@@ -269,11 +269,28 @@ pub struct ResolvedLambda {
 }
 
 #[derive(Debug, Clone)]
+pub enum ResolvedValueProjection {
+    Field(NodeId),
+    Tuple(usize),
+    Index(Box<ResolvedExpr>),
+    Dereference,
+}
+
+#[derive(Debug, Clone)]
 pub enum ResolvedExprKind {
     Literal(ResolvedLiteral),
     FString(Vec<ResolvedFStringPart>),
     Load(ResolvedPlace),
     Constant(NodeId),
+    /// A callable used as a first-class value. Its declaration identity is
+    /// closed here; subsequent calls through a binding use `LocalClosure`.
+    Callable(ResolvedCallee),
+    /// Projection from an rvalue aggregate. Lvalue projections remain a
+    /// `Load(ResolvedPlace)` and therefore always have a stable local base.
+    Project {
+        value: Box<ResolvedExpr>,
+        projection: ResolvedValueProjection,
+    },
     DefaultArgument {
         callable: NodeId,
         parameter: ResolvedParameterId,
@@ -449,7 +466,7 @@ pub enum ResolvedStmtKind {
         iterable: ResolvedExpr,
         body: ResolvedBlock,
     },
-    Drop(ResolvedPlace),
+    Drop(Vec<ResolvedPlace>),
     Contract {
         kind: ContractKind,
         condition: ResolvedExpr,
@@ -724,7 +741,14 @@ impl BodyValidator<'_> {
                 self.visit_expr(iterable);
                 self.visit_block(body);
             }
-            ResolvedStmtKind::Drop(place) => self.visit_place(&statement.node_id, place),
+            ResolvedStmtKind::Drop(places) => {
+                if places.is_empty() {
+                    self.error(&statement.node_id, "drop has no resolved places");
+                }
+                for place in places {
+                    self.visit_place(&statement.node_id, place);
+                }
+            }
             ResolvedStmtKind::Contract { condition, .. } => self.visit_expr(condition),
             ResolvedStmtKind::Math(expressions) => {
                 for expression in expressions {
@@ -824,6 +848,30 @@ impl BodyValidator<'_> {
             ResolvedExprKind::Constant(item) | ResolvedExprKind::ComptimeValue(item) => {
                 if item.0.trim().is_empty() {
                     self.error(&expression.node_id, "resolved item identity is empty");
+                }
+            }
+            ResolvedExprKind::Callable(callee) => {
+                self.validate_callee(&expression.node_id, callee);
+                if !matches!(
+                    self.types.get(&expression.ty),
+                    Some(ResolvedType::Function { .. })
+                ) {
+                    self.error(
+                        &expression.node_id,
+                        "callable value does not have a canonical function type",
+                    );
+                }
+            }
+            ResolvedExprKind::Project { value, projection } => {
+                self.visit_expr(value);
+                match projection {
+                    ResolvedValueProjection::Field(field) if field.0.trim().is_empty() => {
+                        self.error(&expression.node_id, "rvalue field identity is empty");
+                    }
+                    ResolvedValueProjection::Index(index) => self.visit_expr(index),
+                    ResolvedValueProjection::Field(_)
+                    | ResolvedValueProjection::Tuple(_)
+                    | ResolvedValueProjection::Dereference => {}
                 }
             }
             ResolvedExprKind::Lambda(lambda) => {

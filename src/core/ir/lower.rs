@@ -10,7 +10,7 @@ use super::{
     ResolvedCall, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLambda, ResolvedLiteral,
     ResolvedLocal, ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace,
     ResolvedProjection, ResolvedRecordField, ResolvedSignature, ResolvedStmt, ResolvedStmtKind,
-    ResolvedType, ResolvedTypeId, ResolvedTypeTable, ResolvedUnaryOp,
+    ResolvedType, ResolvedTypeId, ResolvedTypeTable, ResolvedUnaryOp, ResolvedValueProjection,
 };
 use crate::ast::{
     AstOrigin, BinOp, Expr, File, FuncDef, Item, Lit, Param, Pattern, PatternKind, Stmt, UnOp,
@@ -30,6 +30,17 @@ use crate::span::{SourceRegistry, Span};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const BLOCK_NORMALIZATION_RULE: &str = "resolved_body.structured_block";
+
+fn is_local_place(expression: &Expr) -> bool {
+    match expression.unlocated() {
+        Expr::Ident(_) => true,
+        Expr::Field(base, _)
+        | Expr::TupleIndex(base, _)
+        | Expr::Index(base, _)
+        | Expr::Unary(UnOp::Deref, base) => is_local_place(base),
+        _ => false,
+    }
+}
 
 /// Inputs already finalized by the checker and stable resolved walker.
 pub struct FunctionBodyInput<'a> {
@@ -450,7 +461,7 @@ impl BodyLowerer<'_> {
                 default,
                 &format!("parameter.{}.default", stable_id_fragment(&parameter.name)),
             )?;
-            self.identity_conversion(&resolved.id.0, &value.ty, &resolved.ty)?;
+            let value = self.apply_implicit_conversion(&resolved.id.0, value, &resolved.ty)?;
             if self
                 .default_values
                 .insert(resolved.id.clone(), value)
@@ -519,6 +530,7 @@ impl BodyLowerer<'_> {
         let kind = match stmt.unlocated() {
             Stmt::Let {
                 pat,
+                ty: declared_type,
                 init,
                 mut_,
                 ref_,
@@ -537,10 +549,18 @@ impl BodyLowerer<'_> {
                             "binding without an initializer has no checker-persisted value type",
                         )]
                     })?;
+                let binding_type = declared_type
+                    .as_ref()
+                    .filter(|ty| !matches!(ty.unlocated(), crate::ast::Type::Infer))
+                    .map(|ty| self.annotation_type(ty, &format!("{role}.type")))
+                    .transpose()?
+                    .unwrap_or_else(|| initializer.ty.clone());
+                let initializer =
+                    self.apply_implicit_conversion(&node_id, initializer, &binding_type)?;
                 let pattern = self.lower_binding_pattern(
                     pat,
                     &format!("{role}.pattern"),
-                    initializer.ty.clone(),
+                    binding_type,
                     *mut_,
                 )?;
                 ResolvedStmtKind::Bind {
@@ -556,7 +576,7 @@ impl BodyLowerer<'_> {
                 let conversion = value
                     .as_ref()
                     .map(|value| {
-                        self.identity_conversion(&node_id, &value.ty, &self.signature.result)
+                        self.implicit_conversion(&node_id, &value.ty, &self.signature.result)
                     })
                     .transpose()?;
                 ResolvedStmtKind::Return { value, conversion }
@@ -575,7 +595,7 @@ impl BodyLowerer<'_> {
                 let place = self.lower_place(target, &format!("{role}.target"))?;
                 let value = self.lower_expr(value, &format!("{role}.value"))?;
                 let target_ty = self.place_type(&node_id, &place)?;
-                let conversion = self.identity_conversion(&node_id, &value.ty, &target_ty)?;
+                let conversion = self.implicit_conversion(&node_id, &value.ty, &target_ty)?;
                 ResolvedStmtKind::Assign {
                     target: place,
                     value,
@@ -774,7 +794,7 @@ impl BodyLowerer<'_> {
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             Stmt::Drop(expr) => {
-                ResolvedStmtKind::Drop(self.lower_place(expr, &format!("{role}.expression"))?)
+                ResolvedStmtKind::Drop(self.lower_drop_places(expr, &format!("{role}.expression"))?)
             }
             Stmt::SharedLet {
                 kind, name, init, ..
@@ -977,32 +997,90 @@ impl BodyLowerer<'_> {
                 } else if name == "None" {
                     ResolvedExprKind::Constant(NodeId("builtin:value:None".into()))
                 } else {
-                    let candidates = self
-                        .constants
+                    let functions = self
+                        .functions
                         .values()
-                        .filter(|constant| {
-                            constant.qualified_name == *name
-                                || constant
+                        .filter(|function| {
+                            function.qualified_name == *name
+                                || function
                                     .qualified_name
                                     .rsplit_once("::")
                                     .is_some_and(|(_, short)| short == name)
                         })
                         .collect::<Vec<_>>();
-                    let [constant] = candidates.as_slice() else {
-                        return Err(vec![ResolvedBodyError::new(
+                    if let [function] = functions.as_slice() {
+                        ResolvedExprKind::Callable(ResolvedCallee::Function(
+                            function.node_id.clone(),
+                        ))
+                    } else {
+                        let states = self
+                            .flows
+                            .values()
+                            .flat_map(|flow| flow.states.values())
+                            .filter(|state| state.id.name == *name)
+                            .filter(|state| {
+                                matches!(
+                                    self.types.get(&ty),
+                                    Some(ResolvedType::Nominal { item, .. })
+                                        if item.as_str() == state.node_id.0
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        if let [state] = states.as_slice() {
+                            ResolvedExprKind::Constant(state.node_id.clone())
+                        } else {
+                            let candidates = self
+                                .constants
+                                .values()
+                                .filter(|constant| {
+                                    constant.qualified_name == *name
+                                        || constant
+                                            .qualified_name
+                                            .rsplit_once("::")
+                                            .is_some_and(|(_, short)| short == name)
+                                })
+                                .collect::<Vec<_>>();
+                            let [constant] = candidates.as_slice() else {
+                                return Err(vec![ResolvedBodyError::new(
                             node_id.clone(),
                             format!(
                                 "identifier '{name}' does not resolve to exactly one local or constant"
                             ),
                         )]);
-                    };
-                    ResolvedExprKind::Constant(constant.node_id.clone())
+                            };
+                            ResolvedExprKind::Constant(constant.node_id.clone())
+                        }
+                    }
                 }
             }
             Expr::Binary(op, left, right) => ResolvedExprKind::Binary {
                 op: self.lower_binary(&node_id, *op)?,
                 left: Box::new(self.lower_expr(left, &format!("{role}.left"))?),
                 right: Box::new(self.lower_expr(right, &format!("{role}.right"))?),
+            },
+            Expr::Unary(UnOp::Deref, operand) if !is_local_place(expr) => {
+                ResolvedExprKind::Project {
+                    value: Box::new(self.lower_expr(operand, &format!("{role}.inner"))?),
+                    projection: ResolvedValueProjection::Dereference,
+                }
+            }
+            Expr::Field(base, name) if !is_local_place(expr) => {
+                let value = self.lower_expr(base, &format!("{role}.inner"))?;
+                let field = self.resolve_field(&node_id, &value.ty, name)?;
+                ResolvedExprKind::Project {
+                    value: Box::new(value),
+                    projection: ResolvedValueProjection::Field(field),
+                }
+            }
+            Expr::TupleIndex(base, index) if !is_local_place(expr) => ResolvedExprKind::Project {
+                value: Box::new(self.lower_expr(base, &format!("{role}.inner"))?),
+                projection: ResolvedValueProjection::Tuple(*index),
+            },
+            Expr::Index(base, index) if !is_local_place(expr) => ResolvedExprKind::Project {
+                value: Box::new(self.lower_expr(base, &format!("{role}.left"))?),
+                projection: ResolvedValueProjection::Index(Box::new(
+                    self.lower_expr(index, &format!("{role}.right"))?,
+                )),
             },
             Expr::Unary(UnOp::Deref, _)
             | Expr::Field(_, _)
@@ -1418,7 +1496,7 @@ impl BodyLowerer<'_> {
                 &value.value,
                 &format!("{role}.field.{}.value", stable_id_fragment(declaration)),
             )?;
-            let conversion = self.identity_conversion(node_id, &value.ty, &target_ty)?;
+            let conversion = self.implicit_conversion(node_id, &value.ty, &target_ty)?;
             lowered.push(ResolvedRecordField {
                 field: field_id,
                 value,
@@ -1524,6 +1602,17 @@ impl BodyLowerer<'_> {
                         type_arguments,
                     );
                 }
+                if matches!(event.as_str(), "spawn" | "spawn_detached") {
+                    if let Some(call) = self.lower_actor_spawn_call(
+                        node_id,
+                        flow,
+                        event,
+                        arguments,
+                        type_arguments,
+                    )? {
+                        return Ok(call);
+                    }
+                }
             }
         }
         if site.kind == ResolvedCallKind::Unknown {
@@ -1532,6 +1621,25 @@ impl BodyLowerer<'_> {
                     return self.lower_local_closure_call(
                         node_id,
                         local,
+                        arguments,
+                        role,
+                        type_arguments,
+                    );
+                }
+                if let Some(function) =
+                    self.function
+                        .body
+                        .iter()
+                        .find_map(|statement| match statement.unlocated() {
+                            Stmt::Func(function) if function.name == *name => {
+                                Some(function.clone())
+                            }
+                            _ => None,
+                        })
+                {
+                    return self.lower_nested_function_call(
+                        node_id,
+                        &function,
                         arguments,
                         role,
                         type_arguments,
@@ -1801,7 +1909,7 @@ impl BodyLowerer<'_> {
                     ),
                 )]);
             };
-            let conversion = self.identity_conversion(node_id, &value.ty, &target)?;
+            let conversion = self.implicit_conversion(node_id, &value.ty, &target)?;
             lowered.push(ResolvedArgument {
                 parameter: parameter.id.clone(),
                 value,
@@ -1982,7 +2090,7 @@ impl BodyLowerer<'_> {
                     format!("transition parameter '{}' has no argument", parameter.name),
                 )]);
             };
-            let conversion = self.identity_conversion(node_id, &value.ty, &parameter.ty)?;
+            let conversion = self.implicit_conversion(node_id, &value.ty, &parameter.ty)?;
             lowered.push(ResolvedArgument {
                 parameter: parameter.id.clone(),
                 value,
@@ -2062,7 +2170,12 @@ impl BodyLowerer<'_> {
                 "local closure call has no checker-finalized result type",
             )]
         })?;
-        self.identity_conversion(node_id, &result, call_result)?;
+        // A let-bound callable may carry a generalized HM scheme. The local's
+        // initializer type is one canonical representative, while each call
+        // expression records its independently instantiated result and
+        // argument types. The checker-finalized call-site types are therefore
+        // the authority here; consumers need no generic substitution.
+        let polymorphic = result != *call_result;
 
         let mut lowered = Vec::with_capacity(arguments.len());
         for (index, (argument, parameter_type)) in
@@ -2073,7 +2186,15 @@ impl BodyLowerer<'_> {
             }
             let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
             let value = self.lower_expr(argument, &argument_role)?;
-            let conversion = self.identity_conversion(node_id, &value.ty, &parameter_type)?;
+            let conversion = if polymorphic || value.ty != parameter_type {
+                CheckedConversion {
+                    kind: CheckedConversionKind::Identity,
+                    from: value.ty.clone(),
+                    to: value.ty.clone(),
+                }
+            } else {
+                self.identity_conversion(node_id, &value.ty, &parameter_type)?
+            };
             lowered.push(ResolvedArgument {
                 parameter: super::ResolvedParameterId(NodeId(format!(
                     "{}/call-parameter:{index}",
@@ -2091,6 +2212,182 @@ impl BodyLowerer<'_> {
             effects: Vec::new(),
             session: Vec::new(),
         })
+    }
+
+    fn lower_nested_function_call(
+        &mut self,
+        node_id: &NodeId,
+        function: &FuncDef,
+        arguments: &[Expr],
+        role: &str,
+        type_arguments: &[ResolvedTypeId],
+    ) -> Result<ResolvedCall, Vec<ResolvedBodyError>> {
+        if !type_arguments.is_empty() || !function.generics.is_empty() {
+            return self.unsupported(node_id, "generic nested function call");
+        }
+        if arguments.len() != function.params.len() {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "nested function argument count {} does not match declaration count {}",
+                    arguments.len(),
+                    function.params.len()
+                ),
+            )]);
+        }
+        let owner = nested_function_owner(&self.owner, function);
+        let mut slots = vec![None; function.params.len()];
+        let mut next_positional = 0;
+        for index in 0..arguments.len() {
+            let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
+            let (slot, value, value_role) = match arguments[index].unlocated() {
+                Expr::NamedArg(name, value) => {
+                    let slot = function
+                        .params
+                        .iter()
+                        .position(|parameter| parameter.name == *name)
+                        .ok_or_else(|| {
+                            vec![ResolvedBodyError::new(
+                                node_id.clone(),
+                                format!("nested argument '{name}' has no parameter"),
+                            )]
+                        })?;
+                    (slot, value.as_ref(), format!("{argument_role}.inner"))
+                }
+                _ => {
+                    while next_positional < slots.len() && slots[next_positional].is_some() {
+                        next_positional += 1;
+                    }
+                    let slot = next_positional;
+                    next_positional += 1;
+                    (slot, &arguments[index], argument_role)
+                }
+            };
+            if slots[slot].is_some() {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "nested parameter '{}' is supplied more than once",
+                        function.params[slot].name
+                    ),
+                )]);
+            }
+            let value = self.lower_expr(value, &value_role)?;
+            slots[slot] = Some(value);
+        }
+        let mut lowered = Vec::with_capacity(slots.len());
+        for (parameter, value) in function.params.iter().zip(slots) {
+            if parameter.default_value.is_some() {
+                return self.unsupported(node_id, "nested function default argument");
+            }
+            let value = value.ok_or_else(|| {
+                vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("nested parameter '{}' has no argument", parameter.name),
+                )]
+            })?;
+            let mut diagnostics = Vec::new();
+            let parameter_id = self.ids.anonymous(
+                &owner,
+                "decl.parameter",
+                &format!("parameter.{}", stable_id_fragment(&parameter.name)),
+                usable_span(parameter.meta.span),
+                parameter.meta.origin,
+                &mut diagnostics,
+            );
+            if !diagnostics.is_empty() || !self.node_meta.contains_key(&parameter_id) {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "nested parameter '{}' has no stable identity",
+                        parameter.name
+                    ),
+                )]);
+            }
+            lowered.push(ResolvedArgument {
+                parameter: super::ResolvedParameterId(parameter_id),
+                conversion: CheckedConversion {
+                    kind: CheckedConversionKind::Identity,
+                    from: value.ty.clone(),
+                    to: value.ty.clone(),
+                },
+                value,
+            });
+        }
+        let effects = function
+            .effects
+            .iter()
+            .map(|effect| {
+                EffectId::new(effect.clone()).map_err(|error| {
+                    vec![ResolvedBodyError::new(node_id.clone(), error.to_string())]
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ResolvedCall {
+            callee: ResolvedCallee::Function(owner),
+            type_arguments: Vec::new(),
+            arguments: lowered,
+            permission: None,
+            effects,
+            session: Vec::new(),
+        })
+    }
+
+    fn lower_actor_spawn_call(
+        &mut self,
+        node_id: &NodeId,
+        actor_name: &str,
+        operation: &str,
+        arguments: &[Expr],
+        explicit_type_arguments: &[ResolvedTypeId],
+    ) -> Result<Option<ResolvedCall>, Vec<ResolvedBodyError>> {
+        let mut actors = self
+            .actors
+            .values()
+            .filter(|actor| {
+                actor.qualified_name == actor_name
+                    || actor
+                        .qualified_name
+                        .rsplit_once("::")
+                        .is_some_and(|(_, short)| short == actor_name)
+            })
+            .collect::<Vec<_>>();
+        actors.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        let [actor] = actors.as_slice() else {
+            return Ok(None);
+        };
+        if !arguments.is_empty() {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!("actor {operation} does not accept constructor arguments"),
+            )]);
+        }
+        if !explicit_type_arguments.is_empty() {
+            return self.unsupported(node_id, "generic arguments on actor spawn");
+        }
+        let result = self.expression_type(node_id)?;
+        match self.types.get(&result) {
+            Some(ResolvedType::Nominal { item, .. }) if item.as_str() == actor.node_id.0 => {}
+            _ => {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "actor {operation} result does not identify actor '{}'",
+                        actor.node_id.0
+                    ),
+                )])
+            }
+        }
+        Ok(Some(ResolvedCall {
+            callee: ResolvedCallee::Builtin(
+                super::BuiltinId::new(format!("actor.{operation}")).map_err(|error| vec![error])?,
+            ),
+            type_arguments: vec![result],
+            arguments: Vec::new(),
+            permission: None,
+            effects: Vec::new(),
+            session: Vec::new(),
+        }))
     }
 
     fn lower_method_call(
@@ -2282,7 +2579,7 @@ impl BodyLowerer<'_> {
                 )]
             })?;
             let value = self.lower_expr(value, &value_role)?;
-            let conversion = self.identity_conversion(node_id, &value.ty, &parameter.ty)?;
+            let conversion = self.implicit_conversion(node_id, &value.ty, &parameter.ty)?;
             lowered.push(ResolvedArgument {
                 parameter: parameter.id.clone(),
                 value,
@@ -2379,6 +2676,11 @@ impl BodyLowerer<'_> {
                     Some(ResolvedType::Array { element, length }) if *length == patterns.len() => {
                         element.clone()
                     }
+                    Some(ResolvedType::Nominal { item, arguments })
+                        if item.as_str() == "builtin:type:List" && arguments.len() == 1 =>
+                    {
+                        arguments[0].clone()
+                    }
                     _ => {
                         return Err(vec![ResolvedBodyError::new(
                             node_id.clone(),
@@ -2398,6 +2700,11 @@ impl BodyLowerer<'_> {
                 let element = match self.types.get(&ty) {
                     Some(ResolvedType::Array { element, .. })
                     | Some(ResolvedType::Slice(element)) => element.clone(),
+                    Some(ResolvedType::Nominal { item, arguments })
+                        if item.as_str() == "builtin:type:List" && arguments.len() == 1 =>
+                    {
+                        arguments[0].clone()
+                    }
                     _ => return self.unsupported(&node_id, "slice pattern on non-sequence type"),
                 };
                 let element_types = vec![element; patterns.len()];
@@ -2753,6 +3060,31 @@ impl BodyLowerer<'_> {
                 Ok(place)
             }
             _ => self.unsupported(&node_id, "projected place lowering"),
+        }
+    }
+
+    fn lower_drop_places(
+        &mut self,
+        expression: &Expr,
+        role: &str,
+    ) -> Result<Vec<ResolvedPlace>, Vec<ResolvedBodyError>> {
+        match expression.unlocated() {
+            Expr::Tuple(elements) | Expr::List(elements) => {
+                let mut places = Vec::new();
+                for index in 0..elements.len() {
+                    let element_role =
+                        expr_sibling_role(&format!("{role}.element"), elements, index);
+                    places.extend(self.lower_drop_places(&elements[index], &element_role)?);
+                }
+                if places.is_empty() {
+                    return Err(vec![ResolvedBodyError::new(
+                        self.expr_id(expression, role)?,
+                        "aggregate drop has no resource places",
+                    )]);
+                }
+                Ok(places)
+            }
+            _ => Ok(vec![self.lower_place(expression, role)?]),
         }
     }
 
@@ -3340,6 +3672,80 @@ impl BodyLowerer<'_> {
         })
     }
 
+    fn implicit_conversion(
+        &self,
+        node_id: &NodeId,
+        from: &ResolvedTypeId,
+        to: &ResolvedTypeId,
+    ) -> Result<CheckedConversion, Vec<ResolvedBodyError>> {
+        if from == to {
+            return self.identity_conversion(node_id, from, to);
+        }
+        let primitives = match (self.types.get(from), self.types.get(to)) {
+            (Some(ResolvedType::Primitive(from)), Some(ResolvedType::Primitive(to))) => {
+                (*from, *to)
+            }
+            _ => {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "checked implicit conversion is required from '{}' to '{}'",
+                        from.as_str(),
+                        to.as_str()
+                    ),
+                )])
+            }
+        };
+        use super::PrimitiveType;
+        if !matches!(
+            primitives,
+            (PrimitiveType::I32, PrimitiveType::I64)
+                | (PrimitiveType::I32, PrimitiveType::F64)
+                | (PrimitiveType::I64, PrimitiveType::F64)
+        ) {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "types '{}' and '{}' have no admitted implicit conversion",
+                    from.as_str(),
+                    to.as_str()
+                ),
+            )]);
+        }
+        Ok(CheckedConversion {
+            kind: CheckedConversionKind::NumericWiden,
+            from: from.clone(),
+            to: to.clone(),
+        })
+    }
+
+    fn apply_implicit_conversion(
+        &self,
+        parent: &NodeId,
+        value: ResolvedExpr,
+        target: &ResolvedTypeId,
+    ) -> Result<ResolvedExpr, Vec<ResolvedBodyError>> {
+        let conversion = self.implicit_conversion(parent, &value.ty, target)?;
+        if conversion.kind == CheckedConversionKind::Identity {
+            return Ok(value);
+        }
+        Ok(ResolvedExpr {
+            node_id: NodeId(format!("{}/implicit-conversion", value.node_id.0)),
+            origin: Origin::Desugared {
+                parent: value.node_id.clone(),
+                rule: "resolved_body.implicit_conversion".into(),
+                span: value.origin.user_span(),
+            },
+            ty: target.clone(),
+            effects: value.effects.clone(),
+            backend_requirements: value.backend_requirements.clone(),
+            kind: ResolvedExprKind::Cast {
+                value: Box::new(value),
+                conversion,
+            },
+        })
+    }
+
     fn checked_explicit_conversion(
         &self,
         node_id: &NodeId,
@@ -3445,6 +3851,26 @@ impl BodyLowerer<'_> {
             usable_span(pattern.meta.span),
             pattern.meta.origin,
         )
+    }
+
+    fn annotation_type(
+        &self,
+        annotation: &crate::ast::Type,
+        role: &str,
+    ) -> Result<ResolvedTypeId, Vec<ResolvedBodyError>> {
+        let meta = annotation.meta();
+        let node_id = self.catalogued_id(
+            type_kind(annotation),
+            role,
+            meta.and_then(|meta| usable_span(meta.span)),
+            meta.map(|meta| meta.origin).unwrap_or(AstOrigin::User),
+        )?;
+        self.type_operands.get(&node_id).cloned().ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id,
+                "explicit annotation has no checker-canonical type",
+            )]
+        })
     }
 
     fn catalogued_id(
@@ -4928,5 +5354,119 @@ mod tests {
         ));
         main.validate(program.resolved_types())
             .expect("valid protocol method call");
+    }
+
+    #[test]
+    fn checked_program_owns_complete_callable_bodies_after_surface_drop() {
+        let program = {
+            let file = parse(
+                "flow Calc { state Zero transition stop(Zero) -> Zero { do { return Zero } } }\nactor Counter { func value() -> i32 { 1 } }\nfunc main() -> i32 { 0 }",
+            );
+            crate::core::check_program(&file).expect("check")
+        };
+
+        let expected = [
+            NodeId("function:Counter::value".into()),
+            NodeId("function:main".into()),
+            NodeId("transition:Calc::stop::Zero".into()),
+        ];
+        for owner in expected {
+            let body = program
+                .resolved_body(&owner)
+                .unwrap_or_else(|| panic!("missing owned body '{}'", owner.0));
+            assert_eq!(body.owner, owner);
+            body.validate(program.resolved_types())
+                .expect("persisted body remains valid");
+        }
+    }
+
+    #[test]
+    fn local_annotation_and_call_retain_numeric_widening() {
+        let file = parse(
+            "func identity(value: i64) -> i64 { value }\nfunc main() -> i64 { let widened: i64 = 40; identity(widened + 1) }",
+        );
+        let program = crate::core::check_program(&file).expect("check widening");
+        let body = program
+            .resolved_body(&NodeId("function:main".into()))
+            .expect("main body");
+        let ResolvedStmtKind::Bind {
+            pattern,
+            initializer: Some(initializer),
+        } = &body.root.statements[0].kind
+        else {
+            panic!("annotated binding expected");
+        };
+        let ResolvedExprKind::Cast { conversion, .. } = &initializer.kind else {
+            panic!("binding must retain an explicit widening");
+        };
+        assert_eq!(conversion.kind, CheckedConversionKind::NumericWiden);
+        assert_eq!(conversion.to, pattern.ty);
+        let ResolvedExprKind::Call(call) = &body.root.result.as_ref().unwrap().kind else {
+            panic!("typed call expected");
+        };
+        assert_eq!(call.arguments[0].conversion.to, pattern.ty);
+        body.validate(program.resolved_types())
+            .expect("valid widening body");
+    }
+
+    #[test]
+    fn rvalue_aggregate_projection_is_not_forged_into_a_local_place() {
+        let file = parse("func first(value: i32) -> i32 { [value][0] }");
+        let program = crate::core::check_program(&file).expect("check projection");
+        let result = program
+            .resolved_body(&NodeId("function:first".into()))
+            .unwrap()
+            .root
+            .result
+            .as_ref()
+            .unwrap();
+        assert!(matches!(
+            &result.kind,
+            ResolvedExprKind::Project {
+                value,
+                projection: ResolvedValueProjection::Index(index),
+            } if matches!(value.kind, ResolvedExprKind::List(_))
+                && matches!(index.kind, ResolvedExprKind::Literal(ResolvedLiteral::Int(0)))
+        ));
+    }
+
+    #[test]
+    fn actor_spawn_and_function_values_have_closed_callable_identities() {
+        let file = parse(
+            "actor Counter { func value() -> i32 { 1 } }\nfunc identity(value: i32) -> i32 { value }\nfunc main() -> i32 { let handle = Counter.spawn(); let apply = identity; apply(handle.value()) }",
+        );
+        let program = crate::core::check_program(&file).expect("check callable values");
+        let body = program
+            .resolved_body(&NodeId("function:main".into()))
+            .expect("main body");
+        let ResolvedStmtKind::Bind {
+            initializer: Some(spawn),
+            ..
+        } = &body.root.statements[0].kind
+        else {
+            panic!("spawn binding expected");
+        };
+        assert!(matches!(
+            &spawn.kind,
+            ResolvedExprKind::Call(ResolvedCall {
+                callee: ResolvedCallee::Builtin(builtin),
+                type_arguments,
+                ..
+            }) if builtin.as_str() == "actor.spawn" && type_arguments == &vec![spawn.ty.clone()]
+        ));
+        let ResolvedStmtKind::Bind {
+            initializer: Some(callable),
+            ..
+        } = &body.root.statements[1].kind
+        else {
+            panic!("callable binding expected");
+        };
+        assert!(matches!(
+            &callable.kind,
+            ResolvedExprKind::Callable(ResolvedCallee::Function(owner))
+                if owner == &NodeId("function:identity".into())
+        ));
+        body.validate(program.resolved_types())
+            .expect("valid closed callable body");
     }
 }
