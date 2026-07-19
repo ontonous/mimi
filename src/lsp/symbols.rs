@@ -129,7 +129,7 @@ impl LspServer {
         }
 
         for (uri, text) in &sources {
-            let file = match self.parse_with_recovery(text) {
+            let file = match self.parse_with_recovery_for_uri(text, Some(uri)) {
                 Some(f) => f,
                 None => continue,
             };

@@ -86,7 +86,7 @@ fn collect_calls_from_exprs(
     visited: &mut HashSet<String>,
 ) {
     for stmt in stmts {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Expr(e) | Stmt::Return(Some(e)) => {
                 collect_calls_from_expr(e, text, items, uri, calls, visited);
             }
@@ -127,9 +127,9 @@ fn collect_calls_from_expr(
     calls: &mut Vec<Value>,
     visited: &mut HashSet<String>,
 ) {
-    match expr {
+    match expr.unlocated() {
         Expr::Call(callee, args) => {
-            if let Expr::Ident(name) = callee.as_ref() {
+            if let Expr::Ident(name) = callee.unlocated() {
                 if !visited.contains(name.as_str()) {
                     visited.insert(name.clone());
                     let callee_line = text
@@ -256,7 +256,7 @@ fn collect_call_sites(
     call_lines: &mut Vec<usize>,
 ) {
     for stmt in stmts {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Expr(e) | Stmt::Return(Some(e)) => {
                 collect_call_sites_from_expr(e, func_name, lines, call_lines);
             }
@@ -295,9 +295,9 @@ fn collect_call_sites_from_expr(
     lines: &[&str],
     call_lines: &mut Vec<usize>,
 ) {
-    match expr {
+    match expr.unlocated() {
         Expr::Call(callee, args) => {
-            if let Expr::Ident(name) = callee.as_ref() {
+            if let Expr::Ident(name) = callee.unlocated() {
                 if name.as_str() == func_name {
                     // Find the line number of this call expression
                     // We use the source text to find where the call appears

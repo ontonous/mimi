@@ -98,6 +98,10 @@ pub struct Interpreter<'a> {
     trait_defs: HashMap<String, TraitDef>,
     /// Trait implementations: type_name -> trait_name -> list of FuncDef methods
     type_impls: HashMap<String, HashMap<String, Vec<FuncDef>>>,
+    /// Defensive validation for ASTs constructed without the source parser.
+    /// Normal source input is rejected during parsing; this prevents the
+    /// interpreter's derive expansion from becoming a second fail-open path.
+    derive_expansion_error: Option<InterpError>,
     /// Extern function declarations: func_name -> ExternFunc
     extern_funcs: HashMap<String, ExternFunc>,
     /// Pre-computed FFI contracts for extern functions.
@@ -661,6 +665,7 @@ impl<'a> Interpreter<'a> {
         for (node_id, meta) in program.node_meta() {
             let precision = match meta.precision {
                 crate::core::SpanPrecision::Exact => "exact",
+                crate::core::SpanPrecision::SourceAnchor => "source_anchor",
                 crate::core::SpanPrecision::DeclarationFallback => "declaration_fallback",
             };
             node_meta_precision.insert(node_id.0.clone(), precision.to_string());
@@ -1505,8 +1510,10 @@ impl<'a> Interpreter<'a> {
                 &type_defs,
             );
         }
-        // Expand built-in derive macros
-        Self::expand_derives(&type_defs, &mut trait_defs, &mut type_impls);
+        // Expand built-in derive macros. Source-parsed files have already been
+        // validated, but programmatically constructed ASTs must also fail closed.
+        let derive_expansion_error =
+            Self::expand_derives(&type_defs, &mut trait_defs, &mut type_impls).err();
         // Build O(1) function, actor, and flow lookup indices
         let mut func_index = HashMap::new();
         let mut actor_index = HashMap::new();
@@ -1518,8 +1525,8 @@ impl<'a> Interpreter<'a> {
         let max_children = flow_index
             .values()
             .flat_map(|f| f.annotations.iter())
-            .find_map(|a| match a {
-                crate::ast::FlowAnnotation::MaxChildren(n) => Some(*n),
+            .find_map(|a| match &a.kind {
+                crate::ast::FlowAnnotationKind::MaxChildren(n) => Some(*n),
                 _ => None,
             });
         Self {
@@ -1540,6 +1547,7 @@ impl<'a> Interpreter<'a> {
             verify_ffi: true,
             trait_defs,
             type_impls,
+            derive_expansion_error,
             extern_funcs,
             ffi_contracts,
             type_defs,
@@ -1963,14 +1971,18 @@ impl<'a> Interpreter<'a> {
             }
             Item::Actor(actor) => {
                 let actor_type_def = TypeDef {
+                    meta: AstNodeMeta::inherited(
+                        actor.meta.span,
+                        AstOrigin::RuntimeSystem("interp.actor_type"),
+                    ),
                     name: actor.name.clone(),
-                    decl_pos: None,
                     pub_: actor.pub_,
                     kind: TypeDefKind::Record(
                         actor
                             .fields
                             .iter()
                             .map(|f| Field {
+                                meta: f.meta,
                                 name: f.name.clone(),
                                 ty: f.ty.clone(),
                             })
@@ -1996,17 +2008,42 @@ impl<'a> Interpreter<'a> {
         type_defs: &HashMap<String, TypeDef>,
         _trait_defs: &mut HashMap<String, TraitDef>,
         type_impls: &mut HashMap<String, HashMap<String, Vec<FuncDef>>>,
-    ) {
+    ) -> InterpResult<()> {
+        // Validate the complete input before mutating the implementation table,
+        // so an unsupported derive cannot leave a partially expanded program.
+        for (type_name, type_def) in type_defs {
+            if let Some(derive_name) = type_def
+                .derives
+                .iter()
+                .find(|name| !matches!(name.as_str(), "Debug" | "Clone" | "Eq"))
+            {
+                return Err(InterpError::with_op(
+                    format!(
+                        "unsupported derive `{}` on type `{}`; supported derives: Debug, Clone, Eq",
+                        derive_name, type_name
+                    ),
+                    "derive expansion",
+                ));
+            }
+        }
+
         for (type_name, type_def) in type_defs {
             for derive_name in &type_def.derives {
+                let derive_meta = AstNodeMeta::inherited(
+                    type_def.meta.span,
+                    AstOrigin::Desugared("interp.derive_method"),
+                );
                 match derive_name.as_str() {
                     "Debug" => {
                         // Generate to_string method for Debug
                         let to_string_func = FuncDef {
+                            meta: derive_meta,
                             name: "to_string".to_string(),
                             pub_: false,
                             params: vec![],
-                            ret: Some(Type::Name("string".into(), vec![])),
+                            ret: Some(
+                                Type::Name("string".into(), vec![]).deep_reorigin(derive_meta),
+                            ),
                             body: vec![],
                             where_clause: Vec::new(),
                             generics: vec![],
@@ -2014,7 +2051,6 @@ impl<'a> Interpreter<'a> {
                             is_comptime: false,
                             is_async: false,
                             extern_abi: None,
-                            pos: (0, 0),
                         };
                         type_impls
                             .entry(type_name.clone())
@@ -2026,10 +2062,13 @@ impl<'a> Interpreter<'a> {
                     "Clone" => {
                         // Generate clone method for Clone
                         let clone_func = FuncDef {
+                            meta: derive_meta,
                             name: "clone".to_string(),
                             pub_: false,
                             params: vec![],
-                            ret: Some(Type::Name(type_name.clone(), vec![])),
+                            ret: Some(
+                                Type::Name(type_name.clone(), vec![]).deep_reorigin(derive_meta),
+                            ),
                             body: vec![],
                             where_clause: Vec::new(),
                             generics: vec![],
@@ -2037,7 +2076,6 @@ impl<'a> Interpreter<'a> {
                             is_comptime: false,
                             is_async: false,
                             extern_abi: None,
-                            pos: (0, 0),
                         };
                         type_impls
                             .entry(type_name.clone())
@@ -2049,16 +2087,19 @@ impl<'a> Interpreter<'a> {
                     "Eq" => {
                         // Generate eq method for Eq
                         let eq_func = FuncDef {
+                            meta: derive_meta,
                             name: "eq".to_string(),
                             pub_: false,
                             params: vec![Param {
+                                meta: derive_meta,
                                 name: "other".to_string(),
-                                ty: Type::Name(type_name.clone(), vec![]),
+                                ty: Type::Name(type_name.clone(), vec![])
+                                    .deep_reorigin(derive_meta),
                                 mut_: false,
                                 default_value: None,
                                 borrow: None,
                             }],
-                            ret: Some(Type::Name("bool".into(), vec![])),
+                            ret: Some(Type::Name("bool".into(), vec![]).deep_reorigin(derive_meta)),
                             body: vec![],
                             where_clause: Vec::new(),
                             generics: vec![],
@@ -2066,7 +2107,6 @@ impl<'a> Interpreter<'a> {
                             is_comptime: false,
                             is_async: false,
                             extern_abi: None,
-                            pos: (0, 0),
                         };
                         type_impls
                             .entry(type_name.clone())
@@ -2075,10 +2115,11 @@ impl<'a> Interpreter<'a> {
                             .or_default()
                             .push(eq_func);
                     }
-                    _ => {}
+                    _ => unreachable!("derive names were validated before expansion"),
                 }
             }
         }
+        Ok(())
     }
 
     fn collect_traits(
@@ -2176,6 +2217,7 @@ impl<'a> Interpreter<'a> {
     /// Resolve a Type AST node to a type name string
     fn resolve_type_name(&self, ty: &Type) -> String {
         match ty {
+            Type::Located { ty, .. } => self.resolve_type_name(ty),
             Type::Name(name, _) => name.clone(),
             Type::Ref(lt, inner) => {
                 if let Some(l) = lt {
@@ -2314,6 +2356,9 @@ impl<'a> Interpreter<'a> {
     }
 
     pub fn run(&mut self) -> Result<Value, InterpError> {
+        if let Some(error) = &self.derive_expansion_error {
+            return Err(error.clone());
+        }
         self.eval_comptime_funcs()?;
         self.eval_consts()?;
         let main = self
@@ -2327,6 +2372,9 @@ impl<'a> Interpreter<'a> {
     /// `comptime func` results; this is the canonical fold-time entry
     /// used by codegen when it encounters an `Expr::Comptime` node.
     pub fn eval_comptime_block(&mut self, block: &crate::ast::Block) -> Result<Value, InterpError> {
+        if let Some(error) = &self.derive_expansion_error {
+            return Err(error.clone());
+        }
         self.eval_comptime_funcs()?;
         self.eval_comptime(block)
     }
@@ -2397,7 +2445,7 @@ impl<'a> Interpreter<'a> {
 
     /// Build a qualified path from nested Field(Ident(...), ...) expressions
     fn build_qualified_path(obj: &Expr, field: &str) -> Option<String> {
-        match obj {
+        match obj.unlocated() {
             Expr::Ident(name) => Some(format!("{}::{}", name, field)),
             Expr::Field(inner_obj, inner_field) => {
                 Self::build_qualified_path(inner_obj, inner_field)
@@ -2519,10 +2567,10 @@ impl<'a> Interpreter<'a> {
         place: &Expr,
         value: Value,
     ) -> Result<(), InterpError> {
-        match place {
+        match place.unlocated() {
             Expr::Ident(name) => self.assign(name, value),
             Expr::Field(obj, field) => {
-                if let Expr::Ident(name) = obj.as_ref() {
+                if let Expr::Ident(name) = obj.unlocated() {
                     if name == "self" {
                         if let Some(Value::Actor(handle)) = self.lookup("self") {
                             handle
@@ -2706,5 +2754,46 @@ fn encode_resolved_const_value(value: &crate::core::ResolvedConstValue) -> Strin
         crate::core::ResolvedConstValue::String(v) => format!("string:{}", v),
         crate::core::ResolvedConstValue::Unit => "unit".into(),
         crate::core::ResolvedConstValue::Complex => "complex".into(),
+    }
+}
+
+#[cfg(test)]
+mod derive_validation_tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    #[test]
+    fn programmatic_ast_with_unknown_derive_fails_before_execution() {
+        let source = "type Packet { value: i32 }\nfunc main() -> i32 { 1 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let mut file = Parser::new(tokens).parse_file().expect("parse");
+        let type_def = file
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                Item::Type(type_def) if type_def.name == "Packet" => Some(type_def),
+                _ => None,
+            })
+            .expect("Packet type");
+        type_def.derives.push("Serialize".to_string());
+
+        let mut interpreter = Interpreter::new(&file);
+        let error = interpreter
+            .run()
+            .expect_err("unsupported derive must not be ignored");
+        assert_eq!(error.code(), crate::diagnostic::codes::E0800);
+        assert_eq!(error.ctx().operation.as_deref(), Some("derive expansion"));
+        assert!(error.message().contains("unsupported derive `Serialize`"));
+        assert!(error.message().contains("type `Packet`"));
+
+        let mut direct = Interpreter::new(&file);
+        let direct_error = direct
+            .call_named("main", vec![])
+            .expect_err("direct calls must also fail closed");
+        assert_eq!(
+            direct_error.ctx().operation.as_deref(),
+            Some("derive expansion")
+        );
     }
 }

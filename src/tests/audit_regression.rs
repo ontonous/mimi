@@ -535,6 +535,7 @@ fn crit03_verifier_no_cross_contamination() {
     let src = r#"
 func inc(x: i32) -> i32 {
     requires: x > 0
+    requires: x < 2147483647
     ensures: result > x
     x + 1
 }

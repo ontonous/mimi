@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::{is_production, is_sketch, resolve_path};
 use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
-use mimi::{lexer, parser};
+use mimi::lexer;
 
 pub(crate) fn check(path: Option<&Path>, strict: bool, verify_rules: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
@@ -14,9 +14,10 @@ pub(crate) fn check(path: Option<&Path>, strict: bool, verify_rules: bool) -> Re
         lexer::Lexer::new(&source).tokenize()?
     };
     let file = if sketch {
-        parser::Parser::new_sketch(tokens).parse_file()?
+        mimi::loader::sketch_parser_for_path(tokens, &path)?.parse_file()?
     } else {
-        let (file, parse_errors) = parser::Parser::new(tokens).parse_file_with_recovery();
+        let (file, parse_errors) =
+            mimi::loader::parser_for_path(tokens, &path)?.parse_file_with_recovery();
         if !parse_errors.is_empty() {
             // Round6: never report "checked successfully" after parse errors.
             // Recovery may yield a partial AST; surface parse errors and fail.
@@ -54,7 +55,7 @@ pub(crate) fn check(path: Option<&Path>, strict: bool, verify_rules: bool) -> Re
             .to_path_buf();
         let mut loader = mimi::loader::ModuleLoader::new(base_dir);
         loader
-            .load_main(&path)
+            .load_main_with_file(&path, file)
             .map_err(|e| format!("failed to load imports: {}", e))?;
         loader
             .merge_all()

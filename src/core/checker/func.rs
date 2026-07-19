@@ -2,13 +2,13 @@ use crate::ast::*;
 use crate::core::helpers::{fmt_type, is_numeric_coercion};
 use crate::diagnostic::codes;
 use crate::diagnostic::Diagnostic;
-use crate::span::Span;
 use std::collections::HashMap;
 
 use super::Checker;
 
 impl<'a> Checker<'a> {
     pub(crate) fn check_func(&mut self, func: &FuncDef) {
+        self.set_span(func.meta.span);
         let owner_name = if self.module_path.is_empty() {
             func.name.clone()
         } else {
@@ -51,7 +51,7 @@ impl<'a> Checker<'a> {
         for p in &func.params {
             let ty = self.resolve_type(&p.ty);
             // If param is a cap type, track it
-            if matches!(&ty, Type::Cap(_)) {
+            if matches!(ty.unlocated(), Type::Cap(_)) {
                 if let Some(s) = self.cap_vars.last_mut() {
                     s.insert(
                         p.name.clone(),
@@ -64,9 +64,9 @@ impl<'a> Checker<'a> {
                 self.record_resource_action(crate::core::ResourceActionKind::Introduce, &p.name);
             }
             // SessionChan<S> params: seed residual from declared session body.
-            if let Type::Name(n, args) = &ty {
+            if let Type::Name(n, args) = ty.unlocated() {
                 if (n == "SessionChan" || n == "session_chan") && !args.is_empty() {
-                    if let Type::Name(sname, _) = &args[0] {
+                    if let Type::Name(sname, _) = args[0].unlocated() {
                         if let Some(body) = self.session_types.get(sname).cloned() {
                             let resolved =
                                 crate::session::resolve(&body, &self.session_types).unwrap_or(body);
@@ -85,14 +85,14 @@ impl<'a> Checker<'a> {
         // Check for contracts on shared-param functions (E0502)
         let has_shared_param = func.params.iter().any(|p| {
             matches!(
-                &p.ty,
+                p.ty.unlocated(),
                 Type::Shared(_) | Type::LocalShared(_) | Type::CShared(_)
             )
         });
         if has_shared_param {
             let has_contract = func.body.iter().any(|s| {
                 matches!(
-                    s,
+                    s.unlocated(),
                     Stmt::Requires(..)
                         | Stmt::Ensures(..)
                         | Stmt::Invariant(..)
@@ -119,14 +119,14 @@ impl<'a> Checker<'a> {
         }
         self.available_effects.push(effects_scope);
         // Check all-return-paths requirement
-        if !matches!(&ret, Type::Name(n, _) if n == "unit")
+        if !matches!(ret.unlocated(), Type::Name(n, _) if n == "unit")
             && !self.block_returns_on_all_paths(&func.body)
         {
             self.errors.push(
                 Diagnostic::error_code(
                     crate::diagnostic::codes::E0255,
                     format!("function '{}' does not return on all paths (missing return in some branches)", func.name),
-                    Span::single(self.current_line, self.current_col),
+                    self.diagnostic_span(),
                 ).with_help("add a return statement or make the last expression return the appropriate type")
             );
         }
@@ -139,25 +139,29 @@ impl<'a> Checker<'a> {
             // Resolve through unification table before further comparison
             let last_ty = self.unification.resolve(&last_ty);
             // Unwrap shared/aliasing wrappers for return type compatibility
-            let last_ty_clean = match &last_ty {
+            let last_ty_clean = match last_ty.unlocated() {
                 Type::Shared(i) | Type::LocalShared(i) | Type::CShared(i) => (**i).clone(),
                 _ => last_ty.clone(),
             };
             let coerced = is_numeric_coercion(&ret, &last_ty_clean);
             let type_ok = coerced || self.unification.unify(&ret, &last_ty_clean).is_ok();
-            if !type_ok && !matches!(&ret, Type::Name(n, _) if n == "unit") {
+            if !type_ok && !matches!(ret.unlocated(), Type::Name(n, _) if n == "unit") {
                 self.errors.push(
                     Diagnostic::error_code(
                         crate::diagnostic::codes::E0207,
                         format!("implicit return: expected {}, found {}", fmt_type(&ret), fmt_type(&last_ty)),
-                        Span::single(self.current_line, self.current_col),
+                        self.diagnostic_span(),
                     ).with_help("the last expression in a function body is implicitly returned; make sure its type matches the declared return type")
                 );
             }
         }
-        if let Some(Stmt::Expr(Expr::Ident(name))) = func.body.last() {
-            if matches!(self.cap_info(name), Some(info) if !info.consumed) {
-                self.consume_capability(name, crate::core::ResourceActionKind::Return);
+        if let Some(stmt) = func.body.last() {
+            if let Stmt::Expr(expr) = stmt.unlocated() {
+                if let Expr::Ident(name) = expr.unlocated() {
+                    if matches!(self.cap_info(name), Some(info) if !info.consumed) {
+                        self.consume_capability(name, crate::core::ResourceActionKind::Return);
+                    }
+                }
             }
         }
         // Check for unconsumed caps before popping
@@ -176,15 +180,31 @@ impl<'a> Checker<'a> {
         }
         // Check if the last statement is an implicit return (expression statement)
         if let Some(last) = block.last() {
-            match last {
+            match last.unlocated() {
                 Stmt::Return(_) => return true,
-                Stmt::Expr(Expr::Match(_, arms)) => {
-                    return arms.iter().all(|arm| {
-                        let block = vec![Stmt::Expr(arm.body.clone())];
-                        self.block_returns_on_all_paths(&block)
-                    });
+                Stmt::Expr(expr) => {
+                    if let Expr::Match(_, arms) = expr.unlocated() {
+                        return arms.iter().all(|arm| {
+                            let meta = arm
+                                .body
+                                .meta()
+                                .map(|meta| {
+                                    AstNodeMeta::new(
+                                        meta.span,
+                                        AstOrigin::Desugared("checker.match_arm.return_analysis"),
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    AstNodeMeta::synthetic(AstOrigin::Desugared(
+                                        "checker.match_arm.return_analysis",
+                                    ))
+                                });
+                            let block = vec![Stmt::Expr(arm.body.clone()).with_meta(meta)];
+                            self.block_returns_on_all_paths(&block)
+                        });
+                    }
+                    return true; // implicit return via last expression
                 }
-                Stmt::Expr(_) => return true, // implicit return via last expression
                 Stmt::If { then_, else_, .. } => {
                     let then_returns = self.block_returns_on_all_paths(then_);
                     let else_returns = else_
@@ -245,7 +265,7 @@ impl<'a> Checker<'a> {
     }
 
     fn stmt_contains_continue(&self, stmt: &Stmt) -> bool {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Continue => true,
             Stmt::If { then_, else_, .. } => {
                 then_.iter().any(|s| self.stmt_contains_continue(s))
@@ -266,7 +286,7 @@ impl<'a> Checker<'a> {
     }
 
     fn stmt_always_exits_loop(&self, stmt: &Stmt) -> bool {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Break(_) | Stmt::Return(_) => true,
             Stmt::Continue => false,
             Stmt::If { then_, else_, .. } => {

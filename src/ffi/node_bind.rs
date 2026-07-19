@@ -211,7 +211,7 @@ impl NodeBindGenerator {
                     )?;
                     for (j, ty) in param_types.iter().enumerate() {
                         writeln!(out, "    napi_value argv{};", j)?;
-                        match ty {
+                        match ty.unlocated() {
                             Type::Name(name, _) if name == "f64" => {
                                 writeln!(
                                     out,
@@ -252,9 +252,9 @@ impl NodeBindGenerator {
                         self.callback_default_ret(ret_type)
                     )?;
                     writeln!(out, "    }}")?;
-                    if !matches!(ret_type.as_ref(), Type::Name(name, _) if name == "unit") {
+                    if !matches!(ret_type.unlocated(), Type::Name(name, _) if name == "unit") {
                         writeln!(out, "    {} ret;", ret_c)?;
-                        match ret_type.as_ref() {
+                        match ret_type.unlocated() {
                             Type::Name(name, _) if name == "f64" => {
                                 writeln!(
                                     out,
@@ -323,7 +323,7 @@ impl NodeBindGenerator {
     fn callback_c_type(&self, ty: &Type) -> String {
         // Use the original Mimi scalar widths so generated C trampolines match
         // the function-pointer ABI expected by the compiled extern function.
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) if name == "i32" => "int32_t".to_string(),
             Type::Name(name, _) if name == "i64" => "int64_t".to_string(),
             Type::Name(name, _) if name == "f64" => "double".to_string(),
@@ -334,7 +334,7 @@ impl NodeBindGenerator {
     }
 
     fn callback_default_ret(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) if name == "f64" => "0.0".to_string(),
             Type::Name(name, _) if name == "unit" => "".to_string(),
             _ => "0".to_string(),
@@ -346,14 +346,14 @@ impl NodeBindGenerator {
             .iter()
             .enumerate()
             .map(|(i, ty)| {
-                let ty_str = match ty {
+                let ty_str = match ty.unlocated() {
                     Type::Name(name, _) if name == "f64" => "number",
                     _ => "number",
                 };
                 format!("arg{}: {}", i, ty_str)
             })
             .collect();
-        let ret = match ret_type {
+        let ret = match ret_type.unlocated() {
             Type::Name(name, _) if name == "f64" => "number",
             Type::Name(name, _) if name == "unit" => "void",
             _ => "number",
@@ -634,7 +634,7 @@ impl NodeBindGenerator {
     }
 
     fn napi_extract_for_field(&self, ty: &Type, js_var: &str, c_var: &str) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => format!("napi_get_value_int32(env, {}, &{});", js_var, c_var),
                 "i64" => format!("napi_get_value_int64(env, {}, &{});", js_var, c_var),
@@ -647,7 +647,7 @@ impl NodeBindGenerator {
     }
 
     fn napi_create_for_field(&self, ty: &Type, c_var: &str, prop_var: &str) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => format!("napi_create_int32(env, {}, &{}_prop);", c_var, prop_var),
                 "i64" => format!("napi_create_int64(env, {}, &{}_prop);", c_var, prop_var),
@@ -732,7 +732,7 @@ impl NodeBindGenerator {
     }
 
     fn mimi_type_to_c_field(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => "int32_t".to_string(),
                 "i64" => "int64_t".to_string(),
@@ -751,7 +751,7 @@ impl NodeBindGenerator {
     }
 
     fn mimi_type_to_ts_field(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" | "i64" | "f64" => "number".to_string(),
                 "bool" => "boolean".to_string(),

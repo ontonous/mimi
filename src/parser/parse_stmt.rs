@@ -5,6 +5,16 @@ use super::*;
 impl Parser {
     pub(crate) fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
         self.skip_newlines();
+        let start_pos = self.pos;
+        let stmt = self.parse_stmt_kind()?;
+        Ok(self.parsed_stmt_from(start_pos, stmt))
+    }
+
+    fn parsed_stmt_from(&self, start_pos: usize, stmt: Stmt) -> Stmt {
+        stmt.with_meta(self.consumed_meta(start_pos, AstOrigin::User))
+    }
+
+    fn parse_stmt_kind(&mut self) -> Result<Stmt, ParseError> {
         match self.peek_kind() {
             TokenKind::Let | TokenKind::Const => self.parse_let(),
             TokenKind::Return => self.parse_return(),
@@ -44,7 +54,7 @@ impl Parser {
                 Ok(Stmt::Block(self.parse_block()?))
             }
             TokenKind::Desc => {
-                let span = crate::span::Span::single(self.peek().line, self.peek().col);
+                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 if self.at(&TokenKind::LBrace) {
                     let s = self.parse_brace_block_content()?;
@@ -56,7 +66,7 @@ impl Parser {
                 }
             }
             TokenKind::Rule => {
-                let span = crate::span::Span::single(self.peek().line, self.peek().col);
+                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 if self.at(&TokenKind::LBrace) {
                     let s = self.parse_brace_block_content()?;
@@ -192,6 +202,7 @@ impl Parser {
                 Ok(Stmt::OnFailure(body))
             }
             _ => {
+                let target_start = self.pos;
                 let expr = self.parse_expr(0)?;
                 if self.at(&TokenKind::Eq) {
                     self.advance();
@@ -212,7 +223,6 @@ impl Parser {
                     let op_token = self.peek().kind.clone();
                     self.advance();
                     let value = self.parse_expr(0)?;
-                    self.match_semi();
                     let op = match op_token {
                         TokenKind::PlusEq => BinOp::Add,
                         TokenKind::MinusEq => BinOp::Sub,
@@ -229,7 +239,29 @@ impl Parser {
                             ))
                         }
                     };
-                    let rhs = expr.clone().binary(op, value);
+                    // The compound-assignment desugaring clones the target
+                    // expression so the original user identifier is retained
+                    // as the assignment target. The cloned operand inside the
+                    // binary RHS must be re-tagged as Desugared so the resolved
+                    // IR gives it a generated NodeId (origin + rule + role)
+                    // instead of duplicating the user identifier's NodeId
+                    // (which is keyed on the user span and would collide).
+                    // Preserve the target's span for diagnostics but mark the
+                    // origin as Desugared so it is not treated as a second
+                    // user-written occurrence of the same identifier.
+                    let cloned_target = match expr.meta() {
+                        Some(meta) => expr.clone().with_meta(AstNodeMeta::inherited(
+                            meta.span,
+                            AstOrigin::Desugared("parser.compound_assignment.operand"),
+                        )),
+                        None => expr.clone(),
+                    };
+                    let binary = cloned_target.binary(op, value);
+                    let rhs = binary.with_meta(self.consumed_meta(
+                        target_start,
+                        AstOrigin::Desugared("parser.compound_assignment"),
+                    ));
+                    self.match_semi();
                     Ok(Stmt::Assign {
                         target: expr,
                         value: rhs,
@@ -396,7 +428,7 @@ impl Parser {
         };
         self.expect(TokenKind::RBrace, "`}`")?;
         self.match_semi();
-        let span = crate::span::Span::single(mms_line, mms_col);
+        let span = self.single_span(mms_line, mms_col);
         Ok(Stmt::MmsBlock { content, span })
     }
 
@@ -441,8 +473,6 @@ impl Parser {
     }
 
     fn parse_let(&mut self) -> Result<Stmt, ParseError> {
-        // Capture position from the `let`/`const` token before consuming.
-        let pos = (self.peek().line, self.peek().col);
         let is_const = self.at(&TokenKind::Const);
         if is_const {
             self.advance();
@@ -491,7 +521,6 @@ impl Parser {
             init,
             mut_,
             ref_,
-            pos,
         })
     }
 
@@ -612,9 +641,11 @@ impl Parser {
         let mut parts = Vec::new();
         let mut chars = raw.chars().peekable();
         let mut current_text = String::new();
+        let raw_char_count = raw.chars().count();
 
         while let Some(&c) = chars.peek() {
             if c == '{' {
+                let open_offset = raw_char_count - chars.clone().count();
                 if !current_text.is_empty() {
                     parts.push(FStringPart::Text(current_text.clone()));
                     current_text.clear();
@@ -650,11 +681,40 @@ impl Parser {
                         base_col,
                     ));
                 }
-                let tokens = crate::lexer::Lexer::new(&expr_str)
+                let mut tokens = crate::lexer::Lexer::new(&expr_str)
                     .tokenize()
                     .map_err(|e| ParseError::new(e.to_string(), base_line, base_col))?;
+                // The interpolation lexer starts at 1:1 in its fragment. Rebase
+                // every token (including its exact half-open end) onto the
+                // enclosing f-string so nested Expr metadata names the real
+                // source and coordinates rather than an anonymous fragment.
+                let mut expr_line = base_line;
+                let mut expr_col = base_col + 2; // skip the leading `f"`
+                for ch in raw.chars().take(open_offset + 1) {
+                    if ch == '\n' {
+                        expr_line += 1;
+                        expr_col = 1;
+                    } else {
+                        expr_col += 1;
+                    }
+                }
+                let rebase = |line: usize, col: usize| {
+                    if line == 1 {
+                        (expr_line, expr_col + col.saturating_sub(1))
+                    } else {
+                        (expr_line + line - 1, col)
+                    }
+                };
+                for token in &mut tokens {
+                    let (line, col) = rebase(token.line, token.col);
+                    let (end_line, end_col) = rebase(token.end_line, token.end_col);
+                    token.line = line;
+                    token.col = col;
+                    token.end_line = end_line;
+                    token.end_col = end_col;
+                }
                 // F-H2: interpolation sub-parser must consume the entire fragment.
-                let mut sub = Parser::new(tokens);
+                let mut sub = Parser::new_with_source(tokens, self.source_id);
                 let expr = sub.parse_expr(0)?;
                 if !sub.at(&TokenKind::Eof) {
                     return Err(ParseError::new(
@@ -720,44 +780,48 @@ impl Parser {
                 break;
             }
             if self.at(&TokenKind::Requires) {
-                let span = Span::single(self.peek().line, self.peek().col);
+                let start_pos = self.pos;
+                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 self.expect(TokenKind::Colon, "`:`")?;
                 let expr = self.parse_expr(0)?;
-                stmts.push(Stmt::Requires(expr, span));
                 // CRITICAL #16 fix: consume trailing semicolons after
                 // contract clauses. Previously, `requires: x > 0;` would
                 // leave the `;` unconsumed, causing cascade parse errors.
                 while self.at(&TokenKind::Semi) {
                     self.advance();
                 }
+                stmts.push(self.parsed_stmt_from(start_pos, Stmt::Requires(expr, span)));
                 continue;
             }
             if self.at(&TokenKind::Ensures) {
-                let span = Span::single(self.peek().line, self.peek().col);
+                let start_pos = self.pos;
+                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 self.expect(TokenKind::Colon, "`:`")?;
                 let expr = self.parse_expr(0)?;
-                stmts.push(Stmt::Ensures(expr, span));
                 // CRITICAL #16 fix: consume trailing semicolons.
                 while self.at(&TokenKind::Semi) {
                     self.advance();
                 }
+                stmts.push(self.parsed_stmt_from(start_pos, Stmt::Ensures(expr, span)));
                 continue;
             }
             if self.at(&TokenKind::Invariant) {
-                let span = Span::single(self.peek().line, self.peek().col);
+                let start_pos = self.pos;
+                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 self.expect(TokenKind::Colon, "`:`")?;
                 let expr = self.parse_expr(0)?;
-                stmts.push(Stmt::Invariant(expr, span));
                 // CRITICAL #16 fix: consume trailing semicolons.
                 while self.at(&TokenKind::Semi) {
                     self.advance();
                 }
+                stmts.push(self.parsed_stmt_from(start_pos, Stmt::Invariant(expr, span)));
                 continue;
             }
             if self.at(&TokenKind::Math) {
+                let start_pos = self.pos;
                 self.advance();
                 self.expect(TokenKind::Colon, "`:`")?;
                 self.skip_newlines();
@@ -771,32 +835,34 @@ impl Parser {
                 }
                 self.expect(TokenKind::RBrace, "`}`")?;
                 self.match_semi();
-                stmts.push(Stmt::Math(exprs));
+                stmts.push(self.parsed_stmt_from(start_pos, Stmt::Math(exprs)));
                 continue;
             }
             if self.at(&TokenKind::Desc) {
-                let span = Span::single(self.peek().line, self.peek().col);
+                let start_pos = self.pos;
+                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 if self.at(&TokenKind::LBrace) {
                     let s = self.parse_brace_block_content()?;
-                    stmts.push(Stmt::Desc(s, span));
+                    stmts.push(self.parsed_stmt_from(start_pos, Stmt::Desc(s, span)));
                 } else {
                     let s = self.expect_string()?;
                     self.match_semi();
-                    stmts.push(Stmt::Desc(s, span));
+                    stmts.push(self.parsed_stmt_from(start_pos, Stmt::Desc(s, span)));
                 }
                 continue;
             }
             if self.at(&TokenKind::Rule) {
-                let span = Span::single(self.peek().line, self.peek().col);
+                let start_pos = self.pos;
+                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 if self.at(&TokenKind::LBrace) {
                     let s = self.parse_brace_block_content()?;
-                    stmts.push(Stmt::Rule(s, span));
+                    stmts.push(self.parsed_stmt_from(start_pos, Stmt::Rule(s, span)));
                 } else {
                     let s = self.expect_string()?;
                     self.match_semi();
-                    stmts.push(Stmt::Rule(s, span));
+                    stmts.push(self.parsed_stmt_from(start_pos, Stmt::Rule(s, span)));
                 }
                 continue;
             }
@@ -821,12 +887,15 @@ impl Parser {
                 break;
             }
             if self.at(&TokenKind::Requires) {
-                let span = Span::single(self.peek().line, self.peek().col);
+                let start_pos = self.pos;
+                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 // F-H3: surface malformed contract clauses instead of swallowing them.
                 match self.expect(TokenKind::Colon, "`:` after requires") {
                     Ok(_) => match self.parse_expr(0) {
-                        Ok(expr) => stmts.push(Stmt::Requires(expr, span)),
+                        Ok(expr) => {
+                            stmts.push(self.parsed_stmt_from(start_pos, Stmt::Requires(expr, span)))
+                        }
                         Err(e) => self.errors.push(e),
                     },
                     Err(e) => self.errors.push(e),
@@ -834,11 +903,14 @@ impl Parser {
                 continue;
             }
             if self.at(&TokenKind::Ensures) {
-                let span = Span::single(self.peek().line, self.peek().col);
+                let start_pos = self.pos;
+                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 match self.expect(TokenKind::Colon, "`:` after ensures") {
                     Ok(_) => match self.parse_expr(0) {
-                        Ok(expr) => stmts.push(Stmt::Ensures(expr, span)),
+                        Ok(expr) => {
+                            stmts.push(self.parsed_stmt_from(start_pos, Stmt::Ensures(expr, span)))
+                        }
                         Err(e) => self.errors.push(e),
                     },
                     Err(e) => self.errors.push(e),
@@ -846,11 +918,12 @@ impl Parser {
                 continue;
             }
             if self.at(&TokenKind::Invariant) {
-                let span = Span::single(self.peek().line, self.peek().col);
+                let start_pos = self.pos;
+                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 if self.expect(TokenKind::Colon, "`:`").is_ok() {
                     if let Ok(expr) = self.parse_expr(0) {
-                        stmts.push(Stmt::Invariant(expr, span));
+                        stmts.push(self.parsed_stmt_from(start_pos, Stmt::Invariant(expr, span)));
                     }
                 }
                 continue;
@@ -858,6 +931,7 @@ impl Parser {
             // BUG-7 fix: Math branch was missing in recovery mode, causing math blocks
             // to be silently dropped and parsed as expression statements instead.
             if self.at(&TokenKind::Math) {
+                let start_pos = self.pos;
                 self.advance();
                 if self.expect(TokenKind::Colon, "`:`").is_ok()
                     && self.expect(TokenKind::LBrace, "`{` for math block").is_ok()
@@ -878,31 +952,35 @@ impl Parser {
                     }
                     let _ = self.expect(TokenKind::RBrace, "`}`");
                     self.match_semi();
-                    stmts.push(Stmt::Math(exprs));
+                    stmts.push(self.parsed_stmt_from(start_pos, Stmt::Math(exprs)));
                 }
                 continue;
             }
             if self.at(&TokenKind::Desc) {
-                let span = Span::single(self.peek().line, self.peek().col);
+                let start_pos = self.pos;
+                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 if self.at(&TokenKind::LBrace) {
                     if let Ok(s) = self.parse_brace_block_content() {
-                        stmts.push(Stmt::Desc(s, span));
+                        stmts.push(self.parsed_stmt_from(start_pos, Stmt::Desc(s, span)));
                     }
                 } else if let Ok(s) = self.expect_string() {
-                    stmts.push(Stmt::Desc(s, span));
+                    self.match_semi();
+                    stmts.push(self.parsed_stmt_from(start_pos, Stmt::Desc(s, span)));
                 }
                 continue;
             }
             if self.at(&TokenKind::Rule) {
-                let span = Span::single(self.peek().line, self.peek().col);
+                let start_pos = self.pos;
+                let span = self.single_span(self.peek().line, self.peek().col);
                 self.advance();
                 if self.at(&TokenKind::LBrace) {
                     if let Ok(s) = self.parse_brace_block_content() {
-                        stmts.push(Stmt::Rule(s, span));
+                        stmts.push(self.parsed_stmt_from(start_pos, Stmt::Rule(s, span)));
                     }
                 } else if let Ok(s) = self.expect_string() {
-                    stmts.push(Stmt::Rule(s, span));
+                    self.match_semi();
+                    stmts.push(self.parsed_stmt_from(start_pos, Stmt::Rule(s, span)));
                 }
                 continue;
             }
@@ -934,5 +1012,119 @@ impl Parser {
         }
         let _ = self.expect(terminator, label);
         Ok(stmts)
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::span::{SourceId, Span};
+
+    fn parse_single_stmt(source: &str, source_id: SourceId) -> Stmt {
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        Parser::new_with_source(tokens, source_id)
+            .parse_stmt()
+            .expect("parse statement")
+    }
+
+    fn assert_user_stmt_span(stmt: &Stmt, expected: Span) {
+        let meta = stmt.meta().expect("parsed Stmt must have metadata");
+        assert_eq!(meta.origin, AstOrigin::User);
+        assert_eq!(meta.span, expected);
+    }
+
+    #[test]
+    fn compound_assignment_desugaring_keeps_user_metadata() {
+        let source_id = SourceId::new(75);
+        let tokens = Lexer::new("counter += delta;").tokenize().expect("lex");
+        let mut parser = Parser::new_with_source(tokens, source_id);
+        let stmt = parser.parse_stmt().expect("parse statement");
+        assert_user_stmt_span(&stmt, Span::new(1, 1, 1, 18).with_source(source_id));
+        let Stmt::Assign { target, value } = stmt.unlocated() else {
+            panic!("expected assignment");
+        };
+
+        let target_meta = target.meta().expect("target metadata");
+        assert_eq!(target_meta.origin, AstOrigin::User);
+        assert_eq!(
+            target_meta.span,
+            Span::new(1, 1, 1, 8).with_source(source_id)
+        );
+        let value_meta = value.meta().expect("desugared value metadata");
+        assert_eq!(
+            value_meta.origin,
+            AstOrigin::Desugared("parser.compound_assignment")
+        );
+        assert_eq!(
+            value_meta.span,
+            Span::new(1, 1, 1, 17).with_source(source_id)
+        );
+        let Expr::Binary(BinOp::Add, left, right) = value.unlocated() else {
+            panic!("expected desugared addition");
+        };
+        assert!(left.meta().is_some());
+        assert_eq!(
+            right.meta().expect("right metadata").span,
+            Span::new(1, 12, 1, 17).with_source(source_id)
+        );
+    }
+
+    #[test]
+    fn simple_and_control_flow_statements_have_exact_source_aware_spans() {
+        let source_id = SourceId::new(76);
+
+        let let_stmt = parse_single_stmt("let x: i32 = 1;", source_id);
+        assert!(matches!(let_stmt.unlocated(), Stmt::Let { .. }));
+        assert_user_stmt_span(&let_stmt, Span::new(1, 1, 1, 16).with_source(source_id));
+
+        let return_stmt = parse_single_stmt("return x;", source_id);
+        assert!(matches!(return_stmt.unlocated(), Stmt::Return(Some(_))));
+        assert_user_stmt_span(&return_stmt, Span::new(1, 1, 1, 10).with_source(source_id));
+
+        let expr_stmt = parse_single_stmt("consume(x);", source_id);
+        assert!(matches!(expr_stmt.unlocated(), Stmt::Expr(_)));
+        assert_user_stmt_span(&expr_stmt, Span::new(1, 1, 1, 12).with_source(source_id));
+
+        let assign_stmt = parse_single_stmt("x = y;", source_id);
+        assert!(matches!(assign_stmt.unlocated(), Stmt::Assign { .. }));
+        assert_user_stmt_span(&assign_stmt, Span::new(1, 1, 1, 7).with_source(source_id));
+
+        let if_stmt = parse_single_stmt("if ready {\n    return value;\n}", source_id);
+        let Stmt::If { then_, .. } = if_stmt.unlocated() else {
+            panic!("expected if statement");
+        };
+        assert_user_stmt_span(&if_stmt, Span::new(1, 1, 3, 2).with_source(source_id));
+        assert_user_stmt_span(&then_[0], Span::new(2, 5, 2, 18).with_source(source_id));
+
+        let while_stmt = parse_single_stmt("while ok { break; }", source_id);
+        assert!(matches!(while_stmt.unlocated(), Stmt::While { .. }));
+        assert_user_stmt_span(&while_stmt, Span::new(1, 1, 1, 20).with_source(source_id));
+
+        let for_stmt = parse_single_stmt("for item in items { continue; }", source_id);
+        assert!(matches!(for_stmt.unlocated(), Stmt::For { .. }));
+        assert_user_stmt_span(&for_stmt, Span::new(1, 1, 1, 32).with_source(source_id));
+    }
+
+    #[test]
+    fn contract_and_math_statements_include_trailing_delimiters() {
+        let source_id = SourceId::new(77);
+        let source = "func sample(x: i32) -> i32 {\n    requires: x > 0;\n    ensures: result > 0;\n    invariant: x >= 0;\n    math: { x + 1; };\n    return x;\n}";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new_with_source(tokens, source_id)
+            .parse_file()
+            .expect("parse file");
+        let Item::Func(func) = &file.items[0] else {
+            panic!("expected function");
+        };
+
+        assert!(matches!(func.body[0].unlocated(), Stmt::Requires(..)));
+        assert_user_stmt_span(&func.body[0], Span::new(2, 5, 2, 21).with_source(source_id));
+        assert!(matches!(func.body[1].unlocated(), Stmt::Ensures(..)));
+        assert_user_stmt_span(&func.body[1], Span::new(3, 5, 3, 25).with_source(source_id));
+        assert!(matches!(func.body[2].unlocated(), Stmt::Invariant(..)));
+        assert_user_stmt_span(&func.body[2], Span::new(4, 5, 4, 23).with_source(source_id));
+        assert!(matches!(func.body[3].unlocated(), Stmt::Math(..)));
+        assert_user_stmt_span(&func.body[3], Span::new(5, 5, 5, 22).with_source(source_id));
     }
 }

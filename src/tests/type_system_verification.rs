@@ -3,7 +3,7 @@
 
 #[cfg(test)]
 mod verification {
-    use crate::ast::{ExternFunc, ExternParam, Type};
+    use crate::ast::{AstNodeMeta, AstOrigin, ExternFunc, ExternParam, Type};
     use crate::core::check;
     use crate::ffi::contract::{FfiArgContract, FfiContract};
 
@@ -33,8 +33,10 @@ mod verification {
     #[test]
     fn test_cbuffer_contract() {
         let func = ExternFunc {
+            meta: AstNodeMeta::synthetic(AstOrigin::User),
             name: "test".to_string(),
             params: vec![ExternParam {
+                meta: AstNodeMeta::synthetic(AstOrigin::User),
                 name: "buf".to_string(),
                 ty: Type::CBuffer(Box::new(Type::Name("u8".to_string(), vec![]))),
                 cap_mode: None,
@@ -69,8 +71,10 @@ mod verification {
         // requires/ensures in extern blocks require specific syntax
         // The contract system works at the AST/FfiContract level
         let func = ExternFunc {
+            meta: AstNodeMeta::synthetic(AstOrigin::User),
             name: "open_file".to_string(),
             params: vec![ExternParam {
+                meta: AstNodeMeta::synthetic(AstOrigin::User),
                 name: "path".to_string(),
                 ty: Type::Name("string".to_string(), vec![]),
                 cap_mode: None,

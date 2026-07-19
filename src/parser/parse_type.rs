@@ -5,17 +5,20 @@ use super::*;
 impl Parser {
     pub(crate) fn parse_type(&mut self) -> Result<Type, ParseError> {
         self.check_depth()?;
+        let start_pos = self.pos;
         self.inc_depth();
         let result = self.parse_type_optional(false);
         self.dec_depth();
-        result
+        result.map(|ty| ty.with_meta(self.consumed_meta(start_pos, AstOrigin::User)))
     }
 
     fn parse_type_optional(&mut self, allow_func: bool) -> Result<Type, ParseError> {
+        let start_pos = self.pos;
         let mut ty = self.parse_type_atom()?;
         loop {
             if self.at(&TokenKind::Lt) {
                 self.advance();
+                self.skip_newlines();
                 let mut args = Vec::new();
                 if !self.at(&TokenKind::Gt) {
                     loop {
@@ -24,20 +27,27 @@ impl Parser {
                             break;
                         }
                         self.advance();
+                        self.skip_newlines();
                     }
                 }
+                self.skip_newlines();
                 self.expect_gt("`>`")?;
-                if let Type::Name(name, _) = ty {
-                    ty = Type::Name(name, args);
-                } else {
-                    let tok = self.peek();
-                    return Err(ParseError::new(
-                        "type arguments only allowed on named types",
-                        tok.line,
-                        tok.col,
-                    ));
-                }
+                ty = match ty.into_unlocated() {
+                    Type::Name(name, _) => Type::Name(name, args),
+                    _ => {
+                        let tok = self.peek();
+                        return Err(ParseError::new(
+                            "type arguments only allowed on named types",
+                            tok.line,
+                            tok.col,
+                        ));
+                    }
+                };
             } else if self.at(&TokenKind::Question) {
+                // The wrapped type is also a first-class AST node. Capture its
+                // span before consuming `?`, including a preceding generic
+                // application rebuilt above.
+                ty = ty.with_meta(self.consumed_meta(start_pos, AstOrigin::User));
                 self.advance();
                 ty = Type::Option(Box::new(ty));
             } else {
@@ -45,6 +55,7 @@ impl Parser {
             }
         }
         if allow_func && self.at(&TokenKind::Arrow) {
+            ty = ty.with_meta(self.consumed_meta(start_pos, AstOrigin::User));
             self.advance();
             let ret = self.parse_type()?;
             ty = Type::Func(vec![ty], Box::new(ret));
@@ -53,8 +64,9 @@ impl Parser {
     }
 
     fn parse_type_atom(&mut self) -> Result<Type, ParseError> {
+        let start_pos = self.pos;
         let tok = self.peek();
-        match tok.kind {
+        let result = match tok.kind {
             TokenKind::Ident(ref name) if name == "CBuffer" => {
                 self.advance();
                 self.expect(TokenKind::Lt, "`<`")?;
@@ -98,13 +110,14 @@ impl Parser {
                     self.advance();
                     let elem_type = self.parse_type()?;
                     self.expect(TokenKind::RBracket, "`]`")?;
-                    return Ok(Type::Slice(Box::new(elem_type)));
-                }
-                let inner = self.parse_type()?;
-                if mut_ {
-                    Ok(Type::RefMut(lifetime, Box::new(inner)))
+                    Ok(Type::Slice(Box::new(elem_type)))
                 } else {
-                    Ok(Type::Ref(lifetime, Box::new(inner)))
+                    let inner = self.parse_type()?;
+                    if mut_ {
+                        Ok(Type::RefMut(lifetime, Box::new(inner)))
+                    } else {
+                        Ok(Type::Ref(lifetime, Box::new(inner)))
+                    }
                 }
             }
             TokenKind::LParen => {
@@ -216,7 +229,9 @@ impl Parser {
                     self.advance();
                     self.parse_type()?
                 } else {
-                    Type::Name("unit".to_string(), vec![])
+                    Type::Name("unit".to_string(), vec![]).synthetic_with_origin(
+                        AstOrigin::Desugared("parser.function_type.unit_return"),
+                    )
                 };
                 Ok(Type::Func(param_types, Box::new(ret_type)))
             }
@@ -252,7 +267,9 @@ impl Parser {
                     self.advance();
                     self.parse_type()?
                 } else {
-                    Type::Name("unit".to_string(), vec![])
+                    Type::Name("unit".to_string(), vec![]).synthetic_with_origin(
+                        AstOrigin::Desugared("parser.extern_function_type.unit_return"),
+                    )
                 };
                 Ok(Type::ExternFunc(param_types, Box::new(ret_type)))
             }
@@ -365,7 +382,8 @@ impl Parser {
                 tok.line,
                 tok.col,
             )),
-        }
+        };
+        result.map(|ty| ty.with_meta(self.consumed_meta(start_pos, AstOrigin::User)))
     }
 
     pub(crate) fn parse_type_def(
@@ -373,7 +391,7 @@ impl Parser {
         derives: Vec<String>,
         attributes: Vec<crate::ast::TypeAttribute>,
     ) -> Result<TypeDef, ParseError> {
-        let decl_pos = Some((self.peek().line, self.peek().col));
+        let start_pos = self.pos;
         self.expect_keyword(TokenKind::Type)?;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
@@ -413,8 +431,8 @@ impl Parser {
                 TypeDefKind::Enum(variants)
             };
             return Ok(TypeDef {
+                meta: self.consumed_meta(start_pos, AstOrigin::User),
                 name,
-                decl_pos,
                 pub_: false,
                 kind,
                 generics,
@@ -434,8 +452,8 @@ impl Parser {
                 self.skip_newlines();
                 self.expect(TokenKind::RBrace, "`}`")?;
                 return Ok(TypeDef {
+                    meta: self.consumed_meta(start_pos, AstOrigin::User),
                     name,
-                    decl_pos,
                     pub_: false,
                     kind: TypeDefKind::Union(fields),
                     generics,
@@ -446,8 +464,8 @@ impl Parser {
             let ty = self.parse_type()?;
             self.match_semi();
             return Ok(TypeDef {
+                meta: self.consumed_meta(start_pos, AstOrigin::User),
                 name,
-                decl_pos,
                 pub_: false,
                 kind: TypeDefKind::Alias(ty),
                 generics,
@@ -467,8 +485,8 @@ impl Parser {
         self.skip_newlines();
         self.expect(TokenKind::RBrace, "`}`")?;
         Ok(TypeDef {
+            meta: self.consumed_meta(start_pos, AstOrigin::User),
             name,
-            decl_pos,
             pub_: false,
             kind,
             generics,
@@ -499,10 +517,12 @@ impl Parser {
             && !self.at(&TokenKind::Dedent)
             && !self.at(&TokenKind::Eof)
         {
+            let field_start = self.pos;
             let fname = self.expect_ident()?;
             self.expect(TokenKind::Colon, "`:`")?;
             let fty = self.parse_type()?;
             fields.push(Field {
+                meta: self.consumed_meta(field_start, AstOrigin::User),
                 name: fname,
                 ty: fty,
             });
@@ -526,6 +546,7 @@ impl Parser {
             {
                 break;
             }
+            let variant_start = self.pos;
             let vname = self.expect_ident()?;
             let payload = if self.at(&TokenKind::LParen) {
                 self.advance();
@@ -550,6 +571,7 @@ impl Parser {
                 None
             };
             variants.push(Variant {
+                meta: self.consumed_meta(variant_start, AstOrigin::User),
                 name: vname,
                 payload,
             });
@@ -569,7 +591,7 @@ impl Parser {
     }
 
     pub(crate) fn parse_newtype(&mut self) -> Result<TypeDef, ParseError> {
-        let decl_pos = Some((self.peek().line, self.peek().col));
+        let start_pos = self.pos;
         self.expect_keyword(TokenKind::Newtype)?;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
@@ -577,13 +599,134 @@ impl Parser {
         let ty = self.parse_type()?;
         self.match_semi();
         Ok(TypeDef {
+            meta: self.consumed_meta(start_pos, AstOrigin::User),
             name,
-            decl_pos,
             pub_: false,
             kind: TypeDefKind::Newtype(ty),
             generics,
             derives: Vec::new(),
             attributes: Vec::new(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::token::TokenKind;
+    use crate::lexer::Lexer;
+    use crate::span::{SourceId, Span};
+
+    fn parse_source_type(source: &str, source_id: SourceId) -> Type {
+        let tokens = Lexer::new(source).tokenize().expect("lex type");
+        let mut parser = Parser::new_with_source(tokens, source_id);
+        let ty = parser.parse_type().expect("parse type");
+        assert!(parser.at(&TokenKind::Eof), "type left trailing tokens");
+        ty
+    }
+
+    fn span_for(source: &str, fragment: &str, source_id: SourceId) -> Span {
+        let offset = source.find(fragment).expect("fragment must occur");
+        let mut line = 1;
+        let mut col = 1;
+        for ch in source[..offset].chars() {
+            if ch == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        let (start_line, start_col) = (line, col);
+        for ch in fragment.chars() {
+            if ch == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        Span::new(start_line, start_col, line, col).with_source(source_id)
+    }
+
+    fn assert_user_span(ty: &Type, expected: Span) {
+        let meta = ty.meta().expect("parsed Type must have metadata");
+        assert_eq!(meta.origin, AstOrigin::User);
+        assert_eq!(meta.span, expected);
+    }
+
+    #[test]
+    fn nested_composite_types_have_exact_source_aware_half_open_spans() {
+        let source = "Result<List<i32>,\n  Option<&'a mut string>>?";
+        let source_id = SourceId::new(91);
+        let ty = parse_source_type(source, source_id);
+        assert_user_span(&ty, span_for(source, source, source_id));
+
+        let Type::Option(result) = ty.unlocated() else {
+            panic!("expected postfix option type");
+        };
+        let result_source = source.strip_suffix('?').expect("option suffix");
+        assert_user_span(result, span_for(source, result_source, source_id));
+
+        let Type::Name(result_name, result_args) = result.unlocated() else {
+            panic!("expected Result application");
+        };
+        assert_eq!(result_name, "Result");
+        assert_eq!(result_args.len(), 2);
+
+        let list = &result_args[0];
+        assert_user_span(list, span_for(source, "List<i32>", source_id));
+        let Type::Name(list_name, list_args) = list.unlocated() else {
+            panic!("expected List application");
+        };
+        assert_eq!(list_name, "List");
+        assert_user_span(&list_args[0], span_for(source, "i32", source_id));
+
+        let option = &result_args[1];
+        assert_user_span(
+            option,
+            span_for(source, "Option<&'a mut string>", source_id),
+        );
+        let Type::Name(option_name, option_args) = option.unlocated() else {
+            panic!("expected Option application");
+        };
+        assert_eq!(option_name, "Option");
+        let reference = &option_args[0];
+        assert_user_span(reference, span_for(source, "&'a mut string", source_id));
+        let Type::RefMut(lifetime, inner) = reference.unlocated() else {
+            panic!("expected mutable reference");
+        };
+        assert_eq!(lifetime.as_deref(), Some("a"));
+        assert_user_span(inner, span_for(source, "string", source_id));
+    }
+
+    #[test]
+    fn type_semantic_equality_ignores_outer_and_nested_metadata() {
+        let first_source = SourceId::new(92);
+        let second_source = SourceId::new(93);
+        let first = Type::Name(
+            "List".into(),
+            vec![Type::Name("i32".into(), vec![]).with_meta(AstNodeMeta::new(
+                Span::new(1, 6, 1, 9).with_source(first_source),
+                AstOrigin::User,
+            ))],
+        )
+        .with_meta(AstNodeMeta::new(
+            Span::new(1, 1, 1, 10).with_source(first_source),
+            AstOrigin::User,
+        ));
+        let second = Type::Name(
+            "List".into(),
+            vec![Type::Name("i32".into(), vec![]).with_meta(AstNodeMeta::new(
+                Span::new(8, 20, 8, 23).with_source(second_source),
+                AstOrigin::User,
+            ))],
+        )
+        .with_meta(AstNodeMeta::new(
+            Span::new(8, 15, 8, 24).with_source(second_source),
+            AstOrigin::User,
+        ));
+
+        assert_eq!(first, second);
     }
 }

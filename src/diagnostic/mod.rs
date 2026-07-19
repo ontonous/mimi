@@ -3,8 +3,40 @@ pub mod format;
 
 use crate::span::Span;
 
+/// Owned provenance attached to a runtime diagnostic.
+///
+/// Unlike AST provenance, every field here owns its text so diagnostics may
+/// safely cross cache/serialization boundaries without leaking strings into
+/// `&'static str`. `parent_node_id`, when present, is the canonical resolved
+/// parent NodeId rather than a source-order/index surrogate.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct DiagnosticOrigin {
+    pub kind: DiagnosticOriginKind,
+    pub rule: Option<String>,
+    pub parent_node_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticOriginKind {
+    User,
+    Desugared,
+    PrototypeFallback,
+    RuntimeSystem,
+}
+
+impl DiagnosticOrigin {
+    pub const fn user() -> Self {
+        Self {
+            kind: DiagnosticOriginKind::User,
+            rule: None,
+            parent_node_id: None,
+        }
+    }
+}
+
 /// Severity level for diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Severity {
     Error,
     Warning,
@@ -39,6 +71,7 @@ pub struct Diagnostic {
     pub code: Option<String>,
     pub notes: Vec<DiagnosticNote>,
     pub help: Option<String>,
+    pub origin: Option<DiagnosticOrigin>,
 }
 
 impl Diagnostic {
@@ -51,6 +84,7 @@ impl Diagnostic {
             code: None,
             notes: Vec::new(),
             help: None,
+            origin: None,
         }
     }
 
@@ -63,6 +97,7 @@ impl Diagnostic {
             code: Some(code.to_string()),
             notes: Vec::new(),
             help: None,
+            origin: None,
         }
     }
 
@@ -75,6 +110,7 @@ impl Diagnostic {
             code: None,
             notes: Vec::new(),
             help: None,
+            origin: None,
         }
     }
 
@@ -87,6 +123,7 @@ impl Diagnostic {
             code: Some(code.to_string()),
             notes: Vec::new(),
             help: None,
+            origin: None,
         }
     }
 
@@ -116,6 +153,12 @@ impl Diagnostic {
         self.span = span;
         self
     }
+
+    /// Attach owned semantic provenance.
+    pub fn with_origin(mut self, origin: DiagnosticOrigin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
 }
 
 impl std::fmt::Display for Diagnostic {
@@ -130,16 +173,17 @@ impl std::fmt::Display for Diagnostic {
 
 impl std::error::Error for Diagnostic {}
 
-/// Legacy bridge: create a Diagnostic from a simple message (no span info).
-/// These are used when no source position is available (e.g., CLI-level errors).
+/// Legacy bridge for genuinely global diagnostics.  `Span::UNKNOWN` is an
+/// explicit lack of location; it must not be presented as a real `(0, 0)`
+/// source coordinate by diagnostic consumers.
 impl From<&str> for Diagnostic {
     fn from(msg: &str) -> Self {
-        Self::error(msg, Span::single(0, 0))
+        Self::error(msg, Span::UNKNOWN)
     }
 }
 
 impl From<String> for Diagnostic {
     fn from(msg: String) -> Self {
-        Self::error(msg, Span::single(0, 0))
+        Self::error(msg, Span::UNKNOWN)
     }
 }

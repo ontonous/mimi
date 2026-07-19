@@ -173,10 +173,14 @@ fn extract_list_elem_type_parses_nested_generics() {
     use crate::ast::Type;
 
     let simple = extract_list_elem_type("List<i32>").unwrap();
-    assert!(matches!(simple, Type::Name(name, args) if name == "i32" && args.is_empty()));
+    assert!(
+        matches!(simple.unlocated(), Type::Name(name, args) if name == "i32" && args.is_empty())
+    );
 
     let nested = extract_list_elem_type("List<List<string>>").unwrap();
-    assert!(matches!(nested, Type::Name(name, args) if name == "List" && args.len() == 1));
+    assert!(
+        matches!(nested.unlocated(), Type::Name(name, args) if name == "List" && args.len() == 1)
+    );
 
     assert!(extract_list_elem_type("i32").is_none());
     assert!(extract_list_elem_type("List<>").is_none());
@@ -200,4 +204,83 @@ fn parse_inner_type_handles_generics() {
         parse_inner_type("List<Map<string, i64>>"),
         Type::Name(name, args) if name == "List" && args.len() == 1
     ));
+}
+
+#[test]
+fn flow_matrix_generated_transition_function_types_share_lowering_origin() {
+    use crate::ast::{AstNodeMeta, AstOrigin, FlowDef, Param, TransitionDef, Type};
+    use crate::span::{SourceId, Span};
+
+    let source = SourceId::new(91);
+    let transition_span = Span::new(8, 3, 8, 42).with_source(source);
+    let user_type_meta =
+        AstNodeMeta::new(Span::new(8, 20, 8, 37).with_source(source), AstOrigin::User);
+    let user_type = Type::Name(
+        "List".into(),
+        vec![Type::Option(Box::new(
+            Type::Name("i32".into(), vec![]).with_meta(user_type_meta),
+        ))
+        .with_meta(user_type_meta)],
+    )
+    .with_meta(user_type_meta);
+    let transition = TransitionDef {
+        meta: AstNodeMeta::inherited(
+            transition_span,
+            AstOrigin::PrototypeFallback("flow.matrix.fallback"),
+        ),
+        name: "event".into(),
+        from_state: "Ready".into(),
+        params: vec![Param {
+            meta: user_type_meta,
+            name: "items".into(),
+            ty: user_type,
+            mut_: false,
+            default_value: None,
+            borrow: None,
+        }],
+        to_states: vec!["Fault".into()],
+        body: None,
+        is_fallback: true,
+        is_ffi_pinned: false,
+    };
+    let flow = FlowDef {
+        meta: AstNodeMeta::new(transition_span, AstOrigin::User),
+        name: "Worker".into(),
+        pub_: false,
+        generics: vec![],
+        annotations: vec![],
+        states: vec![],
+        transitions: vec![],
+        impl_protocols: vec![],
+        persistent_fields: vec![],
+        transactional_fields: vec![],
+        metadata_shadow_fields: vec![],
+    };
+
+    let generated = CodeGenerator::<'static>::transition_to_func(&flow, &transition);
+    let expected = AstNodeMeta::inherited(
+        transition_span,
+        AstOrigin::RuntimeSystem("codegen.transition_lowering"),
+    );
+    assert_eq!(generated.meta, expected);
+    assert_eq!(generated.params[0].meta, expected);
+    assert_eq!(generated.params[0].ty.meta(), Some(expected));
+    assert_eq!(generated.params[1].meta, expected);
+    assert_eq!(generated.params[1].ty.meta(), Some(expected));
+    let Type::Name(_, args) = generated.params[1].ty.unlocated() else {
+        panic!("generated List parameter")
+    };
+    assert_eq!(args[0].meta(), Some(expected));
+    let Type::Option(inner) = args[0].unlocated() else {
+        panic!("generated Option parameter")
+    };
+    assert_eq!(inner.meta(), Some(expected));
+    assert_eq!(generated.ret.as_ref().and_then(Type::meta), Some(expected));
+    assert_eq!(generated.params[1].ty, transition.params[0].ty);
+
+    assert_eq!(transition.params[0].meta.origin, AstOrigin::User);
+    assert_eq!(
+        transition.params[0].ty.meta().unwrap().origin,
+        AstOrigin::User
+    );
 }

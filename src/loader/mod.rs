@@ -6,6 +6,7 @@ mod flow;
 pub use self::flow::{flow_load_file, flow_load_main, Acc};
 
 use crate::ast::*;
+use crate::span::{SourceContext, SourceId, SourceRegistry, SourceTextOrigin};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +16,82 @@ use std::path::{Path, PathBuf};
 pub struct LoadedModule {
     pub path: PathBuf,
     pub file: File,
+}
+
+/// A loader failure with the most precise source anchor available and the
+/// registry needed to route that anchor.  String-returning public APIs remain
+/// available for compatibility; source-aware tools should use the diagnostic
+/// entry point on [`ModuleLoader`].
+#[derive(Clone, Debug)]
+pub struct LoadDiagnosticError {
+    pub diagnostic: Box<crate::diagnostic::Diagnostic>,
+    pub sources: SourceRegistry,
+}
+
+impl LoadDiagnosticError {
+    pub(crate) fn global(message: impl Into<String>, sources: SourceRegistry) -> Self {
+        Self {
+            diagnostic: Box::new(crate::diagnostic::Diagnostic::error(
+                message,
+                crate::span::Span::UNKNOWN,
+            )),
+            sources,
+        }
+    }
+
+    pub(crate) fn at(
+        message: impl Into<String>,
+        span: crate::span::Span,
+        sources: SourceRegistry,
+    ) -> Self {
+        Self {
+            diagnostic: Box::new(crate::diagnostic::Diagnostic::error(message, span)),
+            sources,
+        }
+    }
+}
+
+impl std::fmt::Display for LoadDiagnosticError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.diagnostic.message)
+    }
+}
+
+impl std::error::Error for LoadDiagnosticError {}
+
+/// Register a disk entry point using the exact workspace/package/stdlib
+/// identity rules used by the transitive module loader.
+pub fn source_context_for_path(path: &Path) -> Result<SourceContext, String> {
+    let base_dir = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let (acc, source_id) = Acc::new(base_dir).source_id_for(path, SourceTextOrigin::Disk)?;
+    let (_, registry) = acc.into_source_registry();
+    SourceContext::registered(source_id, registry).map_err(|error| error.to_string())
+}
+
+/// Create a production parser for a disk source without duplicating loader
+/// identity logic at individual CLI/tool entry points.
+pub fn parser_for_path(
+    tokens: Vec<crate::lexer::Token>,
+    path: &Path,
+) -> Result<crate::parser::Parser, String> {
+    Ok(crate::parser::Parser::new_with_source_context(
+        tokens,
+        source_context_for_path(path)?,
+    ))
+}
+
+/// Sketch-mode counterpart of [`parser_for_path`].
+pub fn sketch_parser_for_path(
+    tokens: Vec<crate::lexer::Token>,
+    path: &Path,
+) -> Result<crate::parser::Parser, String> {
+    Ok(crate::parser::Parser::new_sketch_with_source_context(
+        tokens,
+        source_context_for_path(path)?,
+    ))
 }
 
 // ── stdlib_dir (pure) ──────────────────────────────────────────────────
@@ -72,6 +149,8 @@ pub struct ModuleLoader {
     pub base_dir: PathBuf,
     pub loaded: HashMap<PathBuf, LoadedModule>,
     pub modules: HashMap<String, LoadedModule>,
+    source_ids: HashMap<PathBuf, SourceId>,
+    source_registry: SourceRegistry,
 }
 
 impl ModuleLoader {
@@ -80,16 +159,20 @@ impl ModuleLoader {
             base_dir,
             loaded: HashMap::new(),
             modules: HashMap::new(),
+            source_ids: HashMap::new(),
+            source_registry: SourceRegistry::default(),
         }
     }
 
     pub fn load_main(&mut self, path: &Path) -> Result<LoadedModule, String> {
-        let mut acc = Acc::new(self.base_dir.clone());
+        let mut acc = Acc::new(self.base_dir.clone())
+            .with_source_registry(self.source_ids.clone(), self.source_registry.clone());
         acc.loaded = self.loaded.clone();
         acc.modules = self.modules.clone();
         let (acc, main) = flow_load_main(acc, path)?;
-        self.loaded = acc.loaded;
-        self.modules = acc.modules;
+        self.loaded = acc.loaded.clone();
+        self.modules = acc.modules.clone();
+        (self.source_ids, self.source_registry) = acc.into_source_registry();
         Ok(main)
     }
 
@@ -100,13 +183,56 @@ impl ModuleLoader {
         path: &Path,
         file: crate::ast::File,
     ) -> Result<LoadedModule, String> {
-        let mut acc = Acc::new(self.base_dir.clone());
+        let mut acc = Acc::new(self.base_dir.clone())
+            .with_source_registry(self.source_ids.clone(), self.source_registry.clone());
         acc.loaded = self.loaded.clone();
         acc.modules = self.modules.clone();
         let (acc, main) = flow::flow_load_main_with_file(acc, path, file)?;
-        self.loaded = acc.loaded;
-        self.modules = acc.modules;
+        self.loaded = acc.loaded.clone();
+        self.modules = acc.modules.clone();
+        (self.source_ids, self.source_registry) = acc.into_source_registry();
         Ok(main)
+    }
+
+    /// Source-aware counterpart of [`Self::load_main_with_file`].  On failure
+    /// it retains dependency source records and an exact import/lexer/parser
+    /// span whenever one exists.
+    pub fn load_main_with_file_diagnostic(
+        &mut self,
+        path: &Path,
+        file: crate::ast::File,
+    ) -> Result<LoadedModule, LoadDiagnosticError> {
+        let mut acc = Acc::new(self.base_dir.clone())
+            .with_source_registry(self.source_ids.clone(), self.source_registry.clone());
+        acc.loaded = self.loaded.clone();
+        acc.modules = self.modules.clone();
+        match flow::flow_load_main_with_file_diagnostic(acc, path, file) {
+            Ok((acc, main)) => {
+                self.loaded = acc.loaded.clone();
+                self.modules = acc.modules.clone();
+                (self.source_ids, self.source_registry) = acc.into_source_registry();
+                Ok(main)
+            }
+            Err(error) => {
+                self.source_ids = error
+                    .sources
+                    .records()
+                    .iter()
+                    .filter_map(|record| {
+                        record
+                            .disk_path
+                            .as_ref()
+                            .map(|path| (path.clone(), record.id))
+                    })
+                    .collect();
+                self.source_registry = error.sources.clone();
+                Err(error)
+            }
+        }
+    }
+
+    pub fn source_registry(&self) -> &SourceRegistry {
+        &self.source_registry
     }
 
     pub fn merge_all(&self) -> Result<File, String> {
@@ -119,6 +245,11 @@ impl ModuleLoader {
 /// Load prelude items. CL-H18: log errors at each step instead of silently
 /// returning an empty vec, so missing/broken prelude files are diagnosable.
 pub fn load_prelude_items() -> Vec<Item> {
+    let mut source_registry = SourceRegistry::default();
+    load_prelude_items_with_registry(&mut source_registry)
+}
+
+fn load_prelude_items_with_registry(source_registry: &mut SourceRegistry) -> Vec<Item> {
     let std_dir = match stdlib_dir() {
         Some(d) => d,
         None => {
@@ -152,7 +283,30 @@ pub fn load_prelude_items() -> Vec<Item> {
             return vec![];
         }
     };
-    match crate::parser::Parser::new(tokens).parse_file() {
+    let prelude_path = prelude_path.canonicalize().unwrap_or(prelude_path);
+    let source_record = crate::span::SourceRecord::new(
+        crate::span::SourceKey::new("stdlib:prelude.mimi").expect("prelude SourceKey is non-empty"),
+        crate::span::SourceTextOrigin::Builtin,
+    )
+    .with_uri(format!(
+        "file://{}",
+        prelude_path.to_string_lossy().replace('\\', "/")
+    ))
+    .with_disk_path(prelude_path);
+    let source_id = match source_registry.register(source_record) {
+        Ok(source_id) => source_id,
+        Err(error) => {
+            eprintln!("[mimi] warning: failed to register prelude source: {error}");
+            return vec![];
+        }
+    };
+    match crate::parser::Parser::new_with_source_registry(
+        tokens,
+        source_id,
+        source_registry.clone(),
+    )
+    .parse_file()
+    {
         Ok(file) => file.items,
         Err(e) => {
             eprintln!("[mimi] warning: failed to parse prelude: {}", e);
@@ -162,7 +316,7 @@ pub fn load_prelude_items() -> Vec<Item> {
 }
 
 pub fn merge_prelude_into(dest: &mut File) {
-    let prelude_items = load_prelude_items();
+    let prelude_items = load_prelude_items_with_registry(&mut dest.sources);
     if prelude_items.is_empty() {
         return;
     }
@@ -201,6 +355,78 @@ fn item_name(item: &Item) -> Option<&str> {
     }
 }
 
+#[cfg(test)]
+mod source_entry_tests {
+    use super::{load_prelude_items_with_registry, parser_for_path, source_context_for_path};
+    use crate::ast::Item;
+    use crate::span::SourceRegistry;
+
+    #[test]
+    fn disk_entry_parser_uses_loader_key_and_routes_parse_errors() {
+        let root = std::env::temp_dir().join(format!("mimi_source_entry_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let source_dir = root.join("src");
+        std::fs::create_dir_all(&source_dir).expect("create source dir");
+        std::fs::write(
+            root.join("mimi.toml"),
+            "[package]\nname = \"source-entry-test\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write manifest");
+        let path = source_dir.join("main.mimi");
+        let source = "func broken(value: i32 -> i32 { value }";
+        std::fs::write(&path, source).expect("write source");
+
+        let context = source_context_for_path(&path).expect("register disk source");
+        let key = context
+            .registry()
+            .key(context.source_id())
+            .expect("source key")
+            .as_str();
+        assert_eq!(key, "workspace:src/main.mimi");
+        assert!(!key.contains(root.to_string_lossy().as_ref()));
+
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let error = parser_for_path(tokens, &path)
+            .expect("disk parser")
+            .parse_file()
+            .expect_err("malformed signature");
+        assert!(error.source_id.is_known());
+        assert_eq!(error.to_diagnostic().span.source_id, error.source_id);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn parsed_prelude_ast_metadata_uses_the_stable_stdlib_source() {
+        let mut sources = SourceRegistry::default();
+        let items = load_prelude_items_with_registry(&mut sources);
+        let identity = items
+            .iter()
+            .find_map(|item| match item {
+                Item::Func(function) if function.name == "identity" => Some(function),
+                _ => None,
+            })
+            .expect("stdlib prelude should contain identity");
+
+        let source_id = identity.meta.span.source_id;
+        assert!(source_id.is_known());
+        assert_eq!(
+            sources.key(source_id).map(|key| key.as_str()),
+            Some("stdlib:prelude.mimi")
+        );
+        assert_eq!(identity.params[0].meta.span.source_id, source_id);
+        assert_eq!(identity.generics[0].meta.span.source_id, source_id);
+        assert_eq!(
+            identity.body[0]
+                .meta()
+                .expect("parsed prelude statement metadata")
+                .span
+                .source_id,
+            source_id
+        );
+    }
+}
+
 // ── Legacy loader for test equivalence ──────────────────────────────────
 
 #[cfg(test)]
@@ -210,7 +436,6 @@ pub(crate) mod legacy {
     use crate::lexer;
     use crate::lockfile;
     use crate::manifest;
-    use crate::parser;
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
 
@@ -289,7 +514,7 @@ pub(crate) mod legacy {
             let tokens = lexer::Lexer::new(&source)
                 .tokenize()
                 .map_err(|e| format!("lexer error in {}: {}", path.display(), e))?;
-            let file = parser::Parser::new(tokens)
+            let file = super::parser_for_path(tokens, path)?
                 .parse_file()
                 .map_err(|e| format!("parse error in {}: {}", path.display(), e))?;
 
@@ -488,6 +713,7 @@ pub(crate) mod legacy {
             }
 
             Ok(File {
+                sources: crate::span::SourceRegistry::default(),
                 imports: all_imports,
                 items: all_items,
                 implicit_single: false,
@@ -510,5 +736,70 @@ pub(crate) mod legacy {
             Item::Protocol(p) => Some(&p.name),
             Item::Session(s) => Some(&s.name),
         }
+    }
+}
+
+#[cfg(test)]
+mod source_registry_tests {
+    use super::ModuleLoader;
+    use std::fs;
+
+    #[test]
+    fn persistent_module_loader_keeps_source_identity_across_cache_hits() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi_module_loader_source_cache_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("test directory");
+        let main_path = dir.join("main.mimi");
+        let lib_path = dir.join("lib.mimi");
+        fs::write(&main_path, "use lib;\nfunc main() -> i32 { lib::value() }")
+            .expect("main source");
+        fs::write(&lib_path, "pub func value() -> i32 { 7 }").expect("lib source");
+
+        let mut loader = ModuleLoader::new(dir.clone());
+        loader.load_main(&main_path).expect("first load");
+        let canonical_main = main_path.canonicalize().expect("canonical main");
+        let canonical_lib = lib_path.canonicalize().expect("canonical lib");
+        let main_id = loader
+            .source_registry()
+            .id_for_disk_path(&canonical_main)
+            .expect("main id");
+        let lib_id = loader
+            .source_registry()
+            .id_for_disk_path(&canonical_lib)
+            .expect("lib id");
+        let main_key = loader
+            .source_registry()
+            .key(main_id)
+            .cloned()
+            .expect("main key");
+        let lib_key = loader
+            .source_registry()
+            .key(lib_id)
+            .cloned()
+            .expect("lib key");
+
+        loader.load_main(&main_path).expect("cached main load");
+        loader
+            .load_main(&lib_path)
+            .expect("cached dependency as main");
+        assert_eq!(
+            loader.source_registry().id_for_disk_path(&canonical_main),
+            Some(main_id)
+        );
+        assert_eq!(
+            loader.source_registry().id_for_disk_path(&canonical_lib),
+            Some(lib_id)
+        );
+        assert_eq!(loader.source_registry().len(), 2);
+        assert_eq!(loader.source_registry().key(main_id), Some(&main_key));
+        assert_eq!(loader.source_registry().key(lib_id), Some(&lib_key));
+        assert_ne!(main_key, lib_key);
+
+        let merged = loader.merge_all().expect("merge cached modules");
+        assert_eq!(merged.sources.len(), 2);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

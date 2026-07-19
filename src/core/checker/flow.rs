@@ -110,10 +110,10 @@ impl<'a> CheckerState<'a> {
 
 /// Extract deduplicated errors and warnings from the checker.
 fn extract_acc(checker: &mut Checker) -> FlowAcc {
-    let mut seen: HashSet<(Option<String>, String)> = HashSet::new();
+    let mut seen: HashSet<super::DiagnosticDedupKey> = HashSet::new();
     let mut deduped: Vec<Diagnostic> = Vec::with_capacity(checker.errors.len());
     for e in std::mem::take(&mut checker.errors) {
-        let key = (e.code.clone(), e.message.clone());
+        let key = super::DiagnosticDedupKey::from(&e);
         if seen.insert(key) {
             deduped.push(e);
         }
@@ -149,7 +149,7 @@ pub(crate) fn flow_check_with_artifacts(
     let state = CheckerState::new(file);
     let state = match run_to_done(state) {
         Ok(s) => s,
-        Err(e) => return Err(vec![Diagnostic::error(e, Span::single(0, 0))]),
+        Err(e) => return Err(vec![Diagnostic::error(e, Span::UNKNOWN)]),
     };
     let acc = state.into_output();
     if acc.errors.is_empty() {
@@ -172,7 +172,7 @@ pub(crate) fn flow_check_strict_with_artifacts(
     let state = CheckerState::new_strict(file);
     let state = match run_to_done(state) {
         Ok(s) => s,
-        Err(e) => return Err(vec![Diagnostic::error(e, Span::single(0, 0))]),
+        Err(e) => return Err(vec![Diagnostic::error(e, Span::UNKNOWN)]),
     };
     let acc = state.into_output();
     if acc.errors.is_empty() {
@@ -347,6 +347,7 @@ mod tests {
     #[test]
     fn test_flow_empty_file() {
         let file = File {
+            sources: crate::span::SourceRegistry::default(),
             imports: Vec::new(),
             items: Vec::new(),
             implicit_single: false,

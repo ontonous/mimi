@@ -573,7 +573,7 @@ impl JniBindGenerator {
     }
 
     fn mimi_type_to_c_field(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => "int32_t".to_string(),
                 "i64" => "int64_t".to_string(),
@@ -592,7 +592,7 @@ impl JniBindGenerator {
     }
 
     fn java_field_type(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => "int".to_string(),
                 "i64" => "long".to_string(),
@@ -605,7 +605,7 @@ impl JniBindGenerator {
     }
 
     fn jni_field_signature(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => "I".to_string(),
                 "i64" => "J".to_string(),
@@ -618,7 +618,7 @@ impl JniBindGenerator {
     }
 
     fn jni_field_access(&self, ty: &Type) -> (String, String) {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => ("Int".to_string(), "int32_t".to_string()),
                 "i64" => ("Long".to_string(), "int64_t".to_string()),
@@ -665,7 +665,7 @@ impl JniBindGenerator {
     }
 
     fn jni_type_signature(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => "I".to_string(),
                 "i64" => "J".to_string(),
@@ -679,7 +679,7 @@ impl JniBindGenerator {
     }
 
     fn callback_java_arg_type(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) if name == "i32" => "int".to_string(),
             Type::Name(name, _) if name == "i64" => "long".to_string(),
             Type::Name(name, _) if name == "f64" => "double".to_string(),
@@ -689,7 +689,7 @@ impl JniBindGenerator {
     }
 
     fn callback_java_ret_type(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) if name == "i32" => "int".to_string(),
             Type::Name(name, _) if name == "i64" => "long".to_string(),
             Type::Name(name, _) if name == "f64" => "double".to_string(),
@@ -700,7 +700,7 @@ impl JniBindGenerator {
     }
 
     fn callback_c_type(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) if name == "f64" => "double".to_string(),
             Type::Name(name, _) if name == "unit" => "void".to_string(),
             _ => "int64_t".to_string(),
@@ -708,7 +708,7 @@ impl JniBindGenerator {
     }
 
     fn callback_default_ret(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) if name == "f64" => "0.0".to_string(),
             Type::Name(name, _) if name == "unit" => "".to_string(),
             _ => "0".to_string(),
@@ -716,7 +716,7 @@ impl JniBindGenerator {
     }
 
     fn callback_jni_arg_type(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) if name == "i32" => "jint".to_string(),
             Type::Name(name, _) if name == "i64" => "jlong".to_string(),
             Type::Name(name, _) if name == "f64" => "jdouble".to_string(),
@@ -726,7 +726,7 @@ impl JniBindGenerator {
     }
 
     fn callback_jni_ret_type(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) if name == "i32" => "jint".to_string(),
             Type::Name(name, _) if name == "i64" => "jlong".to_string(),
             Type::Name(name, _) if name == "f64" => "jdouble".to_string(),
@@ -737,7 +737,7 @@ impl JniBindGenerator {
     }
 
     fn callback_jni_call(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) if name == "i32" => "Int".to_string(),
             Type::Name(name, _) if name == "i64" => "Long".to_string(),
             Type::Name(name, _) if name == "f64" => "Double".to_string(),

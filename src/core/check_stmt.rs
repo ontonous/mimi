@@ -33,7 +33,7 @@ impl<'a> Checker<'a> {
                 );
                 break;
             }
-            if let Stmt::Return(_) = stmt {
+            if let Stmt::Return(_) = stmt.unlocated() {
                 seen_return = true;
             }
             // NLL: Release borrows whose last use was in a previous statement
@@ -43,15 +43,17 @@ impl<'a> Checker<'a> {
             // CO-H2 (audit): update the fallback error span to the actual
             // statement position so type errors reference the offending
             // expression instead of the enclosing function declaration.
-            // Only `Let` carries a positional source marker; for other Stmts
-            // we keep the function-level fallback and rely on the more
-            // specific span-aware emitters (e.g. check_expr) for finer
-            // diagnostic locations.
-            if let Stmt::Let { pos, .. } = stmt {
-                self.set_pos(pos.0, pos.1);
+            // Only `Let` carries a positional source marker via its `Located`
+            // wrapper; for other Stmts we keep the function-level fallback and
+            // rely on the more specific span-aware emitters (e.g. check_expr)
+            // for finer diagnostic locations.
+            if let Stmt::Let { .. } = stmt.unlocated() {
+                if let Some(meta) = stmt.meta() {
+                    self.set_pos(meta.span.start_line, meta.span.start_col);
+                }
             }
             if i + 1 == block.len() {
-                if let Stmt::Expr(expr) = stmt {
+                if let Stmt::Expr(expr) = stmt.unlocated() {
                     last_expr_type = Some(self.infer_expr(expr, scopes));
                     continue;
                 }
@@ -67,7 +69,7 @@ impl<'a> Checker<'a> {
 
     /// Check that a statement doesn't capture local_shared variables from outer scope
     fn check_stmt_parasteps_safe(&mut self, stmt: &Stmt, scopes: &mut Vec<HashMap<String, Type>>) {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Expr(e) | Stmt::Return(Some(e)) => {
                 self.check_expr_parasteps_safe(e, scopes);
             }
@@ -163,6 +165,7 @@ impl<'a> Checker<'a> {
                     self.check_stmt_parasteps_safe(s, scopes);
                 }
             }
+            Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
         }
     }
 
@@ -171,7 +174,7 @@ impl<'a> Checker<'a> {
 
     /// Root identifier of an assign place (`x`, `x.f`, `x[i].f`, ...).
     fn place_root_ident(expr: &Expr) -> Option<&str> {
-        match expr {
+        match expr.unlocated() {
             Expr::Ident(n) => Some(n.as_str()),
             Expr::Field(obj, _) | Expr::TupleIndex(obj, _) | Expr::Index(obj, _) => {
                 Self::place_root_ident(obj)
@@ -187,15 +190,17 @@ impl<'a> Checker<'a> {
         scopes: &[HashMap<String, Type>],
         writes: &mut Vec<String>,
     ) {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Assign { target, .. } => {
                 self.collect_shared_writes_in_expr_target(target, scopes, writes);
             }
-            Stmt::Expr(Expr::Call(callee, args)) => {
-                if let Expr::Ident(name) = callee.as_ref() {
-                    if name == "push" && !args.is_empty() {
-                        if let Expr::Ident(list_name) = &args[0] {
-                            self.collect_shared_write(list_name, scopes, writes);
+            Stmt::Expr(expr) => {
+                if let Expr::Call(callee, args) = expr.unlocated() {
+                    if let Expr::Ident(name) = callee.unlocated() {
+                        if name == "push" && !args.is_empty() {
+                            if let Expr::Ident(list_name) = args[0].unlocated() {
+                                self.collect_shared_write(list_name, scopes, writes);
+                            }
                         }
                     }
                 }
@@ -271,7 +276,6 @@ impl<'a> Checker<'a> {
             | Stmt::Break(None)
             | Stmt::Return(None)
             | Stmt::Let { init: None, .. }
-            | Stmt::Expr(..)
             | Stmt::Desc(..)
             | Stmt::Rule(..)
             | Stmt::MmsBlock { .. }
@@ -290,6 +294,7 @@ impl<'a> Checker<'a> {
                     self.collect_shared_writes_in_stmt(s, scopes, writes);
                 }
             }
+            Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
         }
     }
 
@@ -300,7 +305,7 @@ impl<'a> Checker<'a> {
         scopes: &[HashMap<String, Type>],
         writes: &mut Vec<String>,
     ) {
-        match expr {
+        match expr.unlocated() {
             Expr::Ident(name) => {
                 self.collect_shared_write(name, scopes, writes);
             }
@@ -401,6 +406,7 @@ impl<'a> Checker<'a> {
                 self.collect_shared_writes_in_expr(inner, scopes, writes);
             }
             Expr::Literal(_) | Expr::TypeInfo(_) => {}
+            Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
         }
     }
 
@@ -411,7 +417,7 @@ impl<'a> Checker<'a> {
         scopes: &[HashMap<String, Type>],
         writes: &mut Vec<String>,
     ) {
-        match expr {
+        match expr.unlocated() {
             Expr::Ident(name) => {
                 self.collect_shared_write(name, scopes, writes);
             }
@@ -437,7 +443,7 @@ impl<'a> Checker<'a> {
     ) {
         for scope in scopes.iter().rev() {
             if let Some(ty) = scope.get(name) {
-                if matches!(ty, Type::Shared(_)) {
+                if matches!(ty.unlocated(), Type::Shared(_)) {
                     writes.push(name.to_string());
                 }
                 break;
@@ -447,12 +453,12 @@ impl<'a> Checker<'a> {
 
     /// Check that an expression doesn't reference local_shared variables
     fn check_expr_parasteps_safe(&mut self, expr: &Expr, scopes: &mut Vec<HashMap<String, Type>>) {
-        match expr {
+        match expr.unlocated() {
             Expr::Ident(name) => {
                 // Check if this variable is local_shared from outer scope
                 for scope in scopes.iter().rev() {
                     if let Some(ty) = scope.get(name) {
-                        if matches!(ty, Type::LocalShared(_)) {
+                        if matches!(ty.unlocated(), Type::LocalShared(_)) {
                             self.emit_code(crate::diagnostic::codes::E0305, format!("cannot capture 'local_shared' variable '{}' in parallel block (use 'shared' instead)", name));
                         }
                         break;
@@ -589,6 +595,7 @@ impl<'a> Checker<'a> {
                 self.check_expr_parasteps_safe(inner, scopes);
             }
             Expr::Literal(_) | Expr::TypeInfo(_) => {}
+            Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
         }
     }
 
@@ -598,32 +605,39 @@ impl<'a> Checker<'a> {
         ret: &Type,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) {
-        // Don't reset position to (0,0) here — that causes all errors from
-        // non-Let statements to point to line 0, confusing users. Instead,
-        // position stays at the function-level position set by check_item,
-        // which at least points errors to the correct function boundary.
-        // Precise positions for each statement type require AST position
-        // fields (future work).
-        match stmt {
+        let previous_span = self.replace_span(stmt.meta().map(|meta| meta.span));
+        self.check_stmt_inner(stmt, ret, scopes);
+        self.set_span(previous_span);
+    }
+
+    fn check_stmt_inner(
+        &mut self,
+        stmt: &Stmt,
+        ret: &Type,
+        scopes: &mut Vec<HashMap<String, Type>>,
+    ) {
+        match stmt.unlocated() {
             Stmt::Let {
                 pat,
                 init,
                 mut_,
                 ref_,
                 ty,
-                pos,
             } => {
-                // P1-8: use the statement's recorded position for error spans.
-                self.set_pos(pos.0, pos.1);
+                // Use the `Located` wrapper's span to anchor diagnostics;
+                // the declaration's SourceId is preserved through the meta.
+                if let Some(meta) = stmt.meta() {
+                    self.set_pos(meta.span.start_line, meta.span.start_col);
+                }
                 // Shadowing detection: only check current scope (allow nested scope shadowing)
-                if let Pattern::Variable(name) = pat {
+                if let PatternKind::Variable(name) = &pat.kind {
                     if let Some(current_scope) = self.var_scopes.last() {
                         if current_scope.contains_key(name) {
                             self.errors.push(
                                 Diagnostic::error_code(
                                     crate::diagnostic::codes::E0403,
                                     format!("variable '{}' already defined in this scope", name),
-                                    Span::single(self.current_line, self.current_col),
+                                    self.diagnostic_span(),
                                 )
                                 .with_help("rename the variable or use assignment to update"),
                             );
@@ -633,13 +647,16 @@ impl<'a> Checker<'a> {
                         s.insert(name.clone(), 0);
                     }
                 }
+                if let Some(declared_ty) = ty {
+                    self.check_type_well_formed(declared_ty, "let binding");
+                }
 
                 let init_ty = init
                     .as_ref()
                     .map(|e| {
                         // C3: use check_expr when declared type is known
                         if let Some(d) = ty.as_ref().map(|t| self.resolve_type(t)) {
-                            if !matches!(&d, Type::Infer) {
+                            if !matches!(d.unlocated(), Type::Infer) {
                                 return self.check_expr(&d, e, scopes);
                             }
                         }
@@ -649,7 +666,7 @@ impl<'a> Checker<'a> {
                 let declared = ty.as_ref().map(|t| self.resolve_type(t));
                 let final_ty = match declared {
                     Some(d) => {
-                        if matches!(&d, Type::Infer) {
+                        if matches!(d.unlocated(), Type::Infer) {
                             // _ type: infer from init expression
                             init_ty.clone()
                         } else {
@@ -665,7 +682,7 @@ impl<'a> Checker<'a> {
                                             fmt_type(&d),
                                             fmt_type(&init_ty)
                                         ),
-                                        Span::single(self.current_line, self.current_col),
+                                        self.diagnostic_span(),
                                     )
                                     .with_help(format!(
                                         "the expression has type '{}', not '{}'",
@@ -702,13 +719,18 @@ impl<'a> Checker<'a> {
                 // is used as the init expression in a let-binding, mark the source
                 // as consumed (move, not copy). Without this, `let y = x` on a cap
                 // creates a copy and both variables are independently usable.
-                if matches!(&final_ty, Type::Cap(_)) {
-                    if let Some(Expr::Ident(src_name)) = init {
-                        self.consume_capability(src_name, crate::core::ResourceActionKind::Move);
+                if matches!(final_ty.unlocated(), Type::Cap(_)) {
+                    if let Some(init) = init {
+                        if let Expr::Ident(src_name) = init.unlocated() {
+                            self.consume_capability(
+                                src_name,
+                                crate::core::ResourceActionKind::Move,
+                            );
+                        }
                     }
                 }
                 // Track mutability
-                if let Pattern::Variable(name) = pat {
+                if let PatternKind::Variable(name) = &pat.kind {
                     if let Some(s) = self.mut_vars.last_mut() {
                         s.insert(name.clone(), *mut_);
                     }
@@ -718,7 +740,7 @@ impl<'a> Checker<'a> {
                 // If the init expression is a Flow::transition() call and
                 // the transition has >1 to_states, the variable must be
                 // exhaustively matched (E0420 on direct field access).
-                if let Pattern::Variable(name) = pat {
+                if let PatternKind::Variable(name) = &pat.kind {
                     if let Some(init_expr) = init {
                         if let Some(targets) = self.check_multi_target_transition(init_expr) {
                             if targets.len() > 1 {
@@ -726,7 +748,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                         // T-H16: aliasing a multi-target var keeps the restriction.
-                        if let Expr::Ident(src) = init_expr {
+                        if let Expr::Ident(src) = init_expr.unlocated() {
                             if let Some(targets) = self.multi_target_vars.get(src).cloned() {
                                 self.multi_target_vars.insert(name.clone(), targets);
                             }
@@ -734,20 +756,23 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // v0.29.19: seed session residual for SessionChan<S> bindings.
-                if let (Pattern::Variable(name), Type::Name(n, args)) = (pat, &final_ty) {
-                    if (n == "SessionChan" || n == "session_chan") && !args.is_empty() {
-                        if let Type::Name(sname, _) = &args[0] {
-                            if let Some(body) = self.session_types.get(sname).cloned() {
-                                let resolved = crate::session::resolve(&body, &self.session_types)
-                                    .unwrap_or(body);
-                                self.session_residuals.insert(name.clone(), resolved);
+                if let PatternKind::Variable(name) = &pat.kind {
+                    if let Type::Name(n, args) = final_ty.unlocated() {
+                        if (n == "SessionChan" || n == "session_chan") && !args.is_empty() {
+                            if let Type::Name(sname, _) = args[0].unlocated() {
+                                if let Some(body) = self.session_types.get(sname).cloned() {
+                                    let resolved =
+                                        crate::session::resolve(&body, &self.session_types)
+                                            .unwrap_or(body);
+                                    self.session_residuals.insert(name.clone(), resolved);
+                                }
                             }
                         }
                     }
                 }
                 // Track cap variables for linear type checking and introduce effects
-                if let Type::Cap(cap_name) = &final_ty {
-                    if let Pattern::Variable(name) = pat {
+                if let Type::Cap(cap_name) = final_ty.unlocated() {
+                    if let PatternKind::Variable(name) = &pat.kind {
                         if let Some(s) = self.cap_vars.last_mut() {
                             s.insert(
                                 name.clone(),
@@ -796,7 +821,7 @@ impl<'a> Checker<'a> {
                             Diagnostic::error_code(
                                 crate::diagnostic::codes::E0207,
                                 format!("return type mismatch: expected {}, found {}", fmt_type(ret), fmt_type(&t)),
-                                Span::single(self.current_line, self.current_col),
+                                self.diagnostic_span(),
                             ).with_help("check the function's declared return type and the type of the returned expression")
                         );
                     }
@@ -822,7 +847,7 @@ impl<'a> Checker<'a> {
                                     types_str.join(", "),
                                     fmt_type(&t)
                                 ),
-                                Span::single(self.current_line, self.current_col),
+                                self.diagnostic_span(),
                             )
                             .with_help(
                                 "the returned value must be one of the declared target states",
@@ -830,7 +855,7 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                let returned = if let Expr::Ident(name) = e {
+                let returned = if let Expr::Ident(name) = e.unlocated() {
                     if self.cap_info(name).is_some() {
                         self.consume_capability(name, crate::core::ResourceActionKind::Return);
                         Some(name.as_str())
@@ -955,7 +980,7 @@ impl<'a> Checker<'a> {
                 body,
             } => {
                 let it = self.infer_expr(iterable, scopes);
-                let elem_ty = match &it {
+                let elem_ty = match it.unlocated() {
                     Type::Name(n, args) if n == "List" && args.len() == 1 => args[0].clone(),
                     Type::Name(n, _) if n == "Range" => Type::Name("i32".into(), vec![]),
                     Type::Name(n, _) if n == "string" => Type::Name("string".into(), vec![]),
@@ -1038,7 +1063,7 @@ impl<'a> Checker<'a> {
                     SharedKind::LocalShared => Type::LocalShared(Box::new(init_ty.clone())),
                     SharedKind::Weak => {
                         // Expect init to be a Shared value
-                        match &init_ty {
+                        match init_ty.unlocated() {
                             Type::Shared(inner) => Type::Weak(inner.clone()),
                             _ => {
                                 self.emit_code(
@@ -1052,7 +1077,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    SharedKind::WeakLocal => match &init_ty {
+                    SharedKind::WeakLocal => match init_ty.unlocated() {
                         Type::LocalShared(inner) => Type::WeakLocal(inner.clone()),
                         _ => {
                             self.emit_code(
@@ -1118,7 +1143,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Assign { target, value } => {
                 let mut value_ty = self.infer_expr(value, scopes);
-                match target {
+                match target.unlocated() {
                     Expr::Ident(name) => {
                         // v0.29.23: view params are read-only.
                         if self.view_params.contains(name) {
@@ -1142,10 +1167,7 @@ impl<'a> Checker<'a> {
                                                 "cannot assign to '{}' while it is borrowed",
                                                 name
                                             ),
-                                            crate::span::Span::single(
-                                                self.current_line,
-                                                self.current_col,
-                                            ),
+                                            self.diagnostic_span(),
                                         )
                                         .with_note("borrow occurs here", *span),
                                     );
@@ -1159,7 +1181,7 @@ impl<'a> Checker<'a> {
                         // This is enforced via a heuristic: if the RHS is a bare literal
                         // or an identifier not referencing this param, reject.
                         if self.mutate_params.contains(name) {
-                            let is_wholesale_replace = match value {
+                            let is_wholesale_replace = match value.unlocated() {
                                 // Plain literal assignment → realloc
                                 Expr::Literal(_) => true,
                                 // List literal → realloc (allocates new backing store)
@@ -1175,9 +1197,9 @@ impl<'a> Checker<'a> {
                                 // T-H2: bare function calls allocate/return a fresh value
                                 // (e.g. `xs = clone_list()`); only method calls on the
                                 // param itself (`xs = xs.sorted()`) are read-modify-write.
-                                Expr::Call(callee, _) => match callee.as_ref() {
+                                Expr::Call(callee, _) => match callee.unlocated() {
                                     Expr::Field(obj, _) => !matches!(
-                                        obj.as_ref(),
+                                        obj.unlocated(),
                                         Expr::Ident(n) if n == name
                                     ),
                                     _ => true,
@@ -1209,7 +1231,7 @@ impl<'a> Checker<'a> {
                                         "cannot assign to immutable variable '{}' (use 'let mut')",
                                         name
                                     ),
-                                    Span::single(self.current_line, self.current_col),
+                                    self.diagnostic_span(),
                                 )
                                 .with_help("use 'let mut' to make the variable mutable"),
                             );
@@ -1229,7 +1251,7 @@ impl<'a> Checker<'a> {
                                         name,
                                         fmt_type(&target_ty)
                                     ),
-                                    Span::single(self.current_line, self.current_col),
+                                    self.diagnostic_span(),
                                 )
                                 .with_help(format!(
                                     "variable '{}' has type '{}', not '{}'",
@@ -1241,11 +1263,16 @@ impl<'a> Checker<'a> {
                         }
                         // E0306: Arena escape — assigning arena-scoped ref to outer-scope variable
                         if self.arena_depth > 0 {
-                            if let Expr::Ident(value_name) = value {
+                            if let Expr::Ident(value_name) = value.unlocated() {
                                 let value_in_arena_scope = scopes
                                     .last()
                                     .and_then(|s| s.get(value_name))
-                                    .map(|ty| matches!(ty, Type::Ref(_, _) | Type::RefMut(_, _)))
+                                    .map(|ty| {
+                                        matches!(
+                                            ty.unlocated(),
+                                            Type::Ref(_, _) | Type::RefMut(_, _)
+                                        )
+                                    })
                                     .unwrap_or(false);
                                 if value_in_arena_scope {
                                     let target_in_outer = scopes[..scopes.len().saturating_sub(1)]
@@ -1265,7 +1292,7 @@ impl<'a> Checker<'a> {
                     Expr::Unary(UnOp::Deref, inner) => {
                         // *r = value: check that inner is &mut T, shared T, or local_shared T
                         let inner_ty = self.infer_expr(inner, scopes);
-                        match &inner_ty {
+                        match inner_ty.unlocated() {
                             Type::RefMut(_, inner_inner) => {
                                 // CK-H1: unify (not same_type) for TypeVar resolution.
                                 if self.unification.unify(&value_ty, inner_inner).is_err() {
@@ -1320,7 +1347,7 @@ impl<'a> Checker<'a> {
                         // Resolve obj_ty to handle TypeVar case
                         let resolved_obj_ty = self.unification.resolve(&obj_ty);
                         // Validate field exists and check type compatibility (Bug 8 fix)
-                        if let Type::Name(name, _) = &resolved_obj_ty {
+                        if let Type::Name(name, _) = resolved_obj_ty.unlocated() {
                             if let Some(type_def) = self.types.get(name) {
                                 match &type_def.kind {
                                     TypeDefKind::Record(fields) => {
@@ -1381,11 +1408,11 @@ impl<'a> Checker<'a> {
                         // xs[i] = val: check that xs is a mutable list and val matches element type
                         let obj_ty = self.infer_expr(obj, scopes);
                         self.infer_expr(idx, scopes);
-                        let list_elem_ty = match &obj_ty {
+                        let list_elem_ty = match obj_ty.unlocated() {
                             Type::Name(n, args) if n == "List" && args.len() == 1 => {
                                 Some(args[0].clone())
                             }
-                            Type::RefMut(_, inner) => match inner.as_ref() {
+                            Type::RefMut(_, inner) => match inner.unlocated() {
                                 Type::Name(n, args) if n == "List" && args.len() == 1 => {
                                     Some(args[0].clone())
                                 }
@@ -1414,7 +1441,7 @@ impl<'a> Checker<'a> {
                                             fmt_type(&value_ty),
                                             fmt_type(&elem_ty)
                                         ),
-                                        Span::single(self.current_line, self.current_col),
+                                        self.diagnostic_span(),
                                     )
                                     .with_help(format!(
                                         "the list contains elements of type '{}', not '{}'",
@@ -1423,7 +1450,7 @@ impl<'a> Checker<'a> {
                                     )),
                                 );
                             }
-                        } else if !matches!(obj_ty, Type::Ref(_, _)) {
+                        } else if !matches!(obj_ty.unlocated(), Type::Ref(_, _)) {
                             self.emit_code(
                                 crate::diagnostic::codes::E0218,
                                 format!("cannot index-assign to {}", fmt_type(&obj_ty)),
@@ -1440,7 +1467,7 @@ impl<'a> Checker<'a> {
                 // Evaluate the expression to ensure it's valid
                 self.infer_expr(expr, scopes);
                 // v0.29.23: cannot drop view/mutate borrowed params.
-                if let Expr::Ident(name) = expr {
+                if let Expr::Ident(name) = expr.unlocated() {
                     if self.view_params.contains(name) || self.mutate_params.contains(name) {
                         self.emit_code(
                             crate::diagnostic::codes::E0415,
@@ -1452,13 +1479,13 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // Mark the capability as consumed
-                if let Expr::Ident(name) = expr {
+                if let Expr::Ident(name) = expr.unlocated() {
                     self.consume_capability(name, crate::core::ResourceActionKind::Drop);
                 }
             }
             Stmt::Requires(expr, _) => {
                 let ty = self.infer_expr(expr, scopes);
-                if !matches!(&ty, Type::Name(n, _) if n == "bool") {
+                if !matches!(ty.unlocated(), Type::Name(n, _) if n == "bool") {
                     self.emit_code(
                         crate::diagnostic::codes::E0212,
                         format!("requires condition must be bool, found {}", fmt_type(&ty)),
@@ -1467,7 +1494,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Invariant(expr, _) => {
                 let ty = self.infer_expr(expr, scopes);
-                if !matches!(&ty, Type::Name(n, _) if n == "bool") {
+                if !matches!(ty.unlocated(), Type::Name(n, _) if n == "bool") {
                     self.emit_code(
                         crate::diagnostic::codes::E0212,
                         format!("invariant condition must be bool, found {}", fmt_type(&ty)),
@@ -1486,7 +1513,7 @@ impl<'a> Checker<'a> {
                 scopes.push(ensure_scope);
                 let ty = self.infer_expr(expr, scopes);
                 scopes.pop();
-                if !matches!(&ty, Type::Name(n, _) if n == "bool") {
+                if !matches!(ty.unlocated(), Type::Name(n, _) if n == "bool") {
                     self.emit_code(
                         crate::diagnostic::codes::E0212,
                         format!("ensures condition must be bool, found {}", fmt_type(&ty)),
@@ -1496,7 +1523,7 @@ impl<'a> Checker<'a> {
             Stmt::Math(exprs) => {
                 for expr in exprs {
                     let ty = self.infer_expr(expr, scopes);
-                    if !matches!(&ty, Type::Name(n, _) if n == "bool") {
+                    if !matches!(ty.unlocated(), Type::Name(n, _) if n == "bool") {
                         self.emit_code(
                             crate::diagnostic::codes::E0212,
                             format!("math constraint must be bool, found {}", fmt_type(&ty)),
@@ -1535,9 +1562,12 @@ impl<'a> Checker<'a> {
                 self.cap_vars = vec![HashMap::new()];
                 let nested_owner = outer_owner
                     .as_ref()
-                    .map(|owner| crate::core::NodeId(format!("{}::nested::{}", owner.0, func.name)))
+                    .map(|owner| crate::core::resolved::nested_function_owner(owner, func))
                     .unwrap_or_else(|| {
-                        crate::core::NodeId(format!("function:nested::{}", func.name))
+                        crate::core::resolved::nested_function_owner(
+                            &crate::core::NodeId("compilation:root".to_string()),
+                            func,
+                        )
                     });
                 let ownership_params: Vec<(String, Type)> = func
                     .params
@@ -1618,7 +1648,7 @@ impl<'a> Checker<'a> {
                     }
                     // CK-C4: require a compile-time integer literal so codegen
                     // can materialize a constant timeout (no runtime expression).
-                    if !matches!(timeout_expr, Expr::Literal(Lit::Int(_))) {
+                    if !matches!(timeout_expr.unlocated(), Expr::Literal(Lit::Int(_))) {
                         self.emit_code(
                             crate::diagnostic::codes::E0209,
                             "pinned timeout must be a compile-time integer literal".to_string(),
@@ -1634,6 +1664,7 @@ impl<'a> Checker<'a> {
                 self.check_block(body, ret, &mut inner_scopes);
                 self.in_pinned_depth = self.in_pinned_depth.saturating_sub(1);
             }
+            Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
         }
     }
 
@@ -1643,9 +1674,9 @@ impl<'a> Checker<'a> {
     /// Only counts user-declared targets (excludes Fault from matrix expansion).
     fn check_multi_target_transition(&self, expr: &Expr) -> Option<Vec<Type>> {
         // C::go(s) is parsed as Expr::Call(Expr::Field(Expr::Ident("C"), "go"), [s])
-        if let Expr::Call(callee, _) = expr {
-            if let Expr::Field(obj, method) = callee.as_ref() {
-                if let Expr::Ident(flow_name) = obj.as_ref() {
+        if let Expr::Call(callee, _) = expr.unlocated() {
+            if let Expr::Field(obj, method) = callee.unlocated() {
+                if let Expr::Ident(flow_name) = obj.unlocated() {
                     // Look up all transitions for this flow+method
                     let mut targets: Vec<String> = Vec::new();
                     for item in &self.file.items {

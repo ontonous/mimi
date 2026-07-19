@@ -30,7 +30,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let inner_type_name = match inner {
             Expr::Ident(name) => self.var_type_names.get(name).cloned(),
             Expr::Call(callee, _) => {
-                if let Expr::Ident(fname) = callee.as_ref() {
+                if let Expr::Ident(fname) = callee.unlocated() {
                     self.func_defs
                         .get(fname)
                         .and_then(|f| f.ret.as_ref())

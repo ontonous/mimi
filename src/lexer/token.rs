@@ -477,6 +477,11 @@ pub struct Token {
     pub kind: TokenKind,
     pub line: usize,
     pub col: usize,
+    /// Exclusive source end. Keeping this on the token avoids reconstructing
+    /// widths from decoded literal values (which is wrong for escapes and
+    /// multi-line strings).
+    pub end_line: usize,
+    pub end_col: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

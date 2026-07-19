@@ -231,11 +231,13 @@ fn emit_py_bindings_with_mimi_lib() {
             Item::Func(f) => {
                 if f.extern_abi.is_some() {
                     let extern_func = crate::ast::ExternFunc {
+                        meta: f.meta,
                         name: f.name.clone(),
                         params: f
                             .params
                             .iter()
                             .map(|p| crate::ast::ExternParam {
+                                meta: p.meta,
                                 name: p.name.clone(),
                                 ty: p.ty.clone(),
                                 cap_mode: None,

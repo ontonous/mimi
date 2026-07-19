@@ -52,13 +52,34 @@ impl Parser {
     /// Get the current token's span.
     pub(crate) fn current_span(&self) -> Span {
         let tok = self.peek();
-        Span::single(tok.line, tok.col)
+        self.single_span(tok.line, tok.col)
+    }
+
+    pub(crate) fn single_span(&self, line: usize, col: usize) -> Span {
+        Span::single(line, col).with_source(self.source_id)
     }
 
     /// Get a span from start token to current position.
     pub(crate) fn span_from(&self, start_line: usize, start_col: usize) -> Span {
         let tok = self.peek();
-        Span::new(start_line, start_col, tok.line, tok.col)
+        Span::new(start_line, start_col, tok.line, tok.col).with_source(self.source_id)
+    }
+
+    /// Exact half-open span for tokens consumed since `start_pos`.
+    ///
+    /// Token end positions come from the lexer, so this remains correct for
+    /// escaped and multi-line literals instead of guessing from decoded text.
+    pub(crate) fn consumed_span(&self, start_pos: usize) -> Span {
+        let Some(first) = self.tokens.get(start_pos) else {
+            return Span::UNKNOWN.with_source(self.source_id);
+        };
+        let last_index = self.pos.saturating_sub(1).max(start_pos);
+        let last = self.tokens.get(last_index).unwrap_or(first);
+        Span::new(first.line, first.col, last.end_line, last.end_col).with_source(self.source_id)
+    }
+
+    pub(crate) fn consumed_meta(&self, start_pos: usize, origin: AstOrigin) -> AstNodeMeta {
+        AstNodeMeta::new(self.consumed_span(start_pos), origin)
     }
 
     pub(crate) fn is_sketch(&self) -> bool {
@@ -71,6 +92,8 @@ impl Parser {
                 kind: TokenKind::Eof,
                 line: 0,
                 col: 0,
+                end_line: 0,
+                end_col: 0,
             };
             &EOF
         } else {
@@ -113,11 +136,17 @@ impl Parser {
         if self.at(&TokenKind::Gt) {
             Ok(self.advance())
         } else if self.at(&TokenKind::Shr) {
+            let original_end_line = self.tokens[self.pos].end_line;
+            let original_end_col = self.tokens[self.pos].end_col;
             self.tokens[self.pos].kind = TokenKind::Gt;
+            self.tokens[self.pos].end_line = self.tokens[self.pos].line;
+            self.tokens[self.pos].end_col = self.tokens[self.pos].col + 1;
             let extra = Token {
                 kind: TokenKind::Gt,
                 line: self.tokens[self.pos].line,
-                col: self.tokens[self.pos].col,
+                col: self.tokens[self.pos].col + 1,
+                end_line: original_end_line,
+                end_col: original_end_col,
             };
             self.tokens.insert(self.pos + 1, extra);
             Ok(self.advance())

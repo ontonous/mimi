@@ -14,7 +14,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[Expr],
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        match callee {
+        match callee.unlocated() {
             Expr::Ident(name) => {
                 match name.as_str() {
                     "type_name" | "type_fields" | "type_variants" | "keys" | "values" | "map"
@@ -49,7 +49,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.compile_call(name, args, vars)
             }
             Expr::Field(obj, method_name) => {
-                if let Expr::Ident(type_name) = obj.as_ref() {
+                if let Expr::Ident(type_name) = obj.unlocated() {
                     let is_builtin_enum = type_name == "Result" || type_name == "Option";
                     let is_custom_enum = self
                         .type_defs
@@ -242,7 +242,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Extract the LLVM return type of a closure-typed variable so that indirect
     /// calls use the correct ABI (especially for tuple/struct/float returns).
     fn closure_return_llvm_type(&self, ty: &Type) -> Option<BasicTypeEnum<'ctx>> {
-        match ty {
+        match ty.unlocated() {
             Type::Func(_, ret) | Type::ExternFunc(_, ret) => self.llvm_type_for(ret),
             Type::Ref(_, inner) | Type::RefMut(_, inner) => self.closure_return_llvm_type(inner),
             _ => None,
@@ -306,7 +306,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 // Handle self.field = push(self.field, val) — get GEP pointer to field slot
                 Expr::Field(obj_expr, field_name) => {
-                    if let Expr::Ident(obj_name) = obj_expr.as_ref() {
+                    if let Expr::Ident(obj_name) = obj_expr.unlocated() {
                         if obj_name == "self" {
                             if let Ok(field_gep) =
                                 self.compile_field_gep(obj_expr, field_name, vars)
@@ -6416,7 +6416,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     if let BasicValueEnum::PointerValue(pv) = compiled_args[i] {
                         // Check if the arg is a string literal or string-producing expr
-                        if matches!(arg_expr, Expr::Literal(Lit::String(_))) {
+                        if matches!(arg_expr.unlocated(), Expr::Literal(Lit::String(_))) {
                             compiled_args[i] = self.wrap_raw_string_ptr(pv)?;
                         }
                     }
@@ -6458,7 +6458,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             if i >= param_types.len() {
                 break;
             }
-            let (cb_params, cb_ret) = match &param_types[i] {
+            let (cb_params, cb_ret) = match param_types[i].unlocated() {
                 crate::ast::Type::ExternFunc(p, r) => (p.as_slice(), r.as_ref()),
                 crate::ast::Type::Func(p, r) => (p.as_slice(), r.as_ref()),
                 _ => continue,
@@ -6504,7 +6504,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             if i >= ef.params.len() {
                 break;
             }
-            if let crate::ast::Type::Name(n, _) = &ef.params[i].ty {
+            if let crate::ast::Type::Name(n, _) = ef.params[i].ty.unlocated() {
                 if self.repr_c_record_names.contains(n.as_str()) {
                     if let BasicValueEnum::PointerValue(pv) = arg {
                         if let Some(&BasicTypeEnum::StructType(sty)) =
@@ -6536,7 +6536,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         for (i, arg) in compiled_args.iter_mut().enumerate() {
             if i < fdef.params.len() {
-                if let Type::Name(tn, _) = &fdef.params[i].ty {
+                if let Type::Name(tn, _) = fdef.params[i].ty.unlocated() {
                     if tn == "List" {
                         if let Some(param_llvm) = self.llvm_type_for(&fdef.params[i].ty) {
                             if let BasicValueEnum::PointerValue(pv) = arg {
@@ -6567,7 +6567,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         for (i, arg) in compiled_args.iter_mut().enumerate() {
             if i < fdef.params.len() {
-                if let Type::Name(tn, _) = &fdef.params[i].ty {
+                if let Type::Name(tn, _) = fdef.params[i].ty.unlocated() {
                     if tn != "List" && self.type_defs.contains_key(tn) {
                         if let BasicValueEnum::PointerValue(pv) = arg {
                             if let Some(param_llvm) = self.llvm_type_for(&fdef.params[i].ty) {
@@ -6600,8 +6600,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .iter()
             .enumerate()
             .map(|(i, arg_expr)| {
-                if i < fdef.params.len() && matches!(&fdef.params[i].ty, Type::Func(_, _)) {
-                    if let Expr::Ident(fn_name) = arg_expr {
+                if i < fdef.params.len() && matches!(fdef.params[i].ty.unlocated(), Type::Func(_, _)) {
+                    if let Expr::Ident(fn_name) = arg_expr.unlocated() {
                         return Some(fn_name.clone());
                     }
                 }
@@ -6797,7 +6797,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .func_defs
             .get(callee_name)
             .and_then(|fd| fd.ret.as_ref())
-            .map(|t| matches!(t, Type::Name(n, _) if n == "string"))
+            .map(|t| matches!(t.unlocated(), Type::Name(n, _) if n == "string"))
             .unwrap_or(false);
         if !ret_is_string {
             return Ok(result);
@@ -7134,7 +7134,9 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Reorder named args to positional order for a known function definition.
     fn reorder_named_args(&self, name: &str, args: &[Expr]) -> Result<Vec<Expr>, CompileError> {
-        let has_named = args.iter().any(|a| matches!(a, Expr::NamedArg(_, _)));
+        let has_named = args
+            .iter()
+            .any(|a| matches!(a.unlocated(), Expr::NamedArg(_, _)));
         if !has_named {
             return Ok(args.to_vec());
         }
@@ -7470,7 +7472,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| {
                         CompileError::LlvmError(format!("extract field {}: {}", field.name, e))
                     })?;
-                match &field.ty {
+                match field.ty.unlocated() {
                     Type::Name(n, _) if n == "string" => {
                         fmt.push_str(&format!("\"{}\":\"%s\"", field.name));
                         let sv = field_val.into_struct_value();
@@ -7685,7 +7687,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .get_field_type_at_index(*i as u32)
                 .ok_or_else(|| CompileError::LlvmError("missing field type".into()))?;
             let field_val = self.build_load(ft, gep, &format!("load_{}", field.name))?;
-            match &field.ty {
+            match field.ty.unlocated() {
                 Type::Name(n, _) if n == "string" => {
                     fmt.push_str(&format!("\"{}\":\"%s\"", field.name));
                     let sv = field_val.into_struct_value();

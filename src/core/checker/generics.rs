@@ -6,7 +6,7 @@ use super::Checker;
 
 impl<'a> Checker<'a> {
     pub(crate) fn type_uses_type_param(&self, ty: &Type, type_param: &str) -> bool {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, args) => {
                 name == type_param
                     || args
@@ -53,7 +53,7 @@ impl<'a> Checker<'a> {
     /// Check if a type variable name occurs within a type (occurs check).
     /// Prevents infinite types like `T = List<T>`.
     pub(crate) fn occurs_check(name: &str, ty: &Type) -> bool {
-        match ty {
+        match ty.unlocated() {
             Type::Name(n, args) => n == name || args.iter().any(|a| Self::occurs_check(name, a)),
             Type::Ref(_, inner) | Type::RefMut(_, inner) => Self::occurs_check(name, inner),
             Type::Option(inner) => Self::occurs_check(name, inner),
@@ -89,7 +89,7 @@ impl<'a> Checker<'a> {
         generics: &[GenericParam],
         type_map: &mut HashMap<String, Type>,
     ) {
-        match param {
+        match param.unlocated() {
             // CK-C6: type-param arm must come first; the concrete Name arm below
             // must not re-check is_type_param (that branch was dead).
             Type::Name(name, _) if is_type_param(name, generics) => {
@@ -100,7 +100,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Type::Name(name, p_args) if !p_args.is_empty() => {
-                match actual {
+                match actual.unlocated() {
                     Type::Name(_, a_args) if p_args.len() == a_args.len() => {
                         for (pa, aa) in p_args.iter().zip(a_args.iter()) {
                             self.infer_type_params(pa, aa, generics, type_map);
@@ -119,7 +119,7 @@ impl<'a> Checker<'a> {
             }
             Type::Name(_, _) => {}
             Type::Option(p_inner) => {
-                match actual {
+                match actual.unlocated() {
                     Type::Option(a_inner) => {
                         self.infer_type_params(p_inner, a_inner, generics, type_map)
                     }
@@ -130,7 +130,7 @@ impl<'a> Checker<'a> {
                     _ => {}
                 }
             }
-            Type::Result(p_ok, p_err) => match actual {
+            Type::Result(p_ok, p_err) => match actual.unlocated() {
                 Type::Result(a_ok, a_err) => {
                     self.infer_type_params(p_ok, a_ok, generics, type_map);
                     self.infer_type_params(p_err, a_err, generics, type_map);
@@ -142,14 +142,14 @@ impl<'a> Checker<'a> {
                 _ => {}
             },
             Type::Tuple(p_elems) => {
-                if let Type::Tuple(a_elems) = actual {
+                if let Type::Tuple(a_elems) = actual.unlocated() {
                     for (pe, ae) in p_elems.iter().zip(a_elems.iter()) {
                         self.infer_type_params(pe, ae, generics, type_map);
                     }
                 }
             }
             Type::Func(p_args, p_ret) => {
-                if let Type::Func(a_args, a_ret) = actual {
+                if let Type::Func(a_args, a_ret) = actual.unlocated() {
                     if p_args.len() == a_args.len() {
                         for (pa, aa) in p_args.iter().zip(a_args.iter()) {
                             self.infer_type_params(pa, aa, generics, type_map);

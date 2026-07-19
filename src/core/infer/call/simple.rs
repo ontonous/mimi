@@ -5,7 +5,6 @@ use crate::core::helpers::{
     subst_type_params, suggest_name,
 };
 use crate::diagnostic::Diagnostic;
-use crate::span::Span;
 use std::collections::HashMap;
 
 impl<'a> Checker<'a> {
@@ -232,7 +231,7 @@ impl<'a> Checker<'a> {
                     return Type::Name("unknown".into(), vec![]);
                 }
                 let list_ty = self.infer_expr(&args[0], scopes);
-                let elem_ty = match &list_ty {
+                let elem_ty = match list_ty.unlocated() {
                     Type::Name(n, inner) if n == "List" && inner.len() == 1 => inner[0].clone(),
                     _ => Type::Name("unknown".into(), vec![]),
                 };
@@ -446,12 +445,12 @@ impl<'a> Checker<'a> {
                     );
                 } else {
                     let list_ty = self.infer_expr(&args[0], scopes);
-                    let elem_ty = match &list_ty {
+                    let elem_ty = match list_ty.unlocated() {
                         Type::Name(_, args) if args.len() == 1 => args[0].clone(),
                         _ => Type::Name("unknown".into(), vec![]),
                     };
                     let closure_ty = self.infer_expr(&args[1], scopes);
-                    let ret_ty = match &closure_ty {
+                    let ret_ty = match closure_ty.unlocated() {
                         Type::Func(_, ret) => ret.as_ref().clone(),
                         _ => elem_ty.clone(),
                     };
@@ -467,7 +466,7 @@ impl<'a> Checker<'a> {
                     );
                 } else {
                     let list_ty = self.infer_expr(&args[0], scopes);
-                    let elem_ty = match &list_ty {
+                    let elem_ty = match list_ty.unlocated() {
                         Type::Name(_, args) if args.len() == 1 => args[0].clone(),
                         _ => Type::Name("unknown".into(), vec![]),
                     };
@@ -500,7 +499,7 @@ impl<'a> Checker<'a> {
                 }
                 let arg_ty = self.infer_expr(&args[0], scopes);
                 // Extract element type from input list to propagate to result
-                let elem_ty = match &arg_ty {
+                let elem_ty = match arg_ty.unlocated() {
                     Type::Name(n, inner) if n == "List" && inner.len() == 1 => inner[0].clone(),
                     _ => Type::Name("unknown".into(), vec![]),
                 };
@@ -1656,7 +1655,7 @@ impl<'a> Checker<'a> {
         {
             let resolved = self.unification.resolve(&local_ty);
             let local_ty = self.instantiate(&resolved);
-            match local_ty {
+            match local_ty.into_unlocated() {
                 Type::Func(param_types, ret_ty) => {
                     if args.len() != param_types.len() {
                         self.emit_code(
@@ -1715,7 +1714,7 @@ impl<'a> Checker<'a> {
                         let resolved = self.unification.resolve(&ty);
                         self.instantiate(&resolved)
                     })
-                    .and_then(|ty| match ty {
+                    .and_then(|ty| match ty.into_unlocated() {
                         Type::Func(params, ret) => Some((params, *ret)),
                         _ => None,
                     })
@@ -1826,7 +1825,7 @@ impl<'a> Checker<'a> {
                         Diagnostic::error_code(
                             crate::diagnostic::codes::E0401,
                             format!("undefined function '{}'", name),
-                            Span::single(self.current_line, self.current_col),
+                            self.diagnostic_span(),
                         )
                         .with_help(format!("did you mean '{}'?", suggested)),
                     );
@@ -1841,7 +1840,9 @@ impl<'a> Checker<'a> {
         };
 
         // Handle named arguments and default values in user function calls
-        let has_named_args = args.iter().any(|a| matches!(a, Expr::NamedArg(_, _)));
+        let has_named_args = args
+            .iter()
+            .any(|a| matches!(a.unlocated(), Expr::NamedArg(_, _)));
         if has_named_args || (!args.is_empty() && args.len() != params.len()) {
             // Check if the function definition has param names (for named args) or defaults
             let func_def_params: Option<&[Param]> = self
@@ -1859,7 +1860,7 @@ impl<'a> Checker<'a> {
                     let mut seen = vec![false; params.len()];
                     let mut pos_idx = 0;
                     for arg in args {
-                        match arg {
+                        match arg.unlocated() {
                             Expr::NamedArg(n, val) => {
                                 if let Some(pos) = func_params.iter().position(|p| p.name == *n) {
                                     reordered[pos] = val;
@@ -1993,7 +1994,7 @@ impl<'a> Checker<'a> {
                                     fmt_type(&subst_param),
                                     fmt_type(at)
                                 ),
-                                Span::single(self.current_line, self.current_col),
+                                self.diagnostic_span(),
                             )
                             .with_help(format!(
                                 "argument {} has type '{}', but '{}' expects type '{}'",
@@ -2023,7 +2024,7 @@ impl<'a> Checker<'a> {
                                     fmt_type(param),
                                     fmt_type(&at)
                                 ),
-                                Span::single(self.current_line, self.current_col),
+                                self.diagnostic_span(),
                             )
                             .with_help(format!(
                                 "argument {} has type '{}', but '{}' expects type '{}'",
@@ -2061,7 +2062,7 @@ impl<'a> Checker<'a> {
             }
 
             for (arg, param) in args.iter().zip(params.iter()) {
-                if matches!(param, Type::Cap(_)) {
+                if matches!(param.unlocated(), Type::Cap(_)) {
                     self.consume_capabilities_in_expr(arg, crate::core::ResourceActionKind::Move);
                 }
             }
@@ -2092,7 +2093,7 @@ impl<'a> Checker<'a> {
 
     /// T-H3: stable residual key for Ident / nested Field places (`a.b.c`).
     fn place_key(expr: &Expr) -> Option<String> {
-        match expr {
+        match expr.unlocated() {
             Expr::Ident(n) => Some(n.clone()),
             Expr::Field(obj, f) => {
                 let base = Self::place_key(obj)?;

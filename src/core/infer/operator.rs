@@ -3,7 +3,6 @@ use crate::core::borrow::BorrowState;
 use crate::core::checker::Checker;
 use crate::core::helpers::{common_numeric_type, fmt_type, is_bool, is_int, is_numeric, is_string};
 use crate::diagnostic::Diagnostic;
-use crate::span::Span;
 use std::collections::HashMap;
 
 impl<'a> Checker<'a> {
@@ -23,7 +22,7 @@ impl<'a> Checker<'a> {
                         Diagnostic::error_code(
                             crate::diagnostic::codes::E0201,
                             format!("cannot negate {}", fmt_type(&t)),
-                            Span::single(self.current_line, self.current_col),
+                            self.diagnostic_span(),
                         )
                         .with_help("negation only works on numeric types (i32, i64, f64)"),
                     );
@@ -42,7 +41,7 @@ impl<'a> Checker<'a> {
                 }
             }
             UnOp::Ref => {
-                match e {
+                match e.unlocated() {
                     Expr::Ident(name) => {
                         // Whole-variable immutable borrow
                         if let Some(BorrowState::BorrowedMut { span }) = self.lookup_borrow(name) {
@@ -50,7 +49,7 @@ impl<'a> Checker<'a> {
                                 Diagnostic::error_code(
                                     crate::diagnostic::codes::E0302,
                                     format!("cannot borrow '{}' as immutable because it is already mutably borrowed", name),
-                                    Span::single(self.current_line, self.current_col),
+                                    self.diagnostic_span(),
                                 ).with_note("mutable borrow occurs here", *span),
                             );
                         }
@@ -60,26 +59,26 @@ impl<'a> Checker<'a> {
                                 Diagnostic::error_code(
                                     crate::diagnostic::codes::E0302,
                                     format!("cannot borrow '{}' as immutable because a field is already mutably borrowed", name),
-                                    Span::single(self.current_line, self.current_col),
+                                    self.diagnostic_span(),
                                 ),
                             );
                         }
                         self.set_borrow(
                             name,
                             BorrowState::BorrowedImm {
-                                span: Span::single(self.current_line, self.current_col),
+                                span: self.diagnostic_span(),
                             },
                         );
                     }
                     Expr::Field(obj, field) => {
-                        if let Expr::Ident(var) = obj.as_ref() {
+                        if let Expr::Ident(var) = obj.unlocated() {
                             // Field-level immutable borrow: &p.x
                             if let Some(span) = self.is_field_borrowed(var, field, false) {
                                 self.errors.push(
                                     Diagnostic::error_code(
                                         crate::diagnostic::codes::E0302,
                                         format!("cannot borrow '{}' as immutable because it is already mutably borrowed", field),
-                                        Span::single(self.current_line, self.current_col),
+                                        self.diagnostic_span(),
                                     ).with_note("mutable borrow occurs here", span),
                                 );
                             }
@@ -87,13 +86,13 @@ impl<'a> Checker<'a> {
                                 var,
                                 field,
                                 BorrowState::BorrowedImm {
-                                    span: Span::single(self.current_line, self.current_col),
+                                    span: self.diagnostic_span(),
                                 },
                             );
                         }
                     }
                     Expr::Index(obj, _) => {
-                        if let Expr::Ident(var) = obj.as_ref() {
+                        if let Expr::Ident(var) = obj.unlocated() {
                             // Borrowed index: &xs[i] borrows the whole list (coarse)
                             if let Some(BorrowState::BorrowedMut { span }) = self.lookup_borrow(var)
                             {
@@ -101,7 +100,7 @@ impl<'a> Checker<'a> {
                                     Diagnostic::error_code(
                                         crate::diagnostic::codes::E0302,
                                         format!("cannot borrow '{}' as immutable because it is already mutably borrowed", var),
-                                        Span::single(self.current_line, self.current_col),
+                                        self.diagnostic_span(),
                                     ).with_note("mutable borrow occurs here", *span),
                                 );
                             }
@@ -110,14 +109,14 @@ impl<'a> Checker<'a> {
                                     Diagnostic::error_code(
                                         crate::diagnostic::codes::E0302,
                                         format!("cannot borrow '{}' as immutable because a field is already mutably borrowed", var),
-                                        Span::single(self.current_line, self.current_col),
+                                        self.diagnostic_span(),
                                     ),
                                 );
                             }
                             self.set_borrow(
                                 var,
                                 BorrowState::BorrowedImm {
-                                    span: Span::single(self.current_line, self.current_col),
+                                    span: self.diagnostic_span(),
                                 },
                             );
                         }
@@ -127,7 +126,7 @@ impl<'a> Checker<'a> {
                 Type::Ref(None, Box::new(t))
             }
             UnOp::RefMut => {
-                match e {
+                match e.unlocated() {
                     Expr::Ident(name) => {
                         // Whole-variable mutable borrow
                         if let Some(state) = self.lookup_borrow(name) {
@@ -138,7 +137,7 @@ impl<'a> Checker<'a> {
                                         Diagnostic::error_code(
                                             crate::diagnostic::codes::E0300,
                                             format!("cannot borrow '{}' as mutable because it is already immutably borrowed", name),
-                                            Span::single(self.current_line, self.current_col),
+                                            self.diagnostic_span(),
                                         ).with_note("immutable borrow occurs here", *span),
                                     );
                                 }
@@ -147,7 +146,7 @@ impl<'a> Checker<'a> {
                                         Diagnostic::error_code(
                                             crate::diagnostic::codes::E0301,
                                             format!("cannot borrow '{}' as mutable because it is already mutably borrowed", name),
-                                            Span::single(self.current_line, self.current_col),
+                                            self.diagnostic_span(),
                                         ).with_note("mutable borrow occurs here", *span),
                                     );
                                 }
@@ -159,26 +158,26 @@ impl<'a> Checker<'a> {
                                 Diagnostic::error_code(
                                     crate::diagnostic::codes::E0300,
                                     format!("cannot borrow '{}' as mutable because a field is already borrowed", name),
-                                    Span::single(self.current_line, self.current_col),
+                                    self.diagnostic_span(),
                                 ),
                             );
                         }
                         self.set_borrow(
                             name,
                             BorrowState::BorrowedMut {
-                                span: Span::single(self.current_line, self.current_col),
+                                span: self.diagnostic_span(),
                             },
                         );
                     }
                     Expr::Field(obj, field) => {
-                        if let Expr::Ident(var) = obj.as_ref() {
+                        if let Expr::Ident(var) = obj.unlocated() {
                             // Field-level mutable borrow: &mut p.x
                             if let Some(span) = self.is_field_borrowed(var, field, true) {
                                 self.errors.push(
                                     Diagnostic::error_code(
                                         crate::diagnostic::codes::E0300,
                                         format!("cannot mutably borrow '{}' because it is already borrowed", field),
-                                        Span::single(self.current_line, self.current_col),
+                                        self.diagnostic_span(),
                                     ).with_note("borrow occurs here", span),
                                 );
                             }
@@ -186,13 +185,13 @@ impl<'a> Checker<'a> {
                                 var,
                                 field,
                                 BorrowState::BorrowedMut {
-                                    span: Span::single(self.current_line, self.current_col),
+                                    span: self.diagnostic_span(),
                                 },
                             );
                         }
                     }
                     Expr::Index(obj, _) => {
-                        if let Expr::Ident(var) = obj.as_ref() {
+                        if let Expr::Ident(var) = obj.unlocated() {
                             // Borrowed mut index: &mut xs[i] borrows the whole list
                             if let Some(state) = self.lookup_borrow(var) {
                                 match state {
@@ -202,7 +201,7 @@ impl<'a> Checker<'a> {
                                             Diagnostic::error_code(
                                                 crate::diagnostic::codes::E0300,
                                                 format!("cannot borrow '{}' as mutable because it is already immutably borrowed", var),
-                                                Span::single(self.current_line, self.current_col),
+                                                self.diagnostic_span(),
                                             ).with_note("immutable borrow occurs here", *span),
                                         );
                                     }
@@ -211,7 +210,7 @@ impl<'a> Checker<'a> {
                                             Diagnostic::error_code(
                                                 crate::diagnostic::codes::E0301,
                                                 format!("cannot borrow '{}' as mutable because it is already mutably borrowed", var),
-                                                Span::single(self.current_line, self.current_col),
+                                                self.diagnostic_span(),
                                             ).with_note("mutable borrow occurs here", *span),
                                         );
                                     }
@@ -222,14 +221,14 @@ impl<'a> Checker<'a> {
                                     Diagnostic::error_code(
                                         crate::diagnostic::codes::E0300,
                                         format!("cannot borrow '{}' as mutable because a field is already borrowed", var),
-                                        Span::single(self.current_line, self.current_col),
+                                        self.diagnostic_span(),
                                     ),
                                 );
                             }
                             self.set_borrow(
                                 var,
                                 BorrowState::BorrowedMut {
-                                    span: Span::single(self.current_line, self.current_col),
+                                    span: self.diagnostic_span(),
                                 },
                             );
                         }
@@ -238,7 +237,7 @@ impl<'a> Checker<'a> {
                 }
                 Type::RefMut(None, Box::new(t))
             }
-            UnOp::Deref => match &t {
+            UnOp::Deref => match t.unlocated() {
                 Type::Ref(_, inner) | Type::RefMut(_, inner) => (**inner).clone(),
                 _ => {
                     self.emit_code(
@@ -301,7 +300,7 @@ impl<'a> Checker<'a> {
                 if let Some(t) = common_numeric_type(&lt, &rt) {
                     // Static divide-by-zero detection
                     if op == BinOp::Div {
-                        if let Expr::Literal(Lit::Int(0)) = r {
+                        if let Expr::Literal(Lit::Int(0)) = r.unlocated() {
                             self.emit_code(
                                 crate::diagnostic::codes::E0237,
                                 "division by zero literal".to_string(),
@@ -336,7 +335,7 @@ impl<'a> Checker<'a> {
                     } else {
                         // Static modulo-by-zero detection
                         if op == BinOp::Mod {
-                            if let Expr::Literal(Lit::Int(0)) = r {
+                            if let Expr::Literal(Lit::Int(0)) = r.unlocated() {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0238,
                                     "modulo by zero literal".to_string(),

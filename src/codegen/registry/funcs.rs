@@ -28,7 +28,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn type_to_llvm_for_extern(&self, ty: &crate::ast::Type) -> MimiResult<BasicTypeEnum<'ctx>> {
         // For user-defined types (Type::Name), prefer the registered type_llvm entry
         // which has the correct layout (e.g. i32 for #[repr(C)] enums).
-        if let crate::ast::Type::Name(name, _) = ty {
+        if let crate::ast::Type::Name(name, _) = ty.unlocated() {
             if let Some(&registered) = self.type_llvm.get(name.as_str()) {
                 return Ok(registered);
             }
@@ -36,14 +36,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         // G1b: Closure types (Type::Func) cross FFI as raw function pointers (i8*),
         // not as {fn_ptr, env_ptr} structs. The conversion is done at the call site
         // via get_or_create_callback_thunk + TLS globals.
-        if matches!(ty, crate::ast::Type::Func(_, _)) {
+        if matches!(ty.unlocated(), crate::ast::Type::Func(_, _)) {
             let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
             return Ok(BasicTypeEnum::PointerType(i8_ptr));
         }
         // Explicitly map unit to i64 (zero-size type has no C ABI representation of its own,
         // but extern wrappers always produce/consume an i64 to keep the function signature uniform).
         // This is NOT a fallback — it is the intended representation for unit in FFI.
-        if let crate::ast::Type::Name(name, _) = ty {
+        if let crate::ast::Type::Name(name, _) = ty.unlocated() {
             if name == "unit" {
                 return Ok(BasicTypeEnum::IntType(self.context.i64_type()));
             }
@@ -86,16 +86,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                             crate::ast::Type::Ref(None, Box::new(self_type_name))
                         }
                     };
-                    impl_method.params.insert(
-                        0,
+                    impl_method.params.insert(0, {
+                        let meta = crate::ast::AstNodeMeta::inherited(
+                            impl_method.meta.span,
+                            crate::ast::AstOrigin::RuntimeSystem("codegen.impl_self"),
+                        );
                         crate::ast::Param {
+                            meta,
                             name: "self".into(),
-                            ty: self_ty,
+                            ty: self_ty.deep_reorigin(meta),
                             mut_: false,
                             default_value: None,
                             borrow: None,
-                        },
-                    );
+                        }
+                    });
                     // Set type_map to identity so compile_func can resolve type params
                     // in self (e.g., &List<T> → T resolves to T in type_map).
                     // This is later overridden by compile_generic_func for monomorphization.
@@ -103,7 +107,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if !type_args_for_self.is_empty() {
                         let mut identity_map: HashMap<String, Type> = HashMap::new();
                         for ta in &type_args_for_self {
-                            if let Type::Name(tn, _) = ta {
+                            if let Type::Name(tn, _) = ta.unlocated() {
                                 identity_map.insert(tn.clone(), ta.clone());
                             }
                         }
@@ -507,7 +511,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let mut param_tys = Vec::new();
         for p in &ef.params {
-            let ty = match &p.ty {
+            let ty = match p.ty.unlocated() {
                 crate::ast::Type::Name(n, _)
                     if n == "List"
                         || (self.record_type_names.contains(n.as_str())
@@ -518,7 +522,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // For the wrapper function (called from internal Mimi code),
                 // use Mimi's internal types (i32 → i64, etc.) so the call site
                 // matches the wrapper signature without LLVM type mismatches.
-                _ => match &p.ty {
+                _ => match p.ty.unlocated() {
                     crate::ast::Type::Name(n, _) if n == "i32" => {
                         BasicTypeEnum::IntType(self.context.i64_type())
                     }
@@ -534,7 +538,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let mut extern_param_tys: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
         for p in &ef.params {
-            let llvm_ty = match &p.ty {
+            let llvm_ty = match p.ty.unlocated() {
                 crate::ast::Type::Name(n, _)
                     if n == "string"
                         || n == "List"
@@ -573,11 +577,11 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let wrapper_ret_ty = match &ef.ret {
             Some(ty) => {
-                if matches!(ty, crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())))
+                if matches!(ty.unlocated(), crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())))
                 {
                     list_struct_ty
                 // F7: Tuple return — wrapper returns the LLVM struct type
-                } else if matches!(ty, crate::ast::Type::Tuple(_)) {
+                } else if matches!(ty.unlocated(), crate::ast::Type::Tuple(_)) {
                     types::mimi_type_to_llvm(self.context, ty).ok_or_else(|| {
                         CompileError::TypeMismatch(format!(
                             "Tuple type '{}' could not be mapped to LLVM struct",
@@ -592,7 +596,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
 
         let is_complex_reprc_ret = ef.ret.as_ref().is_some_and(|ty| {
-            if let crate::ast::Type::Name(n, _) = ty {
+            if let crate::ast::Type::Name(n, _) = ty.unlocated() {
                 self.repr_c_record_names.contains(n.as_str())
                     && self.type_defs.get(n.as_str()).is_some_and(|td| {
                         matches!(&td.kind, TypeDefKind::Record(fields) if !types::is_simple_reprc_record(fields))
@@ -603,7 +607,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         });
         let c_struct_ty = if is_complex_reprc_ret {
             ef.ret.as_ref().and_then(|ty| {
-                if let crate::ast::Type::Name(n, _) = ty {
+                if let crate::ast::Type::Name(n, _) = ty.unlocated() {
                     self.type_defs.get(n.as_str()).and_then(|td| {
                         if let TypeDefKind::Record(ref fields) = td.kind {
                             self.c_layout_return_type(n, fields)
@@ -631,12 +635,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             match &ef.ret {
                 Some(ty) => {
-                    if matches!(ty, crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())))
-                        || matches!(ty, crate::ast::Type::Tuple(_))
-                        || matches!(ty, crate::ast::Type::Name(n, _) if n == "string")
+                    if matches!(ty.unlocated(), crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())))
+                        || matches!(ty.unlocated(), crate::ast::Type::Tuple(_))
+                        || matches!(ty.unlocated(), crate::ast::Type::Name(n, _) if n == "string")
                     {
                         BasicTypeEnum::PointerType(i8_ptr_ty)
-                    } else if let crate::ast::Type::Name(n, _) = ty {
+                    } else if let crate::ast::Type::Name(n, _) = ty.unlocated() {
                         if self.repr_c_record_names.contains(n.as_str()) {
                             if let Some(td) = self.type_defs.get(n.as_str()) {
                                 if let TypeDefKind::Record(ref fields) = td.kind {
@@ -743,9 +747,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut shared_params = Vec::new();
         let i64_ty = self.context.i64_type();
         for (i, p) in ef.params.iter().enumerate() {
-            if matches!(p.ty, crate::ast::Type::CShared(_))
-                || matches!(p.ty, crate::ast::Type::CBorrow(_))
-                || matches!(p.ty, crate::ast::Type::CBorrowMut(_))
+            if matches!(p.ty.unlocated(), crate::ast::Type::CShared(_))
+                || matches!(p.ty.unlocated(), crate::ast::Type::CBorrow(_))
+                || matches!(p.ty.unlocated(), crate::ast::Type::CBorrowMut(_))
             {
                 let param = wrapper_fn
                     .get_nth_param(i as u32)
@@ -782,7 +786,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         wrapper_fn: inkwell::values::FunctionValue<'ctx>,
     ) -> MimiResult<()> {
         for (i, p) in ef.params.iter().enumerate() {
-            if let crate::ast::Type::Cap(cap_name) = &p.ty {
+            if let crate::ast::Type::Cap(cap_name) = p.ty.unlocated() {
                 let param = wrapper_fn
                     .get_nth_param(i as u32)
                     .ok_or_else(|| CompileError::LlvmError(format!("missing param {}", i)))?;
@@ -936,7 +940,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let param = wrapper_fn
                 .get_nth_param(i as u32)
                 .ok_or_else(|| CompileError::LlvmError(format!("missing param {}", i)))?;
-            match &p.ty {
+            match p.ty.unlocated() {
                 crate::ast::Type::Name(n, _) if n == "string" => {
                     wrapper_args.push(self.emit_string_arg_conversion(param, i)?);
                 }
@@ -960,7 +964,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else {
                         // If the Mimi internal type (e.g. i64 for i32) differs from the
                         // extern C type (e.g. i32 for i32), truncate/extend as needed.
-                        let converted = if let crate::ast::Type::Name(n, _) = &p.ty {
+                        let converted = if let crate::ast::Type::Name(n, _) = p.ty.unlocated() {
                             match n.as_str() {
                                 "i32" => {
                                     if let BasicValueEnum::IntValue(iv) = param {
@@ -1265,8 +1269,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicValueEnum::IntValue(iv) => {
                 let width = iv.get_type().get_bit_width();
                 if width < 64 {
-                    let is_bool =
-                        matches!(elem_ty, crate::ast::Type::Name(name, _) if name == "bool");
+                    let is_bool = matches!(elem_ty.unlocated(), crate::ast::Type::Name(name, _) if name == "bool");
                     if is_bool {
                         self.builder
                             .build_int_z_extend(iv, i64_ty, &format!("i_zext_{}_{}", i, ei))
@@ -1317,7 +1320,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // data pointer explicitly; reinterpreting the first eight bytes
                 // of the whole struct loses pointer provenance and couples the
                 // ABI to layout accidents.
-                if matches!(elem_ty, crate::ast::Type::Name(name, _) if name == "string") {
+                if matches!(elem_ty.unlocated(), crate::ast::Type::Name(name, _) if name == "string")
+                {
                     let data_ptr = self
                         .builder
                         .build_extract_value(sv, 0, &format!("s_ptr_{}_{}", i, ei))
@@ -1359,7 +1363,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let BasicValueEnum::StructValue(sv) = param else {
             return Ok(None);
         };
-        let crate::ast::Type::Name(n, _) = ty else {
+        let crate::ast::Type::Name(n, _) = ty.unlocated() else {
             return Ok(None);
         };
         if !self.repr_c_record_names.contains(n.as_str()) {
@@ -1467,7 +1471,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .builder
                 .build_extract_value(sv, fi as u32, &format!("{}_{}_raw", n, f.name))
                 .map_err(|e| CompileError::LlvmError(format!("extract field: {}", e)))?;
-            let c_val: BasicValueEnum = match &f.ty {
+            let c_val: BasicValueEnum = match f.ty.unlocated() {
                 crate::ast::Type::Name(tn, _) if tn == "i32" => match raw_val {
                     BasicValueEnum::IntValue(iv) => {
                         // After A1 restoration, i32 fields may already be 32-bit.
@@ -1622,7 +1626,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let _ = wrapper_fn;
         // Check for complex repr(C) record return first.
         if sig.is_complex_reprc_ret {
-            if let Some(crate::ast::Type::Name(n, _)) = &ef.ret {
+            if let Some(crate::ast::Type::Name(n, _)) =
+                ef.ret.as_ref().map(crate::ast::Type::unlocated)
+            {
                 let complex_fields: Vec<Field> = self
                     .type_defs
                     .get(n.as_str())
@@ -1643,9 +1649,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let is_tuple_return = ef
             .ret
             .as_ref()
-            .is_some_and(|ret_ty| matches!(ret_ty, crate::ast::Type::Tuple(_)));
+            .is_some_and(|ret_ty| matches!(ret_ty.unlocated(), crate::ast::Type::Tuple(_)));
         let needs_json_deserialize = ef.ret.as_ref().is_some_and(|ret_ty| {
-            matches!(ret_ty, crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())))
+            matches!(ret_ty.unlocated(), crate::ast::Type::Name(n, _) if n == "List" || (self.record_type_names.contains(n.as_str()) && !self.repr_c_record_names.contains(n.as_str())))
         }) || is_tuple_return;
 
         if needs_json_deserialize {
@@ -1657,7 +1663,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else if ef
             .ret
             .as_ref()
-            .is_some_and(|t| matches!(t, crate::ast::Type::Name(n, _) if n == "string"))
+            .is_some_and(|t| matches!(t.unlocated(), crate::ast::Type::Name(n, _) if n == "string"))
         {
             self.emit_string_return(call, sig)?;
         } else if sig.wrapper_fn_type.get_return_type().is_some() {
@@ -1864,7 +1870,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let tuple_ty = ef.ret.as_ref().ok_or_else(|| {
             CompileError::LlvmError("expected tuple return type for extern function".to_string())
         })?;
-        let elems = match tuple_ty {
+        let elems = match tuple_ty.unlocated() {
             crate::ast::Type::Tuple(e) => e,
             _ => return Err(CompileError::LlvmError("expected tuple type".to_string())),
         };

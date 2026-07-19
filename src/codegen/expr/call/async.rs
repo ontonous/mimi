@@ -291,7 +291,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         expr: &Expr,
         _vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Option<BasicTypeEnum<'ctx>> {
-        match expr {
+        match expr.unlocated() {
             Expr::Ident(name) => {
                 // Check async_var_inner_types first (variable holding a future from async fn)
                 if let Some(&ty) = self.async_var_inner_types.get(name) {
@@ -310,7 +310,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 None
             }
             Expr::Call(callee, _) => {
-                if let Expr::Ident(func_name) = callee.as_ref() {
+                if let Expr::Ident(func_name) = callee.unlocated() {
                     if let Some(fdef) = self.func_defs.get(func_name) {
                         if let Some(ret_ty) = &fdef.ret {
                             // The function's own return type (before Future wrapping)

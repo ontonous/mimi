@@ -386,7 +386,6 @@ fn tricky_option_default() {
 
 #[test]
 #[ignore = "CODEGEN: generic record field access after monomorphization still i64 (v0.31 type engine)"]
-#[test]
 fn tricky_record_generic_closure() {
     check(
         "type Box<T> { value: T }

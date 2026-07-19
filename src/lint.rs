@@ -10,7 +10,7 @@
 /// - W008: `== true` / `== false` anti-pattern (use direct boolean expression)
 /// - W009: Recursive function without base case
 /// - W010: Unused import
-use crate::ast::{BinOp, Expr, File, FuncDef, Item, Lit, Pattern, Stmt, Type};
+use crate::ast::{BinOp, Expr, File, FuncDef, Item, Lit, Pattern, PatternKind, Stmt, Type};
 use crate::diagnostic::codes::{W002, W003, W004, W006, W007, W008, W009, W010, W012};
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -44,7 +44,7 @@ impl Linter {
                 diagnostics.push(Diagnostic::warning_code(
                     W010,
                     format!("unused import `{}`", path_str),
-                    Span::single(1, 1),
+                    imp.meta.span,
                 ));
             }
         }
@@ -104,7 +104,7 @@ impl Linter {
             diagnostics.push(Diagnostic::warning_code(
                 W004,
                 format!("function `{}` should use snake_case naming", func.name),
-                Span::single(func.pos.0, func.pos.1),
+                func.meta.span,
             ));
         }
 
@@ -113,7 +113,7 @@ impl Linter {
             diagnostics.push(Diagnostic::warning_code(
                 W002,
                 format!("locked function `{}` has empty implementation", func.name),
-                Span::single(func.pos.0, func.pos.1),
+                func.meta.span,
             ));
         }
 
@@ -132,13 +132,13 @@ impl Linter {
                 diagnostics.push(Diagnostic::warning_code(
                     W006,
                     format!("unused variable `{}`", var_name),
-                    Span::single(func.pos.0, func.pos.1),
+                    func.meta.span,
                 ));
             }
         }
 
         // W008: `== true` / `== false` anti-pattern
-        detect_eq_bool(&func.body, diagnostics, func.pos);
+        detect_eq_bool(&func.body, diagnostics, func.meta.span);
 
         // W009: Recursion depth hint — direct recursion without a conditional guard
         detect_recursive_no_base(func, diagnostics);
@@ -197,7 +197,7 @@ fn collect_decls_in_block(block: &[Stmt], info: &mut VarUsage) {
 }
 
 fn collect_decls_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
-    match stmt {
+    match stmt.unlocated() {
         Stmt::Let { pat, .. } => collect_decls_in_pat(pat, info),
         Stmt::For { var, body, .. } => {
             if var != "_" {
@@ -234,21 +234,21 @@ fn collect_decls_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
 }
 
 fn collect_decls_in_pat(pat: &Pattern, info: &mut VarUsage) {
-    match pat {
-        Pattern::Variable(name) if name != "_" => {
+    match &pat.kind {
+        PatternKind::Variable(name) if name != "_" => {
             info.declared.insert(name.clone());
         }
-        Pattern::Tuple(pats) => {
+        PatternKind::Tuple(pats) => {
             for p in pats {
                 collect_decls_in_pat(p, info);
             }
         }
-        Pattern::Array(pats) => {
+        PatternKind::Array(pats) => {
             for p in pats {
                 collect_decls_in_pat(p, info);
             }
         }
-        Pattern::Slice(pats, rest) => {
+        PatternKind::Slice(pats, rest) => {
             for p in pats {
                 collect_decls_in_pat(p, info);
             }
@@ -268,7 +268,7 @@ fn collect_refs_in_block(block: &[Stmt], info: &mut VarUsage) {
 }
 
 fn collect_refs_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
-    match stmt {
+    match stmt.unlocated() {
         Stmt::Let { init, .. } => {
             if let Some(e) = init {
                 collect_refs_in_expr(e, info);
@@ -347,11 +347,12 @@ fn collect_refs_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
             }
             collect_refs_in_block(body, info);
         }
+        Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
     }
 }
 
 fn collect_refs_in_expr(expr: &Expr, info: &mut VarUsage) {
-    match expr {
+    match expr.unlocated() {
         Expr::Ident(name) => {
             if name != "_" {
                 info.referenced.insert(name.clone());
@@ -460,13 +461,14 @@ fn collect_refs_in_expr(expr: &Expr, info: &mut VarUsage) {
         }
         Expr::TupleIndex(e, _) => collect_refs_in_expr(e, info),
         Expr::TypeInfo(_) => {}
+        Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
     }
 }
 
 // ---- W008: `== true` / `== false` anti-pattern ----
 
 /// Detect `x == true`, `x == false`, `x != true`, `x != false` and suggest simplification.
-fn detect_eq_bool(block: &[Stmt], diagnostics: &mut Vec<Diagnostic>, func_pos: (usize, usize)) {
+fn detect_eq_bool(block: &[Stmt], diagnostics: &mut Vec<Diagnostic>, func_pos: Span) {
     for stmt in block {
         detect_eq_bool_in_stmt(stmt, diagnostics, func_pos);
     }
@@ -475,9 +477,9 @@ fn detect_eq_bool(block: &[Stmt], diagnostics: &mut Vec<Diagnostic>, func_pos: (
 fn detect_eq_bool_in_stmt(
     stmt: &Stmt,
     diagnostics: &mut Vec<Diagnostic>,
-    func_pos: (usize, usize),
+    func_pos: Span,
 ) {
-    match stmt {
+    match stmt.unlocated() {
         Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Break(Some(e)) => {
             detect_eq_bool_in_expr(e, diagnostics, func_pos);
         }
@@ -527,17 +529,17 @@ fn detect_eq_bool_in_stmt(
 }
 
 fn is_bool_lit(e: &Expr) -> bool {
-    matches!(e, Expr::Literal(Lit::Bool(_)))
+    matches!(e.unlocated(), Expr::Literal(Lit::Bool(_)))
 }
 
 fn detect_eq_bool_in_expr(
     expr: &Expr,
     diagnostics: &mut Vec<Diagnostic>,
-    func_pos: (usize, usize),
+    func_pos: Span,
 ) {
-    match expr {
+    match expr.unlocated() {
         Expr::Binary(op, lhs, rhs) if *op == BinOp::EqCmp && is_bool_lit(rhs) => {
-            let msg = match &**rhs {
+            let msg = match rhs.unlocated() {
                 Expr::Literal(Lit::Bool(true)) => {
                     "comparison to `true` is unnecessary; use the expression directly"
                 }
@@ -546,18 +548,18 @@ fn detect_eq_bool_in_expr(
             diagnostics.push(Diagnostic::warning_code(
                 W008,
                 msg,
-                Span::single(func_pos.0, func_pos.1),
+                func_pos,
             ));
         }
         Expr::Binary(op, lhs, rhs) if *op == BinOp::NeCmp && is_bool_lit(rhs) => {
-            let msg = match &**rhs {
+            let msg = match rhs.unlocated() {
                 Expr::Literal(Lit::Bool(true)) => "comparison to `true`; use `!expr` instead",
                 _ => "comparison to `false` is unnecessary; use the expression directly",
             };
             diagnostics.push(Diagnostic::warning_code(
                 W008,
                 msg,
-                Span::single(func_pos.0, func_pos.1),
+                func_pos,
             ));
         }
         // Recurse into sub-expressions
@@ -753,7 +755,7 @@ fn detect_recursive_no_base(func: &FuncDef, diagnostics: &mut Vec<Diagnostic>) {
                 "recursive function `{}` has no base case (no `if`/`match` guard)",
                 func_name
             ),
-            Span::single(func.pos.0, func.pos.1),
+            func.meta.span,
         ));
     }
 }
@@ -761,7 +763,7 @@ fn detect_recursive_no_base(func: &FuncDef, diagnostics: &mut Vec<Diagnostic>) {
 /// Check if any statement in a block directly calls the named function.
 fn calls_self_directly(block: &[Stmt], name: &str) -> bool {
     for stmt in block {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Break(Some(e)) | Stmt::Drop(e) => {
                 if expr_calls_name(e, name) {
                     return true;
@@ -817,9 +819,9 @@ fn calls_self_directly(block: &[Stmt], name: &str) -> bool {
 
 /// Check if an expression tree directly calls the named function.
 fn expr_calls_name(expr: &Expr, name: &str) -> bool {
-    match expr {
+    match expr.unlocated() {
         Expr::Call(callee, args) => {
-            if let Expr::Ident(callee_name) = callee.as_ref() {
+            if let Expr::Ident(callee_name) = callee.unlocated() {
                 if callee_name == name {
                     return true;
                 }
@@ -891,10 +893,12 @@ fn stmts_call_name(block: &[Stmt], name: &str) -> bool {
 /// Check if a block contains a conditional guard (if/match) that could serve as a base case.
 fn has_conditional_guard(block: &[Stmt]) -> bool {
     for stmt in block {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::If { .. } => return true,
             Stmt::While { .. } => return true, // while has a condition
-            Stmt::Expr(Expr::If { .. } | Expr::Match(..)) => return true,
+            Stmt::Expr(expr) if matches!(expr.unlocated(), Expr::If { .. } | Expr::Match(..)) => {
+                return true;
+            }
             Stmt::Block(b) if has_conditional_guard(b) => return true,
             _ => {}
         }
@@ -1161,7 +1165,7 @@ fn collect_names_in_item(item: &Item, names: &mut std::collections::HashSet<Stri
 
 fn collect_names_in_block(block: &[Stmt], names: &mut std::collections::HashSet<String>) {
     for stmt in block {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Break(Some(e)) | Stmt::Drop(e) => {
                 collect_names_in_expr(e, names);
             }
@@ -1208,7 +1212,7 @@ fn collect_names_in_block(block: &[Stmt], names: &mut std::collections::HashSet<
 }
 
 fn collect_names_in_expr(expr: &Expr, names: &mut std::collections::HashSet<String>) {
-    match expr {
+    match expr.unlocated() {
         Expr::Ident(name) => {
             names.insert(name.clone());
         }
@@ -1317,7 +1321,8 @@ mod tests {
         let tokens = Lexer::new(src)
             .tokenize()
             .expect("src/lint.rs:121 unwrap failed");
-        Parser::new(tokens)
+        Parser::new_memory(tokens, "lint.tests", "source", src)
+            .expect("register lint test source")
             .parse_file()
             .expect("src/lint.rs:122 unwrap failed")
     }
@@ -1522,15 +1527,16 @@ func main() -> i32 {
     fn lint_unused_import_detected() {
         let src = "use std::io\nfunc main() -> i32 { 42 }";
         let file = parse_source(src);
+        let expected_span = file.imports[0].meta.span;
         let linter = Linter::new();
         let result = linter.lint(&file, src);
-        assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|d| d.code.as_deref() == Some(W010)),
-            "unused import should trigger W010"
-        );
+        let diagnostic = result
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code.as_deref() == Some(W010))
+            .expect("unused import should trigger W010");
+        assert_eq!(diagnostic.span, expected_span);
+        assert!(diagnostic.span.source_id.is_known());
     }
 
     #[test]
@@ -1560,17 +1566,31 @@ func main() -> i32 {
     #[test]
     fn lint_escape_hatch_infer_at_let() {
         // CO-C2 audit: `let x: _ = ...` triggers W012 warning
-        let src = "func main() -> i32 { let x: _ = 42; x }";
+        let src = "func main() -> i32 {\n    let x: _ = 42\n    x\n}";
         let file = parse_source(src);
+        // Progressive typestate may inject a Flow before the user's `main`,
+        // so look up the function by name rather than assuming items[0].
+        let func = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Func(f) if f.name == "main" => Some(f),
+                _ => None,
+            })
+            .expect("expected main function");
+        let expected_span = func.body[0]
+            .meta()
+            .expect("parsed let metadata")
+            .span;
         let linter = Linter::new();
         let result = linter.lint(&file, src);
-        assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|d| d.code.as_deref() == Some(W012)),
-            "should detect `_` escape hatch at let-binding"
-        );
+        let diagnostic = result
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code.as_deref() == Some(W012))
+            .expect("should detect `_` escape hatch at let-binding");
+        assert_eq!(diagnostic.span, expected_span);
+        assert!(diagnostic.span.source_id.is_known());
     }
 
     #[test]
@@ -1613,10 +1633,7 @@ func main() -> i32 {
 /// such bindings propagate the escape hatch into all downstream usages.
 fn detect_escape_hatch_type_annotations(func: &FuncDef, diagnostics: &mut Vec<Diagnostic>) {
     let mut check_stmt = |stmt: &Stmt| {
-        if let Stmt::Let {
-            ty: Some(t), pos, ..
-        } = stmt
-        {
+        if let Stmt::Let { ty: Some(t), .. } = stmt.unlocated() {
             if is_escape_hatch_type(t) {
                 diagnostics.push(Diagnostic::warning_code(
                     W012,
@@ -1625,7 +1642,7 @@ fn detect_escape_hatch_type_annotations(func: &FuncDef, diagnostics: &mut Vec<Di
                          consider using a concrete type or `Any` only at FFI boundaries",
                         crate::core::helpers::fmt_type(t)
                     ),
-                    Span::single(pos.0, pos.1),
+                    stmt.meta().map(|meta| meta.span).unwrap_or(Span::UNKNOWN),
                 ));
             }
         }
@@ -1642,14 +1659,14 @@ fn detect_escape_hatch_type_annotations(func: &FuncDef, diagnostics: &mut Vec<Di
                     crate::core::helpers::fmt_type(&param.ty),
                     param.name
                 ),
-                Span::single(func.pos.0, func.pos.1),
+                param.meta.span,
             ));
         }
     }
 }
 
 fn is_escape_hatch_type(t: &Type) -> bool {
-    match t {
+    match t.unlocated() {
         Type::Infer => true,
         Type::Name(n, _) if n == "_" || n == "Any" => true,
         _ => false,
@@ -1664,7 +1681,7 @@ fn walk_stmts(stmts: &[Stmt], visit: &mut impl FnMut(&Stmt)) {
 }
 
 fn walk_stmt_inner(stmt: &Stmt, visit: &mut impl FnMut(&Stmt)) {
-    match stmt {
+    match stmt.unlocated() {
         Stmt::Block(stmts) | Stmt::Parasteps(stmts) | Stmt::OnFailure(stmts) | Stmt::Do(stmts) => {
             walk_stmts(stmts, visit)
         }

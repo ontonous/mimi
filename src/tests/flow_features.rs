@@ -348,12 +348,12 @@ flow Parent {
     match &file.items[0] {
         Item::Flow(f) => {
             let body = f.transitions[0].body.as_ref().unwrap();
-            let do_body = match &body[0] {
+            let do_body = match body[0].unlocated() {
                 Stmt::Do(b) => b,
                 _ => body,
             };
             assert!(matches!(
-                do_body[0],
+                do_body[0].unlocated(),
                 Stmt::Delegate {
                     kind: DelegateKind::View,
                     ..
@@ -383,19 +383,19 @@ flow Parent {
     match &file.items[0] {
         Item::Flow(f) => {
             let body = f.transitions[0].body.as_ref().unwrap();
-            let do_body = match &body[0] {
+            let do_body = match body[0].unlocated() {
                 Stmt::Do(b) => b,
                 _ => body,
             };
             assert!(matches!(
-                do_body[0],
+                do_body[0].unlocated(),
                 Stmt::Delegate {
                     kind: DelegateKind::Mutate,
                     ..
                 }
             ));
             assert!(matches!(
-                do_body[1],
+                do_body[1].unlocated(),
                 Stmt::Delegate {
                     kind: DelegateKind::Consume,
                     ..
@@ -426,14 +426,14 @@ flow SafeFFI {
     match &file.items[0] {
         Item::Flow(f) => {
             let body = f.transitions[0].body.as_ref().unwrap();
-            let do_body = match &body[0] {
+            let do_body = match body[0].unlocated() {
                 Stmt::Do(b) => b,
                 _ => body,
             };
-            assert!(matches!(do_body[0], Stmt::Pinned { .. }));
+            assert!(matches!(do_body[0].unlocated(), Stmt::Pinned { .. }));
             if let Stmt::Pinned {
                 expr, timeout, var, ..
-            } = &do_body[0]
+            } = do_body[0].unlocated()
             {
                 assert!(timeout.is_some());
                 assert_eq!(var.as_deref(), Some("ptr"));
@@ -598,16 +598,16 @@ flow TestFlow {
     match &file.items[0] {
         Item::Flow(f) => {
             let body = f.transitions[0].body.as_ref().unwrap();
-            let do_body = match &body[0] {
+            let do_body = match body[0].unlocated() {
                 Stmt::Do(b) => b,
                 _ => body,
             };
             // First stmt is let x = 42
-            assert!(matches!(do_body[0], Stmt::Let { .. }));
+            assert!(matches!(do_body[0].unlocated(), Stmt::Let { .. }));
             // Second stmt is the inner do block
-            assert!(matches!(do_body[1], Stmt::Do(_)));
+            assert!(matches!(do_body[1].unlocated(), Stmt::Do(_)));
             // Third is return
-            assert!(matches!(do_body[2], Stmt::Return(_)));
+            assert!(matches!(do_body[2].unlocated(), Stmt::Return(_)));
         }
         _ => panic!("expected Item::Flow"),
     }
@@ -2818,7 +2818,7 @@ flow Parent { state Working { child: CIdle } }
     let fields = working.payload.as_ref().unwrap();
     assert_eq!(fields.len(), 1);
     assert_eq!(fields[0].name, "child");
-    match &fields[0].ty {
+    match fields[0].ty.unlocated() {
         Type::Name(n, _) => assert_eq!(n, "CIdle"),
         other => panic!("expected Name(CIdle), got {:?}", other),
     }
@@ -2829,15 +2829,19 @@ flow Parent { state Working { child: CIdle } }
         .find(|t| t.name == "reset" && t.from_state == "Fault")
         .expect("reset");
     let body = reset.body.as_ref().expect("reset body");
-    match body.first() {
-        Some(Stmt::Return(Some(Expr::Record {
-            ty: Some(t),
-            fields,
-        }))) => {
+    match body.first().map(Stmt::unlocated) {
+        Some(Stmt::Return(Some(expr))) => {
+            let Expr::Record {
+                ty: Some(t),
+                fields,
+            } = expr.unlocated()
+            else {
+                panic!("expected record return expression, got {:?}", expr);
+            };
             assert_eq!(t, "Working");
             assert_eq!(fields.len(), 1);
             assert_eq!(fields[0].name, "child");
-            match &fields[0].value {
+            match fields[0].value.unlocated() {
                 Expr::Record {
                     ty: Some(ct),
                     fields: cfields,
@@ -3093,10 +3097,10 @@ session T = dual(S)
             assert_eq!(s.name, "S");
             match &s.body {
                 SessionType::Send(t, cont) => {
-                    assert!(matches!(t, Type::Name(n, _) if n == "i32"));
+                    assert!(matches!(t.unlocated(), Type::Name(n, _) if n == "i32"));
                     match cont.as_ref() {
                         SessionType::Recv(t2, cont2) => {
-                            assert!(matches!(t2, Type::Name(n, _) if n == "string"));
+                            assert!(matches!(t2.unlocated(), Type::Name(n, _) if n == "string"));
                             assert_eq!(cont2.as_ref(), &SessionType::End);
                         }
                         other => panic!("expected Recv, got {:?}", other),
@@ -3110,7 +3114,7 @@ session T = dual(S)
     match &file.items[1] {
         Item::Session(s) => {
             assert_eq!(s.name, "T");
-            assert!(matches!(s.body, SessionType::Dual(_)));
+            assert!(matches!(s.body.unlocated(), SessionType::Dual(_)));
         }
         other => panic!("expected Session, got {:?}", other),
     }
@@ -3365,7 +3369,7 @@ flow Audio {
             assert!(
                 f.annotations
                     .iter()
-                    .any(|a| matches!(a, FlowAnnotation::MailboxDepth(64))),
+                    .any(|a| matches!(a.kind, FlowAnnotationKind::MailboxDepth(64))),
                 "expected MailboxDepth(64), got {:?}",
                 f.annotations
             );
@@ -3725,7 +3729,7 @@ flow Parent {
             assert!(
                 f.annotations
                     .iter()
-                    .any(|a| matches!(a, FlowAnnotation::MaxChildren(3))),
+                    .any(|a| matches!(a.kind, FlowAnnotationKind::MaxChildren(3))),
                 "got {:?}",
                 f.annotations
             );

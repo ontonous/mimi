@@ -83,6 +83,8 @@ impl<'a> Lexer<'a> {
                     kind: TokenKind::Newline,
                     line,
                     col,
+                    end_line: self.line,
+                    end_col: self.col,
                 });
                 continue;
             }
@@ -118,13 +120,21 @@ impl<'a> Lexer<'a> {
 
             self.at_line_start = false;
             let kind = self.scan_token(c, line, col)?;
-            tokens.push(Token { kind, line, col });
+            tokens.push(Token {
+                kind,
+                line,
+                col,
+                end_line: self.line,
+                end_col: self.col,
+            });
         }
         self.flush_indent(&mut tokens);
         tokens.push(Token {
             kind: TokenKind::Eof,
             line: self.line,
             col: self.col,
+            end_line: self.line,
+            end_col: self.col,
         });
         Ok(tokens)
     }

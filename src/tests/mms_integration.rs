@@ -26,7 +26,7 @@ fn mms_block_exists() {
     let mms_stmt = func
         .body
         .iter()
-        .find(|s| matches!(s, Stmt::MmsBlock { .. }));
+        .find(|s| matches!(s.unlocated(), Stmt::MmsBlock { .. }));
     assert!(mms_stmt.is_some(), "should have MMS block");
 }
 
@@ -54,10 +54,12 @@ fn mms_block_has_content() {
     let mms_stmt = func
         .body
         .iter()
-        .find(|s| matches!(s, Stmt::MmsBlock { .. }));
+        .find(|s| matches!(s.unlocated(), Stmt::MmsBlock { .. }));
     assert!(mms_stmt.is_some());
     if let Stmt::MmsBlock { content, .. } =
-        mms_stmt.expect("src/tests/mms_integration.rs:37 unwrap failed")
+        mms_stmt
+            .expect("src/tests/mms_integration.rs:37 unwrap failed")
+            .unlocated()
     {
         assert!(!content.is_empty(), "content should not be empty");
     }
@@ -100,7 +102,7 @@ fn mms_block_multiple() {
     let mms_count = func
         .body
         .iter()
-        .filter(|s| matches!(s, Stmt::MmsBlock { .. }))
+        .filter(|s| matches!(s.unlocated(), Stmt::MmsBlock { .. }))
         .count();
     assert!(mms_count >= 2, "should have at least 2 MMS blocks");
 }
@@ -141,7 +143,7 @@ fn mms_block_in_module() {
     let mms_stmt = func
         .body
         .iter()
-        .find(|s| matches!(s, Stmt::MmsBlock { .. }));
+        .find(|s| matches!(s.unlocated(), Stmt::MmsBlock { .. }));
     assert!(mms_stmt.is_some(), "should have MMS block in module");
 }
 
@@ -173,7 +175,7 @@ fn mms_block_ast_token_content() {
         .body
         .iter()
         .find_map(|s| {
-            if let Stmt::MmsBlock { content, .. } = s {
+            if let Stmt::MmsBlock { content, .. } = s.unlocated() {
                 Some(content.clone())
             } else {
                 None
@@ -218,7 +220,7 @@ fn mms_block_ast_with_desc() {
         .body
         .iter()
         .find_map(|s| {
-            if let Stmt::MmsBlock { content, .. } = s {
+            if let Stmt::MmsBlock { content, .. } = s.unlocated() {
                 Some(content.clone())
             } else {
                 None
@@ -260,7 +262,7 @@ fn mms_block_content_preserved() {
         .body
         .iter()
         .find_map(|s| {
-            if let Stmt::MmsBlock { content, .. } = s {
+            if let Stmt::MmsBlock { content, .. } = s.unlocated() {
                 Some(content.clone())
             } else {
                 None

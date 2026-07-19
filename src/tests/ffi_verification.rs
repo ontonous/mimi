@@ -3,7 +3,7 @@
 
 #[cfg(test)]
 mod ffi_verification_tests {
-    use crate::ast::{ExternFunc, ExternParam, Type};
+    use crate::ast::{AstNodeMeta, AstOrigin, ExternFunc, ExternParam, Type};
     use crate::ffi::contract::{FfiArgContract, FfiContract, FfiScalarType};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
@@ -127,8 +127,10 @@ mod ffi_verification_tests {
     #[test]
     fn test_ffi_contract_generation() {
         let func = ExternFunc {
+            meta: AstNodeMeta::synthetic(AstOrigin::User),
             name: "test_func".to_string(),
             params: vec![ExternParam {
+                meta: AstNodeMeta::synthetic(AstOrigin::User),
                 name: "x".to_string(),
                 ty: Type::Name("i32".to_string(), vec![]),
                 cap_mode: None,
@@ -151,8 +153,10 @@ mod ffi_verification_tests {
     #[test]
     fn test_cbuffer_contract_generation() {
         let func = ExternFunc {
+            meta: AstNodeMeta::synthetic(AstOrigin::User),
             name: "process_buffer".to_string(),
             params: vec![ExternParam {
+                meta: AstNodeMeta::synthetic(AstOrigin::User),
                 name: "buf".to_string(),
                 ty: Type::CBuffer(Box::new(Type::Name("u8".to_string(), vec![]))),
                 cap_mode: None,
@@ -172,8 +176,10 @@ mod ffi_verification_tests {
     #[test]
     fn test_extern_fn_contract_generation() {
         let func = ExternFunc {
+            meta: AstNodeMeta::synthetic(AstOrigin::User),
             name: "register_callback".to_string(),
             params: vec![ExternParam {
+                meta: AstNodeMeta::synthetic(AstOrigin::User),
                 name: "cb".to_string(),
                 ty: Type::ExternFunc(
                     vec![Type::Name("i32".to_string(), vec![])],

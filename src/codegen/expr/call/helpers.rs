@@ -81,7 +81,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
     /// Determine if an expression evaluates to a string type (for len() dispatch).
     pub(in crate::codegen) fn expr_is_string(&self, expr: &Expr) -> bool {
-        match expr {
+        match expr.unlocated() {
             Expr::Literal(Lit::String(_)) | Expr::Literal(Lit::FString(_)) => true,
             Expr::Ident(name) => self
                 .var_type_names
@@ -89,7 +89,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map(|t| t == "string")
                 .unwrap_or(false),
             Expr::Call(callee, _) => {
-                if let Expr::Ident(name) = callee.as_ref() {
+                if let Expr::Ident(name) = callee.unlocated() {
                     matches!(
                         name.as_str(),
                         "to_string"
@@ -108,7 +108,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             | "from_json"
                             | "c_str_to_string"
                     )
-                } else if let Expr::Field(_, method) = callee.as_ref() {
+                } else if let Expr::Field(_, method) = callee.unlocated() {
                     matches!(
                         method.as_str(),
                         "to_string"
@@ -140,13 +140,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Turbofish(name, _, _) => matches!(name.as_str(), "to_string"),
             Expr::Binary(BinOp::Add, lhs, _) => self.expr_is_string(lhs),
             Expr::If { then_, else_, .. } => {
-                if let Some(Stmt::Expr(e)) = then_.last() {
+                if let Some(Stmt::Expr(e)) = then_.last().map(Stmt::unlocated) {
                     if self.expr_is_string(e) {
                         return true;
                     }
                 }
                 if let Some(else_block) = else_ {
-                    if let Some(Stmt::Expr(e)) = else_block.last() {
+                    if let Some(Stmt::Expr(e)) = else_block.last().map(Stmt::unlocated) {
                         if self.expr_is_string(e) {
                             return true;
                         }
@@ -180,7 +180,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         let make_string_value =
             |pv: inkwell::values::PointerValue<'ctx>| -> BasicValueEnum<'ctx> { pv.into() };
-        match expr {
+        match expr.unlocated() {
             Expr::Literal(Lit::Bool(true)) => {
                 Some(make_string_value(build_global("true", "bool_true_lit")?))
             }
@@ -218,7 +218,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             // is_ok/is_err/is_some/is_none: parsed as Call(Field(obj, method), []).
             // Return bool (i64 0/1); print as true/false to match interpreter.
             Expr::Call(callee, _) => {
-                if let Expr::Field(_, method) = callee.as_ref() {
+                if let Expr::Field(_, method) = callee.unlocated() {
                     if matches!(method.as_str(), "is_ok" | "is_err" | "is_some" | "is_none") {
                         return self.select_bool_string(value, &build_global);
                     }
@@ -261,7 +261,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         expr: &Expr,
         _vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Option<Type> {
-        match expr {
+        match expr.unlocated() {
             Expr::Ident(name) => {
                 // Prefer var_types (full AST type with generic args) for generic
                 // inference. Fall back to var_type_names (string-based) for types
@@ -287,7 +287,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 _ => None,
             },
             Expr::Call(callee, _args) => {
-                if let Expr::Ident(name) = callee.as_ref() {
+                if let Expr::Ident(name) = callee.unlocated() {
                     self.func_defs
                         .get(name)
                         .and_then(|f| f.ret.clone())
@@ -306,7 +306,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
     /// Check whether a Type contains a reference to a generic parameter name.
     pub(in crate::codegen) fn type_references_generic(ty: &Type, generic_name: &str) -> bool {
-        match ty {
+        match ty.unlocated() {
+            Type::Located { ty, .. } => Self::type_references_generic(ty, generic_name),
             Type::Name(name, args) => {
                 if name == generic_name {
                     return true;
@@ -896,7 +897,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Determine the lambda's first parameter type to adjust the
                 // element width. After A1 restoration, i32 params expect i32
                 // values, but list elements are stored as i64.
-                let lambda_param_ty = if let Expr::Lambda { params, .. } = &args[1] {
+                let lambda_param_ty = if let Expr::Lambda { params, .. } = args[1].unlocated() {
                     params.first().and_then(|p| {
                         self.llvm_type_for(&p.ty)
                             .or_else(|| types::mimi_type_to_llvm(self.context, &p.ty))
@@ -1338,7 +1339,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     fn is_string_type(ty: &Type) -> bool {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) if name == "string" => true,
             Type::Ref(_, inner) | Type::RefMut(_, inner) => Self::is_string_type(inner),
             _ => false,
@@ -1480,14 +1481,14 @@ pub(crate) fn infer_generic_args(
 ) {
     let is_gen = |name: &str| generics.iter().any(|g| g == name);
 
-    match param {
+    match param.unlocated() {
         Type::Name(p_name, p_args) if is_gen(p_name) => {
             if !occurs_in(name_of_type(arg), p_name) {
                 map.entry(p_name.clone()).or_insert_with(|| arg.clone());
             }
         }
         Type::Name(p_name, p_args) => {
-            if let Type::Name(a_name, a_args) = arg {
+            if let Type::Name(a_name, a_args) = arg.unlocated() {
                 if p_name == a_name && p_args.len() == a_args.len() {
                     for (pa, aa) in p_args.iter().zip(a_args.iter()) {
                         infer_generic_args(pa, aa, generics, map);
@@ -1496,23 +1497,23 @@ pub(crate) fn infer_generic_args(
             }
         }
         Type::Ref(_, p_inner) | Type::RefMut(_, p_inner) => {
-            if let Type::Ref(_, a_inner) | Type::RefMut(_, a_inner) = arg {
+            if let Type::Ref(_, a_inner) | Type::RefMut(_, a_inner) = arg.unlocated() {
                 infer_generic_args(p_inner, a_inner, generics, map);
             }
         }
         Type::Option(p_inner) => {
-            if let Type::Option(a_inner) = arg {
+            if let Type::Option(a_inner) = arg.unlocated() {
                 infer_generic_args(p_inner, a_inner, generics, map);
             }
         }
         Type::Result(p_ok, p_err) => {
-            if let Type::Result(a_ok, a_err) = arg {
+            if let Type::Result(a_ok, a_err) = arg.unlocated() {
                 infer_generic_args(p_ok, a_ok, generics, map);
                 infer_generic_args(p_err, a_err, generics, map);
             }
         }
         Type::Tuple(p_elems) => {
-            if let Type::Tuple(a_elems) = arg {
+            if let Type::Tuple(a_elems) = arg.unlocated() {
                 if p_elems.len() == a_elems.len() {
                     for (pe, ae) in p_elems.iter().zip(a_elems.iter()) {
                         infer_generic_args(pe, ae, generics, map);
@@ -1521,7 +1522,7 @@ pub(crate) fn infer_generic_args(
             }
         }
         Type::Func(p_args, p_ret) => {
-            if let Type::Func(a_args, a_ret) = arg {
+            if let Type::Func(a_args, a_ret) = arg.unlocated() {
                 if p_args.len() == a_args.len() {
                     for (pa, aa) in p_args.iter().zip(a_args.iter()) {
                         infer_generic_args(pa, aa, generics, map);
@@ -1531,37 +1532,37 @@ pub(crate) fn infer_generic_args(
             }
         }
         Type::Shared(p_inner) => {
-            if let Type::Shared(a_inner) = arg {
+            if let Type::Shared(a_inner) = arg.unlocated() {
                 infer_generic_args(p_inner, a_inner, generics, map);
             }
         }
         Type::LocalShared(p_inner) => {
-            if let Type::LocalShared(a_inner) = arg {
+            if let Type::LocalShared(a_inner) = arg.unlocated() {
                 infer_generic_args(p_inner, a_inner, generics, map);
             }
         }
         Type::Weak(p_inner) => {
-            if let Type::Weak(a_inner) = arg {
+            if let Type::Weak(a_inner) = arg.unlocated() {
                 infer_generic_args(p_inner, a_inner, generics, map);
             }
         }
         Type::WeakLocal(p_inner) => {
-            if let Type::WeakLocal(a_inner) = arg {
+            if let Type::WeakLocal(a_inner) = arg.unlocated() {
                 infer_generic_args(p_inner, a_inner, generics, map);
             }
         }
         Type::Slice(p_inner) => {
-            if let Type::Slice(a_inner) = arg {
+            if let Type::Slice(a_inner) = arg.unlocated() {
                 infer_generic_args(p_inner, a_inner, generics, map);
             }
         }
         Type::RawPtr(p_inner) => {
-            if let Type::RawPtr(a_inner) = arg {
+            if let Type::RawPtr(a_inner) = arg.unlocated() {
                 infer_generic_args(p_inner, a_inner, generics, map);
             }
         }
         Type::RawPtrMut(p_inner) => {
-            if let Type::RawPtrMut(a_inner) = arg {
+            if let Type::RawPtrMut(a_inner) = arg.unlocated() {
                 infer_generic_args(p_inner, a_inner, generics, map);
             }
         }
@@ -1570,7 +1571,7 @@ pub(crate) fn infer_generic_args(
 }
 
 fn name_of_type(ty: &Type) -> Option<&str> {
-    match ty {
+    match ty.unlocated() {
         Type::Name(name, _) => Some(name),
         _ => None,
     }

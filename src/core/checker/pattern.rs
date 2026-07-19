@@ -1,7 +1,6 @@
 use crate::ast::*;
 use crate::core::helpers::*;
 use crate::diagnostic::Diagnostic;
-use crate::span::Span;
 use std::collections::HashMap;
 
 use super::Checker;
@@ -13,12 +12,23 @@ impl<'a> Checker<'a> {
         subject: &Type,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) {
-        match pat {
-            Pattern::Wildcard => {}
-            Pattern::Variable(name) => {
+        let previous_span = self.replace_span(Some(pat.meta.span));
+        self.check_pattern_inner(pat, subject, scopes);
+        self.set_span(previous_span);
+    }
+
+    fn check_pattern_inner(
+        &mut self,
+        pat: &Pattern,
+        subject: &Type,
+        scopes: &mut Vec<HashMap<String, Type>>,
+    ) {
+        match &pat.kind {
+            PatternKind::Wildcard => {}
+            PatternKind::Variable(name) => {
                 // If the name matches an enum variant of the subject type,
                 // treat it as a constructor match (no variable binding).
-                let is_constructor = match subject {
+                let is_constructor = match subject.unlocated() {
                     Type::Result(_, _) => name == "Ok" || name == "Err",
                     Type::Option(_) => name == "Some" || name == "None",
                     Type::Name(tn, _) => self
@@ -38,7 +48,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Pattern::Literal(l) => {
+            PatternKind::Literal(l) => {
                 let lit_ty = match l {
                     Lit::Int(_) => Type::Name("i32".into(), vec![]),
                     Lit::Float(_) => Type::Name("f64".into(), vec![]),
@@ -57,7 +67,7 @@ impl<'a> Checker<'a> {
                                 fmt_type(&lit_ty),
                                 fmt_type(subject)
                             ),
-                            Span::single(self.current_line, self.current_col),
+                            self.diagnostic_span(),
                         )
                         .with_help(format!(
                             "change the pattern to match type {}",
@@ -66,11 +76,11 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            Pattern::Constructor(name, pats) => {
+            PatternKind::Constructor(name, pats) => {
                 // Handle built-in Option/Result constructors
                 // (support both Type::Option/Result and Type::Name("Option"/"Result", _) representations)
                 if name == "Some" || name == "None" {
-                    let inner_opt: Option<&Type> = match subject {
+                    let inner_opt: Option<&Type> = match subject.unlocated() {
                         Type::Option(inner) => Some(inner.as_ref()),
                         Type::Name(n, args) if n == "Option" && args.len() == 1 => Some(&args[0]),
                         _ => None,
@@ -95,7 +105,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if name == "Ok" || name == "Err" {
-                    let ok_err: Option<(&Type, &Type)> = match subject {
+                    let ok_err: Option<(&Type, &Type)> = match subject.unlocated() {
                         Type::Result(ok, err) => Some((ok.as_ref(), err.as_ref())),
                         Type::Name(n, args) if n == "Result" && args.len() == 2 => {
                             Some((&args[0], &args[1]))
@@ -116,7 +126,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // CK1: Scope constructor lookup to subject type when known
-                let def = match subject {
+                let def = match subject.unlocated() {
                     Type::Name(type_name, _) => {
                         self.types.get(type_name).filter(|t| match &t.kind {
                             TypeDefKind::Enum(variants) => variants.iter().any(|v| v.name == *name),
@@ -237,7 +247,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Pattern::Tuple(pats) => match subject {
+            PatternKind::Tuple(pats) => match subject.unlocated() {
                 Type::Tuple(types) => {
                     if pats.len() != types.len() {
                         self.emit_code(
@@ -264,7 +274,7 @@ impl<'a> Checker<'a> {
                     );
                 }
             },
-            Pattern::Array(pats) => match subject {
+            PatternKind::Array(pats) => match subject.unlocated() {
                 Type::Array(inner, size) => {
                     if pats.len() != *size {
                         self.emit_code(
@@ -297,8 +307,8 @@ impl<'a> Checker<'a> {
                     );
                 }
             },
-            Pattern::Slice(pats, rest) => {
-                match subject {
+            PatternKind::Slice(pats, rest) => {
+                match subject.unlocated() {
                     Type::Array(inner, _) | Type::Slice(inner) => {
                         if !pats.is_empty() {
                             for p in pats {

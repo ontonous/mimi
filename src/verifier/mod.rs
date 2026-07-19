@@ -14,12 +14,17 @@ pub use flow::{
     VerifierState,
 };
 
+fn parse_memory_source(source: &str, label: &str) -> Result<crate::ast::File, String> {
+    let tokens = crate::lexer::Lexer::new(source).tokenize()?;
+    crate::parser::Parser::new_memory(tokens, "verifier.source", label, source)
+        .map_err(|error| error.to_string())?
+        .parse_file()
+        .map_err(|error| error.message)
+}
+
 /// Verify contracts in source text.
 pub fn verify_source(source: &str) -> Result<Vec<VerificationResult>, String> {
-    let tokens = crate::lexer::Lexer::new(source).tokenize()?;
-    let file = crate::parser::Parser::new(tokens)
-        .parse_file()
-        .map_err(|e| e.message)?;
+    let file = parse_memory_source(source, "contracts")?;
     let program = crate::core::check_program(&file).map_err(format_check_errors)?;
     verify_checked(&program)
 }
@@ -29,10 +34,7 @@ pub fn verify_source_with(
     source: &str,
     verifier: &mut Verifier,
 ) -> Result<Vec<VerificationResult>, String> {
-    let tokens = crate::lexer::Lexer::new(source).tokenize()?;
-    let file = crate::parser::Parser::new(tokens)
-        .parse_file()
-        .map_err(|e| e.message)?;
+    let file = parse_memory_source(source, "contracts")?;
     let program = crate::core::check_program(&file).map_err(format_check_errors)?;
     Ok(verifier.verify_checked(&program))
 }
@@ -49,10 +51,7 @@ pub fn verify_checked(
 
 /// Parse source and verify extern call sites using Z3.
 pub fn verify_ffi_source(source: &str) -> Result<Vec<VerificationResult>, String> {
-    let tokens = crate::lexer::Lexer::new(source).tokenize()?;
-    let file = crate::parser::Parser::new(tokens)
-        .parse_file()
-        .map_err(|e| e.message)?;
+    let file = parse_memory_source(source, "ffi-call-sites")?;
     let program = crate::core::check_program(&file).map_err(format_check_errors)?;
     verify_ffi_checked(&program)
 }
@@ -68,18 +67,26 @@ pub fn verify_ffi_checked(
     let mut externs = std::collections::HashMap::new();
     for block in program.extern_blocks().values() {
         for signature in &block.signatures {
+            let func_span = signature.span;
+            let adapter_origin = crate::ast::AstOrigin::Desugared("verifier.extern_adapter");
+            let func_meta = crate::ast::AstNodeMeta::inherited(func_span, adapter_origin);
             let declaration = crate::ast::ExternFunc {
+                meta: func_meta,
                 name: signature.name.clone(),
                 params: signature
                     .typed_params
                     .iter()
                     .map(|(name, ty, cap_mode)| crate::ast::ExternParam {
+                        meta: func_meta,
                         name: name.clone(),
-                        ty: ty.clone(),
+                        ty: ty.clone().deep_reorigin(func_meta),
                         cap_mode: *cap_mode,
                     })
                     .collect(),
-                ret: signature.ret_type.clone(),
+                ret: signature
+                    .ret_type
+                    .clone()
+                    .map(|ty| ty.deep_reorigin(func_meta)),
                 requires: signature.requires.clone(),
                 ensures: signature.ensures.clone(),
                 variadic: signature.variadic,

@@ -31,6 +31,10 @@ pub(crate) struct Checker<'a> {
     pub(crate) warnings: Vec<Diagnostic>,
     pub(crate) funcs: HashMap<String, (Vec<Type>, Type)>,
     pub(crate) aliases: HashMap<String, Type>,
+    /// Declaration anchors for aliases. Alias-cycle validation runs after the
+    /// whole (possibly multi-source) declaration graph is collected, so it
+    /// must not rely on whichever item last updated `current_span`.
+    pub(crate) alias_spans: HashMap<String, Span>,
     pub(crate) types: HashMap<String, TypeDef>,
     /// Track newtype definitions: name -> inner type (unresolved)
     pub(crate) newtypes: HashMap<String, Type>,
@@ -82,6 +86,10 @@ pub(crate) struct Checker<'a> {
     /// Current item/function line-col for fallback error positioning
     pub(crate) current_line: usize,
     pub(crate) current_col: usize,
+    /// Source-aware diagnostic context. Exact Expr/Stmt metadata temporarily
+    /// replaces this value while that node is checked; declaration metadata
+    /// remains the honest fallback for declaration-level checks.
+    pub(crate) current_span: Span,
     /// C2: Unification table for type inference
     pub(crate) unification: UnificationTable,
     /// Top-level constant types: name -> type
@@ -115,6 +123,50 @@ pub(crate) struct Checker<'a> {
     pub(crate) ownership_control_path: Vec<String>,
 }
 
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct DiagnosticDedupKey {
+    code: Option<String>,
+    message: String,
+    severity: crate::diagnostic::Severity,
+    source_id: crate::span::SourceId,
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+    notes: Vec<(String, crate::span::SourceId, usize, usize, usize, usize)>,
+    help: Option<String>,
+}
+
+impl From<&Diagnostic> for DiagnosticDedupKey {
+    fn from(diagnostic: &Diagnostic) -> Self {
+        Self {
+            code: diagnostic.code.clone(),
+            message: diagnostic.message.clone(),
+            severity: diagnostic.severity,
+            source_id: diagnostic.span.source_id,
+            start_line: diagnostic.span.start_line,
+            start_col: diagnostic.span.start_col,
+            end_line: diagnostic.span.end_line,
+            end_col: diagnostic.span.end_col,
+            notes: diagnostic
+                .notes
+                .iter()
+                .map(|note| {
+                    (
+                        note.message.clone(),
+                        note.span.source_id,
+                        note.span.start_line,
+                        note.span.start_col,
+                        note.span.end_line,
+                        note.span.end_col,
+                    )
+                })
+                .collect(),
+            help: diagnostic.help.clone(),
+        }
+    }
+}
+
 #[allow(dead_code)]
 impl<'a> Checker<'a> {
     pub(crate) fn new(file: &'a File) -> Self {
@@ -124,6 +176,7 @@ impl<'a> Checker<'a> {
             warnings: Vec::new(),
             funcs: HashMap::new(),
             aliases: HashMap::new(),
+            alias_spans: HashMap::new(),
             types: HashMap::new(),
             newtypes: HashMap::new(),
             cap_vars: vec![HashMap::new()],
@@ -150,6 +203,7 @@ impl<'a> Checker<'a> {
             arena_depth: 0,
             current_line: 0,
             current_col: 0,
+            current_span: Span::UNKNOWN,
             unification: UnificationTable::new(),
             const_types: HashMap::new(),
             current_ret: None,
@@ -185,6 +239,7 @@ impl<'a> Checker<'a> {
         let Some(owner) = self.current_ownership_owner.clone() else {
             return;
         };
+        let span = self.diagnostic_span();
         let ledger = self
             .ownership_ledgers
             .entry(owner.clone())
@@ -193,7 +248,7 @@ impl<'a> Checker<'a> {
             kind,
             resource: resource.to_string(),
             control_path: self.ownership_control_path.clone(),
-            span: Span::single(self.current_line, self.current_col),
+            span,
         });
     }
 
@@ -203,7 +258,7 @@ impl<'a> Checker<'a> {
         else_caps: &[HashMap<String, CapVarInfo>],
     ) {
         let owner = self.current_ownership_owner.clone();
-        let span = Span::single(self.current_line, self.current_col);
+        let span = self.diagnostic_span();
         let mut merges = Vec::new();
         let mut inconsistent = Vec::new();
 
@@ -311,7 +366,7 @@ impl<'a> Checker<'a> {
                         "capability '{}' cannot be consumed inside a potentially repeating loop",
                         name
                     ),
-                    Span::single(self.current_line, self.current_col),
+                    self.diagnostic_span(),
                 )
                 .with_help(
                     "move or drop the capability outside the loop; loop-carried ownership requires CFG fixed-point analysis",
@@ -348,7 +403,7 @@ impl<'a> Checker<'a> {
         kind: super::ResourceActionKind,
     ) {
         fn collect(expr: &Expr, names: &mut HashSet<String>) {
-            match expr {
+            match expr.unlocated() {
                 Expr::Ident(name) => {
                     names.insert(name.clone());
                 }
@@ -373,8 +428,11 @@ impl<'a> Checker<'a> {
                 }
                 Expr::If { then_, else_, .. } => {
                     for block in std::iter::once(then_).chain(else_.iter()) {
-                        if let Some(Stmt::Expr(value) | Stmt::Return(Some(value))) = block.last() {
-                            collect(value, names);
+                        if let Some(stmt) = block.last() {
+                            if let Stmt::Expr(value) | Stmt::Return(Some(value)) = stmt.unlocated()
+                            {
+                                collect(value, names);
+                            }
                         }
                     }
                 }
@@ -406,7 +464,7 @@ impl<'a> Checker<'a> {
             .entry(owner.clone())
             .or_insert_with(|| super::OwnershipLedger::new(owner));
         for (name, ty) in params {
-            if matches!(ty, Type::Cap(_)) {
+            if matches!(ty.unlocated(), Type::Cap(_)) {
                 if let Some(scope) = self.cap_vars.last_mut() {
                     scope.insert(
                         name.clone(),
@@ -430,6 +488,33 @@ impl<'a> Checker<'a> {
     pub(crate) fn set_pos(&mut self, line: usize, col: usize) {
         self.current_line = line;
         self.current_col = col;
+        self.current_span = Span::single(line, col).with_source(self.current_span.source_id);
+    }
+
+    /// Replace the current source-aware diagnostic context.
+    pub(crate) fn set_span(&mut self, span: Span) {
+        self.current_span = span;
+        self.current_line = span.start_line;
+        self.current_col = span.start_col;
+    }
+
+    /// Return an honest diagnostic span. Unknown context stays UNKNOWN rather
+    /// than becoming a fabricated `(0,0)` point that tooling might publish on
+    /// the active document.
+    pub(crate) fn diagnostic_span(&self) -> Span {
+        if self.current_span.start_line == 0 || self.current_span.start_col == 0 {
+            Span::UNKNOWN
+        } else {
+            self.current_span
+        }
+    }
+
+    pub(crate) fn replace_span(&mut self, span: Option<Span>) -> Span {
+        let previous = self.current_span;
+        if let Some(span) = span {
+            self.set_span(span);
+        }
+        previous
     }
 
     pub(crate) fn check(&mut self) -> Result<(), Vec<Diagnostic>> {
@@ -441,14 +526,16 @@ impl<'a> Checker<'a> {
         if self.errors.is_empty() {
             Ok(())
         } else {
-            // P1-7: deduplicate identical errors (same code + message),
+            // P1-7: deduplicate truly identical diagnostics. Source identity,
+            // range, notes and help are semantic: collapsing two dependency
+            // diagnostics with the same prose would lose cross-file errors.
             // which can occur when a method-call expression inside a
             // multi-arg expression is type-checked along multiple paths.
-            let mut seen: std::collections::HashSet<(Option<String>, String)> =
+            let mut seen: std::collections::HashSet<DiagnosticDedupKey> =
                 std::collections::HashSet::new();
             let mut deduped: Vec<Diagnostic> = Vec::with_capacity(self.errors.len());
             for e in std::mem::take(&mut self.errors) {
-                let key = (e.code.clone(), e.message.clone());
+                let key = DiagnosticDedupKey::from(&e);
                 if seen.insert(key) {
                     deduped.push(e);
                 }
@@ -458,12 +545,12 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn emit_code(&mut self, code: &str, msg: impl Into<String>) {
-        let span = Span::single(self.current_line, self.current_col);
+        let span = self.diagnostic_span();
         self.errors.push(Diagnostic::error_code(code, msg, span));
     }
 
     pub(crate) fn emit_warning_code(&mut self, code: &str, msg: impl Into<String>) {
-        let span = Span::single(self.current_line, self.current_col);
+        let span = self.diagnostic_span();
         self.warnings
             .push(Diagnostic::warning_code(code, msg, span));
     }
@@ -506,14 +593,14 @@ impl<'a> Checker<'a> {
         if self.file.implicit_single {
             return; // still in script mode — no migration needed
         }
-        let has_user_flow = self
-            .file
-            .items
-            .iter()
-            .any(|i| matches!(i, crate::ast::Item::Flow(_)));
-        if !has_user_flow {
+        let Some(user_flow_span) = self.file.items.iter().find_map(|item| match item {
+            crate::ast::Item::Flow(flow) if flow.meta.origin == AstOrigin::User => {
+                Some(flow.meta.span)
+            }
+            _ => None,
+        }) else {
             return;
-        }
+        };
         if !crate::progressive::has_top_level_main(self.file) {
             return;
         }
@@ -527,13 +614,14 @@ impl<'a> Checker<'a> {
                 shown.join(", ")
             )
         };
-        self.emit_warning_code(
+        self.warnings.push(Diagnostic::warning_code(
             crate::diagnostic::codes::W011,
             format!(
                 "detected explicit `flow` — progressive script mode (implicit Single) is disabled.{}",
                 local_hint
             ),
-        );
+            user_flow_span,
+        ));
     }
 
     pub(crate) fn fresh_var(&mut self) -> Type {
@@ -574,7 +662,7 @@ impl<'a> Checker<'a> {
         // CK-H2: never nest ForAll. If already quantified, leave it alone
         // (re-generalizing a ForAll body would re-bind TypeVar(0..n) and nest).
         let (resolved, free_vars) = self.resolve_and_collect_free_vars(ty);
-        if matches!(resolved, Type::ForAll(..)) {
+        if matches!(resolved.unlocated(), Type::ForAll(..)) {
             return resolved;
         }
         let env_vars = self.collect_env_type_vars(env);
@@ -601,6 +689,7 @@ impl<'a> Checker<'a> {
     /// Remap TypeVar IDs in a type according to the given mapping (Bug 10 fix).
     fn remap_type_vars(&self, ty: &Type, remap: &HashMap<u32, u32>) -> Type {
         match ty {
+            Type::Located { meta, ty } => self.remap_type_vars(ty, remap).with_meta(*meta),
             Type::TypeVar(id) => {
                 if let Some(&new_id) = remap.get(id) {
                     Type::TypeVar(new_id)
@@ -677,6 +766,9 @@ impl<'a> Checker<'a> {
     /// Combined resolve + collect free TypeVars inner loop.
     fn resolve_and_collect_inner(&mut self, ty: &Type, free_vars: &mut Vec<u32>) -> Type {
         match ty {
+            Type::Located { meta, ty } => self
+                .resolve_and_collect_inner(ty, free_vars)
+                .with_meta(*meta),
             Type::TypeVar(id) => {
                 let root = self.unification.find(*id);
                 if let Some(bound) = self.unification.get_binding(root).cloned() {
@@ -781,7 +873,7 @@ impl<'a> Checker<'a> {
     /// (i as u32) matching TypeVar IDs in the body. This avoids confusion between
     /// user-defined type parameters (Type::Name) and inference variables (TypeVar).
     pub(crate) fn instantiate(&mut self, ty: &Type) -> Type {
-        match ty {
+        match ty.unlocated() {
             Type::ForAll(params, body) => {
                 let mut substitutions = HashMap::new();
                 for (i, _param) in params.iter().enumerate() {
@@ -803,6 +895,7 @@ impl<'a> Checker<'a> {
 
     fn collect_type_vars_inner(&self, ty: &Type, vars: &mut Vec<u32>) {
         match ty {
+            Type::Located { ty, .. } => self.collect_type_vars_inner(ty, vars),
             Type::TypeVar(id) => vars.push(*id),
             Type::ForAll(_, body) => self.collect_type_vars_inner(body, vars),
             Type::Option(inner) => self.collect_type_vars_inner(inner, vars),
@@ -859,6 +952,7 @@ impl<'a> Checker<'a> {
     /// Substitute TypeVar IDs in a type with new IDs.
     fn substitute_type_vars(&self, ty: &Type, subs: &HashMap<u32, u32>) -> Type {
         match ty {
+            Type::Located { meta, ty } => self.substitute_type_vars(ty, subs).with_meta(*meta),
             Type::TypeVar(id) => {
                 if let Some(new_id) = subs.get(id) {
                     Type::TypeVar(*new_id)
@@ -934,6 +1028,29 @@ impl<'a> Checker<'a> {
             ),
             _ => ty.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_dedup_tests {
+    use super::DiagnosticDedupKey;
+    use crate::diagnostic::Diagnostic;
+    use crate::span::{SourceId, Span};
+
+    #[test]
+    fn identical_messages_in_distinct_sources_are_not_deduplicated() {
+        let first = Diagnostic::error(
+            "same error",
+            Span::single(3, 4).with_source(SourceId::new(1)),
+        );
+        let second = Diagnostic::error(
+            "same error",
+            Span::single(3, 4).with_source(SourceId::new(2)),
+        );
+        assert_ne!(
+            DiagnosticDedupKey::from(&first),
+            DiagnosticDedupKey::from(&second)
+        );
     }
 }
 

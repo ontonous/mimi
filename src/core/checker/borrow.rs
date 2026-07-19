@@ -97,7 +97,7 @@ impl<'a> Checker<'a> {
 
     /// Collect all variable names used in an expression (shallow)
     pub(crate) fn collect_uses_in_expr(expr: &Expr, uses: &mut Vec<String>) {
-        match expr {
+        match expr.unlocated() {
             Expr::Ident(name) => uses.push(name.clone()),
             Expr::Unary(_, inner) => Self::collect_uses_in_expr(inner, uses),
             Expr::Binary(_, l, r) => {
@@ -217,12 +217,13 @@ impl<'a> Checker<'a> {
             }
             Expr::NamedArg(_, value) => Self::collect_uses_in_expr(value, uses),
             Expr::Cast(inner, _) => Self::collect_uses_in_expr(inner, uses),
+            Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
         }
     }
 
     /// Collect all variable names used in a statement
     pub(crate) fn collect_uses_in_stmt(stmt: &Stmt, uses: &mut Vec<String>) {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Expr(e) => Self::collect_uses_in_expr(e, uses),
             Stmt::Return(Some(e)) => Self::collect_uses_in_expr(e, uses),
             Stmt::Return(None) => {}
@@ -315,6 +316,7 @@ impl<'a> Checker<'a> {
                     Self::collect_uses_in_stmt(s, uses);
                 }
             }
+            Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
         }
     }
 
@@ -417,48 +419,26 @@ impl<'a> Checker<'a> {
         for stmt in &block[..current_idx] {
             if let Stmt::Let {
                 pat,
-                init: Some(Expr::Unary(UnOp::Ref, inner)),
+                init: Some(init),
                 ..
-            } = stmt
+            } = stmt.unlocated()
             {
-                if let Expr::Ident(name) = inner.as_ref() {
+                let Expr::Unary(UnOp::Ref | UnOp::RefMut, inner) = init.unlocated() else {
+                    continue;
+                };
+                let borrowed_name = match inner.unlocated() {
+                    Expr::Ident(name) => Some(name.as_str()),
+                    // Borrowed index: let r = &xs[i] / &mut xs[i]
+                    Expr::Index(obj, _) => match obj.unlocated() {
+                        Expr::Ident(name) => Some(name.as_str()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(name) = borrowed_name {
                     if name == borrowed_var {
-                        if let Pattern::Variable(ref_name) = pat {
+                        if let PatternKind::Variable(ref_name) = &pat.kind {
                             return Some(ref_name.clone());
-                        }
-                    }
-                }
-                // Borrowed index: let r = &xs[i]
-                if let Expr::Index(obj, _) = inner.as_ref() {
-                    if let Expr::Ident(name) = obj.as_ref() {
-                        if name == borrowed_var {
-                            if let Pattern::Variable(ref_name) = pat {
-                                return Some(ref_name.clone());
-                            }
-                        }
-                    }
-                }
-            }
-            if let Stmt::Let {
-                pat,
-                init: Some(Expr::Unary(UnOp::RefMut, inner)),
-                ..
-            } = stmt
-            {
-                if let Expr::Ident(name) = inner.as_ref() {
-                    if name == borrowed_var {
-                        if let Pattern::Variable(ref_name) = pat {
-                            return Some(ref_name.clone());
-                        }
-                    }
-                }
-                // Borrowed mut index: let r = &mut xs[i]
-                if let Expr::Index(obj, _) = inner.as_ref() {
-                    if let Expr::Ident(name) = obj.as_ref() {
-                        if name == borrowed_var {
-                            if let Pattern::Variable(ref_name) = pat {
-                                return Some(ref_name.clone());
-                            }
                         }
                     }
                 }

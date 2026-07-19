@@ -1,6 +1,9 @@
-use crate::ast::{AstOrigin, Expr, FStringPart, File, FlowDef, Item, Pattern, Stmt, Type};
+use crate::ast::{
+    AstNodeMeta, AstOrigin, AstParentHint, Expr, FStringPart, File, FlowDef, Item, Pattern,
+    PatternKind, Stmt, Type,
+};
 use crate::diagnostic::Diagnostic;
-use crate::span::Span;
+use crate::span::{SourceRegistry, Span};
 use std::collections::HashMap;
 
 use super::OwnershipLedger;
@@ -9,6 +12,93 @@ pub const RESOLVED_IR_VERSION: &str = "mimi-resolved-ir-1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NodeId(pub String);
+
+/// The single canonical builder for anonymous semantic node identities.
+///
+/// `SourceId` is deliberately absent from the emitted identity: it is a dense,
+/// session-local allocation index and therefore changes when import discovery
+/// order changes.  User nodes are anchored by their stable `SourceKey`, source
+/// range, syntax kind, and semantic role.  Nodes without an honest source
+/// range use a controlled role discriminator supplied by the walker.
+struct NodeIdBuilder<'a> {
+    sources: &'a SourceRegistry,
+}
+
+impl<'a> NodeIdBuilder<'a> {
+    fn new(sources: &'a SourceRegistry) -> Self {
+        Self { sources }
+    }
+
+    fn anonymous(
+        &self,
+        owner: &NodeId,
+        kind: &str,
+        role: &str,
+        span: Option<Span>,
+        origin: AstOrigin,
+        errors: &mut Vec<Diagnostic>,
+    ) -> NodeId {
+        if origin == AstOrigin::User {
+            if let Some(span) = span.filter(|span| span.start_line > 0 && span.start_col > 0) {
+                let source = if span.source_id.is_known() {
+                    match self.sources.key(span.source_id) {
+                        Some(key) => stable_id_fragment(key.as_str()),
+                        None => {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                "TOOL-RESOLUTION-001: source id {} has no SourceRegistry record",
+                                span.source_id.raw()
+                            ),
+                                span,
+                            ));
+                            "unregistered-source".to_string()
+                        }
+                    }
+                } else {
+                    "unknown-source".to_string()
+                };
+                NodeId(format!(
+                    "{}/node:{}@{}:{}:{}-{}:{}",
+                    owner.0,
+                    stable_id_fragment(kind),
+                    source,
+                    span.start_line,
+                    span.start_col,
+                    span.end_line,
+                    span.end_col
+                ))
+            } else {
+                NodeId(format!(
+                    "{}/fallback:{}:{}",
+                    owner.0,
+                    stable_id_fragment(kind),
+                    stable_id_fragment(role)
+                ))
+            }
+        } else {
+            NodeId(format!(
+                "{}/generated:{}:{}:{}",
+                owner.0,
+                stable_id_fragment(kind),
+                stable_id_fragment(origin.rule().unwrap_or("missing-rule")),
+                stable_id_fragment(role)
+            ))
+        }
+    }
+}
+
+fn stable_id_fragment(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':') {
+            escaped.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(escaped, "%{byte:02x}");
+        }
+    }
+    escaped
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedItemKind {
@@ -37,6 +127,9 @@ pub struct ResolvedItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpanPrecision {
     Exact,
+    /// A real source range belonging to a child/token anchors the node, but
+    /// the AST representation cannot yet express the node's full range.
+    SourceAnchor,
     DeclarationFallback,
 }
 
@@ -106,9 +199,21 @@ pub struct TransitionId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Origin {
     User(Span),
-    Desugared { parent: NodeId, span: Span },
-    PrototypeFallback { parent: NodeId, span: Span },
-    RuntimeSystem { parent: NodeId, span: Span },
+    Desugared {
+        parent: NodeId,
+        rule: String,
+        span: Span,
+    },
+    PrototypeFallback {
+        parent: NodeId,
+        rule: String,
+        span: Span,
+    },
+    RuntimeSystem {
+        parent: NodeId,
+        rule: String,
+        span: Span,
+    },
 }
 
 impl Origin {
@@ -118,6 +223,97 @@ impl Origin {
             | Self::Desugared { span, .. }
             | Self::PrototypeFallback { span, .. }
             | Self::RuntimeSystem { span, .. } => *span,
+        }
+    }
+
+    pub fn rule(&self) -> Option<&str> {
+        match self {
+            Self::User(_) => None,
+            Self::Desugared { rule, .. }
+            | Self::PrototypeFallback { rule, .. }
+            | Self::RuntimeSystem { rule, .. } => Some(rule),
+        }
+    }
+}
+
+#[derive(Default)]
+struct OriginCatalog {
+    entries: HashMap<NodeId, Origin>,
+}
+
+impl OriginCatalog {
+    fn register(&mut self, node_id: &NodeId, origin: &Origin, errors: &mut Vec<Diagnostic>) {
+        if let Some(existing) = self.entries.get(node_id) {
+            if existing != origin {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: NodeId '{}' has conflicting Origin records",
+                        node_id.0
+                    ),
+                    origin.user_span(),
+                ));
+            }
+            return;
+        }
+        self.entries.insert(node_id.clone(), origin.clone());
+    }
+
+    fn validate(&self, errors: &mut Vec<Diagnostic>) {
+        for (node_id, origin) in &self.entries {
+            let mut current_id = node_id;
+            let mut current = origin;
+            let mut seen = std::collections::HashSet::new();
+            loop {
+                match current {
+                    Origin::User(_) => break,
+                    Origin::Desugared { parent, rule, span }
+                    | Origin::PrototypeFallback { parent, rule, span }
+                    | Origin::RuntimeSystem { parent, rule, span } => {
+                        if rule.trim().is_empty() {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: generated NodeId '{}' has an empty Origin rule",
+                                    current_id.0
+                                ),
+                                *span,
+                            ));
+                            break;
+                        }
+                        if parent == current_id {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: generated NodeId '{}' has a self-referential Origin",
+                                    current_id.0
+                                ),
+                                *span,
+                            ));
+                            break;
+                        }
+                        if !seen.insert(current_id.clone()) || seen.contains(parent) {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: Origin cycle reaches NodeId '{}'",
+                                    parent.0
+                                ),
+                                *span,
+                            ));
+                            break;
+                        }
+                        let Some(parent_origin) = self.entries.get(parent) else {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: generated NodeId '{}' references missing Origin parent '{}'",
+                                    current_id.0, parent.0
+                                ),
+                                *span,
+                            ));
+                            break;
+                        };
+                        current_id = parent;
+                        current = parent_origin;
+                    }
+                }
+            }
         }
     }
 }
@@ -319,6 +515,7 @@ pub struct ResolvedTypeDef {
 #[derive(Debug, Clone)]
 pub struct ResolvedExternFunc {
     pub name: String,
+    pub span: Span,
     pub params: Vec<(String, String)>,
     pub typed_params: Vec<(String, Type, Option<crate::ast::CapMode>)>,
     pub ret: String,
@@ -390,9 +587,29 @@ impl<'a> CheckedProgram<'a> {
         let mut extern_blocks = HashMap::new();
         let mut backend_requirements = Vec::new();
         let mut errors = Vec::new();
+        let ids = NodeIdBuilder::new(&file.sources);
+        let compilation_root = NodeId(COMPILATION_ROOT_NODE_ID.to_string());
+        for import in &file.imports {
+            let key = format!(
+                "{}:as:{}",
+                import.path.join("::"),
+                import.alias.as_deref().unwrap_or("_")
+            );
+            insert_child_meta(
+                import.meta,
+                &compilation_root,
+                "decl.import",
+                &format!("import.{}", stable_id_fragment(&key)),
+                import.meta.span,
+                &ids,
+                &mut node_meta,
+                &mut errors,
+            );
+        }
         collect_items(
             &file.items,
             "",
+            &file.sources,
             &mut items,
             &mut node_meta,
             &mut functions,
@@ -420,24 +637,94 @@ impl<'a> CheckedProgram<'a> {
                         "TOOL-RESOLUTION-001: ownership ledger key '{}' disagrees with ledger.owner '{}'",
                         owner.0, ledger.owner.0
                     ),
-                    Span::single(1, 1),
+                    Span::UNKNOWN,
                 ));
             }
-            let ok = owner.0.starts_with("function:") || owner.0.starts_with("transition:");
-            if !ok {
+            let catalogued = functions.contains_key(owner)
+                || transitions
+                    .values()
+                    .any(|transition| transition.node_id == *owner)
+                || (is_callable_catalog_root(owner) && node_meta.contains_key(owner));
+            if !catalogued {
                 errors.push(Diagnostic::error(
                     format!(
-                        "TOOL-RESOLUTION-001: ownership ledger owner '{}' is not a callable NodeId",
+                        "TOOL-RESOLUTION-001: ownership ledger owner '{}' is not present in the callable NodeMeta/function/transition catalog",
                         owner.0
                     ),
-                    Span::single(1, 1),
+                    Span::UNKNOWN,
                 ));
             }
         }
         if !errors.is_empty() {
             return Err(errors);
         }
-        collect_program_call_sites(file, &functions, &extern_blocks, &actors, &mut call_sites);
+        collect_program_call_sites(
+            file,
+            &functions,
+            &extern_blocks,
+            &actors,
+            &transitions,
+            &mut call_sites,
+            &mut errors,
+        );
+        let mut origin_catalog = OriginCatalog::default();
+        origin_catalog.register(
+            &NodeId(COMPILATION_ROOT_NODE_ID.to_string()),
+            &Origin::User(Span::UNKNOWN),
+            &mut errors,
+        );
+        for item in items.values() {
+            origin_catalog.register(&item.node_id, &item.origin, &mut errors);
+        }
+        for meta in node_meta.values() {
+            origin_catalog.register(&meta.node_id, &meta.origin, &mut errors);
+        }
+        for call in call_sites.values() {
+            origin_catalog.register(&call.node_id, &call.origin, &mut errors);
+        }
+        for flow in flows.values() {
+            origin_catalog.register(&flow.node_id, &flow.origin, &mut errors);
+            for state in flow.states.values() {
+                origin_catalog.register(&state.node_id, &state.origin, &mut errors);
+            }
+        }
+        for transition in transitions.values() {
+            origin_catalog.register(&transition.node_id, &transition.origin, &mut errors);
+        }
+        for function in functions.values() {
+            origin_catalog.register(&function.node_id, &function.origin, &mut errors);
+        }
+        for session in sessions.values() {
+            origin_catalog.register(&session.node_id, &session.origin, &mut errors);
+        }
+        for protocol in protocols.values() {
+            origin_catalog.register(&protocol.node_id, &protocol.origin, &mut errors);
+        }
+        for actor in actors.values() {
+            origin_catalog.register(&actor.node_id, &actor.origin, &mut errors);
+        }
+        for capability in capabilities.values() {
+            origin_catalog.register(&capability.node_id, &capability.origin, &mut errors);
+        }
+        for constant in constants.values() {
+            origin_catalog.register(&constant.node_id, &constant.origin, &mut errors);
+        }
+        for trait_def in traits.values() {
+            origin_catalog.register(&trait_def.node_id, &trait_def.origin, &mut errors);
+        }
+        for impl_def in impls.values() {
+            origin_catalog.register(&impl_def.node_id, &impl_def.origin, &mut errors);
+        }
+        for type_def in type_defs.values() {
+            origin_catalog.register(&type_def.node_id, &type_def.origin, &mut errors);
+        }
+        for extern_block in extern_blocks.values() {
+            origin_catalog.register(&extern_block.node_id, &extern_block.origin, &mut errors);
+        }
+        origin_catalog.validate(&mut errors);
+        if !errors.is_empty() {
+            return Err(errors);
+        }
         Ok(Self {
             file,
             items,
@@ -739,6 +1026,17 @@ impl<'a> CheckedProgram<'a> {
     }
 }
 
+fn is_callable_catalog_root(node_id: &NodeId) -> bool {
+    if node_id.0.starts_with("transition:") {
+        return !node_id.0.contains('/');
+    }
+    node_id.0.starts_with("function:")
+        && node_id
+            .0
+            .split('/')
+            .all(|segment| segment.starts_with("function:"))
+}
+
 fn backend_supports(backend: BackendProfile, capability: &str) -> bool {
     match backend {
         // Interpreter implements the current Flow surface, including experimental multi-target.
@@ -758,6 +1056,7 @@ fn backend_supports(backend: BackendProfile, capability: &str) -> bool {
 fn collect_items(
     items: &[Item],
     module: &str,
+    sources: &SourceRegistry,
     resolved_items: &mut HashMap<NodeId, ResolvedItem>,
     node_meta: &mut HashMap<NodeId, NodeMeta>,
     functions: &mut HashMap<NodeId, ResolvedFunction>,
@@ -775,21 +1074,25 @@ fn collect_items(
     backend_requirements: &mut Vec<CapabilityRequirement>,
     errors: &mut Vec<Diagnostic>,
 ) {
+    let ids = NodeIdBuilder::new(sources);
     for item in items {
+        collect_item_meta(item, module, &ids, node_meta, errors);
         match item {
             Item::Module(def) => {
                 let qualified = qualify(module, &def.name);
+                let span = declaration_span(def.meta, def.meta.span);
                 insert_item(
                     resolved_items,
                     ResolvedItemKind::Module,
                     &qualified,
-                    def.origin,
-                    Span::from(def.pos),
+                    def.meta,
+                    span,
                     errors,
                 );
                 collect_items(
                     &def.items,
                     &qualified,
+                    sources,
                     resolved_items,
                     node_meta,
                     functions,
@@ -810,12 +1113,13 @@ fn collect_items(
             }
             Item::Flow(flow) => {
                 let qualified = qualify(module, &flow.name);
+                let span = declaration_span(flow.meta, flow.meta.span);
                 insert_item(
                     resolved_items,
                     ResolvedItemKind::Flow,
                     &qualified,
-                    flow.origin,
-                    Span::from(flow.pos),
+                    flow.meta,
+                    span,
                     errors,
                 );
                 collect_flow(
@@ -829,17 +1133,24 @@ fn collect_items(
             }
             Item::Func(function) => {
                 let qualified = qualify(module, &function.name);
-                let span = Span::from(function.pos);
+                let span = declaration_span(function.meta, function.meta.span);
                 insert_item(
                     resolved_items,
                     ResolvedItemKind::Function,
                     &qualified,
-                    AstOrigin::User,
+                    function.meta,
                     span,
                     errors,
                 );
                 let node_id = NodeId(format!("function:{}", qualified));
-                let origin = Origin::User(span);
+                let origin = resolve_named_origin(
+                    ResolvedItemKind::Function,
+                    &qualified,
+                    &node_id,
+                    function.meta,
+                    span,
+                    errors,
+                );
                 let params = function
                     .params
                     .iter()
@@ -875,7 +1186,7 @@ fn collect_items(
                 functions.insert(
                     node_id.clone(),
                     ResolvedFunction {
-                        node_id,
+                        node_id: node_id.clone(),
                         qualified_name: qualified.clone(),
                         params,
                         param_decls: function.params.clone(),
@@ -890,29 +1201,19 @@ fn collect_items(
                         origin,
                     },
                 );
-                collect_block_meta(
-                    &function.body,
-                    &format!("function:{}", qualified),
-                    span,
-                    node_meta,
-                );
             }
             Item::Type(type_def) => {
                 let qualified = qualify(module, &type_def.name);
-                let span = type_def
-                    .decl_pos
-                    .map(Span::from)
-                    .unwrap_or_else(|| Span::single(1, 1));
-                if type_def.decl_pos.is_some() {
-                    insert_item(
-                        resolved_items,
-                        ResolvedItemKind::Type,
-                        &qualified,
-                        AstOrigin::User,
-                        span,
-                        errors,
-                    );
-                }
+                let fallback = type_def.meta.span;
+                let span = declaration_span(type_def.meta, fallback);
+                insert_item(
+                    resolved_items,
+                    ResolvedItemKind::Type,
+                    &qualified,
+                    type_def.meta,
+                    span,
+                    errors,
+                );
                 let kind = match &type_def.kind {
                     crate::ast::TypeDefKind::Alias(_) => ResolvedTypeKind::Alias,
                     crate::ast::TypeDefKind::Newtype(_) => ResolvedTypeKind::Newtype,
@@ -1008,31 +1309,38 @@ fn collect_items(
                 type_defs.insert(
                     node_id.clone(),
                     ResolvedTypeDef {
-                        node_id,
-                        qualified_name: qualified,
+                        node_id: node_id.clone(),
+                        qualified_name: qualified.clone(),
                         kind,
                         alias_of,
                         fields,
                         variants,
                         declaration: type_def.clone(),
-                        origin: Origin::User(span),
+                        origin: resolve_named_origin(
+                            ResolvedItemKind::Type,
+                            &qualified,
+                            &node_id,
+                            type_def.meta,
+                            span,
+                            errors,
+                        ),
                     },
                 );
             }
             Item::Const {
+                meta,
                 name,
-                pos,
                 ty,
                 value,
                 ..
             } => {
                 let qualified = qualify(module, name);
-                let span = Span::from(*pos);
+                let span = declaration_span(*meta, meta.span);
                 insert_item(
                     resolved_items,
                     ResolvedItemKind::Constant,
                     &qualified,
-                    AstOrigin::User,
+                    *meta,
                     span,
                     errors,
                 );
@@ -1050,22 +1358,29 @@ fn collect_items(
                 constants.insert(
                     node_id.clone(),
                     ResolvedConstant {
-                        node_id,
-                        qualified_name: qualified,
+                        node_id: node_id.clone(),
+                        qualified_name: qualified.clone(),
                         ty: ty_str,
                         value: materialize_const_value(value),
-                        origin: Origin::User(span),
+                        origin: resolve_named_origin(
+                            ResolvedItemKind::Constant,
+                            &qualified,
+                            &node_id,
+                            *meta,
+                            span,
+                            errors,
+                        ),
                     },
                 );
             }
             Item::Cap(cap) => {
                 let qualified = qualify(module, &cap.name);
-                let span = Span::from(cap.pos);
+                let span = declaration_span(cap.meta, cap.meta.span);
                 insert_item(
                     resolved_items,
                     ResolvedItemKind::Capability,
                     &qualified,
-                    cap.origin,
+                    cap.meta,
                     span,
                     errors,
                 );
@@ -1073,21 +1388,28 @@ fn collect_items(
                 capabilities.insert(
                     node_id.clone(),
                     ResolvedCapability {
-                        node_id,
-                        qualified_name: qualified,
+                        node_id: node_id.clone(),
+                        qualified_name: qualified.clone(),
                         combined_with: cap.combined_with.clone(),
-                        origin: resolve_origin(cap.origin, &NodeId("capability".into()), span),
+                        origin: resolve_named_origin(
+                            ResolvedItemKind::Capability,
+                            &qualified,
+                            &node_id,
+                            cap.meta,
+                            span,
+                            errors,
+                        ),
                     },
                 );
             }
             Item::Trait(trait_def) => {
                 let qualified = qualify(module, &trait_def.name);
-                let span = Span::from(trait_def.pos);
+                let span = declaration_span(trait_def.meta, trait_def.meta.span);
                 insert_item(
                     resolved_items,
                     ResolvedItemKind::Trait,
                     &qualified,
-                    trait_def.origin,
+                    trait_def.meta,
                     span,
                     errors,
                 );
@@ -1141,11 +1463,18 @@ fn collect_items(
                 traits.insert(
                     node_id.clone(),
                     ResolvedTrait {
-                        node_id,
-                        qualified_name: qualified,
+                        node_id: node_id.clone(),
+                        qualified_name: qualified.clone(),
                         methods,
                         method_signatures,
-                        origin: resolve_origin(trait_def.origin, &NodeId("trait".into()), span),
+                        origin: resolve_named_origin(
+                            ResolvedItemKind::Trait,
+                            &qualified,
+                            &node_id,
+                            trait_def.meta,
+                            span,
+                            errors,
+                        ),
                     },
                 );
             }
@@ -1154,12 +1483,12 @@ fn collect_items(
                     module,
                     &format!("{}:for:{}", impl_def.trait_name, impl_def.type_name),
                 );
-                let span = Span::from(impl_def.pos);
+                let span = declaration_span(impl_def.meta, impl_def.meta.span);
                 insert_item(
                     resolved_items,
                     ResolvedItemKind::Impl,
                     &qualified,
-                    impl_def.origin,
+                    impl_def.meta,
                     span,
                     errors,
                 );
@@ -1213,24 +1542,31 @@ fn collect_items(
                 impls.insert(
                     node_id.clone(),
                     ResolvedImpl {
-                        node_id,
-                        qualified_name: qualified,
+                        node_id: node_id.clone(),
+                        qualified_name: qualified.clone(),
                         trait_name: impl_def.trait_name.clone(),
                         type_name: impl_def.type_name.clone(),
                         methods,
                         method_signatures,
-                        origin: resolve_origin(impl_def.origin, &NodeId("impl".into()), span),
+                        origin: resolve_named_origin(
+                            ResolvedItemKind::Impl,
+                            &qualified,
+                            &node_id,
+                            impl_def.meta,
+                            span,
+                            errors,
+                        ),
                     },
                 );
             }
             Item::ExternBlock(block) => {
-                let qualified = qualify(module, &format!("{}:at:{}", block.abi, block.pos.0));
-                let span = Span::from(block.pos);
+                let qualified = qualify(module, &extern_block_key(block));
+                let span = declaration_span(block.meta, block.meta.span);
                 insert_item(
                     resolved_items,
                     ResolvedItemKind::ExternBlock,
                     &qualified,
-                    block.origin,
+                    block.meta,
                     span,
                     errors,
                 );
@@ -1264,6 +1600,7 @@ fn collect_items(
                     }
                     signatures.push(ResolvedExternFunc {
                         name: func.name.clone(),
+                        span: func.meta.span,
                         params: func
                             .params
                             .iter()
@@ -1289,26 +1626,33 @@ fn collect_items(
                 extern_blocks.insert(
                     node_id.clone(),
                     ResolvedExternBlock {
-                        node_id,
-                        qualified_name: qualified,
+                        node_id: node_id.clone(),
+                        qualified_name: qualified.clone(),
                         abi: block.abi.clone(),
                         funcs,
                         signatures,
                         no_panic: block.no_panic,
                         unsafe_: block.unsafe_,
-                        origin: resolve_origin(block.origin, &NodeId("extern".into()), span),
+                        origin: resolve_named_origin(
+                            ResolvedItemKind::ExternBlock,
+                            &qualified,
+                            &node_id,
+                            block.meta,
+                            span,
+                            errors,
+                        ),
                     },
                 );
             }
 
             Item::Actor(actor) => {
                 let qualified = qualify(module, &actor.name);
-                let span = Span::from(actor.pos);
+                let span = declaration_span(actor.meta, actor.meta.span);
                 insert_item(
                     resolved_items,
                     ResolvedItemKind::Actor,
                     &qualified,
-                    actor.origin,
+                    actor.meta,
                     span,
                     errors,
                 );
@@ -1382,23 +1726,30 @@ fn collect_items(
                 actors.insert(
                     node_id.clone(),
                     ResolvedActor {
-                        node_id,
-                        qualified_name: qualified,
+                        node_id: node_id.clone(),
+                        qualified_name: qualified.clone(),
                         fields,
                         methods,
                         method_signatures,
-                        origin: resolve_origin(actor.origin, &NodeId("actor".into()), span),
+                        origin: resolve_named_origin(
+                            ResolvedItemKind::Actor,
+                            &qualified,
+                            &node_id,
+                            actor.meta,
+                            span,
+                            errors,
+                        ),
                     },
                 );
             }
             Item::Protocol(protocol) => {
                 let qualified = qualify(module, &protocol.name);
-                let span = Span::from(protocol.pos);
+                let span = declaration_span(protocol.meta, protocol.meta.span);
                 insert_item(
                     resolved_items,
                     ResolvedItemKind::Protocol,
                     &qualified,
-                    protocol.origin,
+                    protocol.meta,
                     span,
                     errors,
                 );
@@ -1451,24 +1802,31 @@ fn collect_items(
                 protocols.insert(
                     node_id.clone(),
                     ResolvedProtocol {
-                        node_id,
-                        qualified_name: qualified,
+                        node_id: node_id.clone(),
+                        qualified_name: qualified.clone(),
                         states,
                         state_payloads,
                         transitions,
                         transition_records,
-                        origin: resolve_origin(protocol.origin, &NodeId("protocol".into()), span),
+                        origin: resolve_named_origin(
+                            ResolvedItemKind::Protocol,
+                            &qualified,
+                            &node_id,
+                            protocol.meta,
+                            span,
+                            errors,
+                        ),
                     },
                 );
             }
             Item::Session(session) => {
                 let qualified = qualify(module, &session.name);
-                let span = Span::from(session.pos);
+                let span = declaration_span(session.meta, session.meta.span);
                 insert_item(
                     resolved_items,
                     ResolvedItemKind::Session,
                     &qualified,
-                    session.origin,
+                    session.meta,
                     span,
                     errors,
                 );
@@ -1476,11 +1834,18 @@ fn collect_items(
                 sessions.insert(
                     node_id.clone(),
                     ResolvedSession {
-                        node_id,
-                        qualified_name: qualified,
+                        node_id: node_id.clone(),
+                        qualified_name: qualified.clone(),
                         body: session.body.clone(),
                         body_display: format_session_type(&session.body),
-                        origin: resolve_origin(session.origin, &NodeId("session".into()), span),
+                        origin: resolve_named_origin(
+                            ResolvedItemKind::Session,
+                            &qualified,
+                            &node_id,
+                            session.meta,
+                            span,
+                            errors,
+                        ),
                     },
                 );
             }
@@ -1492,7 +1857,7 @@ fn insert_item(
     items: &mut HashMap<NodeId, ResolvedItem>,
     kind: ResolvedItemKind,
     qualified_name: &str,
-    origin: AstOrigin,
+    meta: AstNodeMeta,
     span: Span,
     errors: &mut Vec<Diagnostic>,
 ) {
@@ -1511,11 +1876,12 @@ fn insert_item(
         ResolvedItemKind::Session => "session",
     };
     let node_id = NodeId(format!("{}:{}", kind_name, qualified_name));
+    let item_origin = resolve_named_origin(kind, qualified_name, &node_id, meta, span, errors);
     let item = ResolvedItem {
         node_id: node_id.clone(),
         qualified_name: qualified_name.to_string(),
         kind,
-        origin: resolve_origin(origin, &node_id, span),
+        origin: item_origin,
     };
     if items.insert(node_id, item).is_some() {
         errors.push(Diagnostic::error(
@@ -1530,37 +1896,1514 @@ fn insert_item(
 
 fn collect_block_meta(
     block: &[Stmt],
-    parent: &str,
+    owner: &NodeId,
+    context: &str,
     fallback: Span,
+    ids: &NodeIdBuilder<'_>,
     out: &mut HashMap<NodeId, NodeMeta>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     for (index, stmt) in block.iter().enumerate() {
-        collect_stmt_meta(stmt, &format!("{parent}/stmt:{index}"), fallback, out);
+        let role = stmt_sibling_role(context, block, index);
+        collect_stmt_meta(stmt, owner, &role, fallback, ids, out, errors);
     }
 }
 
-fn collect_stmt_meta(stmt: &Stmt, path: &str, fallback: Span, out: &mut HashMap<NodeId, NodeMeta>) {
-    let exact = match stmt {
-        Stmt::Let { pos, .. } => Some(Span::from(*pos)),
+fn stmt_sibling_role(context: &str, block: &[Stmt], index: usize) -> String {
+    semantic_sibling_role(
+        &format!("{context}.statement"),
+        block,
+        index,
+        stmt_semantic_key,
+    )
+}
+
+fn expr_sibling_role(context: &str, exprs: &[Expr], index: usize) -> String {
+    semantic_sibling_role(context, exprs, index, expr_semantic_key)
+}
+
+fn pattern_sibling_role(context: &str, patterns: &[Pattern], index: usize) -> String {
+    semantic_sibling_role(context, patterns, index, pattern_semantic_key)
+}
+
+fn type_sibling_role(context: &str, types: &[Type], index: usize) -> String {
+    semantic_sibling_role(context, types, index, type_semantic_key)
+}
+
+fn match_arm_semantic_key(arm: &crate::ast::MatchArm) -> String {
+    format!(
+        "{}|guard:{}|body:{}",
+        pattern_semantic_key(&arm.pat),
+        arm.guard
+            .as_ref()
+            .map(expr_semantic_key)
+            .unwrap_or_default(),
+        expr_semantic_key(&arm.body)
+    )
+}
+
+fn match_arm_role(context: &str, arms: &[crate::ast::MatchArm], index: usize) -> String {
+    semantic_sibling_role(context, arms, index, match_arm_semantic_key)
+}
+
+fn map_entry_semantic_key(entry: &(Expr, Expr)) -> String {
+    format!(
+        "{}=>{}",
+        expr_semantic_key(&entry.0),
+        expr_semantic_key(&entry.1)
+    )
+}
+
+fn map_entry_role(context: &str, entries: &[(Expr, Expr)], index: usize) -> String {
+    semantic_sibling_role(context, entries, index, map_entry_semantic_key)
+}
+
+fn interpolation_role(context: &str, parts: &[FStringPart], part_index: usize) -> String {
+    let FStringPart::Interp(expr) = &parts[part_index] else {
+        unreachable!("interpolation role requested for text")
+    };
+    let key = expr_semantic_key(expr);
+    let occurrence = parts[..part_index]
+        .iter()
+        .filter_map(|part| match part {
+            FStringPart::Interp(expr) => Some(expr_semantic_key(expr)),
+            FStringPart::Text(_) => None,
+        })
+        .filter(|candidate| candidate == &key)
+        .count();
+    format!(
+        "{}.{:016x}.same.{}",
+        context,
+        stable_text_hash(&key),
+        occurrence
+    )
+}
+
+fn semantic_sibling_role<T>(
+    context: &str,
+    values: &[T],
+    index: usize,
+    key_of: impl Fn(&T) -> String,
+) -> String {
+    let key = key_of(&values[index]);
+    let occurrence = values[..index]
+        .iter()
+        .filter(|value| key_of(value) == key)
+        .count();
+    format!(
+        "{}.{:016x}.same.{}",
+        context,
+        stable_text_hash(&key),
+        occurrence
+    )
+}
+
+fn stable_text_hash(value: &str) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    value.bytes().fold(FNV_OFFSET, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
+    })
+}
+
+const COMPILATION_ROOT_NODE_ID: &str = "compilation:root";
+
+fn declaration_span(meta: crate::ast::AstNodeMeta, fallback: Span) -> Span {
+    usable_span(meta.span).unwrap_or(fallback)
+}
+
+fn top_level_enclosing_parent(qualified_name: &str) -> NodeId {
+    qualified_name
+        .rsplit_once("::")
+        .map(|(module, _)| NodeId(format!("module:{module}")))
+        .unwrap_or_else(|| NodeId(COMPILATION_ROOT_NODE_ID.to_string()))
+}
+
+fn named_function_parent(name: &str, qualified_scope: Option<&str>) -> NodeId {
+    let qualified = if name.contains("::") {
+        name.to_string()
+    } else if let Some((module, _)) = qualified_scope.and_then(|scope| scope.rsplit_once("::")) {
+        format!("{module}::{name}")
+    } else {
+        name.to_string()
+    };
+    NodeId(format!("function:{qualified}"))
+}
+
+fn explicit_origin_parent(
+    node_id: &NodeId,
+    origin: AstOrigin,
+    hint: AstParentHint,
+    enclosing: &NodeId,
+    qualified_scope: Option<&str>,
+    span: Span,
+    errors: &mut Vec<Diagnostic>,
+) -> NodeId {
+    if origin == AstOrigin::User {
+        if hint != AstParentHint::None {
+            errors.push(Diagnostic::error(
+                format!(
+                    "TOOL-RESOLUTION-001: user NodeId '{}' must not declare a generated AST parent hint",
+                    node_id.0
+                ),
+                span,
+            ));
+        }
+        return enclosing.clone();
+    }
+
+    match hint {
+        AstParentHint::None => {
+            errors.push(Diagnostic::error(
+                format!(
+                    "TOOL-RESOLUTION-001: generated NodeId '{}' is missing an explicit AST parent hint",
+                    node_id.0
+                ),
+                span,
+            ));
+            enclosing.clone()
+        }
+        AstParentHint::Enclosing => enclosing.clone(),
+        AstParentHint::NamedFunction(name) => named_function_parent(name, qualified_scope),
+        AstParentHint::CompilationRoot => NodeId(COMPILATION_ROOT_NODE_ID.to_string()),
+    }
+}
+
+fn resolve_named_origin(
+    _kind: ResolvedItemKind,
+    qualified_name: &str,
+    node_id: &NodeId,
+    meta: AstNodeMeta,
+    span: Span,
+    errors: &mut Vec<Diagnostic>,
+) -> Origin {
+    let enclosing = top_level_enclosing_parent(qualified_name);
+    let parent = explicit_origin_parent(
+        node_id,
+        meta.origin,
+        meta.parent,
+        &enclosing,
+        Some(qualified_name),
+        span,
+        errors,
+    );
+    resolve_origin(meta.origin, &parent, span)
+}
+
+fn resolve_enclosed_origin(
+    node_id: &NodeId,
+    meta: AstNodeMeta,
+    enclosing: &NodeId,
+    span: Span,
+    errors: &mut Vec<Diagnostic>,
+) -> Origin {
+    let parent = explicit_origin_parent(
+        node_id,
+        meta.origin,
+        meta.parent,
+        enclosing,
+        None,
+        span,
+        errors,
+    );
+    resolve_origin(meta.origin, &parent, span)
+}
+
+fn insert_canonical_meta(
+    node_id: NodeId,
+    _kind: ResolvedItemKind,
+    qualified_name: &str,
+    meta: crate::ast::AstNodeMeta,
+    fallback: Span,
+    out: &mut HashMap<NodeId, NodeMeta>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let parent = top_level_enclosing_parent(qualified_name);
+    insert_node_meta(
+        node_id,
+        meta.origin,
+        meta.parent,
+        ast_meta_anchor(meta),
+        fallback,
+        &parent,
+        Some(qualified_name),
+        out,
+        errors,
+    );
+}
+
+fn insert_child_meta(
+    meta: crate::ast::AstNodeMeta,
+    owner: &NodeId,
+    kind: &str,
+    role: &str,
+    fallback: Span,
+    ids: &NodeIdBuilder<'_>,
+    out: &mut HashMap<NodeId, NodeMeta>,
+    errors: &mut Vec<Diagnostic>,
+) -> NodeId {
+    let anchor = ast_meta_anchor(meta);
+    let node_id = ids.anonymous(
+        owner,
+        kind,
+        role,
+        anchor.map(|(span, _)| span),
+        meta.origin,
+        errors,
+    );
+    insert_node_meta(
+        node_id.clone(),
+        meta.origin,
+        meta.parent,
+        anchor,
+        fallback,
+        owner,
+        None,
+        out,
+        errors,
+    );
+    node_id
+}
+
+fn type_semantic_key(ty: &Type) -> String {
+    crate::core::fmt_type(ty)
+}
+
+fn type_kind(ty: &Type) -> &'static str {
+    match ty.unlocated() {
+        Type::Name(_, _) => "type.name",
+        Type::Ref(_, _) => "type.ref",
+        Type::RefMut(_, _) => "type.ref_mut",
+        Type::Option(_) => "type.option",
+        Type::Result(_, _) => "type.result",
+        Type::Tuple(_) => "type.tuple",
+        Type::Func(_, _) => "type.function",
+        Type::ExternFunc(_, _) => "type.extern_function",
+        Type::CBuffer(_) => "type.c_buffer",
+        Type::Cap(_) => "type.capability",
+        Type::Shared(_) => "type.shared",
+        Type::LocalShared(_) => "type.local_shared",
+        Type::Weak(_) => "type.weak",
+        Type::WeakLocal(_) => "type.weak_local",
+        Type::Newtype(_, _) => "type.newtype",
+        Type::Nothing => "type.nothing",
+        Type::Allocator => "type.allocator",
+        Type::Array(_, _) => "type.array",
+        Type::Slice(_) => "type.slice",
+        Type::ImplTrait(_) => "type.impl_trait",
+        Type::DynTrait(_) => "type.dyn_trait",
+        Type::RawPtr(_) => "type.raw_ptr",
+        Type::RawPtrMut(_) => "type.raw_ptr_mut",
+        Type::CShared(_) => "type.c_shared",
+        Type::CBorrow(_) => "type.c_borrow",
+        Type::CBorrowMut(_) => "type.c_borrow_mut",
+        Type::RawString => "type.raw_string",
+        Type::Infer => "type.infer",
+        Type::TypeVar(_) => "type.variable",
+        Type::ForAll(_, _) => "type.for_all",
+        Type::Located { .. } => unreachable!("Type::unlocated returned Located"),
+    }
+}
+
+fn collect_type_meta(
+    ty: &Type,
+    owner: &NodeId,
+    role: &str,
+    fallback: Span,
+    ids: &NodeIdBuilder<'_>,
+    out: &mut HashMap<NodeId, NodeMeta>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let meta = ty.meta();
+    let ast_origin = meta.map(|meta| meta.origin).unwrap_or(AstOrigin::User);
+    let anchor = meta.and_then(ast_meta_anchor);
+    let node_id = ids.anonymous(
+        owner,
+        type_kind(ty),
+        role,
+        anchor.map(|(span, _)| span),
+        ast_origin,
+        errors,
+    );
+    insert_node_meta(
+        node_id.clone(),
+        ast_origin,
+        meta.map(|meta| meta.parent).unwrap_or(AstParentHint::None),
+        anchor,
+        fallback,
+        owner,
+        None,
+        out,
+        errors,
+    );
+    match ty.unlocated() {
+        Type::Name(_, args) => {
+            for index in 0..args.len() {
+                let child_role = type_sibling_role(&format!("{role}.argument"), args, index);
+                collect_type_meta(
+                    &args[index],
+                    &node_id,
+                    &child_role,
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
+            }
+        }
+        Type::Ref(_, inner)
+        | Type::RefMut(_, inner)
+        | Type::Option(inner)
+        | Type::CBuffer(inner)
+        | Type::Shared(inner)
+        | Type::LocalShared(inner)
+        | Type::Weak(inner)
+        | Type::WeakLocal(inner)
+        | Type::Newtype(_, inner)
+        | Type::Slice(inner)
+        | Type::RawPtr(inner)
+        | Type::RawPtrMut(inner)
+        | Type::CShared(inner)
+        | Type::CBorrow(inner)
+        | Type::CBorrowMut(inner)
+        | Type::Array(inner, _)
+        | Type::ForAll(_, inner) => collect_type_meta(
+            inner,
+            &node_id,
+            &format!("{role}.inner"),
+            fallback,
+            ids,
+            out,
+            errors,
+        ),
+        Type::Result(ok, err) => {
+            collect_type_meta(
+                ok,
+                &node_id,
+                &format!("{role}.ok"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            collect_type_meta(
+                err,
+                &node_id,
+                &format!("{role}.error"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+        }
+        Type::Tuple(items) => {
+            for index in 0..items.len() {
+                let child_role = type_sibling_role(&format!("{role}.element"), items, index);
+                collect_type_meta(
+                    &items[index],
+                    &node_id,
+                    &child_role,
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
+            }
+        }
+        Type::Func(params, ret) | Type::ExternFunc(params, ret) => {
+            for index in 0..params.len() {
+                let child_role = type_sibling_role(&format!("{role}.parameter"), params, index);
+                collect_type_meta(
+                    &params[index],
+                    &node_id,
+                    &child_role,
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
+            }
+            collect_type_meta(
+                ret,
+                &node_id,
+                &format!("{role}.return"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+        }
+        Type::Cap(_)
+        | Type::Nothing
+        | Type::Allocator
+        | Type::ImplTrait(_)
+        | Type::DynTrait(_)
+        | Type::RawString
+        | Type::Infer
+        | Type::TypeVar(_) => {}
+        Type::Located { .. } => unreachable!("Type::unlocated returned Located"),
+    }
+}
+
+fn collect_generic_param_meta(
+    param: &crate::ast::GenericParam,
+    owner: &NodeId,
+    context: &str,
+    fallback: Span,
+    ids: &NodeIdBuilder<'_>,
+    out: &mut HashMap<NodeId, NodeMeta>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    insert_child_meta(
+        param.meta,
+        owner,
+        "decl.generic_parameter",
+        &format!("{context}.{}", stable_id_fragment(&param.name)),
+        fallback,
+        ids,
+        out,
+        errors,
+    );
+}
+
+fn collect_param_meta(
+    param: &crate::ast::Param,
+    owner: &NodeId,
+    context: &str,
+    fallback: Span,
+    ids: &NodeIdBuilder<'_>,
+    out: &mut HashMap<NodeId, NodeMeta>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let role = format!("{context}.{}", stable_id_fragment(&param.name));
+    let param_id = insert_child_meta(
+        param.meta,
+        owner,
+        "decl.parameter",
+        &role,
+        fallback,
+        ids,
+        out,
+        errors,
+    );
+    collect_type_meta(&param.ty, &param_id, "type", fallback, ids, out, errors);
+    if let Some(default) = &param.default_value {
+        collect_expr_meta(
+            default,
+            owner,
+            &format!("{role}.default"),
+            fallback,
+            ids,
+            out,
+            errors,
+        );
+    }
+}
+
+fn collect_where_clause_meta(
+    clause: &crate::ast::WhereClause,
+    owner: &NodeId,
+    fallback: Span,
+    ids: &NodeIdBuilder<'_>,
+    out: &mut HashMap<NodeId, NodeMeta>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    insert_child_meta(
+        clause.meta,
+        owner,
+        "decl.where_clause",
+        &format!("where.{}", stable_id_fragment(&clause.type_param)),
+        fallback,
+        ids,
+        out,
+        errors,
+    );
+}
+
+fn collect_func_meta(
+    function: &crate::ast::FuncDef,
+    node_id: NodeId,
+    parent: &NodeId,
+    fallback: Span,
+    ids: &NodeIdBuilder<'_>,
+    out: &mut HashMap<NodeId, NodeMeta>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let span = declaration_span(function.meta, fallback);
+    insert_node_meta(
+        node_id.clone(),
+        function.meta.origin,
+        function.meta.parent,
+        ast_meta_anchor(function.meta),
+        fallback,
+        parent,
+        None,
+        out,
+        errors,
+    );
+    for generic in &function.generics {
+        collect_generic_param_meta(generic, &node_id, "generic", span, ids, out, errors);
+    }
+    for param in &function.params {
+        collect_param_meta(param, &node_id, "parameter", span, ids, out, errors);
+    }
+    if let Some(ret) = &function.ret {
+        collect_type_meta(ret, &node_id, "return_type", span, ids, out, errors);
+    }
+    for clause in &function.where_clause {
+        collect_where_clause_meta(clause, &node_id, span, ids, out, errors);
+    }
+    collect_block_meta(&function.body, &node_id, "body", span, ids, out, errors);
+}
+
+fn collect_field_meta(
+    field: &crate::ast::Field,
+    owner: &NodeId,
+    context: &str,
+    fallback: Span,
+    ids: &NodeIdBuilder<'_>,
+    out: &mut HashMap<NodeId, NodeMeta>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let role = format!("{context}.{}", stable_id_fragment(&field.name));
+    let field_id = insert_child_meta(
+        field.meta,
+        owner,
+        "decl.field",
+        &role,
+        fallback,
+        ids,
+        out,
+        errors,
+    );
+    collect_type_meta(&field.ty, &field_id, "type", fallback, ids, out, errors);
+}
+
+fn session_kind(session: &crate::ast::SessionType) -> &'static str {
+    match session.unlocated() {
+        crate::ast::SessionType::Send(_, _) => "session.send",
+        crate::ast::SessionType::Recv(_, _) => "session.recv",
+        crate::ast::SessionType::Dual(_) => "session.dual",
+        crate::ast::SessionType::Name(_) => "session.name",
+        crate::ast::SessionType::End => "session.end",
+        crate::ast::SessionType::Located { .. } => {
+            unreachable!("SessionType::unlocated returned Located")
+        }
+    }
+}
+
+fn collect_session_type_meta(
+    session: &crate::ast::SessionType,
+    owner: &NodeId,
+    role: &str,
+    fallback: Span,
+    ids: &NodeIdBuilder<'_>,
+    out: &mut HashMap<NodeId, NodeMeta>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let meta = session.meta();
+    let ast_origin = meta.map(|meta| meta.origin).unwrap_or(AstOrigin::User);
+    let anchor = meta.and_then(ast_meta_anchor);
+    let node_id = ids.anonymous(
+        owner,
+        session_kind(session),
+        role,
+        anchor.map(|(span, _)| span),
+        ast_origin,
+        errors,
+    );
+    insert_node_meta(
+        node_id.clone(),
+        ast_origin,
+        meta.map(|meta| meta.parent).unwrap_or(AstParentHint::None),
+        anchor,
+        fallback,
+        owner,
+        None,
+        out,
+        errors,
+    );
+    match session.unlocated() {
+        crate::ast::SessionType::Send(payload, continuation)
+        | crate::ast::SessionType::Recv(payload, continuation) => {
+            collect_type_meta(
+                payload,
+                &node_id,
+                &format!("{role}.payload"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            collect_session_type_meta(
+                continuation,
+                &node_id,
+                &format!("{role}.continuation"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+        }
+        crate::ast::SessionType::Dual(inner) => collect_session_type_meta(
+            inner,
+            &node_id,
+            &format!("{role}.inner"),
+            fallback,
+            ids,
+            out,
+            errors,
+        ),
+        crate::ast::SessionType::Name(_) | crate::ast::SessionType::End => {}
+        crate::ast::SessionType::Located { .. } => {
+            unreachable!("SessionType::unlocated returned Located")
+        }
+    }
+}
+
+fn method_signature_key(name: &str, params: &[crate::ast::Param], ret: Option<&Type>) -> String {
+    format!(
+        "{}({})->{}",
+        name,
+        params
+            .iter()
+            .map(|param| crate::core::fmt_type(&param.ty))
+            .collect::<Vec<_>>()
+            .join(","),
+        ret.map(crate::core::fmt_type)
+            .unwrap_or_else(|| "unit".to_string())
+    )
+}
+
+fn extern_function_signature_key(function: &crate::ast::ExternFunc) -> String {
+    format!(
+        "{}({})->{}",
+        function.name,
+        function
+            .params
+            .iter()
+            .map(|param| crate::core::fmt_type(&param.ty))
+            .collect::<Vec<_>>()
+            .join(","),
+        function
+            .ret
+            .as_ref()
+            .map(crate::core::fmt_type)
+            .unwrap_or_else(|| "unit".to_string())
+    )
+}
+
+fn extern_function_owner(block_owner: &NodeId, function: &crate::ast::ExternFunc) -> NodeId {
+    NodeId(format!(
+        "{}/function:{}:{:016x}",
+        block_owner.0,
+        stable_id_fragment(&function.name),
+        stable_text_hash(&extern_function_signature_key(function))
+    ))
+}
+
+pub(crate) fn impl_method_owner(impl_qualified_name: &str, method: &crate::ast::FuncDef) -> NodeId {
+    NodeId(format!(
+        "function:{}::{}:{:016x}",
+        impl_qualified_name,
+        method.name,
+        stable_text_hash(&method_signature_key(
+            &method.name,
+            &method.params,
+            method.ret.as_ref()
+        ))
+    ))
+}
+
+pub(crate) fn nested_function_owner(owner: &NodeId, function: &crate::ast::FuncDef) -> NodeId {
+    NodeId(format!(
+        "{}/function:{}:{:016x}",
+        owner.0,
+        stable_id_fragment(&function.name),
+        stable_text_hash(&method_signature_key(
+            &function.name,
+            &function.params,
+            function.ret.as_ref()
+        ))
+    ))
+}
+
+fn collect_item_meta(
+    item: &Item,
+    module: &str,
+    ids: &NodeIdBuilder<'_>,
+    out: &mut HashMap<NodeId, NodeMeta>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    match item {
+        Item::Module(def) => {
+            let qualified = qualify(module, &def.name);
+            let node_id = NodeId(format!("module:{qualified}"));
+            let fallback = def.meta.span;
+            insert_canonical_meta(
+                node_id.clone(),
+                ResolvedItemKind::Module,
+                &qualified,
+                def.meta,
+                fallback,
+                out,
+                errors,
+            );
+            for import in &def.imports {
+                let key = format!(
+                    "{}:as:{}",
+                    import.path.join("::"),
+                    import.alias.as_deref().unwrap_or("_")
+                );
+                insert_child_meta(
+                    import.meta,
+                    &node_id,
+                    "decl.import",
+                    &format!("import.{}", stable_id_fragment(&key)),
+                    declaration_span(import.meta, fallback),
+                    ids,
+                    out,
+                    errors,
+                );
+            }
+        }
+        Item::Func(function) => {
+            let qualified = qualify(module, &function.name);
+            let node_id = NodeId(format!("function:{qualified}"));
+            let fallback = function.meta.span;
+            let parent = top_level_enclosing_parent(&qualified);
+            collect_func_meta(function, node_id, &parent, fallback, ids, out, errors);
+        }
+        Item::Type(type_def) => {
+            let qualified = qualify(module, &type_def.name);
+            let node_id = NodeId(format!("type:{qualified}"));
+            let fallback = type_def.meta.span;
+            insert_canonical_meta(
+                node_id.clone(),
+                ResolvedItemKind::Type,
+                &qualified,
+                type_def.meta,
+                fallback,
+                out,
+                errors,
+            );
+            let span = declaration_span(type_def.meta, fallback);
+            for generic in &type_def.generics {
+                collect_generic_param_meta(generic, &node_id, "generic", span, ids, out, errors);
+            }
+            match &type_def.kind {
+                crate::ast::TypeDefKind::Alias(ty) | crate::ast::TypeDefKind::Newtype(ty) => {
+                    collect_type_meta(ty, &node_id, "target", span, ids, out, errors);
+                }
+                crate::ast::TypeDefKind::Record(fields)
+                | crate::ast::TypeDefKind::Union(fields) => {
+                    for field in fields {
+                        collect_field_meta(field, &node_id, "field", span, ids, out, errors);
+                    }
+                }
+                crate::ast::TypeDefKind::Enum(variants) => {
+                    for variant in variants {
+                        let role = format!("variant.{}", stable_id_fragment(&variant.name));
+                        let variant_id = insert_child_meta(
+                            variant.meta,
+                            &node_id,
+                            "decl.variant",
+                            &role,
+                            span,
+                            ids,
+                            out,
+                            errors,
+                        );
+                        match &variant.payload {
+                            Some(crate::ast::VariantPayload::Tuple(types)) => {
+                                for index in 0..types.len() {
+                                    let child_role =
+                                        type_sibling_role("payload.element", types, index);
+                                    collect_type_meta(
+                                        &types[index],
+                                        &variant_id,
+                                        &child_role,
+                                        span,
+                                        ids,
+                                        out,
+                                        errors,
+                                    );
+                                }
+                            }
+                            Some(crate::ast::VariantPayload::Record(fields)) => {
+                                for field in fields {
+                                    collect_field_meta(
+                                        field,
+                                        &variant_id,
+                                        "payload.field",
+                                        span,
+                                        ids,
+                                        out,
+                                        errors,
+                                    );
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                }
+            }
+        }
+        Item::Actor(actor) => {
+            let qualified = qualify(module, &actor.name);
+            let node_id = NodeId(format!("actor:{qualified}"));
+            let fallback = actor.meta.span;
+            insert_canonical_meta(
+                node_id.clone(),
+                ResolvedItemKind::Actor,
+                &qualified,
+                actor.meta,
+                fallback,
+                out,
+                errors,
+            );
+            let span = declaration_span(actor.meta, fallback);
+            for field in &actor.fields {
+                let role = format!("field.{}", stable_id_fragment(&field.name));
+                let field_id = insert_child_meta(
+                    field.meta,
+                    &node_id,
+                    "decl.actor_field",
+                    &role,
+                    span,
+                    ids,
+                    out,
+                    errors,
+                );
+                collect_type_meta(&field.ty, &field_id, "type", span, ids, out, errors);
+                if let Some(init) = &field.init {
+                    collect_expr_meta(
+                        init,
+                        &node_id,
+                        &format!("{role}.initializer"),
+                        span,
+                        ids,
+                        out,
+                        errors,
+                    );
+                }
+            }
+            for method in &actor.methods {
+                let method_id = NodeId(format!("function:{qualified}::{}", method.name));
+                collect_func_meta(method, method_id, &node_id, span, ids, out, errors);
+            }
+        }
+        Item::Cap(cap) => {
+            let qualified = qualify(module, &cap.name);
+            insert_canonical_meta(
+                NodeId(format!("capability:{qualified}")),
+                ResolvedItemKind::Capability,
+                &qualified,
+                cap.meta,
+                cap.meta.span,
+                out,
+                errors,
+            );
+        }
+        Item::Trait(trait_def) => {
+            let qualified = qualify(module, &trait_def.name);
+            let node_id = NodeId(format!("trait:{qualified}"));
+            let fallback = trait_def.meta.span;
+            insert_canonical_meta(
+                node_id.clone(),
+                ResolvedItemKind::Trait,
+                &qualified,
+                trait_def.meta,
+                fallback,
+                out,
+                errors,
+            );
+            let span = declaration_span(trait_def.meta, fallback);
+            for generic in &trait_def.generics {
+                collect_generic_param_meta(generic, &node_id, "generic", span, ids, out, errors);
+            }
+            for method in &trait_def.methods {
+                let signature =
+                    method_signature_key(&method.name, &method.params, method.ret.as_ref());
+                let method_id = NodeId(format!(
+                    "{}/method:{}:{:016x}",
+                    node_id.0,
+                    stable_id_fragment(&method.name),
+                    stable_text_hash(&signature)
+                ));
+                insert_node_meta(
+                    method_id.clone(),
+                    method.meta.origin,
+                    method.meta.parent,
+                    ast_meta_anchor(method.meta),
+                    span,
+                    &node_id,
+                    None,
+                    out,
+                    errors,
+                );
+                for generic in &method.generics {
+                    collect_generic_param_meta(
+                        generic, &method_id, "generic", span, ids, out, errors,
+                    );
+                }
+                for param in &method.params {
+                    collect_param_meta(param, &method_id, "parameter", span, ids, out, errors);
+                }
+                if let Some(ret) = &method.ret {
+                    collect_type_meta(ret, &method_id, "return_type", span, ids, out, errors);
+                }
+            }
+        }
+        Item::Impl(impl_def) => {
+            let qualified = qualify(
+                module,
+                &format!("{}:for:{}", impl_def.trait_name, impl_def.type_name),
+            );
+            let node_id = NodeId(format!("impl:{qualified}"));
+            let fallback = impl_def.meta.span;
+            insert_canonical_meta(
+                node_id.clone(),
+                ResolvedItemKind::Impl,
+                &qualified,
+                impl_def.meta,
+                fallback,
+                out,
+                errors,
+            );
+            let span = declaration_span(impl_def.meta, fallback);
+            for generic in &impl_def.generics {
+                collect_generic_param_meta(generic, &node_id, "generic", span, ids, out, errors);
+            }
+            for index in 0..impl_def.trait_args.len() {
+                let role = type_sibling_role("trait_argument", &impl_def.trait_args, index);
+                collect_type_meta(
+                    &impl_def.trait_args[index],
+                    &node_id,
+                    &role,
+                    span,
+                    ids,
+                    out,
+                    errors,
+                );
+            }
+            for index in 0..impl_def.type_args.len() {
+                let role = type_sibling_role("type_argument", &impl_def.type_args, index);
+                collect_type_meta(
+                    &impl_def.type_args[index],
+                    &node_id,
+                    &role,
+                    span,
+                    ids,
+                    out,
+                    errors,
+                );
+            }
+            for method in &impl_def.methods {
+                collect_func_meta(
+                    method,
+                    impl_method_owner(&qualified, method),
+                    &node_id,
+                    span,
+                    ids,
+                    out,
+                    errors,
+                );
+            }
+        }
+        Item::ExternBlock(block) => {
+            let qualified = qualify(module, &extern_block_key(block));
+            let node_id = NodeId(format!("extern:{qualified}"));
+            let fallback = block.meta.span;
+            insert_canonical_meta(
+                node_id.clone(),
+                ResolvedItemKind::ExternBlock,
+                &qualified,
+                block.meta,
+                fallback,
+                out,
+                errors,
+            );
+            let span = declaration_span(block.meta, fallback);
+            for function in &block.funcs {
+                let function_id = extern_function_owner(&node_id, function);
+                insert_node_meta(
+                    function_id.clone(),
+                    function.meta.origin,
+                    function.meta.parent,
+                    ast_meta_anchor(function.meta),
+                    span,
+                    &node_id,
+                    None,
+                    out,
+                    errors,
+                );
+                for param in &function.params {
+                    let role = format!("parameter.{}", stable_id_fragment(&param.name));
+                    let param_id = insert_child_meta(
+                        param.meta,
+                        &function_id,
+                        "decl.extern_parameter",
+                        &role,
+                        span,
+                        ids,
+                        out,
+                        errors,
+                    );
+                    collect_type_meta(&param.ty, &param_id, "type", span, ids, out, errors);
+                }
+                if let Some(ret) = &function.ret {
+                    collect_type_meta(ret, &function_id, "return_type", span, ids, out, errors);
+                }
+                if let Some(requires) = &function.requires {
+                    collect_expr_meta(requires, &function_id, "requires", span, ids, out, errors);
+                }
+                if let Some(ensures) = &function.ensures {
+                    collect_expr_meta(ensures, &function_id, "ensures", span, ids, out, errors);
+                }
+            }
+        }
+        Item::Const {
+            meta,
+            name,
+            ty,
+            value,
+            ..
+        } => {
+            let qualified = qualify(module, name);
+            let node_id = NodeId(format!("constant:{qualified}"));
+            let fallback = meta.span;
+            insert_canonical_meta(
+                node_id.clone(),
+                ResolvedItemKind::Constant,
+                &qualified,
+                *meta,
+                fallback,
+                out,
+                errors,
+            );
+            let span = declaration_span(*meta, fallback);
+            if let Some(ty) = ty {
+                collect_type_meta(ty, &node_id, "type", span, ids, out, errors);
+            }
+            collect_expr_meta(value, &node_id, "value", span, ids, out, errors);
+        }
+        Item::Flow(flow) => {
+            let qualified = qualify(module, &flow.name);
+            let node_id = NodeId(format!("flow:{qualified}"));
+            let fallback = flow.meta.span;
+            insert_canonical_meta(
+                node_id.clone(),
+                ResolvedItemKind::Flow,
+                &qualified,
+                flow.meta,
+                fallback,
+                out,
+                errors,
+            );
+            let span = declaration_span(flow.meta, fallback);
+            for generic in &flow.generics {
+                collect_generic_param_meta(generic, &node_id, "generic", span, ids, out, errors);
+            }
+            for annotation in &flow.annotations {
+                let role = match annotation.kind {
+                    crate::ast::FlowAnnotationKind::MailboxDepth(depth) => {
+                        format!("annotation.mailbox_depth.{depth}")
+                    }
+                    crate::ast::FlowAnnotationKind::MaxChildren(max) => {
+                        format!("annotation.max_children.{max}")
+                    }
+                };
+                insert_child_meta(
+                    annotation.meta,
+                    &node_id,
+                    "decl.flow_annotation",
+                    &role,
+                    span,
+                    ids,
+                    out,
+                    errors,
+                );
+            }
+            for state in &flow.states {
+                let state_id = NodeId(format!("state:{qualified}::{}", state.name));
+                insert_node_meta(
+                    state_id.clone(),
+                    state.meta.origin,
+                    state.meta.parent,
+                    ast_meta_anchor(state.meta),
+                    span,
+                    &node_id,
+                    None,
+                    out,
+                    errors,
+                );
+                for field in state.payload.as_deref().unwrap_or_default() {
+                    collect_field_meta(field, &state_id, "payload.field", span, ids, out, errors);
+                }
+            }
+            for transition in &flow.transitions {
+                let transition_id = NodeId(format!(
+                    "transition:{qualified}::{}::{}",
+                    transition.name, transition.from_state
+                ));
+                insert_node_meta(
+                    transition_id.clone(),
+                    transition.meta.origin,
+                    transition.meta.parent,
+                    ast_meta_anchor(transition.meta),
+                    span,
+                    &node_id,
+                    None,
+                    out,
+                    errors,
+                );
+                let transition_span = declaration_span(transition.meta, span);
+                for param in &transition.params {
+                    collect_param_meta(
+                        param,
+                        &transition_id,
+                        "parameter",
+                        transition_span,
+                        ids,
+                        out,
+                        errors,
+                    );
+                }
+                if let Some(body) = &transition.body {
+                    collect_block_meta(
+                        body,
+                        &transition_id,
+                        "body",
+                        transition_span,
+                        ids,
+                        out,
+                        errors,
+                    );
+                }
+            }
+        }
+        Item::Protocol(protocol) => {
+            let qualified = qualify(module, &protocol.name);
+            let node_id = NodeId(format!("protocol:{qualified}"));
+            let fallback = protocol.meta.span;
+            insert_canonical_meta(
+                node_id.clone(),
+                ResolvedItemKind::Protocol,
+                &qualified,
+                protocol.meta,
+                fallback,
+                out,
+                errors,
+            );
+            let span = declaration_span(protocol.meta, fallback);
+            for generic in &protocol.generics {
+                collect_generic_param_meta(generic, &node_id, "generic", span, ids, out, errors);
+            }
+            for state in &protocol.states {
+                let state_id = NodeId(format!(
+                    "{}/state:{}",
+                    node_id.0,
+                    stable_id_fragment(&state.name)
+                ));
+                insert_node_meta(
+                    state_id.clone(),
+                    state.meta.origin,
+                    state.meta.parent,
+                    ast_meta_anchor(state.meta),
+                    span,
+                    &node_id,
+                    None,
+                    out,
+                    errors,
+                );
+                if let Some(payload) = &state.payload_type {
+                    collect_type_meta(payload, &state_id, "payload_type", span, ids, out, errors);
+                }
+            }
+            for transition in &protocol.transitions {
+                let signature = format!(
+                    "{}:{}->{}",
+                    transition.name, transition.from_state, transition.to_state
+                );
+                let transition_id = NodeId(format!(
+                    "{}/transition:{}:{:016x}",
+                    node_id.0,
+                    stable_id_fragment(&transition.name),
+                    stable_text_hash(&signature)
+                ));
+                insert_node_meta(
+                    transition_id,
+                    transition.meta.origin,
+                    transition.meta.parent,
+                    ast_meta_anchor(transition.meta),
+                    span,
+                    &node_id,
+                    None,
+                    out,
+                    errors,
+                );
+            }
+        }
+        Item::Session(session) => {
+            let qualified = qualify(module, &session.name);
+            let node_id = NodeId(format!("session:{qualified}"));
+            let fallback = session.meta.span;
+            insert_canonical_meta(
+                node_id.clone(),
+                ResolvedItemKind::Session,
+                &qualified,
+                session.meta,
+                fallback,
+                out,
+                errors,
+            );
+            collect_session_type_meta(
+                &session.body,
+                &node_id,
+                "body",
+                declaration_span(session.meta, fallback),
+                ids,
+                out,
+                errors,
+            );
+        }
+    }
+}
+
+fn stmt_semantic_key(stmt: &Stmt) -> String {
+    match stmt.unlocated() {
+        Stmt::Let { pat, .. } => format!("let:{}", pattern_semantic_key(pat)),
+        Stmt::Return(value) => format!(
+            "return:{}",
+            value.as_ref().map(expr_semantic_key).unwrap_or_default()
+        ),
+        Stmt::Break(value) => format!(
+            "break:{}",
+            value.as_ref().map(expr_semantic_key).unwrap_or_default()
+        ),
+        Stmt::Continue => "continue".into(),
+        Stmt::Expr(expr) => format!("expr:{}", expr_semantic_key(expr)),
+        Stmt::If { cond, .. } => format!("if:{}", expr_semantic_key(cond)),
+        Stmt::While { cond, .. } => format!("while:{}", expr_semantic_key(cond)),
+        Stmt::WhileLet { pat, init, .. } => format!(
+            "while-let:{}:{}",
+            pattern_semantic_key(pat),
+            expr_semantic_key(init)
+        ),
+        Stmt::Loop(_) => "loop".into(),
+        Stmt::For { var, iterable, .. } => {
+            format!("for:{var}:{}", expr_semantic_key(iterable))
+        }
+        Stmt::Block(_) => "block".into(),
+        Stmt::Desc(value, _) => format!("desc:{value}"),
+        Stmt::Rule(value, _) => format!("rule:{value}"),
+        Stmt::Requires(expr, _) => format!("requires:{}", expr_semantic_key(expr)),
+        Stmt::Ensures(expr, _) => format!("ensures:{}", expr_semantic_key(expr)),
+        Stmt::Invariant(expr, _) => format!("invariant:{}", expr_semantic_key(expr)),
+        Stmt::Math(exprs) => format!("math:{}", exprs.len()),
+        Stmt::Assign { target, .. } => format!("assign:{}", expr_semantic_key(target)),
+        Stmt::Arena(_) => "arena".into(),
+        Stmt::Unsafe(_) => "unsafe".into(),
+        Stmt::Drop(expr) => format!("drop:{}", expr_semantic_key(expr)),
+        Stmt::SharedLet { name, .. } => format!("shared-let:{name}"),
+        Stmt::OnFailure(_) => "on-failure".into(),
+        Stmt::Do(_) => "do".into(),
+        Stmt::Delegate { target, .. } => format!("delegate:{target}"),
+        Stmt::Pinned { var, .. } => format!("pinned:{}", var.as_deref().unwrap_or("_")),
+        Stmt::Parasteps(_) => "parasteps".into(),
+        Stmt::MmsBlock { content, .. } => format!("mms:{:016x}", stable_text_hash(content)),
+        Stmt::Func(function) => format!("function:{}", function.name),
+        Stmt::Alloc { kind, .. } => format!("alloc:{kind:?}"),
+        Stmt::Ellipsis => "ellipsis".into(),
+        Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
+    }
+}
+
+fn stmt_kind(stmt: &Stmt) -> &'static str {
+    match stmt.unlocated() {
+        Stmt::Let { .. } => "stmt.let",
+        Stmt::Return(_) => "stmt.return",
+        Stmt::Break(_) => "stmt.break",
+        Stmt::Continue => "stmt.continue",
+        Stmt::Expr(_) => "stmt.expr",
+        Stmt::If { .. } => "stmt.if",
+        Stmt::While { .. } => "stmt.while",
+        Stmt::WhileLet { .. } => "stmt.while_let",
+        Stmt::Loop(_) => "stmt.loop",
+        Stmt::For { .. } => "stmt.for",
+        Stmt::Block(_) => "stmt.block",
+        Stmt::Desc(_, _) => "stmt.desc",
+        Stmt::Rule(_, _) => "stmt.rule",
+        Stmt::Requires(_, _) => "stmt.requires",
+        Stmt::Ensures(_, _) => "stmt.ensures",
+        Stmt::Invariant(_, _) => "stmt.invariant",
+        Stmt::Math(_) => "stmt.math",
+        Stmt::Assign { .. } => "stmt.assign",
+        Stmt::Arena(_) => "stmt.arena",
+        Stmt::Unsafe(_) => "stmt.unsafe",
+        Stmt::Drop(_) => "stmt.drop",
+        Stmt::SharedLet { .. } => "stmt.shared_let",
+        Stmt::OnFailure(_) => "stmt.on_failure",
+        Stmt::Do(_) => "stmt.do",
+        Stmt::Delegate { .. } => "stmt.delegate",
+        Stmt::Pinned { .. } => "stmt.pinned",
+        Stmt::Parasteps(_) => "stmt.parasteps",
+        Stmt::MmsBlock { .. } => "stmt.mms",
+        Stmt::Func(_) => "stmt.function",
+        Stmt::Alloc { .. } => "stmt.alloc",
+        Stmt::Ellipsis => "stmt.ellipsis",
+        Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
+    }
+}
+
+fn usable_span(span: Span) -> Option<Span> {
+    (span.start_line > 0 && span.start_col > 0).then_some(span)
+}
+
+fn ast_meta_anchor(meta: crate::ast::AstNodeMeta) -> Option<(Span, SpanPrecision)> {
+    usable_span(meta.span).map(|span| {
+        let precision = if meta.origin == AstOrigin::User {
+            SpanPrecision::Exact
+        } else {
+            // Lowering frequently inherits the triggering user construct's
+            // range.  It remains an honest source anchor, but it is not the
+            // generated child's own exact syntax range.
+            SpanPrecision::SourceAnchor
+        };
+        (span, precision)
+    })
+}
+
+fn expr_span(expr: &Expr) -> Option<Span> {
+    expr.meta().and_then(|meta| usable_span(meta.span))
+}
+
+fn stmt_anchor(stmt: &Stmt, fallback: Span) -> Option<(Span, SpanPrecision)> {
+    if let Some(anchor) = stmt.meta().and_then(ast_meta_anchor) {
+        return Some(anchor);
+    }
+    let anchored = |span| usable_span(span).map(|span| (span, SpanPrecision::SourceAnchor));
+    match stmt.unlocated() {
+        Stmt::Let { pat, .. } => {
+            // Unwrapped stmt without a `Located` shell: fall back to the
+            // pattern's own span, which still carries a SourceId.
+            anchored(pat.meta.span)
+        }
+        Stmt::Expr(expr) => expr_span(expr).map(|span| (span, SpanPrecision::Exact)),
+        Stmt::Return(Some(expr))
+        | Stmt::Break(Some(expr))
+        | Stmt::Drop(expr)
+        | Stmt::SharedLet { init: expr, .. }
+        | Stmt::Delegate { expr, .. } => {
+            expr_span(expr).map(|span| (span, SpanPrecision::SourceAnchor))
+        }
+        Stmt::If { cond, .. } | Stmt::While { cond, .. } => {
+            expr_span(cond).map(|span| (span, SpanPrecision::SourceAnchor))
+        }
+        Stmt::WhileLet { pat, .. } => anchored(pat.meta.span),
+        Stmt::For { iterable, .. } => {
+            expr_span(iterable).map(|span| (span, SpanPrecision::SourceAnchor))
+        }
         Stmt::Desc(_, span)
         | Stmt::Rule(_, span)
         | Stmt::Requires(_, span)
         | Stmt::Ensures(_, span)
         | Stmt::Invariant(_, span)
-        | Stmt::MmsBlock { span, .. } => Some(*span),
+        | Stmt::MmsBlock { span, .. } => anchored(*span),
+        Stmt::Assign { target, .. } => {
+            expr_span(target).map(|span| (span, SpanPrecision::SourceAnchor))
+        }
+        Stmt::Pinned { expr, .. } => {
+            expr_span(expr).map(|span| (span, SpanPrecision::SourceAnchor))
+        }
+        Stmt::Math(exprs) => exprs
+            .first()
+            .and_then(expr_span)
+            .map(|span| (span, SpanPrecision::SourceAnchor)),
+        Stmt::Func(function) => {
+            anchored(function.meta.span.with_source(fallback.source_id))
+        }
         _ => None,
-    };
-    insert_node_meta(path, exact, fallback, out);
-    match stmt {
-        Stmt::Let { pat, init, .. } => {
-            collect_pattern_meta(pat, &format!("{path}/pattern"), fallback, out);
+    }
+}
+
+fn collect_stmt_meta(
+    stmt: &Stmt,
+    owner: &NodeId,
+    role: &str,
+    fallback: Span,
+    ids: &NodeIdBuilder<'_>,
+    out: &mut HashMap<NodeId, NodeMeta>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let meta = stmt.meta();
+    let anchor = stmt_anchor(stmt, fallback);
+    let ast_origin = meta.map(|meta| meta.origin).unwrap_or(AstOrigin::User);
+    let node_id = ids.anonymous(
+        owner,
+        stmt_kind(stmt),
+        role,
+        anchor.map(|(span, _)| span),
+        ast_origin,
+        errors,
+    );
+    insert_node_meta(
+        node_id,
+        ast_origin,
+        meta.map(|meta| meta.parent).unwrap_or(AstParentHint::None),
+        anchor,
+        fallback,
+        owner,
+        None,
+        out,
+        errors,
+    );
+    match stmt.unlocated() {
+        Stmt::Let { pat, ty, init, .. } => {
+            collect_pattern_meta(
+                pat,
+                owner,
+                &format!("{role}.pattern"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            if let Some(ty) = ty {
+                collect_type_meta(
+                    ty,
+                    owner,
+                    &format!("{role}.type"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
+            }
             if let Some(expr) = init {
-                collect_expr_meta(expr, &format!("{path}/init"), fallback, out);
+                collect_expr_meta(
+                    expr,
+                    owner,
+                    &format!("{role}.initializer"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
             }
         }
         Stmt::Return(expr) | Stmt::Break(expr) => {
             if let Some(expr) = expr {
-                collect_expr_meta(expr, &format!("{path}/value"), fallback, out);
+                collect_expr_meta(
+                    expr,
+                    owner,
+                    &format!("{role}.value"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
             }
         }
         Stmt::Continue | Stmt::Ellipsis | Stmt::Desc(_, _) | Stmt::Rule(_, _) => {}
@@ -1569,23 +3412,95 @@ fn collect_stmt_meta(stmt: &Stmt, path: &str, fallback: Span, out: &mut HashMap<
         | Stmt::Requires(expr, _)
         | Stmt::Ensures(expr, _)
         | Stmt::Invariant(expr, _) => {
-            collect_expr_meta(expr, &format!("{path}/expr"), fallback, out);
+            collect_expr_meta(
+                expr,
+                owner,
+                &format!("{role}.expression"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
         }
         Stmt::If { cond, then_, else_ } => {
-            collect_expr_meta(cond, &format!("{path}/cond"), fallback, out);
-            collect_block_meta(then_, &format!("{path}/then"), fallback, out);
+            collect_expr_meta(
+                cond,
+                owner,
+                &format!("{role}.condition"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            collect_block_meta(
+                then_,
+                owner,
+                &format!("{role}.then"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
             if let Some(block) = else_ {
-                collect_block_meta(block, &format!("{path}/else"), fallback, out);
+                collect_block_meta(
+                    block,
+                    owner,
+                    &format!("{role}.else"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
             }
         }
         Stmt::While { cond, body } => {
-            collect_expr_meta(cond, &format!("{path}/cond"), fallback, out);
-            collect_block_meta(body, &format!("{path}/body"), fallback, out);
+            collect_expr_meta(
+                cond,
+                owner,
+                &format!("{role}.condition"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            collect_block_meta(
+                body,
+                owner,
+                &format!("{role}.body"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
         }
         Stmt::WhileLet { pat, init, body } => {
-            collect_pattern_meta(pat, &format!("{path}/pattern"), fallback, out);
-            collect_expr_meta(init, &format!("{path}/init"), fallback, out);
-            collect_block_meta(body, &format!("{path}/body"), fallback, out);
+            collect_pattern_meta(
+                pat,
+                owner,
+                &format!("{role}.pattern"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            collect_expr_meta(
+                init,
+                owner,
+                &format!("{role}.initializer"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            collect_block_meta(
+                body,
+                owner,
+                &format!("{role}.body"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
         }
         Stmt::Loop(body)
         | Stmt::Block(body)
@@ -1593,69 +3508,321 @@ fn collect_stmt_meta(stmt: &Stmt, path: &str, fallback: Span, out: &mut HashMap<
         | Stmt::Unsafe(body)
         | Stmt::OnFailure(body)
         | Stmt::Do(body)
-        | Stmt::Parasteps(body) => {
-            collect_block_meta(body, &format!("{path}/body"), fallback, out);
-        }
+        | Stmt::Parasteps(body) => collect_block_meta(
+            body,
+            owner,
+            &format!("{role}.body"),
+            fallback,
+            ids,
+            out,
+            errors,
+        ),
         Stmt::For { iterable, body, .. } => {
-            collect_expr_meta(iterable, &format!("{path}/iterable"), fallback, out);
-            collect_block_meta(body, &format!("{path}/body"), fallback, out);
+            collect_expr_meta(
+                iterable,
+                owner,
+                &format!("{role}.iterable"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            collect_block_meta(
+                body,
+                owner,
+                &format!("{role}.body"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
         }
         Stmt::Math(exprs) => {
-            for (index, expr) in exprs.iter().enumerate() {
-                collect_expr_meta(expr, &format!("{path}/math:{index}"), fallback, out);
+            for index in 0..exprs.len() {
+                let child_role = expr_sibling_role(&format!("{role}.math"), exprs, index);
+                collect_expr_meta(
+                    &exprs[index],
+                    owner,
+                    &child_role,
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
             }
         }
         Stmt::Assign { target, value } => {
-            collect_expr_meta(target, &format!("{path}/target"), fallback, out);
-            collect_expr_meta(value, &format!("{path}/value"), fallback, out);
+            collect_expr_meta(
+                target,
+                owner,
+                &format!("{role}.target"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            collect_expr_meta(
+                value,
+                owner,
+                &format!("{role}.value"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
         }
-        Stmt::SharedLet { init, .. } => {
-            collect_expr_meta(init, &format!("{path}/init"), fallback, out);
+        Stmt::SharedLet { ty, init, .. } => {
+            if let Some(ty) = ty {
+                collect_type_meta(
+                    ty,
+                    owner,
+                    &format!("{role}.type"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
+            }
+            collect_expr_meta(
+                init,
+                owner,
+                &format!("{role}.initializer"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
         }
-        Stmt::Delegate { expr, .. } => {
-            collect_expr_meta(expr, &format!("{path}/expr"), fallback, out);
-        }
+        Stmt::Delegate { expr, .. } => collect_expr_meta(
+            expr,
+            owner,
+            &format!("{role}.expression"),
+            fallback,
+            ids,
+            out,
+            errors,
+        ),
         Stmt::Pinned {
             expr,
             timeout,
             body,
             ..
         } => {
-            collect_expr_meta(expr, &format!("{path}/expr"), fallback, out);
+            collect_expr_meta(
+                expr,
+                owner,
+                &format!("{role}.expression"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
             if let Some(timeout) = timeout {
-                collect_expr_meta(timeout, &format!("{path}/timeout"), fallback, out);
+                collect_expr_meta(
+                    timeout,
+                    owner,
+                    &format!("{role}.timeout"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
             }
-            collect_block_meta(body, &format!("{path}/body"), fallback, out);
+            collect_block_meta(
+                body,
+                owner,
+                &format!("{role}.body"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
         }
         Stmt::MmsBlock { .. } => {}
-        Stmt::Func(function) => collect_block_meta(
-            &function.body,
-            &format!("{path}/function:{}", function.name),
-            Span::from(function.pos),
-            out,
-        ),
-        Stmt::Alloc { body, .. } => {
-            collect_block_meta(body, &format!("{path}/body"), fallback, out);
+        Stmt::Func(function) => {
+            let nested_owner = nested_function_owner(owner, function);
+            let nested_fallback =
+                function.meta.span.with_source(fallback.source_id);
+            collect_func_meta(
+                function,
+                nested_owner,
+                owner,
+                nested_fallback,
+                ids,
+                out,
+                errors,
+            );
         }
+        Stmt::Alloc { body, .. } => collect_block_meta(
+            body,
+            owner,
+            &format!("{role}.body"),
+            fallback,
+            ids,
+            out,
+            errors,
+        ),
+        Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
     }
 }
 
-fn collect_expr_meta(expr: &Expr, path: &str, fallback: Span, out: &mut HashMap<NodeId, NodeMeta>) {
-    insert_node_meta(path, None, fallback, out);
-    match expr {
+fn expr_semantic_key(expr: &Expr) -> String {
+    match expr.unlocated() {
+        Expr::Literal(lit) => match lit {
+            crate::ast::Lit::Int(value) => format!("literal.int:{value}"),
+            crate::ast::Lit::Float(value) => format!("literal.float:{:016x}", value.to_bits()),
+            crate::ast::Lit::Bool(value) => format!("literal.bool:{value}"),
+            crate::ast::Lit::String(value) => {
+                format!("literal.string:{:016x}", stable_text_hash(value))
+            }
+            crate::ast::Lit::FString(parts) => format!("literal.fstring:{}", parts.len()),
+            crate::ast::Lit::Unit => "literal.unit".into(),
+        },
+        Expr::Ident(name) => format!("ident:{name}"),
+        Expr::Binary(op, _, _) => format!("binary:{op:?}"),
+        Expr::Unary(op, _) => format!("unary:{op:?}"),
+        Expr::Call(callee, _) => format!("call:{}", expr_semantic_key(callee)),
+        Expr::Field(_, name) => format!("field:{name}"),
+        Expr::Index(_, _) => "index".into(),
+        Expr::Tuple(items) => format!("tuple:{}", items.len()),
+        Expr::List(items) => format!("list:{}", items.len()),
+        Expr::Comprehension { var, .. } => format!("comprehension:{var}"),
+        Expr::Match(_, arms) => format!("match:{}", arms.len()),
+        Expr::Record { ty, .. } => format!("record:{}", ty.as_deref().unwrap_or("_")),
+        Expr::Block(_) => "block".into(),
+        Expr::Try(_) => "try".into(),
+        Expr::OptionalChain(_, field) => format!("optional-chain:{field}"),
+        Expr::Spawn(_) => "spawn".into(),
+        Expr::Await(_) => "await".into(),
+        Expr::Quote(_) => "quote".into(),
+        Expr::QuoteInterpolate(_) => "quote-interpolate".into(),
+        Expr::Comptime(_) => "comptime".into(),
+        Expr::TypeOf(_) => "type-of".into(),
+        Expr::TypeInfo(ty) => format!("type-info:{}", crate::core::fmt_type(ty)),
+        Expr::If { .. } => "if".into(),
+        Expr::Lambda { params, .. } => format!("lambda:{}", params.len()),
+        Expr::Old(_) => "old".into(),
+        Expr::SliceExpr { .. } => "slice".into(),
+        Expr::Range { .. } => "range".into(),
+        Expr::Turbofish(name, types, _) => format!("turbofish:{name}:{}", types.len()),
+        Expr::TupleIndex(_, index) => format!("tuple-index:{index}"),
+        Expr::Arena(_) => "arena".into(),
+        Expr::MapLiteral { entries } => format!("map:{}", entries.len()),
+        Expr::SetLiteral(items) => format!("set:{}", items.len()),
+        Expr::NamedArg(name, _) => format!("named-argument:{name}"),
+        Expr::Cast(_, ty) => format!("cast:{}", crate::core::fmt_type(ty)),
+        Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
+    }
+}
+
+fn expr_kind(expr: &Expr) -> &'static str {
+    match expr.unlocated() {
+        Expr::Literal(_) => "expr.literal",
+        Expr::Ident(_) => "expr.identifier",
+        Expr::Binary(_, _, _) => "expr.binary",
+        Expr::Unary(_, _) => "expr.unary",
+        Expr::Call(_, _) => "expr.call",
+        Expr::Field(_, _) => "expr.field",
+        Expr::Index(_, _) => "expr.index",
+        Expr::Tuple(_) => "expr.tuple",
+        Expr::List(_) => "expr.list",
+        Expr::Comprehension { .. } => "expr.comprehension",
+        Expr::Match(_, _) => "expr.match",
+        Expr::Record { .. } => "expr.record",
+        Expr::Block(_) => "expr.block",
+        Expr::Try(_) => "expr.try",
+        Expr::OptionalChain(_, _) => "expr.optional_chain",
+        Expr::Spawn(_) => "expr.spawn",
+        Expr::Await(_) => "expr.await",
+        Expr::Quote(_) => "expr.quote",
+        Expr::QuoteInterpolate(_) => "expr.quote_interpolate",
+        Expr::Comptime(_) => "expr.comptime",
+        Expr::TypeOf(_) => "expr.type_of",
+        Expr::TypeInfo(_) => "expr.type_info",
+        Expr::If { .. } => "expr.if",
+        Expr::Lambda { .. } => "expr.lambda",
+        Expr::Old(_) => "expr.old",
+        Expr::SliceExpr { .. } => "expr.slice",
+        Expr::Range { .. } => "expr.range",
+        Expr::Turbofish(_, _, _) => "expr.turbofish",
+        Expr::TupleIndex(_, _) => "expr.tuple_index",
+        Expr::Arena(_) => "expr.arena",
+        Expr::MapLiteral { .. } => "expr.map",
+        Expr::SetLiteral(_) => "expr.set",
+        Expr::NamedArg(_, _) => "expr.named_argument",
+        Expr::Cast(_, _) => "expr.cast",
+        Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
+    }
+}
+
+fn collect_expr_meta(
+    expr: &Expr,
+    owner: &NodeId,
+    role: &str,
+    fallback: Span,
+    ids: &NodeIdBuilder<'_>,
+    out: &mut HashMap<NodeId, NodeMeta>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let meta = expr.meta();
+    let anchor = meta.and_then(ast_meta_anchor);
+    let exact = anchor.map(|(span, _)| span);
+    let ast_origin = meta.map(|meta| meta.origin).unwrap_or(AstOrigin::User);
+    let node_id = ids.anonymous(owner, expr_kind(expr), role, exact, ast_origin, errors);
+    insert_node_meta(
+        node_id,
+        ast_origin,
+        meta.map(|meta| meta.parent).unwrap_or(AstParentHint::None),
+        anchor,
+        fallback,
+        owner,
+        None,
+        out,
+        errors,
+    );
+    match expr.unlocated() {
         Expr::Literal(lit) => {
             if let crate::ast::Lit::FString(parts) = lit {
-                for (index, part) in parts.iter().enumerate() {
+                for (part_index, part) in parts.iter().enumerate() {
                     if let FStringPart::Interp(expr) = part {
-                        collect_expr_meta(expr, &format!("{path}/fstring:{index}"), fallback, out);
+                        let child_role =
+                            interpolation_role(&format!("{role}.interpolation"), parts, part_index);
+                        collect_expr_meta(expr, owner, &child_role, fallback, ids, out, errors);
                     }
                 }
             }
         }
-        Expr::Ident(_) | Expr::TypeInfo(_) => {}
+        Expr::Ident(_) => {}
+        Expr::TypeInfo(ty) => {
+            collect_type_meta(
+                ty,
+                owner,
+                &format!("{role}.type"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+        }
         Expr::Binary(_, left, right) | Expr::Index(left, right) => {
-            collect_expr_meta(left, &format!("{path}/left"), fallback, out);
-            collect_expr_meta(right, &format!("{path}/right"), fallback, out);
+            collect_expr_meta(
+                left,
+                owner,
+                &format!("{role}.left"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            collect_expr_meta(
+                right,
+                owner,
+                &format!("{role}.right"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
         }
         Expr::Unary(_, inner)
         | Expr::Field(inner, _)
@@ -1667,145 +3834,506 @@ fn collect_expr_meta(expr: &Expr, path: &str, fallback: Span, out: &mut HashMap<
         | Expr::TypeOf(inner)
         | Expr::Old(inner)
         | Expr::TupleIndex(inner, _)
-        | Expr::NamedArg(_, inner)
-        | Expr::Cast(inner, _) => {
-            collect_expr_meta(inner, &format!("{path}/inner"), fallback, out);
+        | Expr::NamedArg(_, inner) => {
+            collect_expr_meta(
+                inner,
+                owner,
+                &format!("{role}.inner"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+        }
+        Expr::Cast(inner, ty) => {
+            collect_expr_meta(
+                inner,
+                owner,
+                &format!("{role}.inner"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            collect_type_meta(
+                ty,
+                owner,
+                &format!("{role}.type"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
         }
         Expr::Call(callee, args) => {
-            collect_expr_meta(callee, &format!("{path}/callee"), fallback, out);
-            for (index, arg) in args.iter().enumerate() {
-                collect_expr_meta(arg, &format!("{path}/arg:{index}"), fallback, out);
+            collect_expr_meta(
+                callee,
+                owner,
+                &format!("{role}.callee"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            for index in 0..args.len() {
+                let child_role = expr_sibling_role(&format!("{role}.argument"), args, index);
+                collect_expr_meta(&args[index], owner, &child_role, fallback, ids, out, errors);
             }
         }
         Expr::Tuple(items) | Expr::List(items) | Expr::SetLiteral(items) => {
-            for (index, item) in items.iter().enumerate() {
-                collect_expr_meta(item, &format!("{path}/item:{index}"), fallback, out);
+            for index in 0..items.len() {
+                let child_role = expr_sibling_role(&format!("{role}.element"), items, index);
+                collect_expr_meta(
+                    &items[index],
+                    owner,
+                    &child_role,
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
             }
         }
         Expr::Comprehension {
             expr, iter, guard, ..
         } => {
-            collect_expr_meta(expr, &format!("{path}/value"), fallback, out);
-            collect_expr_meta(iter, &format!("{path}/iter"), fallback, out);
+            collect_expr_meta(
+                expr,
+                owner,
+                &format!("{role}.value"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            collect_expr_meta(
+                iter,
+                owner,
+                &format!("{role}.iterable"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
             if let Some(guard) = guard {
-                collect_expr_meta(guard, &format!("{path}/guard"), fallback, out);
+                collect_expr_meta(
+                    guard,
+                    owner,
+                    &format!("{role}.guard"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
             }
         }
         Expr::Match(scrutinee, arms) => {
-            collect_expr_meta(scrutinee, &format!("{path}/scrutinee"), fallback, out);
+            collect_expr_meta(
+                scrutinee,
+                owner,
+                &format!("{role}.scrutinee"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
             for (index, arm) in arms.iter().enumerate() {
+                let arm_role = match_arm_role(&format!("{role}.arm"), arms, index);
+                insert_child_meta(
+                    arm.meta,
+                    owner,
+                    "match.arm",
+                    &arm_role,
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
                 collect_pattern_meta(
                     &arm.pat,
-                    &format!("{path}/arm:{index}/pattern"),
+                    owner,
+                    &format!("{arm_role}.pattern"),
                     fallback,
+                    ids,
                     out,
+                    errors,
                 );
                 if let Some(guard) = &arm.guard {
-                    collect_expr_meta(guard, &format!("{path}/arm:{index}/guard"), fallback, out);
+                    collect_expr_meta(
+                        guard,
+                        owner,
+                        &format!("{arm_role}.guard"),
+                        fallback,
+                        ids,
+                        out,
+                        errors,
+                    );
                 }
                 collect_expr_meta(
                     &arm.body,
-                    &format!("{path}/arm:{index}/body"),
+                    owner,
+                    &format!("{arm_role}.body"),
                     fallback,
+                    ids,
                     out,
+                    errors,
                 );
             }
         }
         Expr::Record { fields, .. } => {
-            for (index, field) in fields.iter().enumerate() {
+            for field in fields {
+                let field_role = format!("{role}.field.{}", stable_id_fragment(&field.name));
+                insert_child_meta(
+                    field.meta,
+                    owner,
+                    "record.field",
+                    &field_role,
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
                 collect_expr_meta(
                     &field.value,
-                    &format!("{path}/field:{index}"),
+                    owner,
+                    &format!("{field_role}.value"),
                     fallback,
+                    ids,
                     out,
+                    errors,
                 );
             }
         }
         Expr::Block(block) | Expr::Quote(block) | Expr::Comptime(block) | Expr::Arena(block) => {
-            collect_block_meta(block, &format!("{path}/block"), fallback, out);
+            collect_block_meta(
+                block,
+                owner,
+                &format!("{role}.block"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
         }
         Expr::If { cond, then_, else_ } => {
-            collect_expr_meta(cond, &format!("{path}/cond"), fallback, out);
-            collect_block_meta(then_, &format!("{path}/then"), fallback, out);
+            collect_expr_meta(
+                cond,
+                owner,
+                &format!("{role}.condition"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            collect_block_meta(
+                then_,
+                owner,
+                &format!("{role}.then"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
             if let Some(block) = else_ {
-                collect_block_meta(block, &format!("{path}/else"), fallback, out);
+                collect_block_meta(
+                    block,
+                    owner,
+                    &format!("{role}.else"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
             }
         }
-        Expr::Lambda { body, .. } => {
-            collect_block_meta(body, &format!("{path}/body"), fallback, out);
+        Expr::Lambda { params, ret, body } => {
+            for param in params {
+                collect_param_meta(
+                    param,
+                    owner,
+                    &format!("{role}.parameter"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
+            }
+            if let Some(ret) = ret {
+                collect_type_meta(
+                    ret,
+                    owner,
+                    &format!("{role}.return_type"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
+            }
+            collect_block_meta(
+                body,
+                owner,
+                &format!("{role}.body"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
         }
         Expr::SliceExpr { target, start, end } => {
-            collect_expr_meta(target, &format!("{path}/target"), fallback, out);
+            collect_expr_meta(
+                target,
+                owner,
+                &format!("{role}.target"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
             if let Some(start) = start {
-                collect_expr_meta(start, &format!("{path}/start"), fallback, out);
+                collect_expr_meta(
+                    start,
+                    owner,
+                    &format!("{role}.start"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
             }
             if let Some(end) = end {
-                collect_expr_meta(end, &format!("{path}/end"), fallback, out);
+                collect_expr_meta(
+                    end,
+                    owner,
+                    &format!("{role}.end"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
             }
         }
         Expr::Range { start, end } => {
-            collect_expr_meta(start, &format!("{path}/start"), fallback, out);
-            collect_expr_meta(end, &format!("{path}/end"), fallback, out);
+            collect_expr_meta(
+                start,
+                owner,
+                &format!("{role}.start"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
+            collect_expr_meta(
+                end,
+                owner,
+                &format!("{role}.end"),
+                fallback,
+                ids,
+                out,
+                errors,
+            );
         }
-        Expr::Turbofish(_, _, args) => {
-            for (index, arg) in args.iter().enumerate() {
-                collect_expr_meta(arg, &format!("{path}/arg:{index}"), fallback, out);
+        Expr::Turbofish(_, types, args) => {
+            for index in 0..types.len() {
+                let child_role = type_sibling_role(&format!("{role}.type_argument"), types, index);
+                collect_type_meta(
+                    &types[index],
+                    owner,
+                    &child_role,
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
+            }
+            for index in 0..args.len() {
+                let child_role = expr_sibling_role(&format!("{role}.argument"), args, index);
+                collect_expr_meta(&args[index], owner, &child_role, fallback, ids, out, errors);
             }
         }
         Expr::MapLiteral { entries } => {
             for (index, (key, value)) in entries.iter().enumerate() {
-                collect_expr_meta(key, &format!("{path}/entry:{index}/key"), fallback, out);
-                collect_expr_meta(value, &format!("{path}/entry:{index}/value"), fallback, out);
+                let entry_role = map_entry_role(&format!("{role}.entry"), entries, index);
+                collect_expr_meta(
+                    key,
+                    owner,
+                    &format!("{entry_role}.key"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
+                collect_expr_meta(
+                    value,
+                    owner,
+                    &format!("{entry_role}.value"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
             }
         }
+        Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
+    }
+}
+
+fn pattern_semantic_key(pattern: &Pattern) -> String {
+    match &pattern.kind {
+        PatternKind::Wildcard => "wildcard".into(),
+        PatternKind::Variable(name) => format!("variable:{name}"),
+        PatternKind::Literal(lit) => match lit {
+            crate::ast::Lit::Int(value) => format!("literal.int:{value}"),
+            crate::ast::Lit::Float(value) => format!("literal.float:{:016x}", value.to_bits()),
+            crate::ast::Lit::Bool(value) => format!("literal.bool:{value}"),
+            crate::ast::Lit::String(value) => {
+                format!("literal.string:{:016x}", stable_text_hash(value))
+            }
+            crate::ast::Lit::FString(parts) => format!("literal.fstring:{}", parts.len()),
+            crate::ast::Lit::Unit => "literal.unit".into(),
+        },
+        PatternKind::Constructor(name, _) => format!("constructor:{name}"),
+        PatternKind::Tuple(items) => format!("tuple:{}", items.len()),
+        PatternKind::Array(items) => format!("array:{}", items.len()),
+        PatternKind::Slice(items, rest) => format!("slice:{}:{}", items.len(), rest.is_some()),
+    }
+}
+
+fn pattern_kind(pattern: &Pattern) -> &'static str {
+    match &pattern.kind {
+        PatternKind::Wildcard => "pattern.wildcard",
+        PatternKind::Variable(_) => "pattern.variable",
+        PatternKind::Literal(_) => "pattern.literal",
+        PatternKind::Constructor(_, _) => "pattern.constructor",
+        PatternKind::Tuple(_) => "pattern.tuple",
+        PatternKind::Array(_) => "pattern.array",
+        PatternKind::Slice(_, _) => "pattern.slice",
     }
 }
 
 fn collect_pattern_meta(
     pattern: &Pattern,
-    path: &str,
+    owner: &NodeId,
+    role: &str,
     fallback: Span,
+    ids: &NodeIdBuilder<'_>,
     out: &mut HashMap<NodeId, NodeMeta>,
+    errors: &mut Vec<Diagnostic>,
 ) {
-    insert_node_meta(path, None, fallback, out);
-    match pattern {
-        Pattern::Wildcard | Pattern::Variable(_) | Pattern::Literal(_) => {}
-        Pattern::Constructor(_, fields) => {
-            for (index, (_, pattern)) in fields.iter().enumerate() {
-                collect_pattern_meta(pattern, &format!("{path}/field:{index}"), fallback, out);
+    let anchor = ast_meta_anchor(pattern.meta);
+    let exact = anchor.map(|(span, _)| span);
+    let node_id = ids.anonymous(
+        owner,
+        pattern_kind(pattern),
+        role,
+        exact,
+        pattern.meta.origin,
+        errors,
+    );
+    insert_node_meta(
+        node_id,
+        pattern.meta.origin,
+        pattern.meta.parent,
+        anchor,
+        fallback,
+        owner,
+        None,
+        out,
+        errors,
+    );
+    match &pattern.kind {
+        PatternKind::Wildcard | PatternKind::Variable(_) | PatternKind::Literal(_) => {}
+        PatternKind::Constructor(_, fields) => {
+            for (name, pattern) in fields {
+                collect_pattern_meta(
+                    pattern,
+                    owner,
+                    &format!("{role}.field.{}", stable_id_fragment(name)),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
             }
         }
-        Pattern::Tuple(items) | Pattern::Array(items) => {
-            for (index, pattern) in items.iter().enumerate() {
-                collect_pattern_meta(pattern, &format!("{path}/item:{index}"), fallback, out);
+        PatternKind::Tuple(items) | PatternKind::Array(items) => {
+            for index in 0..items.len() {
+                let child_role = pattern_sibling_role(&format!("{role}.element"), items, index);
+                collect_pattern_meta(
+                    &items[index],
+                    owner,
+                    &child_role,
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
             }
         }
-        Pattern::Slice(items, rest) => {
-            for (index, pattern) in items.iter().enumerate() {
-                collect_pattern_meta(pattern, &format!("{path}/item:{index}"), fallback, out);
+        PatternKind::Slice(items, rest) => {
+            for index in 0..items.len() {
+                let child_role = pattern_sibling_role(&format!("{role}.element"), items, index);
+                collect_pattern_meta(
+                    &items[index],
+                    owner,
+                    &child_role,
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
             }
             if let Some(rest) = rest {
-                collect_pattern_meta(rest, &format!("{path}/rest"), fallback, out);
+                collect_pattern_meta(
+                    rest,
+                    owner,
+                    &format!("{role}.rest"),
+                    fallback,
+                    ids,
+                    out,
+                    errors,
+                );
             }
         }
     }
 }
 
 fn insert_node_meta(
-    path: &str,
-    exact: Option<Span>,
+    node_id: NodeId,
+    ast_origin: AstOrigin,
+    parent_hint: AstParentHint,
+    anchor: Option<(Span, SpanPrecision)>,
     fallback: Span,
+    enclosing: &NodeId,
+    qualified_scope: Option<&str>,
     out: &mut HashMap<NodeId, NodeMeta>,
+    errors: &mut Vec<Diagnostic>,
 ) {
-    let node_id = NodeId(path.to_string());
-    let (span, precision) = exact
-        .map(|span| (span, SpanPrecision::Exact))
-        .unwrap_or((fallback, SpanPrecision::DeclarationFallback));
+    let (span, precision) = anchor.unwrap_or((fallback, SpanPrecision::DeclarationFallback));
+    if out.contains_key(&node_id) {
+        errors.push(Diagnostic::error(
+            format!(
+                "TOOL-RESOLUTION-001: duplicate canonical NodeId '{}'",
+                node_id.0
+            ),
+            span,
+        ));
+        return;
+    }
+    let parent = explicit_origin_parent(
+        &node_id,
+        ast_origin,
+        parent_hint,
+        enclosing,
+        qualified_scope,
+        span,
+        errors,
+    );
+    let origin = resolve_origin(ast_origin, &parent, span);
     out.insert(
         node_id.clone(),
         NodeMeta {
             node_id,
-            origin: Origin::User(span),
+            origin,
             precision,
         },
     );
@@ -1821,7 +4349,7 @@ fn collect_flow(
 ) {
     let flow_id = FlowId(qualified_name.to_string());
     let flow_node_id = NodeId(format!("flow:{}", qualified_name));
-    let flow_span = Span::from(flow.pos);
+    let flow_span = declaration_span(flow.meta, flow.meta.span);
     let states = flow
         .states
         .iter()
@@ -1844,12 +4372,18 @@ fn collect_flow(
                             "TOOL-RESOLUTION-001: unresolved or erased type '{}' in state '{}::{}' field '{}'",
                             crate::core::fmt_type(ty), qualified_name, state.name, field
                         ),
-                        Span::from(state.pos),
+                        declaration_span(state.meta, state.meta.span),
                     ));
                 }
             }
             let node_id = NodeId(format!("state:{}::{}", qualified_name, state.name));
-            let origin = resolve_origin(state.origin, &flow_node_id, Span::from(state.pos));
+            let origin = resolve_enclosed_origin(
+                &node_id,
+                state.meta,
+                &flow_node_id,
+                declaration_span(state.meta, state.meta.span),
+                errors,
+            );
             (
                 state.name.clone(),
                 ResolvedState {
@@ -1880,11 +4414,13 @@ fn collect_flow(
             event: transition.name.clone(),
             source,
         };
-        let span = Span::from(transition.pos);
+        let span = declaration_span(transition.meta, transition.meta.span);
         let node_id = NodeId(format!(
             "transition:{}::{}::{}",
             qualified_name, transition.name, transition.from_state
         ));
+        let transition_origin =
+            resolve_enclosed_origin(&node_id, transition.meta, &flow_node_id, span, errors);
         let resolved = ResolvedTransition {
             node_id,
             id: id.clone(),
@@ -1921,19 +4457,7 @@ fn collect_flow(
             },
             is_fallback: transition.is_fallback,
             is_ffi_pinned: transition.is_ffi_pinned,
-            origin: if transition.is_ffi_pinned {
-                Origin::RuntimeSystem {
-                    parent: flow_node_id.clone(),
-                    span: flow_span,
-                }
-            } else if transition.is_fallback {
-                Origin::PrototypeFallback {
-                    parent: flow_node_id.clone(),
-                    span: flow_span,
-                }
-            } else {
-                Origin::User(span)
-            },
+            origin: transition_origin,
             span,
         };
         flow_transition_ids.push(id.clone());
@@ -1960,9 +4484,9 @@ fn collect_flow(
     let mut max_children = None;
     let mut mailbox_depth = None;
     for annotation in &flow.annotations {
-        match annotation {
-            crate::ast::FlowAnnotation::MaxChildren(n) => max_children = Some(*n),
-            crate::ast::FlowAnnotation::MailboxDepth(n) => mailbox_depth = Some(*n),
+        match &annotation.kind {
+            crate::ast::FlowAnnotationKind::MaxChildren(n) => max_children = Some(*n),
+            crate::ast::FlowAnnotationKind::MailboxDepth(n) => mailbox_depth = Some(*n),
         }
     }
     let resolved_flow = ResolvedFlow {
@@ -1976,7 +4500,14 @@ fn collect_flow(
         transactional_fields: flow.transactional_fields.clone(),
         metadata_shadow_fields: flow.metadata_shadow_fields.clone(),
         impl_protocols: flow.impl_protocols.clone(),
-        origin: resolve_origin(flow.origin, &flow_node_id, flow_span),
+        origin: resolve_named_origin(
+            ResolvedItemKind::Flow,
+            qualified_name,
+            &flow_node_id,
+            flow.meta,
+            flow_span,
+            errors,
+        ),
     };
     if flows.insert(flow_id.clone(), resolved_flow).is_some() {
         errors.push(Diagnostic::error(
@@ -1989,19 +4520,40 @@ fn collect_flow(
     }
 }
 
+fn extern_block_key(block: &crate::ast::ExternBlock) -> String {
+    let mut symbols = block
+        .funcs
+        .iter()
+        .map(|func| func.name.as_str())
+        .collect::<Vec<_>>();
+    symbols.sort_unstable();
+    format!(
+        "{}:{}",
+        block.abi,
+        if symbols.is_empty() {
+            "empty".to_string()
+        } else {
+            symbols.join("+")
+        }
+    )
+}
+
 fn resolve_origin(origin: AstOrigin, parent: &NodeId, span: Span) -> Origin {
     match origin {
         AstOrigin::User => Origin::User(span),
-        AstOrigin::Desugared => Origin::Desugared {
+        AstOrigin::Desugared(rule) => Origin::Desugared {
             parent: parent.clone(),
+            rule: rule.to_string(),
             span,
         },
-        AstOrigin::PrototypeFallback => Origin::PrototypeFallback {
+        AstOrigin::PrototypeFallback(rule) => Origin::PrototypeFallback {
             parent: parent.clone(),
+            rule: rule.to_string(),
             span,
         },
-        AstOrigin::RuntimeSystem => Origin::RuntimeSystem {
+        AstOrigin::RuntimeSystem(rule) => Origin::RuntimeSystem {
             parent: parent.clone(),
+            rule: rule.to_string(),
             span,
         },
     }
@@ -2012,7 +4564,9 @@ fn collect_program_call_sites(
     functions: &HashMap<NodeId, ResolvedFunction>,
     extern_blocks: &HashMap<NodeId, ResolvedExternBlock>,
     actors: &HashMap<NodeId, ResolvedActor>,
+    _transitions: &HashMap<TransitionId, ResolvedTransition>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     let mut function_info: HashMap<String, (usize, Vec<String>, String)> = HashMap::new();
     for function in functions.values() {
@@ -2059,18 +4613,100 @@ fn collect_program_call_sites(
             );
         }
     }
+    let ids = NodeIdBuilder::new(&file.sources);
     for item in &file.items {
-        collect_item_call_sites(item, "", &function_info, &extern_info, &method_info, out);
+        collect_item_call_sites(
+            item,
+            "",
+            &ids,
+            &function_info,
+            &extern_info,
+            &method_info,
+            out,
+            errors,
+        );
     }
+}
+
+fn collect_param_default_call_sites(
+    params: &[crate::ast::Param],
+    owner: &NodeId,
+    context: &str,
+    fallback: Span,
+    ids: &NodeIdBuilder<'_>,
+    functions: &HashMap<String, (usize, Vec<String>, String)>,
+    externs: &HashMap<String, (usize, String)>,
+    methods: &HashMap<String, (usize, Vec<String>, String)>,
+    out: &mut HashMap<NodeId, ResolvedCallSite>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    for param in params {
+        let Some(default) = &param.default_value else {
+            continue;
+        };
+        let role = format!("{context}.{}", stable_id_fragment(&param.name));
+        collect_expr_call_sites(
+            default,
+            owner,
+            &format!("{role}.default"),
+            fallback,
+            ids,
+            functions,
+            externs,
+            methods,
+            out,
+            errors,
+        );
+    }
+}
+
+fn collect_func_call_sites(
+    function: &crate::ast::FuncDef,
+    owner: &NodeId,
+    fallback: Span,
+    ids: &NodeIdBuilder<'_>,
+    functions: &HashMap<String, (usize, Vec<String>, String)>,
+    externs: &HashMap<String, (usize, String)>,
+    methods: &HashMap<String, (usize, Vec<String>, String)>,
+    out: &mut HashMap<NodeId, ResolvedCallSite>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let span = declaration_span(function.meta, fallback);
+    collect_param_default_call_sites(
+        &function.params,
+        owner,
+        "parameter",
+        span,
+        ids,
+        functions,
+        externs,
+        methods,
+        out,
+        errors,
+    );
+    collect_block_call_sites(
+        &function.body,
+        owner,
+        "body",
+        span,
+        ids,
+        functions,
+        externs,
+        methods,
+        out,
+        errors,
+    );
 }
 
 fn collect_item_call_sites(
     item: &Item,
     module: &str,
+    ids: &NodeIdBuilder<'_>,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &HashMap<String, (usize, String)>,
     methods: &HashMap<String, (usize, Vec<String>, String)>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     match item {
         Item::Module(module_def) => {
@@ -2080,75 +4716,187 @@ fn collect_item_call_sites(
                 format!("{module}::{}", module_def.name)
             };
             for inner in &module_def.items {
-                collect_item_call_sites(inner, &next, functions, externs, methods, out);
+                collect_item_call_sites(
+                    inner, &next, ids, functions, externs, methods, out, errors,
+                );
             }
         }
         Item::Func(function) => {
-            let owner = if module.is_empty() {
+            let owner = NodeId(if module.is_empty() {
                 format!("function:{}", function.name)
             } else {
                 format!("function:{module}::{}", function.name)
-            };
-            collect_block_call_sites(
-                &function.body,
+            });
+            collect_func_call_sites(
+                function,
                 &owner,
-                &format!("{owner}/body"),
-                Span::from(function.pos),
+                function.meta.span,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
         }
         Item::Actor(actor) => {
-            for method in &actor.methods {
-                let owner = format!("function:{}::{}", actor.name, method.name);
-                collect_block_call_sites(
-                    &method.body,
-                    &owner,
-                    &format!("{owner}/body"),
-                    Span::from(method.pos),
+            let qualified = qualify(module, &actor.name);
+            let actor_owner = NodeId(format!("actor:{qualified}"));
+            let actor_span = declaration_span(actor.meta, actor.meta.span);
+            for field in &actor.fields {
+                let Some(initializer) = &field.init else {
+                    continue;
+                };
+                let role = format!("field.{}", stable_id_fragment(&field.name));
+                collect_expr_call_sites(
+                    initializer,
+                    &actor_owner,
+                    &format!("{role}.initializer"),
+                    actor_span,
+                    ids,
                     functions,
                     externs,
                     methods,
                     out,
+                    errors,
+                );
+            }
+            for method in &actor.methods {
+                let owner = NodeId(format!("function:{qualified}::{}", method.name));
+                collect_func_call_sites(
+                    method, &owner, actor_span, ids, functions, externs, methods, out, errors,
+                );
+            }
+        }
+        Item::Trait(trait_def) => {
+            let qualified = qualify(module, &trait_def.name);
+            let trait_owner = NodeId(format!("trait:{qualified}"));
+            let trait_span = declaration_span(trait_def.meta, trait_def.meta.span);
+            for method in &trait_def.methods {
+                let signature =
+                    method_signature_key(&method.name, &method.params, method.ret.as_ref());
+                let method_owner = NodeId(format!(
+                    "{}/method:{}:{:016x}",
+                    trait_owner.0,
+                    stable_id_fragment(&method.name),
+                    stable_text_hash(&signature)
+                ));
+                collect_param_default_call_sites(
+                    &method.params,
+                    &method_owner,
+                    "parameter",
+                    trait_span,
+                    ids,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                    errors,
                 );
             }
         }
         Item::Impl(impl_def) => {
+            let qualified = qualify(
+                module,
+                &format!("{}:for:{}", impl_def.trait_name, impl_def.type_name),
+            );
+            let impl_span = declaration_span(impl_def.meta, impl_def.meta.span);
             for method in &impl_def.methods {
-                let owner = format!(
-                    "function:{}:for:{}:{}",
-                    impl_def.trait_name, impl_def.type_name, method.name
+                let owner = impl_method_owner(&qualified, method);
+                collect_func_call_sites(
+                    method, &owner, impl_span, ids, functions, externs, methods, out, errors,
                 );
-                collect_block_call_sites(
-                    &method.body,
+            }
+        }
+        Item::ExternBlock(block) => {
+            let qualified = qualify(module, &extern_block_key(block));
+            let block_owner = NodeId(format!("extern:{qualified}"));
+            let block_span = declaration_span(block.meta, block.meta.span);
+            for function in &block.funcs {
+                let function_owner = extern_function_owner(&block_owner, function);
+                if let Some(requires) = &function.requires {
+                    collect_expr_call_sites(
+                        requires,
+                        &function_owner,
+                        "requires",
+                        block_span,
+                        ids,
+                        functions,
+                        externs,
+                        methods,
+                        out,
+                        errors,
+                    );
+                }
+                if let Some(ensures) = &function.ensures {
+                    collect_expr_call_sites(
+                        ensures,
+                        &function_owner,
+                        "ensures",
+                        block_span,
+                        ids,
+                        functions,
+                        externs,
+                        methods,
+                        out,
+                        errors,
+                    );
+                }
+            }
+        }
+        Item::Const {
+            meta,
+            name,
+            value,
+            ..
+        } => {
+            let owner = NodeId(format!("constant:{}", qualify(module, name)));
+            collect_expr_call_sites(
+                value,
+                &owner,
+                "value",
+                declaration_span(*meta, meta.span),
+                ids,
+                functions,
+                externs,
+                methods,
+                out,
+                errors,
+            );
+        }
+        Item::Flow(flow) => {
+            let qualified = qualify(module, &flow.name);
+            let flow_span = declaration_span(flow.meta, flow.meta.span);
+            for transition in &flow.transitions {
+                let owner = NodeId(format!(
+                    "transition:{}::{}::{}",
+                    qualified, transition.name, transition.from_state
+                ));
+                let transition_span = declaration_span(transition.meta, flow_span);
+                collect_param_default_call_sites(
+                    &transition.params,
                     &owner,
-                    &format!("{owner}/body"),
-                    Span::from(method.pos),
+                    "parameter",
+                    transition_span,
+                    ids,
                     functions,
                     externs,
                     methods,
                     out,
-                );
-            }
-        }
-        Item::Flow(flow) => {
-            for transition in &flow.transitions {
-                let owner = format!(
-                    "transition:{}:{}:{}",
-                    flow.name, transition.name, transition.from_state
+                    errors,
                 );
                 if let Some(body) = &transition.body {
                     collect_block_call_sites(
                         body,
                         &owner,
-                        &format!("{owner}/body"),
-                        Span::from(transition.pos),
+                        "body",
+                        transition_span,
+                        ids,
                         functions,
                         externs,
                         methods,
                         out,
+                        errors,
                     );
                 }
             }
@@ -2159,39 +4907,101 @@ fn collect_item_call_sites(
 
 fn collect_block_call_sites(
     block: &[Stmt],
-    owner: &str,
-    path: &str,
+    owner: &NodeId,
+    context: &str,
     fallback: Span,
+    ids: &NodeIdBuilder<'_>,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &HashMap<String, (usize, String)>,
     methods: &HashMap<String, (usize, Vec<String>, String)>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     for (index, stmt) in block.iter().enumerate() {
+        let role = stmt_sibling_role(context, block, index);
         collect_stmt_call_sites(
-            stmt,
-            owner,
-            &format!("{path}/stmt:{index}"),
-            fallback,
-            functions,
-            externs,
-            methods,
-            out,
+            stmt, owner, &role, fallback, ids, functions, externs, methods, out, errors,
         );
+    }
+}
+
+type ResolvedCalleeFacts = (
+    String,
+    ResolvedCallKind,
+    Option<usize>,
+    Vec<String>,
+    Option<String>,
+);
+
+fn record_expr_call_site(
+    expr: &Expr,
+    owner: &NodeId,
+    role: &str,
+    fallback: Span,
+    ids: &NodeIdBuilder<'_>,
+    argc: usize,
+    callee: ResolvedCalleeFacts,
+    out: &mut HashMap<NodeId, ResolvedCallSite>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let (callee_name, kind, expected_argc, effects, ret) = callee;
+    let span = expr_span(expr).unwrap_or(fallback);
+    let ast_meta = expr.meta();
+    let ast_origin = ast_meta.map(|meta| meta.origin).unwrap_or(AstOrigin::User);
+    // This is deliberately the exact same builder input as collect_expr_meta:
+    // a call-site ID is the ID of its semantic Expr node, not a parallel ID.
+    let node_id = ids.anonymous(
+        owner,
+        expr_kind(expr),
+        role,
+        expr_span(expr),
+        ast_origin,
+        errors,
+    );
+    let origin_parent = explicit_origin_parent(
+        &node_id,
+        ast_origin,
+        ast_meta.map(|meta| meta.parent).unwrap_or_default(),
+        owner,
+        None,
+        span,
+        errors,
+    );
+    let call_site = ResolvedCallSite {
+        node_id: node_id.clone(),
+        owner: owner.0.clone(),
+        callee: callee_name,
+        argc,
+        expected_argc,
+        effects,
+        ret,
+        kind,
+        origin: resolve_origin(ast_origin, &origin_parent, span),
+    };
+    if out.insert(node_id.clone(), call_site).is_some() {
+        errors.push(Diagnostic::error(
+            format!(
+                "TOOL-RESOLUTION-001: duplicate canonical call-site NodeId '{}'",
+                node_id.0
+            ),
+            span,
+        ));
     }
 }
 
 fn collect_stmt_call_sites(
     stmt: &Stmt,
-    owner: &str,
-    path: &str,
+    owner: &NodeId,
+    role: &str,
     fallback: Span,
+    ids: &NodeIdBuilder<'_>,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &HashMap<String, (usize, String)>,
     methods: &HashMap<String, (usize, Vec<String>, String)>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
+    errors: &mut Vec<Diagnostic>,
 ) {
-    match stmt {
+    match stmt.unlocated() {
         Stmt::Let {
             init: Some(expr), ..
         }
@@ -2204,48 +5014,61 @@ fn collect_stmt_call_sites(
         | Stmt::Invariant(expr, _)
         | Stmt::SharedLet { init: expr, .. }
         | Stmt::Delegate { expr, .. } => {
+            let syntax_role = match stmt.unlocated() {
+                Stmt::Let { .. } | Stmt::SharedLet { .. } => "initializer",
+                Stmt::Return(_) | Stmt::Break(_) => "value",
+                _ => "expression",
+            };
             collect_expr_call_sites(
                 expr,
                 owner,
-                &format!("{path}/expr"),
+                &format!("{role}.{syntax_role}"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
         }
         Stmt::If { cond, then_, else_ } => {
             collect_expr_call_sites(
                 cond,
                 owner,
-                &format!("{path}/cond"),
+                &format!("{role}.condition"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
             collect_block_call_sites(
                 then_,
                 owner,
-                &format!("{path}/then"),
+                &format!("{role}.then"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
             if let Some(block) = else_ {
                 collect_block_call_sites(
                     block,
                     owner,
-                    &format!("{path}/else"),
+                    &format!("{role}.else"),
                     fallback,
+                    ids,
                     functions,
                     externs,
                     methods,
                     out,
+                    errors,
                 );
             }
         }
@@ -2253,44 +5076,52 @@ fn collect_stmt_call_sites(
             collect_expr_call_sites(
                 cond,
                 owner,
-                &format!("{path}/cond"),
+                &format!("{role}.condition"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
             collect_block_call_sites(
                 body,
                 owner,
-                &format!("{path}/body"),
+                &format!("{role}.body"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
         }
         Stmt::WhileLet { init, body, .. } => {
             collect_expr_call_sites(
                 init,
                 owner,
-                &format!("{path}/init"),
+                &format!("{role}.initializer"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
             collect_block_call_sites(
                 body,
                 owner,
-                &format!("{path}/body"),
+                &format!("{role}.body"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
         }
         Stmt::Loop(body)
@@ -2303,56 +5134,66 @@ fn collect_stmt_call_sites(
             collect_block_call_sites(
                 body,
                 owner,
-                &format!("{path}/body"),
+                &format!("{role}.body"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
         }
         Stmt::For { iterable, body, .. } => {
             collect_expr_call_sites(
                 iterable,
                 owner,
-                &format!("{path}/iterable"),
+                &format!("{role}.iterable"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
             collect_block_call_sites(
                 body,
                 owner,
-                &format!("{path}/body"),
+                &format!("{role}.body"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
         }
         Stmt::Assign { target, value } => {
             collect_expr_call_sites(
                 target,
                 owner,
-                &format!("{path}/target"),
+                &format!("{role}.target"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
             collect_expr_call_sites(
                 value,
                 owner,
-                &format!("{path}/value"),
+                &format!("{role}.value"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
         }
         Stmt::Pinned {
@@ -2364,72 +5205,86 @@ fn collect_stmt_call_sites(
             collect_expr_call_sites(
                 expr,
                 owner,
-                &format!("{path}/expr"),
+                &format!("{role}.expression"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
             if let Some(timeout) = timeout {
                 collect_expr_call_sites(
                     timeout,
                     owner,
-                    &format!("{path}/timeout"),
+                    &format!("{role}.timeout"),
                     fallback,
+                    ids,
                     functions,
                     externs,
                     methods,
                     out,
+                    errors,
                 );
             }
             collect_block_call_sites(
                 body,
                 owner,
-                &format!("{path}/body"),
+                &format!("{role}.body"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
         }
         Stmt::Func(function) => {
-            let nested_owner = format!("{owner}/function:{}", function.name);
-            collect_block_call_sites(
-                &function.body,
+            let nested_owner = nested_function_owner(owner, function);
+            let nested_fallback =
+                function.meta.span.with_source(fallback.source_id);
+            collect_func_call_sites(
+                function,
                 &nested_owner,
-                &format!("{path}/function:{}", function.name),
-                Span::from(function.pos),
+                nested_fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
         }
         Stmt::Alloc { body, .. } => {
             collect_block_call_sites(
                 body,
                 owner,
-                &format!("{path}/body"),
+                &format!("{role}.body"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
         }
         Stmt::Math(exprs) => {
-            for (index, expr) in exprs.iter().enumerate() {
+            for index in 0..exprs.len() {
+                let child_role = expr_sibling_role(&format!("{role}.math"), exprs, index);
                 collect_expr_call_sites(
-                    expr,
+                    &exprs[index],
                     owner,
-                    &format!("{path}/math:{index}"),
+                    &child_role,
                     fallback,
+                    ids,
                     functions,
                     externs,
                     methods,
                     out,
+                    errors,
                 );
             }
         }
@@ -2439,53 +5294,54 @@ fn collect_stmt_call_sites(
 
 fn collect_expr_call_sites(
     expr: &Expr,
-    owner: &str,
-    path: &str,
+    owner: &NodeId,
+    role: &str,
     fallback: Span,
+    ids: &NodeIdBuilder<'_>,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &HashMap<String, (usize, String)>,
     methods: &HashMap<String, (usize, Vec<String>, String)>,
     out: &mut HashMap<NodeId, ResolvedCallSite>,
+    errors: &mut Vec<Diagnostic>,
 ) {
-    match expr {
+    match expr.unlocated() {
         Expr::Call(callee, args) => {
-            let (callee_name, kind, expected_argc, effects, ret) =
-                resolve_call_callee(callee, functions, externs, methods);
-            let node_id = NodeId(format!("{path}/call"));
-            out.insert(
-                node_id.clone(),
-                ResolvedCallSite {
-                    node_id,
-                    owner: owner.to_string(),
-                    callee: callee_name,
-                    argc: args.len(),
-                    expected_argc,
-                    effects,
-                    ret,
-                    kind,
-                    origin: Origin::User(fallback),
-                },
+            record_expr_call_site(
+                expr,
+                owner,
+                role,
+                fallback,
+                ids,
+                args.len(),
+                resolve_call_callee(callee, functions, externs, methods),
+                out,
+                errors,
             );
             collect_expr_call_sites(
                 callee,
                 owner,
-                &format!("{path}/callee"),
+                &format!("{role}.callee"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
-            for (index, arg) in args.iter().enumerate() {
+            for index in 0..args.len() {
+                let child_role = expr_sibling_role(&format!("{role}.argument"), args, index);
                 collect_expr_call_sites(
-                    arg,
+                    &args[index],
                     owner,
-                    &format!("{path}/arg:{index}"),
+                    &child_role,
                     fallback,
+                    ids,
                     functions,
                     externs,
                     methods,
                     out,
+                    errors,
                 );
             }
         }
@@ -2493,22 +5349,26 @@ fn collect_expr_call_sites(
             collect_expr_call_sites(
                 left,
                 owner,
-                &format!("{path}/left"),
+                &format!("{role}.left"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
             collect_expr_call_sites(
                 right,
                 owner,
-                &format!("{path}/right"),
+                &format!("{role}.right"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
         }
         Expr::Unary(_, inner)
@@ -2526,25 +5386,30 @@ fn collect_expr_call_sites(
             collect_expr_call_sites(
                 inner,
                 owner,
-                &format!("{path}/inner"),
+                &format!("{role}.inner"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
         }
-        Expr::Tuple(items) | Expr::List(items) => {
-            for (index, item) in items.iter().enumerate() {
+        Expr::Tuple(items) | Expr::List(items) | Expr::SetLiteral(items) => {
+            for index in 0..items.len() {
+                let child_role = expr_sibling_role(&format!("{role}.element"), items, index);
                 collect_expr_call_sites(
-                    item,
+                    &items[index],
                     owner,
-                    &format!("{path}/item:{index}"),
+                    &child_role,
                     fallback,
+                    ids,
                     functions,
                     externs,
                     methods,
                     out,
+                    errors,
                 );
             }
         }
@@ -2552,86 +5417,146 @@ fn collect_expr_call_sites(
             collect_expr_call_sites(
                 scrutinee,
                 owner,
-                &format!("{path}/scrutinee"),
+                &format!("{role}.scrutinee"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
             for (index, arm) in arms.iter().enumerate() {
+                let arm_role = match_arm_role(&format!("{role}.arm"), arms, index);
+                if let Some(guard) = &arm.guard {
+                    collect_expr_call_sites(
+                        guard,
+                        owner,
+                        &format!("{arm_role}.guard"),
+                        fallback,
+                        ids,
+                        functions,
+                        externs,
+                        methods,
+                        out,
+                        errors,
+                    );
+                }
                 collect_expr_call_sites(
                     &arm.body,
                     owner,
-                    &format!("{path}/arm:{index}"),
+                    &format!("{arm_role}.body"),
                     fallback,
+                    ids,
                     functions,
                     externs,
                     methods,
                     out,
+                    errors,
                 );
             }
         }
         Expr::Record { fields, .. } => {
-            for (index, field) in fields.iter().enumerate() {
+            for field in fields {
+                let field_role = format!("{role}.field.{}", stable_id_fragment(&field.name));
                 collect_expr_call_sites(
                     &field.value,
                     owner,
-                    &format!("{path}/field:{index}"),
+                    &format!("{field_role}.value"),
                     fallback,
+                    ids,
                     functions,
                     externs,
                     methods,
                     out,
+                    errors,
                 );
             }
         }
-        Expr::Block(block)
-        | Expr::Comptime(block)
-        | Expr::Quote(block)
-        | Expr::Lambda { body: block, .. } => {
+        Expr::Block(block) | Expr::Comptime(block) | Expr::Quote(block) | Expr::Arena(block) => {
             collect_block_call_sites(
                 block,
                 owner,
-                &format!("{path}/block"),
+                &format!("{role}.block"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
+            );
+        }
+        Expr::Lambda { params, body, .. } => {
+            for param in params {
+                if let Some(default) = &param.default_value {
+                    collect_expr_call_sites(
+                        default,
+                        owner,
+                        &format!(
+                            "{role}.parameter.{}.default",
+                            stable_id_fragment(&param.name)
+                        ),
+                        fallback,
+                        ids,
+                        functions,
+                        externs,
+                        methods,
+                        out,
+                        errors,
+                    );
+                }
+            }
+            collect_block_call_sites(
+                body,
+                owner,
+                &format!("{role}.body"),
+                fallback,
+                ids,
+                functions,
+                externs,
+                methods,
+                out,
+                errors,
             );
         }
         Expr::If { cond, then_, else_ } => {
             collect_expr_call_sites(
                 cond,
                 owner,
-                &format!("{path}/cond"),
+                &format!("{role}.condition"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
             collect_block_call_sites(
                 then_,
                 owner,
-                &format!("{path}/then"),
+                &format!("{role}.then"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
             if let Some(block) = else_ {
                 collect_block_call_sites(
                     block,
                     owner,
-                    &format!("{path}/else"),
+                    &format!("{role}.else"),
                     fallback,
+                    ids,
                     functions,
                     externs,
                     methods,
                     out,
+                    errors,
                 );
             }
         }
@@ -2641,33 +5566,39 @@ fn collect_expr_call_sites(
             collect_expr_call_sites(
                 expr,
                 owner,
-                &format!("{path}/expr"),
+                &format!("{role}.value"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
             collect_expr_call_sites(
                 iter,
                 owner,
-                &format!("{path}/iter"),
+                &format!("{role}.iterable"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
             if let Some(guard) = guard {
                 collect_expr_call_sites(
                     guard,
                     owner,
-                    &format!("{path}/guard"),
+                    &format!("{role}.guard"),
                     fallback,
+                    ids,
                     functions,
                     externs,
                     methods,
                     out,
+                    errors,
                 );
             }
         }
@@ -2675,58 +5606,151 @@ fn collect_expr_call_sites(
             collect_expr_call_sites(
                 target,
                 owner,
-                &format!("{path}/target"),
+                &format!("{role}.target"),
                 fallback,
+                ids,
                 functions,
                 externs,
                 methods,
                 out,
+                errors,
             );
             if let Some(start) = start {
                 collect_expr_call_sites(
                     start,
                     owner,
-                    &format!("{path}/start"),
+                    &format!("{role}.start"),
                     fallback,
+                    ids,
                     functions,
                     externs,
                     methods,
                     out,
+                    errors,
                 );
             }
             if let Some(end) = end {
                 collect_expr_call_sites(
                     end,
                     owner,
-                    &format!("{path}/end"),
+                    &format!("{role}.end"),
                     fallback,
+                    ids,
                     functions,
                     externs,
                     methods,
                     out,
+                    errors,
+                );
+            }
+        }
+        Expr::Range { start, end } => {
+            collect_expr_call_sites(
+                start,
+                owner,
+                &format!("{role}.start"),
+                fallback,
+                ids,
+                functions,
+                externs,
+                methods,
+                out,
+                errors,
+            );
+            collect_expr_call_sites(
+                end,
+                owner,
+                &format!("{role}.end"),
+                fallback,
+                ids,
+                functions,
+                externs,
+                methods,
+                out,
+                errors,
+            );
+        }
+        Expr::Turbofish(name, _, args) => {
+            record_expr_call_site(
+                expr,
+                owner,
+                role,
+                fallback,
+                ids,
+                args.len(),
+                resolve_named_call_callee(name, functions, externs, methods),
+                out,
+                errors,
+            );
+            for index in 0..args.len() {
+                let child_role = expr_sibling_role(&format!("{role}.argument"), args, index);
+                collect_expr_call_sites(
+                    &args[index],
+                    owner,
+                    &child_role,
+                    fallback,
+                    ids,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                    errors,
+                );
+            }
+        }
+        Expr::MapLiteral { entries } => {
+            for (index, (key, value)) in entries.iter().enumerate() {
+                let entry_role = map_entry_role(&format!("{role}.entry"), entries, index);
+                collect_expr_call_sites(
+                    key,
+                    owner,
+                    &format!("{entry_role}.key"),
+                    fallback,
+                    ids,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                    errors,
+                );
+                collect_expr_call_sites(
+                    value,
+                    owner,
+                    &format!("{entry_role}.value"),
+                    fallback,
+                    ids,
+                    functions,
+                    externs,
+                    methods,
+                    out,
+                    errors,
                 );
             }
         }
         Expr::Literal(lit) => {
             if let crate::ast::Lit::FString(parts) = lit {
-                for (index, part) in parts.iter().enumerate() {
+                for (part_index, part) in parts.iter().enumerate() {
                     if let FStringPart::Interp(expr) = part {
+                        let child_role =
+                            interpolation_role(&format!("{role}.interpolation"), parts, part_index);
                         collect_expr_call_sites(
                             expr,
                             owner,
-                            &format!("{path}/fstring:{index}"),
+                            &child_role,
                             fallback,
+                            ids,
                             functions,
                             externs,
                             methods,
                             out,
+                            errors,
                         );
                     }
                 }
             }
         }
         Expr::Ident(_) | Expr::TypeInfo(_) => {}
-        _ => {}
+        Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
     }
 }
 
@@ -2735,51 +5759,11 @@ fn resolve_call_callee(
     functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &HashMap<String, (usize, String)>,
     methods: &HashMap<String, (usize, Vec<String>, String)>,
-) -> (
-    String,
-    ResolvedCallKind,
-    Option<usize>,
-    Vec<String>,
-    Option<String>,
-) {
-    match callee {
-        Expr::Ident(name) => {
-            if let Some((arity, effects, ret)) = functions.get(name) {
-                (
-                    name.clone(),
-                    ResolvedCallKind::Function,
-                    Some(*arity),
-                    effects.clone(),
-                    Some(ret.clone()),
-                )
-            } else if let Some((arity, ret)) = externs.get(name) {
-                (
-                    name.clone(),
-                    ResolvedCallKind::Extern,
-                    Some(*arity),
-                    Vec::new(),
-                    Some(ret.clone()),
-                )
-            } else if let Some((arity, effects, ret)) = methods.get(name) {
-                (
-                    name.clone(),
-                    ResolvedCallKind::Method,
-                    Some(*arity),
-                    effects.clone(),
-                    Some(ret.clone()),
-                )
-            } else {
-                (
-                    name.clone(),
-                    ResolvedCallKind::Unknown,
-                    None,
-                    Vec::new(),
-                    None,
-                )
-            }
-        }
+) -> ResolvedCalleeFacts {
+    match callee.unlocated() {
+        Expr::Ident(name) => resolve_named_call_callee(name, functions, externs, methods),
         Expr::Field(obj, field) => {
-            let base = match obj.as_ref() {
+            let base = match obj.unlocated() {
                 Expr::Ident(name) => name.clone(),
                 _ => "_".into(),
             };
@@ -2808,8 +5792,49 @@ fn resolve_call_callee(
     }
 }
 
+fn resolve_named_call_callee(
+    name: &str,
+    functions: &HashMap<String, (usize, Vec<String>, String)>,
+    externs: &HashMap<String, (usize, String)>,
+    methods: &HashMap<String, (usize, Vec<String>, String)>,
+) -> ResolvedCalleeFacts {
+    if let Some((arity, effects, ret)) = functions.get(name) {
+        (
+            name.to_string(),
+            ResolvedCallKind::Function,
+            Some(*arity),
+            effects.clone(),
+            Some(ret.clone()),
+        )
+    } else if let Some((arity, ret)) = externs.get(name) {
+        (
+            name.to_string(),
+            ResolvedCallKind::Extern,
+            Some(*arity),
+            Vec::new(),
+            Some(ret.clone()),
+        )
+    } else if let Some((arity, effects, ret)) = methods.get(name) {
+        (
+            name.to_string(),
+            ResolvedCallKind::Method,
+            Some(*arity),
+            effects.clone(),
+            Some(ret.clone()),
+        )
+    } else {
+        (
+            name.to_string(),
+            ResolvedCallKind::Unknown,
+            None,
+            Vec::new(),
+            None,
+        )
+    }
+}
+
 fn format_session_type(ty: &crate::ast::SessionType) -> String {
-    match ty {
+    match ty.unlocated() {
         crate::ast::SessionType::Send(payload, cont) => {
             format!(
                 "!{}.{}",
@@ -2827,11 +5852,12 @@ fn format_session_type(ty: &crate::ast::SessionType) -> String {
         crate::ast::SessionType::Dual(inner) => format!("dual({})", format_session_type(inner)),
         crate::ast::SessionType::Name(name) => name.clone(),
         crate::ast::SessionType::End => "end".into(),
+        crate::ast::SessionType::Located { .. } => unreachable!("unlocated session type"),
     }
 }
 
 fn materialize_const_value(expr: &crate::ast::Expr) -> ResolvedConstValue {
-    match expr {
+    match expr.unlocated() {
         crate::ast::Expr::Literal(lit) => match lit {
             crate::ast::Lit::Int(v) => ResolvedConstValue::Int(*v),
             crate::ast::Lit::Float(v) => ResolvedConstValue::Float(*v),
@@ -2853,9 +5879,13 @@ fn materialize_const_value(expr: &crate::ast::Expr) -> ResolvedConstValue {
 
 fn contains_unresolved_type(ty: &Type) -> bool {
     match ty {
+        Type::Located { ty, .. } => contains_unresolved_type(ty),
         Type::Infer | Type::TypeVar(_) => true,
         Type::Name(name, args) => {
-            name == "Any" || name == "_" || args.iter().any(contains_unresolved_type)
+            name == "Any"
+                || name == "_"
+                || name == "unknown"
+                || args.iter().any(contains_unresolved_type)
         }
         Type::Ref(_, inner)
         | Type::RefMut(_, inner)
@@ -2872,8 +5902,8 @@ fn contains_unresolved_type(ty: &Type) -> bool {
         | Type::RawPtrMut(inner)
         | Type::CShared(inner)
         | Type::CBorrow(inner)
-        | Type::CBorrowMut(inner)
-        | Type::ForAll(_, inner) => contains_unresolved_type(inner),
+        | Type::CBorrowMut(inner) => contains_unresolved_type(inner),
+        Type::ForAll(_, _) => true,
         Type::Result(ok, err) => contains_unresolved_type(ok) || contains_unresolved_type(err),
         Type::Tuple(items) => items.iter().any(contains_unresolved_type),
         Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
@@ -2897,6 +5927,47 @@ mod tests {
         crate::parser::Parser::new(tokens)
             .parse_file()
             .expect("parse")
+    }
+
+    fn node_id_at(program: &CheckedProgram<'_>, kind: &str, line: usize, col: usize) -> NodeId {
+        let marker = format!("/node:{kind}@");
+        program
+            .node_meta()
+            .iter()
+            .find_map(|(node_id, meta)| {
+                let span = meta.origin.user_span();
+                (node_id.0.contains(&marker) && span.start_line == line && span.start_col == col)
+                    .then(|| node_id.clone())
+            })
+            .unwrap_or_else(|| panic!("missing {kind} at {line}:{col}"))
+    }
+
+    fn generated_node_id(
+        program: &CheckedProgram<'_>,
+        owner: &str,
+        kind: &str,
+        rule: &str,
+    ) -> NodeId {
+        let generated_prefix = format!("{owner}/generated:{kind}:");
+        let anchored_marker = format!("{owner}/node:{kind}@");
+        program
+            .node_meta()
+            .iter()
+            .find_map(|(node_id, meta)| {
+                ((node_id.0.starts_with(&generated_prefix)
+                    || node_id.0.starts_with(&anchored_marker))
+                    && meta.origin.rule() == Some(rule))
+                .then(|| node_id.clone())
+            })
+            .unwrap_or_else(|| panic!("missing generated {kind} for {owner} ({rule})"))
+    }
+
+    fn node_meta_ids(program: &CheckedProgram<'_>) -> std::collections::BTreeSet<String> {
+        program
+            .node_meta()
+            .keys()
+            .map(|node_id| node_id.0.clone())
+            .collect()
     }
 
     #[test]
@@ -3038,8 +6109,8 @@ func main() -> i32 { 0 }
             .expect("util::twice signature");
         assert_eq!(twice.params.len(), 1);
         assert_eq!(twice.params[0].0, "x");
-        assert!(matches!(&twice.params[0].1, Type::Name(n, _) if n == "i32"));
-        assert!(matches!(&twice.ret, Type::Name(n, _) if n == "i32"));
+        assert!(matches!(twice.params[0].1.unlocated(), Type::Name(n, _) if n == "i32"));
+        assert!(matches!(twice.ret.unlocated(), Type::Name(n, _) if n == "i32"));
         assert!(program.function("twice").is_none());
         assert!(program.function("main").is_some());
     }
@@ -3068,7 +6139,10 @@ func main() -> i32 { 0 }
         );
         let program = crate::core::check_program(&file).expect("check");
         let session = program.session("Ping").expect("Ping session");
-        assert!(matches!(session.body, crate::ast::SessionType::Send(_, _)));
+        assert!(matches!(
+            session.body.unlocated(),
+            crate::ast::SessionType::Send(_, _)
+        ));
     }
 
     #[test]
@@ -3465,16 +6539,6 @@ func main() -> i32 { 0 }
 
     #[test]
     fn ownership_summary_flags_maybe_consumed_branch_merge() {
-        let file = parse(
-            r#"
-cap File
-func bad(flag: bool, f: cap File) -> i32 {
-    if flag { drop(f) }
-    0
-}
-func main() -> i32 { 0 }
-"#,
-        );
         // This program is rejected by checker; use check_program expect_err then
         // still materialize IR is not available. Instead check accepted both-path
         // program for merge without maybe, and use a custom accepted pattern.
@@ -3885,7 +6949,7 @@ func main() -> i32 { 0 }
         let open = program.transition("Door", "open", "Closed").expect("open");
         assert_eq!(open.params.len(), 1);
         assert_eq!(open.params[0].0, "code");
-        assert!(matches!(&open.params[0].1, Type::Name(n, _) if n == "i32"));
+        assert!(matches!(open.params[0].1.unlocated(), Type::Name(n, _) if n == "i32"));
     }
 
     #[test]
@@ -4858,7 +7922,7 @@ func main() -> i32 { 0 }
             "trait:Show",
             "impl:Show:for:Number",
             "const:ANSWER",
-            "extern:C:at:7",
+            "extern:C:abs",
         ] {
             let item = program
                 .items()
@@ -4866,6 +7930,45 @@ func main() -> i32 { 0 }
                 .unwrap_or_else(|| panic!("missing {node_id}"));
             assert!(item.origin.user_span().start_line > 0);
         }
+    }
+
+    #[test]
+    fn extern_block_node_id_is_independent_of_position_and_symbol_order() {
+        let first = parse(
+            r#"
+extern "C" {
+    func read(fd: i32) -> i32;
+    func close(fd: i32) -> i32;
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let reordered = parse(
+            r#"
+func main() -> i32 { 0 }
+
+
+extern "C" {
+    func close(fd: i32) -> i32;
+    func read(fd: i32) -> i32;
+}
+"#,
+        );
+        let first = crate::core::check_program(&first).expect("first program");
+        let reordered = crate::core::check_program(&reordered).expect("reordered program");
+        let first_ids = first
+            .extern_blocks()
+            .keys()
+            .map(|id| id.0.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let reordered_ids = reordered
+            .extern_blocks()
+            .keys()
+            .map(|id| id.0.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(first_ids, reordered_ids);
+        assert_eq!(first_ids.len(), 1);
+        assert!(first_ids.contains("extern:C:close+read"));
     }
 
     #[test]
@@ -4878,15 +7981,216 @@ func main() -> i32 { 0 }
         let program = crate::core::check_program(&file).expect("check");
         let flow = program.flow("Main").expect("implicit Main flow");
         assert!(matches!(flow.origin, Origin::RuntimeSystem { .. }));
+        assert_eq!(flow.origin.rule(), Some("progressive.main"));
+        match &flow.origin {
+            Origin::RuntimeSystem { parent, .. } => {
+                assert_eq!(parent, &NodeId("function:main".to_string()));
+                assert!(program.items().contains_key(parent));
+                assert_ne!(parent, &flow.node_id);
+            }
+            _ => unreachable!(),
+        }
         assert_eq!(flow.origin.user_span().start_line, 2);
         let single = flow.states.get("Single").expect("Single state");
         assert!(matches!(single.origin, Origin::RuntimeSystem { .. }));
+        assert_eq!(single.origin.rule(), Some("progressive.single"));
         assert_eq!(single.origin.user_span().start_line, 2);
+        let Origin::RuntimeSystem {
+            parent: single_parent,
+            ..
+        } = &single.origin
+        else {
+            unreachable!()
+        };
+        assert_eq!(single_parent, &flow.node_id);
         assert!(flow
             .transitions
             .iter()
             .filter_map(|id| program.transitions().get(id))
             .all(|transition| transition.origin.user_span().start_line > 0));
+        let run = program
+            .transition("Main", "run", "Single")
+            .expect("implicit run transition");
+        assert!(matches!(run.origin, Origin::RuntimeSystem { .. }));
+        assert_eq!(run.origin.rule(), Some("progressive.run"));
+        let Origin::RuntimeSystem {
+            parent: run_parent, ..
+        } = &run.origin
+        else {
+            unreachable!()
+        };
+        assert_eq!(run_parent, &flow.node_id);
+        let reset = program
+            .transition("Main", "reset", "Fault")
+            .expect("implicit reset transition");
+        assert!(matches!(reset.origin, Origin::RuntimeSystem { .. }));
+        assert_eq!(reset.origin.rule(), Some("flow.reset"));
+        let fallback = program
+            .transition("Main", "run", "Fault")
+            .expect("matrix fallback transition");
+        assert!(matches!(fallback.origin, Origin::PrototypeFallback { .. }));
+        assert_eq!(fallback.origin.rule(), Some("flow.matrix.fallback"));
+        let run_stmt_id = generated_node_id(
+            &program,
+            "transition:Main::run::Single",
+            "stmt.return",
+            "progressive.run",
+        );
+        let run_stmt = program
+            .node_meta()
+            .get(&run_stmt_id)
+            .expect("implicit run body metadata");
+        assert!(matches!(run_stmt.origin, Origin::RuntimeSystem { .. }));
+        assert_eq!(run_stmt.origin.rule(), Some("progressive.run"));
+        let Origin::RuntimeSystem {
+            parent: run_stmt_parent,
+            ..
+        } = &run_stmt.origin
+        else {
+            unreachable!()
+        };
+        assert_eq!(run_stmt_parent, &run.node_id);
+        let fallback_stmt_id = generated_node_id(
+            &program,
+            "transition:Main::run::Fault",
+            "stmt.return",
+            "flow.matrix.fallback",
+        );
+        let fallback_stmt = program
+            .node_meta()
+            .get(&fallback_stmt_id)
+            .expect("matrix fallback body metadata");
+        assert!(matches!(
+            fallback_stmt.origin,
+            Origin::PrototypeFallback { .. }
+        ));
+        assert_eq!(fallback_stmt.origin.rule(), Some("flow.matrix.fallback"));
+    }
+
+    #[test]
+    fn generated_transition_rule_comes_from_ast_and_survives_rename() {
+        let mut file = parse("flow Worker { state Active }");
+        let reset = file
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                Item::Flow(flow) => flow
+                    .transitions
+                    .iter_mut()
+                    .find(|transition| transition.name == "reset"),
+                _ => None,
+            })
+            .expect("generated reset transition");
+        reset.name = "restart".to_string();
+        reset.meta.origin = AstOrigin::RuntimeSystem("test.rule.from_ast");
+
+        let program = crate::core::check_program(&file).expect("check renamed transition");
+        let restart = program
+            .transition("Worker", "restart", "Fault")
+            .expect("renamed transition");
+        assert_eq!(restart.origin.rule(), Some("test.rule.from_ast"));
+        let Origin::RuntimeSystem { parent, .. } = &restart.origin else {
+            unreachable!()
+        };
+        assert_eq!(parent, &NodeId("flow:Worker".into()));
+    }
+
+    #[test]
+    fn explicit_named_parent_survives_generated_flow_rule_and_name_changes() {
+        let mut file = parse("func main() -> i32 { 0 }");
+        let flow = file
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                Item::Flow(flow) if flow.name == "Main" => Some(flow),
+                _ => None,
+            })
+            .expect("implicit Main flow");
+        assert_eq!(flow.meta.parent, AstParentHint::NamedFunction("main"));
+        flow.name = "RenamedRuntimeFlow".into();
+        flow.meta.origin = AstOrigin::RuntimeSystem("test.renamed.progressive.rule");
+
+        let program = crate::core::check_program(&file).expect("renamed generated flow");
+        let flow = program
+            .flow("RenamedRuntimeFlow")
+            .expect("renamed flow catalog entry");
+        let Origin::RuntimeSystem { parent, rule, .. } = &flow.origin else {
+            unreachable!()
+        };
+        assert_eq!(parent, &NodeId("function:main".into()));
+        assert_eq!(rule, "test.renamed.progressive.rule");
+    }
+
+    #[test]
+    fn generated_ast_node_without_parent_hint_is_rejected() {
+        let mut file = parse("flow Worker { state Active }");
+        let reset = file
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                Item::Flow(flow) => flow
+                    .transitions
+                    .iter_mut()
+                    .find(|transition| transition.name == "reset"),
+                _ => None,
+            })
+            .expect("generated reset transition");
+        reset.meta.parent = AstParentHint::None;
+
+        let diagnostics = crate::core::check_program(&file).expect_err("parent hint must fail");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.message.contains(
+                "generated NodeId 'transition:Worker::reset::Fault' is missing an explicit AST parent hint",
+            )
+        }));
+    }
+
+    #[test]
+    fn generated_ast_origin_with_empty_rule_is_rejected() {
+        let mut file = parse("flow Worker { state Active }");
+        let reset = file
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                Item::Flow(flow) => flow
+                    .transitions
+                    .iter_mut()
+                    .find(|transition| transition.name == "reset"),
+                _ => None,
+            })
+            .expect("generated reset transition");
+        reset.meta.origin = AstOrigin::RuntimeSystem("");
+
+        let diagnostics = crate::core::check_program(&file).expect_err("empty rule must fail");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.message.contains(
+                "generated NodeId 'transition:Worker::reset::Fault' has an empty Origin rule",
+            )
+        }));
+    }
+
+    #[test]
+    fn generated_transition_call_sites_inherit_runtime_origin() {
+        let file = parse(
+            r#"
+flow Worker {
+    state Active { outcome: Result<i32, string> }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let recover_owner = "transition:Worker::recover::Fault";
+        let calls = program
+            .call_sites()
+            .values()
+            .filter(|call| call.owner == recover_owner)
+            .collect::<Vec<_>>();
+        assert!(!calls.is_empty(), "recover should contain a generated call");
+        assert!(calls.iter().all(|call| {
+            matches!(call.origin, Origin::RuntimeSystem { .. })
+                && call.origin.rule() == Some("flow.recover")
+        }));
     }
 
     #[test]
@@ -4922,24 +8226,30 @@ func main() -> i32 {
 "#,
         );
         let program = crate::core::check_program(&file).expect("check");
+        let let_id = node_id_at(&program, "stmt.let", 3, 5);
+        let pattern_id = node_id_at(&program, "pattern.variable", 3, 9);
+        let tuple_id = node_id_at(&program, "expr.tuple", 3, 16);
+        let tuple_item_id = node_id_at(&program, "expr.literal", 3, 17);
+        let cond_id = node_id_at(&program, "expr.literal", 4, 8);
+        let returned_ident_id = node_id_at(&program, "expr.identifier", 4, 22);
         for node_id in [
-            "function:main/stmt:0",
-            "function:main/stmt:0/pattern",
-            "function:main/stmt:0/init",
-            "function:main/stmt:0/init/item:0",
-            "function:main/stmt:1/cond",
-            "function:main/stmt:1/then/stmt:0/value/inner",
+            &let_id,
+            &pattern_id,
+            &tuple_id,
+            &tuple_item_id,
+            &cond_id,
+            &returned_ident_id,
         ] {
             let meta = program
                 .node_meta()
-                .get(&NodeId(node_id.to_string()))
-                .unwrap_or_else(|| panic!("missing {node_id}"));
+                .get(node_id)
+                .unwrap_or_else(|| panic!("missing {}", node_id.0));
             assert!(meta.origin.user_span().start_line > 0);
         }
         assert_eq!(
             program
                 .node_meta()
-                .get(&NodeId("function:main/stmt:0".to_string()))
+                .get(&let_id)
                 .expect("let metadata")
                 .precision,
             SpanPrecision::Exact
@@ -4947,53 +8257,881 @@ func main() -> i32 {
         assert_eq!(
             program
                 .node_meta()
-                .get(&NodeId("function:main/stmt:1/cond".to_string()))
+                .get(&cond_id)
                 .expect("condition metadata")
                 .precision,
-            SpanPrecision::DeclarationFallback
+            SpanPrecision::Exact
         );
         let interp = crate::interp::Interpreter::from_checked(&program);
-        assert!(interp.has_resolved_node_meta_path("function:main/stmt:0"));
-        assert!(interp.has_resolved_node_meta_path("function:main/stmt:1/cond"));
+        assert!(interp.has_resolved_node_meta_path(&let_id.0));
+        assert!(interp.has_resolved_node_meta_path(&cond_id.0));
         let mut verifier = crate::verifier::Verifier::new().expect("z3");
         let _ = verifier.verify_checked(&program);
-        assert!(verifier.has_checked_node_meta_path("function:main/stmt:0/init"));
+        assert!(verifier.has_checked_node_meta_path(&tuple_id.0));
         let context = inkwell::context::Context::create();
         let mut codegen = crate::codegen::CodeGenerator::new(&context, "node_meta");
         codegen.compile_checked(&program).expect("compile");
-        assert!(codegen.has_resolved_node_meta_path("function:main/stmt:1/then/stmt:0/value/inner"));
+        assert!(codegen.has_resolved_node_meta_path(&returned_ident_id.0));
         assert_eq!(
-            interp.resolved_node_meta_precision("function:main/stmt:0"),
+            interp.resolved_node_meta_precision(&let_id.0),
             Some("exact")
         );
         assert_eq!(
-            verifier.checked_node_meta_precision("function:main/stmt:1/cond"),
-            Some("declaration_fallback")
-        );
-        assert_eq!(
-            codegen.resolved_node_meta_precision("function:main/stmt:0"),
+            verifier.checked_node_meta_precision(&cond_id.0),
             Some("exact")
         );
-        let let_span = interp
-            .resolved_node_meta_span("function:main/stmt:0")
-            .expect("let span");
+        assert_eq!(
+            codegen.resolved_node_meta_precision(&let_id.0),
+            Some("exact")
+        );
+        let let_span = interp.resolved_node_meta_span(&let_id.0).expect("let span");
         assert!(let_span.0 > 0);
-        assert_eq!(
-            verifier.checked_node_meta_span("function:main/stmt:0"),
-            Some(let_span)
-        );
-        assert_eq!(
-            codegen.resolved_node_meta_span("function:main/stmt:0"),
-            Some(let_span)
-        );
+        assert_eq!(verifier.checked_node_meta_span(&let_id.0), Some(let_span));
+        assert_eq!(codegen.resolved_node_meta_span(&let_id.0), Some(let_span));
         let cond_span = interp
-            .resolved_node_meta_span("function:main/stmt:1/cond")
+            .resolved_node_meta_span(&cond_id.0)
             .expect("cond span");
         assert!(cond_span.0 > 0);
-        assert_eq!(
-            verifier.checked_node_meta_span("function:main/stmt:1/cond"),
-            Some(cond_span)
+        assert_eq!(verifier.checked_node_meta_span(&cond_id.0), Some(cond_span));
+    }
+
+    #[test]
+    fn positioned_body_node_ids_survive_synthetic_statement_insertion() {
+        let mut file = parse(
+            r#"
+func helper() -> i32 { 1 }
+func main() -> i32 {
+    let value = helper()
+    value
+}
+"#,
         );
+        let original = crate::core::check_program(&file).expect("original");
+        let let_id = node_id_at(&original, "stmt.let", 4, 5);
+        let call_id = original
+            .call_sites()
+            .values()
+            .find(|call| call.owner == "function:main" && call.callee == "helper")
+            .map(|call| call.node_id.clone())
+            .expect("helper call site");
+        assert!(original.node_meta().contains_key(&let_id));
+        assert!(original.call_sites().contains_key(&call_id));
+
+        let main = file
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                Item::Func(function) if function.name == "main" => Some(function),
+                _ => None,
+            })
+            .expect("main function");
+        main.body.insert(0, Stmt::Block(Vec::new()));
+
+        let lowered = crate::core::check_program(&file).expect("lowered");
+        assert!(lowered.node_meta().contains_key(&let_id));
+        assert!(lowered.call_sites().contains_key(&call_id));
+    }
+
+    #[test]
+    fn positioned_contract_node_ids_survive_synthetic_statement_insertion() {
+        let mut file = parse(
+            r#"
+func main() -> i32 {
+    requires: true
+    return 0
+}
+"#,
+        );
+        let original = crate::core::check_program(&file).expect("original");
+        let contract_id = node_id_at(&original, "stmt.requires", 3, 5);
+        assert!(original.node_meta().contains_key(&contract_id));
+
+        let main = file
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                Item::Func(function) if function.name == "main" => Some(function),
+                _ => None,
+            })
+            .expect("main function");
+        main.body.insert(0, Stmt::Block(Vec::new()));
+
+        let lowered = crate::core::check_program(&file).expect("lowered");
+        assert!(lowered.node_meta().contains_key(&contract_id));
+    }
+
+    #[test]
+    fn anonymous_node_ids_use_stable_source_keys_not_session_source_ids() {
+        let source = "func main() -> i32 { let value = 1; value }";
+        let key = crate::span::SourceKey::new("workspace:src/main.mimi").expect("key");
+
+        let mut first_registry = crate::span::SourceRegistry::default();
+        let first_id = first_registry
+            .register(crate::span::SourceRecord::new(
+                key.clone(),
+                crate::span::SourceTextOrigin::Disk,
+            ))
+            .expect("first source");
+        let first_tokens = crate::lexer::Lexer::new(source)
+            .tokenize()
+            .expect("lex first");
+        let first_file =
+            crate::parser::Parser::new_with_source_registry(first_tokens, first_id, first_registry)
+                .parse_file()
+                .expect("parse first");
+
+        let mut second_registry = crate::span::SourceRegistry::default();
+        second_registry
+            .register_key(
+                "workspace:src/other.mimi",
+                crate::span::SourceTextOrigin::Disk,
+            )
+            .expect("other source");
+        let second_id = second_registry
+            .register(crate::span::SourceRecord::new(
+                key,
+                crate::span::SourceTextOrigin::Disk,
+            ))
+            .expect("second source");
+        assert_ne!(first_id, second_id);
+        let second_tokens = crate::lexer::Lexer::new(source)
+            .tokenize()
+            .expect("lex second");
+        let second_file = crate::parser::Parser::new_with_source_registry(
+            second_tokens,
+            second_id,
+            second_registry,
+        )
+        .parse_file()
+        .expect("parse second");
+
+        let first = crate::core::check_program(&first_file).expect("check first");
+        let second = crate::core::check_program(&second_file).expect("check second");
+        let first_ids = first
+            .node_meta()
+            .keys()
+            .map(|id| id.0.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let second_ids = second
+            .node_meta()
+            .keys()
+            .map(|id| id.0.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(first_ids, second_ids);
+        assert!(first_ids
+            .iter()
+            .any(|id| id.contains("workspace:src%2fmain.mimi")));
+    }
+
+    #[test]
+    fn declaration_expression_call_sites_are_complete_expr_ids_and_reorder_stable() {
+        let source = r#"
+func leaf() -> i32 { 1 }
+func generic<T>(value: T) -> T { value }
+const ANSWER: i32 = leaf()
+trait Defaulted {
+    func choose(left: i32 = leaf(), right: i32 = leaf()) -> i32;
+}
+actor Worker {
+    mut value: i32 = leaf()
+    func choose(left: i32 = leaf(), right: i32 = leaf()) -> i32 {
+        generic::<i32>(left)
+    }
+}
+impl Defaulted for i32 {
+    func choose(left: i32 = leaf(), right: i32 = leaf()) -> i32 {
+        generic::<i32>(right)
+    }
+}
+extern "C" {
+    func probe(value: i32) -> i32
+        requires: leaf() > 0
+        ensures: generic::<i32>(result) > 0;
+}
+flow Machine {
+    state Ready
+    transition tick(Ready, left: i32, right: i32) -> Ready {
+        do { return Ready {} }
+    }
+}
+func top(left: i32 = leaf(), right: i32 = leaf()) -> i32 {
+    func nested(first: i32 = leaf(), second: i32 = leaf()) -> i32 { first }
+    generic::<i32>(nested(left))
+}
+func main() -> i32 { top() }
+"#;
+        let mut file = parse(source);
+        // Transition parameters use the same Param AST but their current
+        // surface grammar does not expose defaults. Seed the model directly
+        // so the declaration walker remains complete when that syntax lands.
+        let transition_defaults = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Func(function) if function.name == "top" => Some(
+                    function
+                        .params
+                        .iter()
+                        .map(|param| param.default_value.clone().expect("top default"))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .expect("default expression fixtures");
+        let transition = file
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                Item::Flow(flow) => flow
+                    .transitions
+                    .iter_mut()
+                    .find(|transition| transition.name == "tick"),
+                _ => None,
+            })
+            .expect("tick transition");
+        for (param, default) in transition.params.iter_mut().zip(transition_defaults) {
+            param.default_value = Some(default);
+        }
+        let original = CheckedProgram::from_checked_file(&file).expect("catalog original");
+
+        let calls_for = |owner: &str, callee: &str| {
+            original
+                .call_sites()
+                .values()
+                .filter(|call| call.owner == owner && call.callee == callee)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(calls_for("constant:ANSWER", "leaf").len(), 1);
+        assert_eq!(calls_for("actor:Worker", "leaf").len(), 1);
+        assert_eq!(calls_for("function:Worker::choose", "leaf").len(), 2);
+        assert_eq!(calls_for("function:Worker::choose", "generic").len(), 1);
+        assert_eq!(
+            calls_for("transition:Machine::tick::Ready", "leaf").len(),
+            2
+        );
+        assert_eq!(calls_for("function:top", "leaf").len(), 2);
+        assert_eq!(calls_for("function:top", "generic").len(), 1);
+
+        let trait_def = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Trait(trait_def) => Some(trait_def),
+                _ => None,
+            })
+            .expect("trait fixture");
+        let trait_method = &trait_def.methods[0];
+        let trait_owner = format!(
+            "trait:Defaulted/method:{}:{:016x}",
+            stable_id_fragment(&trait_method.name),
+            stable_text_hash(&method_signature_key(
+                &trait_method.name,
+                &trait_method.params,
+                trait_method.ret.as_ref()
+            ))
+        );
+        assert_eq!(calls_for(&trait_owner, "leaf").len(), 2);
+
+        let impl_def = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Impl(impl_def) => Some(impl_def),
+                _ => None,
+            })
+            .expect("impl fixture");
+        let impl_owner = impl_method_owner("Defaulted:for:i32", &impl_def.methods[0]);
+        assert_eq!(calls_for(&impl_owner.0, "leaf").len(), 2);
+        assert_eq!(calls_for(&impl_owner.0, "generic").len(), 1);
+
+        let extern_block = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::ExternBlock(block) => Some(block),
+                _ => None,
+            })
+            .expect("extern fixture");
+        let extern_owner = extern_function_owner(
+            &NodeId(format!("extern:{}", extern_block_key(extern_block))),
+            &extern_block.funcs[0],
+        );
+        assert_eq!(calls_for(&extern_owner.0, "leaf").len(), 1);
+        assert_eq!(calls_for(&extern_owner.0, "generic").len(), 1);
+
+        let nested_owner = original
+            .call_sites()
+            .values()
+            .find(|call| call.owner.starts_with("function:top/function:nested:"))
+            .map(|call| call.owner.clone())
+            .expect("nested default call owner");
+        assert_eq!(calls_for(&nested_owner, "leaf").len(), 2);
+
+        let turbofish_calls = original
+            .call_sites()
+            .values()
+            .filter(|call| call.callee == "generic")
+            .collect::<Vec<_>>();
+        assert_eq!(turbofish_calls.len(), 4);
+        assert!(turbofish_calls.iter().all(|call| {
+            call.node_id.0.contains("/node:expr.turbofish@")
+                && original.node_meta().get(&call.node_id).is_some_and(|meta| {
+                    meta.origin == call.origin && meta.precision == SpanPrecision::Exact
+                })
+        }));
+        assert!(original.call_sites().values().all(|call| {
+            original
+                .node_meta()
+                .get(&call.node_id)
+                .is_some_and(|meta| meta.origin == call.origin)
+        }));
+
+        let original_ids = original
+            .call_sites()
+            .keys()
+            .map(|node_id| node_id.0.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut reordered_file = file.clone();
+        reordered_file.items.reverse();
+        for item in &mut reordered_file.items {
+            match item {
+                Item::Func(function) => {
+                    function.params.reverse();
+                    for stmt in &mut function.body {
+                        if let Stmt::Func(nested) = stmt.unlocated_mut() {
+                            nested.params.reverse();
+                        }
+                    }
+                }
+                Item::Actor(actor) => {
+                    actor.fields.reverse();
+                    actor.methods.reverse();
+                    for method in &mut actor.methods {
+                        method.params.reverse();
+                    }
+                }
+                Item::Trait(trait_def) => {
+                    trait_def.methods.reverse();
+                    for method in &mut trait_def.methods {
+                        method.params.reverse();
+                    }
+                }
+                Item::Impl(impl_def) => {
+                    impl_def.methods.reverse();
+                    for method in &mut impl_def.methods {
+                        method.params.reverse();
+                    }
+                }
+                Item::ExternBlock(block) => block.funcs.reverse(),
+                Item::Flow(flow) => {
+                    flow.transitions.reverse();
+                    for transition in &mut flow.transitions {
+                        transition.params.reverse();
+                    }
+                }
+                _ => {}
+            }
+        }
+        let reordered =
+            CheckedProgram::from_checked_file(&reordered_file).expect("catalog reordered");
+        let reordered_ids = reordered
+            .call_sites()
+            .keys()
+            .map(|node_id| node_id.0.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(original_ids, reordered_ids);
+        assert!(reordered.call_sites().values().all(|call| {
+            reordered
+                .node_meta()
+                .get(&call.node_id)
+                .is_some_and(|meta| meta.origin == call.origin)
+        }));
+    }
+
+    #[test]
+    fn declaration_type_protocol_session_extern_and_flow_catalog_is_complete_and_reorder_stable() {
+        let source = r#"
+type Pair<T: Clone, U: Eq> { left: Result<T, string>, right: List<U> }
+type Choice { Some(i32), Empty }
+trait Show<T> { func show(value: T, flags: i32) -> string; }
+extern "C" {
+    func add(left: i32, right: i32) -> i32;
+    func sub(left: i32, right: i32) -> i32;
+}
+protocol Sensor<T> {
+    state Idle
+    state Active { data: T }
+    transition start(Idle) -> Active
+    transition stop(Active) -> Idle
+}
+session Ping = !Result<i32, string> . ?List<i32> . end
+session Pong = dual(Ping)
+flow Worker<T> {
+    @max_children(3)
+    @mailbox(depth = 8)
+    state Idle { value: T, count: i32 }
+    state Busy { value: T, count: i32 }
+    transition start(Idle, left: i32, right: i32) -> Busy { do { return Busy {} } }
+    transition stop(Busy, left: i32, right: i32) -> Idle { do { return Idle {} } }
+}
+func catalog<T: Clone, U: Eq>(first: Pair<T, U>, second: Pair<T, U>) -> i32 where T: Clone, U: Eq {
+    let pair = Pair { left: first.left, right: second.right }
+    match 1 {
+        0 => Pair { left: first.left, right: second.right }.right,
+        _ => 0
+    }
+}
+"#;
+        let original_file = parse(source);
+        let mut reordered_file = original_file.clone();
+
+        for item in &mut reordered_file.items {
+            match item {
+                Item::Type(type_def) if type_def.name == "Pair" => {
+                    type_def.generics.reverse();
+                    if let crate::ast::TypeDefKind::Record(fields) = &mut type_def.kind {
+                        fields.reverse();
+                    }
+                }
+                Item::Type(type_def) if type_def.name == "Choice" => {
+                    if let crate::ast::TypeDefKind::Enum(variants) = &mut type_def.kind {
+                        variants.reverse();
+                        for variant in variants {
+                            match &mut variant.payload {
+                                Some(crate::ast::VariantPayload::Tuple(types)) => types.reverse(),
+                                Some(crate::ast::VariantPayload::Record(fields)) => {
+                                    fields.reverse()
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+                }
+                Item::Trait(trait_def) => {
+                    trait_def.generics.reverse();
+                }
+                Item::ExternBlock(block) => {
+                    block.funcs.reverse();
+                    for function in &mut block.funcs {
+                        function.params.reverse();
+                    }
+                }
+                Item::Protocol(protocol) => {
+                    protocol.generics.reverse();
+                    protocol.states.reverse();
+                    protocol.transitions.reverse();
+                }
+                Item::Flow(flow) => {
+                    flow.generics.reverse();
+                    flow.annotations.reverse();
+                    flow.states.reverse();
+                    flow.transitions.reverse();
+                    for state in &mut flow.states {
+                        if let Some(payload) = &mut state.payload {
+                            payload.reverse();
+                        }
+                    }
+                    for transition in &mut flow.transitions {
+                        transition.params.reverse();
+                    }
+                }
+                Item::Func(function) if function.name == "catalog" => {
+                    function.generics.reverse();
+                    function.params.reverse();
+                    function.where_clause.reverse();
+                    for stmt in &mut function.body {
+                        match stmt.unlocated_mut() {
+                            Stmt::Let {
+                                init: Some(expr), ..
+                            } => {
+                                if let Expr::Record { fields, .. } = expr.unlocated_mut() {
+                                    fields.reverse();
+                                }
+                            }
+                            Stmt::Expr(expr) => {
+                                if let Expr::Match(_, arms) = expr.unlocated_mut() {
+                                    arms.reverse();
+                                    for arm in arms {
+                                        if let Expr::Field(record, _) = arm.body.unlocated_mut() {
+                                            if let Expr::Record { fields, .. } =
+                                                record.unlocated_mut()
+                                            {
+                                                fields.reverse();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        reordered_file.items.reverse();
+
+        let original = CheckedProgram::from_checked_file(&original_file).expect("original catalog");
+        let reordered =
+            CheckedProgram::from_checked_file(&reordered_file).expect("reordered catalog");
+        assert_eq!(node_meta_ids(&original), node_meta_ids(&reordered));
+
+        let ids = node_meta_ids(&original);
+        for canonical in [
+            "type:Pair",
+            "type:Choice",
+            "trait:Show",
+            "extern:C:add+sub",
+            "protocol:Sensor",
+            "session:Ping",
+            "session:Pong",
+            "flow:Worker",
+            "state:Worker::Idle",
+            "state:Worker::Busy",
+            "transition:Worker::start::Idle",
+            "transition:Worker::stop::Busy",
+            "function:catalog",
+        ] {
+            assert!(ids.contains(canonical), "missing canonical {canonical}");
+        }
+        for kind in [
+            "decl.generic_parameter",
+            "decl.parameter",
+            "decl.where_clause",
+            "decl.field",
+            "decl.variant",
+            "decl.extern_parameter",
+            "decl.flow_annotation",
+            "type.name",
+            "session.send",
+            "session.recv",
+            "session.end",
+            "match.arm",
+            "record.field",
+        ] {
+            assert!(
+                ids.iter().any(|node_id| {
+                    node_id.contains(&format!("/node:{kind}@"))
+                        || node_id.contains(&format!("/generated:{kind}:"))
+                        || node_id.contains(&format!("/fallback:{kind}:"))
+                }),
+                "missing NodeMeta kind {kind}"
+            );
+        }
+        assert!(ids
+            .iter()
+            .any(|node_id| node_id.starts_with("protocol:Sensor/state:")));
+        assert!(ids
+            .iter()
+            .any(|node_id| node_id.starts_with("protocol:Sensor/transition:")));
+        assert!(ids
+            .iter()
+            .any(|node_id| node_id.starts_with("extern:C:add+sub/function:")));
+    }
+
+    #[test]
+    fn generated_siblings_with_the_same_inherited_span_use_rule_and_semantic_discriminator() {
+        let mut file = parse("func main() -> i32 { let values = [1]; 0 }");
+        let main = file
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                Item::Func(function) if function.name == "main" => Some(function),
+                _ => None,
+            })
+            .expect("main");
+        let inherited = main.meta.span;
+        let Stmt::Let {
+            init: Some(values), ..
+        } = main.body[0].unlocated_mut()
+        else {
+            panic!("list binding")
+        };
+        let Expr::List(items) = values.unlocated_mut() else {
+            panic!("list expression")
+        };
+        *items = vec![
+            Expr::Literal(crate::ast::Lit::Int(7)).with_meta(crate::ast::AstNodeMeta::inherited(
+                inherited,
+                AstOrigin::Desugared("test.same_span"),
+            )),
+            Expr::Literal(crate::ast::Lit::Int(7)).with_meta(crate::ast::AstNodeMeta::inherited(
+                inherited,
+                AstOrigin::Desugared("test.same_span"),
+            )),
+        ];
+
+        let program = CheckedProgram::from_checked_file(&file).expect("generated siblings");
+        let generated = program
+            .node_meta()
+            .iter()
+            .filter(|(node_id, meta)| {
+                node_id
+                    .0
+                    .contains("/generated:expr.literal:test.same_span:")
+                    && meta.origin.rule() == Some("test.same_span")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(generated.len(), 2);
+        assert_ne!(generated[0].0, generated[1].0);
+        assert!(generated
+            .iter()
+            .all(|(_, meta)| meta.precision == SpanPrecision::SourceAnchor));
+    }
+
+    #[test]
+    fn callable_catalog_uses_the_same_impl_and_nested_ids_as_ownership_ledgers() {
+        let source = r#"
+module api {
+    trait Close {
+        func close(value: i32) -> i32;
+        func flush(value: i32) -> i32;
+    }
+    type Handle { value: i32 }
+    impl Close for Handle {
+        func close(value: i32) -> i32 { value }
+        func flush(value: i32) -> i32 { value }
+    }
+    func outer() -> i32 { func inner(value: i32) -> i32 { value }; inner(1) }
+}
+func main() -> i32 { 0 }
+"#;
+        let file = parse(source);
+        let program = crate::core::check_program(&file).expect("callable catalog");
+        let module = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Module(module) if module.name == "api" => Some(module),
+                _ => None,
+            })
+            .expect("api module");
+        let impl_def = module
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Impl(impl_def) => Some(impl_def),
+                _ => None,
+            })
+            .expect("impl");
+        let impl_owner = impl_method_owner("api::Close:for:Handle", &impl_def.methods[0]);
+        assert!(program.node_meta().contains_key(&impl_owner));
+        assert!(program.ownership_ledger(&impl_owner).is_some());
+
+        let outer = module
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Func(function) if function.name == "outer" => Some(function),
+                _ => None,
+            })
+            .expect("outer");
+        let nested = outer
+            .body
+            .iter()
+            .find_map(|stmt| match stmt.unlocated() {
+                Stmt::Func(function) => Some(function),
+                _ => None,
+            })
+            .expect("nested function");
+        let nested_owner = nested_function_owner(&NodeId("function:api::outer".into()), nested);
+        assert!(program.node_meta().contains_key(&nested_owner));
+        assert!(program.ownership_ledger(&nested_owner).is_some());
+
+        let expected_owners = program
+            .ownership_ledgers()
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let mut reordered = file.clone();
+        let reordered_module = reordered
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                Item::Module(module) if module.name == "api" => Some(module),
+                _ => None,
+            })
+            .expect("reordered api");
+        for item in &mut reordered_module.items {
+            match item {
+                Item::Trait(trait_def) => trait_def.methods.reverse(),
+                Item::Impl(impl_def) => impl_def.methods.reverse(),
+                _ => {}
+            }
+        }
+        reordered_module.items.reverse();
+        let reordered_program =
+            crate::core::check_program(&reordered).expect("reordered callable catalog");
+        assert_eq!(
+            expected_owners,
+            reordered_program
+                .ownership_ledgers()
+                .keys()
+                .cloned()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn ownership_ledger_rejects_body_node_that_only_looks_like_a_callable_prefix() {
+        let file = parse("func main() -> i32 { 0 }");
+        let plain = CheckedProgram::from_checked_file(&file).expect("plain catalog");
+        let body_id = plain
+            .node_meta()
+            .keys()
+            .find(|node_id| {
+                node_id.0.starts_with("function:main/")
+                    && (node_id.0.contains("/node:")
+                        || node_id.0.contains("/fallback:")
+                        || node_id.0.contains("/generated:"))
+            })
+            .cloned()
+            .expect("body node");
+        drop(plain);
+        let mut ledgers = HashMap::new();
+        ledgers.insert(body_id.clone(), OwnershipLedger::new(body_id));
+        let diagnostics = CheckedProgram::from_checked_file_with_ownership(&file, ledgers)
+            .expect_err("body node must not be accepted as callable owner");
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("not present in the callable NodeMeta/function/transition catalog")));
+    }
+
+    #[test]
+    fn production_node_ids_do_not_encode_vec_indexes() {
+        let file = parse(
+            r#"
+func helper(x: i32) -> i32 { x }
+func main() -> i32 {
+    let values = [helper(1), helper(2)]
+    match values { [a, b] => a, _ => 0 }
+}
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        for node_id in program
+            .node_meta()
+            .keys()
+            .chain(program.call_sites().keys())
+        {
+            for forbidden in ["/stmt:", "/arg:", "/item:", "/arm:", "/field:", "/entry:"] {
+                assert!(
+                    !node_id.0.contains(forbidden),
+                    "NodeId contains Vec-index identity: {}",
+                    node_id.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exact_child_ids_survive_same_role_synthetic_insertion() {
+        let mut file = parse("func main() -> i32 { let values = [1, 2]; 0 }");
+        let original = crate::core::check_program(&file).expect("original");
+        let first_literal = node_id_at(&original, "expr.literal", 1, 36);
+        let second_literal = node_id_at(&original, "expr.literal", 1, 39);
+
+        let main = file
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                Item::Func(function) if function.name == "main" => Some(function),
+                _ => None,
+            })
+            .expect("main");
+        let Stmt::Let {
+            init: Some(values), ..
+        } = main.body[0].unlocated_mut()
+        else {
+            panic!("list binding")
+        };
+        let Expr::List(items) = values.unlocated_mut() else {
+            panic!("list expression")
+        };
+        items.insert(
+            0,
+            Expr::Literal(crate::ast::Lit::Int(99))
+                .synthetic_with_origin(AstOrigin::Desugared("test.list_prefix")),
+        );
+
+        let lowered = crate::core::check_program(&file).expect("lowered");
+        assert!(lowered.node_meta().contains_key(&first_literal));
+        assert!(lowered.node_meta().contains_key(&second_literal));
+    }
+
+    #[test]
+    fn duplicate_canonical_node_ids_are_structured_errors() {
+        let mut file = parse("func main() -> i32 { 1; 2 }");
+        let main = file
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                Item::Func(function) if function.name == "main" => Some(function),
+                _ => None,
+            })
+            .expect("main");
+        let first_meta = match main.body[0].unlocated() {
+            Stmt::Expr(expr) => expr.meta().expect("first metadata"),
+            _ => panic!("first expression"),
+        };
+        let second = match main.body[1].unlocated_mut() {
+            Stmt::Expr(expr) => expr,
+            _ => panic!("second expression"),
+        };
+        *second = second.clone().with_meta(first_meta);
+
+        let diagnostics = CheckedProgram::from_checked_file(&file).expect_err("duplicate id");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.message.contains("TOOL-RESOLUTION-001")
+                && diagnostic.message.contains("duplicate canonical NodeId")
+        }));
+    }
+
+    #[test]
+    fn origin_catalog_rejects_missing_parent_and_cycles() {
+        let a = NodeId("generated:a".into());
+        let b = NodeId("generated:b".into());
+        let span = Span::single(2, 3);
+        let mut catalog = OriginCatalog::default();
+        let mut errors = Vec::new();
+        catalog.register(
+            &a,
+            &Origin::Desugared {
+                parent: b.clone(),
+                rule: "test.a".into(),
+                span,
+            },
+            &mut errors,
+        );
+        catalog.validate(&mut errors);
+        assert!(errors
+            .iter()
+            .any(|error| error.message.contains("missing Origin parent")));
+
+        let mut cyclic = OriginCatalog::default();
+        let mut cycle_errors = Vec::new();
+        cyclic.register(
+            &a,
+            &Origin::Desugared {
+                parent: b.clone(),
+                rule: "test.a".into(),
+                span,
+            },
+            &mut cycle_errors,
+        );
+        cyclic.register(
+            &b,
+            &Origin::Desugared {
+                parent: a.clone(),
+                rule: "test.b".into(),
+                span,
+            },
+            &mut cycle_errors,
+        );
+        cyclic.validate(&mut cycle_errors);
+        assert!(cycle_errors
+            .iter()
+            .any(|error| error.message.contains("Origin cycle")));
     }
 
     #[test]
@@ -5013,6 +9151,51 @@ flow Cache {
         assert!(diagnostics
             .iter()
             .all(|diagnostic| diagnostic.span.start_line > 0));
+    }
+
+    #[test]
+    fn resolved_ir_rejects_unknown_and_type_schemes() {
+        for ty in [
+            Type::Name("unknown".into(), vec![]),
+            Type::ForAll(vec!["T".into()], Box::new(Type::Name("i32".into(), vec![]))),
+        ] {
+            let file = File {
+                sources: crate::span::SourceRegistry::default(),
+                imports: Vec::new(),
+                items: vec![Item::Func(crate::ast::FuncDef {
+                    meta: crate::ast::AstNodeMeta::synthetic(crate::ast::AstOrigin::RuntimeSystem(
+                        "test.resolved_fixture",
+                    )),
+                    name: "bad".into(),
+                    pub_: false,
+                    params: vec![crate::ast::Param {
+                        meta: crate::ast::AstNodeMeta::synthetic(
+                            crate::ast::AstOrigin::RuntimeSystem("test.resolved_fixture_param"),
+                        ),
+                        name: "value".into(),
+                        ty,
+                        mut_: false,
+                        default_value: None,
+                        borrow: None,
+                    }],
+                    ret: Some(Type::Name("i32".into(), vec![])),
+                    body: vec![Stmt::Return(Some(Expr::Literal(crate::ast::Lit::Int(0))))],
+                    where_clause: Vec::new(),
+                    generics: Vec::new(),
+                    effects: Vec::new(),
+                    is_comptime: false,
+                    is_async: false,
+                    extern_abi: None,
+                })],
+                implicit_single: false,
+            };
+
+            let diagnostics =
+                CheckedProgram::from_checked_file(&file).expect_err("IR must reject unresolved");
+            assert!(diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("TOOL-RESOLUTION-001")));
+        }
     }
 
     #[test]

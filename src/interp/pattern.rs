@@ -43,10 +43,10 @@ impl<'a> Interpreter<'a> {
         allow_constructor: bool,
         bindings: &mut Vec<(String, Value)>,
     ) -> bool {
-        match pat {
-            Pattern::Wildcard => true,
-            Pattern::Variable(name) => {
-                // Bare identifiers like `Red` are parsed as Pattern::Variable, but at
+        match &pat.kind {
+            PatternKind::Wildcard => true,
+            PatternKind::Variable(name) => {
+                // Bare identifiers like `Red` are parsed as PatternKind::Variable, but at
                 // runtime they often denote zero-arity enum constructors. In matching
                 // contexts, treat a constructor name as a constructor pattern unless
                 // the name is currently bound as a variable (shadowing). In binding
@@ -61,7 +61,7 @@ impl<'a> Interpreter<'a> {
                 bindings.push((name.clone(), value.clone()));
                 true
             }
-            Pattern::Literal(l) => {
+            PatternKind::Literal(l) => {
                 let expected = match l {
                     Lit::Int(v) => Value::Int(*v),
                     Lit::Float(v) => Value::Float(*v),
@@ -72,7 +72,7 @@ impl<'a> Interpreter<'a> {
                 };
                 values_equal(value, &expected)
             }
-            Pattern::Constructor(name, pats) => {
+            PatternKind::Constructor(name, pats) => {
                 match value {
                     Value::Variant(vname, vals) if vname == name => {
                         if pats.len() != vals.len() {
@@ -137,7 +137,7 @@ impl<'a> Interpreter<'a> {
                     _ => false,
                 }
             }
-            Pattern::Tuple(pats) => match value {
+            PatternKind::Tuple(pats) => match value {
                 Value::Tuple(vals) if pats.len() == vals.len() => {
                     for (p, v) in pats.iter().zip(vals.iter()) {
                         if !self.match_pattern_inner(p, v, allow_constructor, bindings) {
@@ -148,7 +148,7 @@ impl<'a> Interpreter<'a> {
                 }
                 _ => false,
             },
-            Pattern::Array(pats) => {
+            PatternKind::Array(pats) => {
                 let vals = match value {
                     Value::Array(a) => a.as_slice(),
                     Value::List(l) => l.as_slice(),
@@ -165,7 +165,7 @@ impl<'a> Interpreter<'a> {
                 }
                 true
             }
-            Pattern::Slice(pats, rest) => {
+            PatternKind::Slice(pats, rest) => {
                 let vals = match value {
                     Value::Array(a) => a.as_slice(),
                     Value::List(l) => l.as_slice(),

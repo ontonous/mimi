@@ -394,7 +394,7 @@ impl CppBindGenerator {
     }
 
     fn callback_default_ret(&self, ret_type: &Type) -> String {
-        match ret_type {
+        match ret_type.unlocated() {
             Type::Name(name, _) if name == "f64" => "0.0".to_string(),
             Type::Name(name, _) if name == "unit" => "".to_string(),
             _ => "0".to_string(),
@@ -404,7 +404,7 @@ impl CppBindGenerator {
     fn mimi_type_to_c_type(&self, ty: &Type) -> String {
         // Use the original Mimi scalar widths so generated C function-pointer
         // types match the ABI of the compiled extern function.
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => "int32_t".to_string(),
                 "i64" => "int64_t".to_string(),

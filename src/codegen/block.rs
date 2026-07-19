@@ -22,14 +22,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.push_heap_scope();
         for stmt in block {
             // Run compensations before exit()
-            if let Stmt::Expr(Expr::Call(callee, _)) = stmt {
-                if let Expr::Ident(name) = &**callee {
-                    if name == "exit" {
-                        self.compile_compensations(vars)?;
+            if let Stmt::Expr(expr) = stmt.unlocated() {
+                if let Expr::Call(callee, _) = expr.unlocated() {
+                    if let Expr::Ident(name) = callee.unlocated() {
+                        if name == "exit" {
+                            self.compile_compensations(vars)?;
+                        }
                     }
                 }
             }
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::Expr(expr) => {
                     self.compile_expr(expr, vars)?;
                 }
@@ -89,9 +91,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ..
                 } => {
                     // dyn Trait let-binding: build fat pointer from concrete value (requires Variable pattern)
-                    if let Some(Type::DynTrait(trait_names)) = &ty {
-                        let name = match pat {
-                            Pattern::Variable(n) => n.clone(),
+                    if let Some(Type::DynTrait(trait_names)) = ty.as_ref().map(Type::unlocated) {
+                        let name = match &pat.kind {
+                            PatternKind::Variable(n) => n.clone(),
                             _ => {
                                 return Err(CompileError::LlvmError(
                                     "dyn Trait binding requires a simple variable pattern"
@@ -100,7 +102,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         };
                         let concrete_val = self.compile_expr(init, vars)?;
-                        let concrete_type = match init {
+                        let concrete_type = match init.unlocated() {
                             Expr::Record { ty: Some(tn), .. } => tn.clone(),
                             Expr::Ident(var_name) => self
                                 .var_type_names
@@ -185,8 +187,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         continue;
                     }
                     // Shared ref copy: let v = shared_var
-                    if let Pattern::Variable(name) = pat {
-                        if let Expr::Ident(src_name) = init {
+                    if let PatternKind::Variable(name) = &pat.kind {
+                        if let Expr::Ident(src_name) = init.unlocated() {
                             if self.shared_var_names.contains(src_name.as_str()) {
                                 self.compile_shared_ref_copy(name, src_name, vars)?;
                                 continue;
@@ -194,12 +196,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     // Shared var clone: let v = shared_var.clone()
-                    if let Pattern::Variable(name) = pat {
-                        if let Expr::Call(callee, cargs) = init {
+                    if let PatternKind::Variable(name) = &pat.kind {
+                        if let Expr::Call(callee, cargs) = init.unlocated() {
                             if cargs.is_empty() {
-                                if let Expr::Field(obj, method_name) = callee.as_ref() {
+                                if let Expr::Field(obj, method_name) = callee.unlocated() {
                                     if method_name == "clone" {
-                                        if let Expr::Ident(src_name) = obj.as_ref() {
+                                        if let Expr::Ident(src_name) = obj.unlocated() {
                                             if self.shared_var_names.contains(src_name.as_str()) {
                                                 self.compile_shared_ref_copy(name, src_name, vars)?;
                                                 continue;
@@ -214,9 +216,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Typed list literals: seed element type so Result/Option
                     // list elems pack with a uniform layout.
                     let saved_list_elem = self.pending_list_elem_type.take();
-                    if matches!(init, Expr::List(_)) {
+                    if matches!(init.unlocated(), Expr::List(_)) {
                         if let Some(decl_ty) = ty.as_ref() {
-                            if let Type::Name(n, args) = decl_ty {
+                            if let Type::Name(n, args) = decl_ty.unlocated() {
                                 if n == "List" && args.len() == 1 {
                                     self.pending_list_elem_type = Some(args[0].clone());
                                 }
@@ -235,7 +237,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // list operations update the original alloca.
                         // For non-List complex types we still need the load because
                         // compile_pattern_bind stores into a fresh alloca by value.
-                        if let crate::ast::Type::Name(tn, _) = decl_ty {
+                        if let crate::ast::Type::Name(tn, _) = decl_ty.unlocated() {
                             if tn == "List" {
                                 // Skip the load — val stays as PointerValue. The
                                 // downstream compile_pattern_bind will store the
@@ -245,11 +247,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     // For simple Variable patterns, track type info
-                    if let Pattern::Variable(name) = pat {
+                    if let PatternKind::Variable(name) = &pat.kind {
                         if let Some(decl_ty) = ty.as_ref() {
                             if let Some(full) = self.get_full_type_name(decl_ty) {
                                 self.var_type_names.insert(name.clone(), full);
-                            } else if let Type::Name(tn, args) = decl_ty {
+                            } else if let Type::Name(tn, args) = decl_ty.unlocated() {
                                 if args.is_empty() {
                                     self.var_type_names.insert(name.clone(), tn.clone());
                                 }
@@ -257,13 +259,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                         } else if self.expr_is_string(init) {
                             self.var_type_names
                                 .insert(name.clone(), "string".to_string());
-                        } else if let Expr::Record { ty: None, .. } = init {
+                        } else if let Expr::Record { ty: None, .. } = init.unlocated() {
                             self.var_type_names
                                 .insert(name.clone(), "string".to_string());
                         } else if let Expr::Record {
                             ty: Some(tn),
                             fields,
-                        } = init
+                        } = init.unlocated()
                         {
                             self.var_type_names.insert(name.clone(), tn.clone());
                             // Infer concrete generic args from field values (e.g.
@@ -294,9 +296,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                 }
                             }
-                        } else if matches!(init, Expr::SetLiteral(_)) {
+                        } else if matches!(init.unlocated(), Expr::SetLiteral(_)) {
                             self.var_type_names.insert(name.clone(), "set".to_string());
-                        } else if let Expr::List(list_elems) = init {
+                        } else if let Expr::List(list_elems) = init.unlocated() {
                             // D1: infer List<T> type from first element
                             if let Some(first) = list_elems.first() {
                                 let elem_type = self.infer_object_type(first, vars);
@@ -320,14 +322,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                 }
                             }
-                        } else if let Expr::Index(_, _) = init {
+                        } else if let Expr::Index(_, _) = init.unlocated() {
                             // D1: infer element type via infer_object_type (handles List<T> stripping)
                             let elem_type = self.infer_object_type(init, vars);
                             if !elem_type.is_empty() {
                                 self.var_type_names.insert(name.clone(), elem_type);
                             }
-                        } else if let Expr::Call(callee, call_args) = init {
-                            if let Expr::Field(obj, method_name) = callee.as_ref() {
+                        } else if let Expr::Call(callee, call_args) = init.unlocated() {
+                            if let Expr::Field(obj, method_name) = callee.unlocated() {
                                 if method_name == "spawn" || method_name == "spawn_detached" {
                                     let obj_type = self.infer_object_type(obj, vars);
                                     if !obj_type.is_empty() {
@@ -356,7 +358,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     let obj_type = self.infer_object_type(obj, vars);
                                     if obj_type.starts_with("Set") || obj_type == "set" {
                                         self.var_type_names.insert(name.clone(), obj_type);
-                                    } else if let Expr::Ident(flow_name) = obj.as_ref() {
+                                    } else if let Expr::Ident(flow_name) = obj.unlocated() {
                                         // Flow::transition(from, ...) — insert/remove may be
                                         // flow transition names, not Set operations.
                                         if let Some(flow) = self.flow_defs.get(flow_name) {
@@ -386,7 +388,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         if !ret_type.is_empty() {
                                             self.var_type_names.insert(name.clone(), ret_type);
                                         }
-                                    } else if let Expr::Ident(flow_name) = obj.as_ref() {
+                                    } else if let Expr::Ident(flow_name) = obj.unlocated() {
                                         // Flow::transition(from, ...) → matching overload's to-state
                                         if let Some(flow) = self.flow_defs.get(flow_name) {
                                             let from_type = call_args
@@ -405,7 +407,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                     }
                                 }
-                            } else if let Expr::Ident(func_name) = callee.as_ref() {
+                            } else if let Expr::Ident(func_name) = callee.unlocated() {
                                 match func_name.as_str() {
                                     "Ok" | "Err" => {
                                         // Do not overwrite a full annotated type
@@ -473,7 +475,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         .insert(name.clone(), "Map".to_string());
                                                 }
                                                 "map_set" | "map_remove" => {
-                                                    if let Expr::Call(_, args) = init {
+                                                    if let Expr::Call(_, args) = init.unlocated() {
                                                         if let Some(val_arg) = args.get(2) {
                                                             let vt = self
                                                                 .infer_object_type(val_arg, vars);
@@ -535,7 +537,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             .map(|fdef| (fdef.ret.clone(), fdef.is_async))
                                         {
                                             if let Some(ret_ty) = ret_ty {
-                                                match &ret_ty {
+                                                match ret_ty.unlocated() {
                                                     Type::ImplTrait(traits) => {
                                                         self.var_type_names.insert(
                                                             name.clone(),
@@ -585,6 +587,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             .extern_func_defs
                                             .get(func_name)
                                             .and_then(|ef| ef.ret.as_ref())
+                                            .map(crate::ast::Type::unlocated)
                                         {
                                             self.var_type_names.insert(name.clone(), tn.clone());
                                         }
@@ -663,9 +666,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                     }
                                 }
-                            } else if let Expr::Turbofish(_func_name, turbo_type_args, _) = init {
+                            } else if let Expr::Turbofish(_func_name, turbo_type_args, _) =
+                                init.unlocated()
+                            {
                                 if let Some(ta) = turbo_type_args.first() {
-                                    if let Type::Name(tn, args) = ta {
+                                    if let Type::Name(tn, args) = ta.unlocated() {
                                         if tn == "List" && !args.is_empty() {
                                             if let Some(full) = self.get_full_type_name(ta) {
                                                 self.var_type_names.insert(name.clone(), full);
@@ -690,15 +695,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                     // Track list element type for nested List<List<T>> indexing
-                    if let Pattern::Variable(name) = pat {
+                    if let PatternKind::Variable(name) = &pat.kind {
                         if let Some(decl_ty) = &ty {
                             self.register_list_elem_type(name, decl_ty);
                             self.var_types.insert(name.clone(), decl_ty.clone());
                         }
                         // Track standalone turbofish type (e.g. from_json::<List<f64>>("..."))
-                        if let Expr::Turbofish(_func_name, turbo_type_args, _) = init {
+                        if let Expr::Turbofish(_func_name, turbo_type_args, _) = init.unlocated() {
                             if let Some(ta) = turbo_type_args.first() {
-                                if let Type::Name(tn, args) = ta {
+                                if let Type::Name(tn, args) = ta.unlocated() {
                                     if tn == "List" && !args.is_empty() {
                                         if let Some(full) = self.get_full_type_name(ta) {
                                             self.var_type_names.insert(name.clone(), full);
@@ -722,8 +727,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     let val = self.normalize_string_value(val, init)?;
                     self.compile_pattern_bind(pat, val, vars)?;
-                    if let Pattern::Variable(name) = pat {
-                        if let Expr::Ident(fn_name) = init {
+                    if let PatternKind::Variable(name) = &pat.kind {
+                        if let Expr::Ident(fn_name) = init.unlocated() {
                             if self.module.get_function(fn_name).is_some() {
                                 self.fn_ptr_var_names.insert(name.clone());
                             }
@@ -740,7 +745,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ..
                 } => {
                     // let x; or let (a, b); — needs type annotation
-                    if let Pattern::Variable(name) = pat {
+                    if let PatternKind::Variable(name) = &pat.kind {
                         let llvm_ty = match ty {
                             Some(decl_ty) => types::mimi_type_to_llvm(self.context, decl_ty)
                                 .ok_or_else(|| {
@@ -1398,7 +1403,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         let mut last_val = self.context.i64_type().const_int(0, false).into();
         for stmt in block {
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::Expr(e) => {
                     last_val = self.compile_expr(e, vars)?;
                 }
@@ -1425,14 +1430,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ty,
                     mut_: _,
                     ref_: _,
-                    pos: _,
                 } => {
                     // Typed list literals: seed pending_list_elem_type so
                     // Result/Option list elements pack with a uniform layout.
                     let saved_list_elem = self.pending_list_elem_type.take();
-                    if matches!(init, Expr::List(_)) {
+                    if matches!(init.unlocated(), Expr::List(_)) {
                         if let Some(decl_ty) = ty.as_ref() {
-                            if let Type::Name(n, args) = decl_ty {
+                            if let Type::Name(n, args) = decl_ty.unlocated() {
                                 if n == "List" && args.len() == 1 {
                                     self.pending_list_elem_type = Some(args[0].clone());
                                 }
@@ -1447,7 +1451,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // infer_object_type can return e.g. "Option<string>" instead
                         // of just "Option" for generic variant types.
                         if let Some(full) = self.get_full_type_name(decl_ty) {
-                            if let Pattern::Variable(name) = pat {
+                            if let PatternKind::Variable(name) = &pat.kind {
                                 self.var_type_names.insert(name.clone(), full.clone());
                             }
                         }
@@ -1456,12 +1460,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         val
                     };
                     self.compile_pattern_bind(pat, val, vars)?;
-                    if let Pattern::Variable(name) = pat {
+                    if let PatternKind::Variable(name) = &pat.kind {
                         if self.expr_is_string(init) {
                             self.var_type_names
                                 .insert(name.clone(), "string".to_string());
                         }
-                        if let Expr::Ident(fn_name) = init {
+                        if let Expr::Ident(fn_name) = init.unlocated() {
                             if self.module.get_function(fn_name.as_str()).is_some() {
                                 self.fn_ptr_var_names.insert(name.clone());
                             }
@@ -1513,8 +1517,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // (e.g. std::strings::words/lines/split).  The callee is a
                         // function name, not a bare identifier, so it is not covered
                         // by the branch above.
-                        if let Expr::Call(callee, args) = init {
-                            if let Expr::Ident(fn_name) = callee.as_ref() {
+                        if let Expr::Call(callee, args) = init.unlocated() {
+                            if let Expr::Ident(fn_name) = callee.unlocated() {
                                 // General user-function return-type tracking (e.g. std::csv::parse
                                 // returns List<List<string>>). This lets downstream indexing and
                                 // printing recover the concrete element type.
@@ -1590,9 +1594,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         }
                         // from_json::<Map<…>> / Set turbofish type tracking
-                        if let Expr::Turbofish(_fn, turbo_type_args, _) = init {
+                        if let Expr::Turbofish(_fn, turbo_type_args, _) = init.unlocated() {
                             if let Some(ta) = turbo_type_args.first() {
-                                if let Type::Name(tn, args) = ta {
+                                if let Type::Name(tn, args) = ta.unlocated() {
                                     if (tn == "Map" || tn == "Set") && !args.is_empty() {
                                         if let Some(full) = self.get_full_type_name(ta) {
                                             self.var_type_names.insert(name.clone(), full);
@@ -1718,7 +1722,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         type_params: &[String],
     ) -> HashMap<String, Type> {
         fn type_ident_name(ty: &Type) -> String {
-            if let Type::Name(n, _) = ty {
+            if let Type::Name(n, _) = ty.unlocated() {
                 n.clone()
             } else {
                 String::new()
@@ -1750,8 +1754,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         val: BasicValueEnum<'ctx>,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<()> {
-        if let Expr::Field(container, field_name) = expr {
-            if let Expr::Ident(name) = container.as_ref() {
+        if let Expr::Field(container, field_name) = expr.unlocated() {
+            if let Expr::Ident(name) = container.unlocated() {
                 if let Some(&(alloca, _ty)) = vars.get(name) {
                     let obj_type = self.infer_object_type(container, vars);
                     if let Some(td) = self.type_defs.get(&obj_type) {

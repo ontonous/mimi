@@ -418,6 +418,9 @@ enum HeapEntry<'ctx> {
     ),
 }
 
+// Resolved-directory query methods are production instrumentation consumed by
+// external tooling and selectively by tests; a crate target need not call all.
+#[allow(dead_code)]
 impl<'ctx> CodeGenerator<'ctx> {
     pub fn new(context: &'ctx Context, module_name: &str) -> Self {
         let module = context.create_module(module_name);
@@ -1603,16 +1606,17 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// weak reference. Updating `var_type_names`/`var_types` lets downstream
     /// method dispatch (`is_none`, `unwrap`) find the Option implementation.
     pub(super) fn track_weak_upgrade_type(&mut self, name: &str, obj: &Expr) {
-        if let Expr::Ident(obj_name) = obj {
+        if let Expr::Ident(obj_name) = obj.unlocated() {
             if let Some(ty) = self.var_types.get(obj_name).cloned() {
-                let inner = match ty {
-                    Type::Weak(inner) | Type::WeakLocal(inner) => inner,
+                let inner = match ty.unlocated() {
+                    Type::Weak(inner) | Type::WeakLocal(inner) => inner.clone(),
                     _ => return,
                 };
                 let inner_name = crate::core::fmt_type(&inner);
                 self.var_type_names
                     .insert(name.to_string(), format!("Option<{}>", inner_name));
-                self.var_types.insert(name.to_string(), Type::Option(inner));
+                self.var_types
+                    .insert(name.to_string(), Type::Option(inner.clone()));
                 self.upgrade_option_vars.insert(name.to_string());
             }
         }
@@ -1763,7 +1767,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     pub(super) fn llvm_type_for(&self, ty: &crate::ast::Type) -> Option<BasicTypeEnum<'ctx>> {
         use crate::ast::Type;
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, args) if args.is_empty() => {
                 if let Some(llvm) = self.type_llvm.get(name) {
                     return Some(*llvm);
@@ -1776,7 +1780,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // List and nested Option stay classic {i1,i64} heap-pack
                 // (Option ABI split). Never embed List by-value — packing
                 // Option<List> into an outer List would zero/dangle the payload.
-                let force_heap = match inner.as_ref() {
+                let force_heap = match inner.as_ref().unlocated() {
                     Type::Option(_) => true,
                     Type::Name(n, _)
                         if n == "List" || n == "Option" || n == "Map" || n == "Set" =>
@@ -1797,7 +1801,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let inner_llvm = self.llvm_type_for(inner)?;
                 // Only widen scalar ints and product-tuple int fields — never
                 // named records (all-i32 records must keep i32 field layout).
-                let widened = match (inner.as_ref(), inner_llvm) {
+                let widened = match (inner.unlocated(), inner_llvm) {
                     (_, BasicTypeEnum::IntType(it)) if it.get_bit_width() < 64 => {
                         BasicTypeEnum::IntType(self.context.i64_type())
                     }
@@ -1830,7 +1834,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Widen integer Ok slots and product-tuple i32 fields to i64
                 // so they match Ok((1,2)) literal ABI. Do not widen named records
                 // or i1 bool fields.
-                let widened = match (ok.as_ref(), ok_llvm) {
+                let widened = match (ok.unlocated(), ok_llvm) {
                     (_, BasicTypeEnum::IntType(it)) if it.get_bit_width() < 64 => {
                         BasicTypeEnum::IntType(self.context.i64_type())
                     }
@@ -1874,7 +1878,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Register the element LLVM type for a `List<T>` variable so that
     /// compile_index_expr can reconstruct struct-typed elements from type-erased storage.
     pub(super) fn register_list_elem_type(&mut self, var_name: &str, decl_ty: &Type) {
-        if let Type::Name(tn, args) = decl_ty {
+        if let Type::Name(tn, args) = decl_ty.unlocated() {
             if tn == "List" && args.len() == 1 {
                 let elem_ty = &args[0];
                 if let Some(llvm_elem) = self.llvm_type_for(elem_ty) {
@@ -1935,7 +1939,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Get the full type name including generics for a variable (for list element reconstruction).
     pub(super) fn get_full_type_name(&self, ty: &Type) -> Option<String> {
-        match ty {
+        match ty.unlocated() {
             Type::Name(tn, args) => {
                 if args.is_empty() {
                     Some(tn.clone())
@@ -1978,7 +1982,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// `type_map` from the calling context (populated by monomorphization).
     pub(super) fn substitute_type_params(&self, ty: &crate::ast::Type) -> crate::ast::Type {
         use crate::ast::Type;
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, args) => {
                 if args.is_empty() {
                     if let Some(resolved) = self.type_map.get(name) {
@@ -2112,10 +2116,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             let tn = crate::core::fmt_type(decl_ty);
             self.var_type_names.insert(name.clone(), tn);
             self.var_types.insert(name.clone(), decl_ty.clone());
-        } else if let Expr::Record { ty: Some(tn), .. } = init {
+        } else if let Expr::Record { ty: Some(tn), .. } = init.unlocated() {
             self.var_type_names.insert(name.clone(), tn.clone());
-        } else if let Expr::Call(callee, _) = init {
-            if let Expr::Ident(fname) = callee.as_ref() {
+        } else if let Expr::Call(callee, _) = init.unlocated() {
+            if let Expr::Ident(fname) = callee.unlocated() {
                 if let Some(fdef) = self.func_defs.get(fname) {
                     if let Some(ret_ty) = &fdef.ret {
                         let tn = crate::core::fmt_type(ret_ty);
@@ -2150,7 +2154,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             crate::ast::SharedKind::Shared | crate::ast::SharedKind::LocalShared => {
                 // Shared reference copy: `shared q = p` where p is already shared.
                 // Share the same heap allocation and retain, rather than copying the value.
-                if let Expr::Ident(src_name) = init {
+                if let Expr::Ident(src_name) = init.unlocated() {
                     if self.shared_var_names.contains(src_name.as_str()) {
                         return self.compile_shared_ref_copy(name, src_name, vars);
                     }
@@ -2158,7 +2162,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             crate::ast::SharedKind::Weak | crate::ast::SharedKind::WeakLocal => {
                 // Weak reference: init must be an existing shared variable.
-                if let Expr::Ident(src_name) = init {
+                if let Expr::Ident(src_name) = init.unlocated() {
                     let &(src_alloca, val_ty) = vars.get(src_name).ok_or_else(|| {
                         CompileError::LlvmError(format!("weak source '{}' not found", src_name))
                     })?;
@@ -2207,7 +2211,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // actual data on the heap, not a stack pointer.
         let llvm_ty = if let BasicValueEnum::PointerValue(pv) = val {
             let ty_name = self.var_type_names.get(name.as_str()).or({
-                if let Expr::Record { ty: Some(tn), .. } = init {
+                if let Expr::Record { ty: Some(tn), .. } = init.unlocated() {
                     Some(tn)
                 } else {
                     None

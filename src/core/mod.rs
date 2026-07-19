@@ -1,7 +1,6 @@
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 
-pub(crate) use crate::span::Span;
 pub(crate) use std::collections::HashMap;
 
 mod borrow;
@@ -77,7 +76,7 @@ fn verify_rules_in_block(block: &[Stmt], errors: &mut Vec<String>, context: &str
     let mut last_was_rule = false;
     let mut rule_pos = String::new();
     for stmt in block {
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Rule(text, _) => {
                 if last_was_rule {
                     errors.push(format!(

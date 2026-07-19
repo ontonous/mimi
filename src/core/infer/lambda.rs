@@ -16,7 +16,7 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|p| {
                 let ty = self.resolve_type(&p.ty);
-                if matches!(ty, Type::Infer) {
+                if matches!(ty.unlocated(), Type::Infer) {
                     self.fresh_var()
                 } else {
                     ty
@@ -31,18 +31,18 @@ impl<'a> Checker<'a> {
         }
         let mut body_type = Type::Name("unit".into(), vec![]);
         for stmt in body {
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::Expr(e) => body_type = self.infer_expr(e, scopes),
                 Stmt::Return(Some(e)) => {
                     body_type = self.infer_expr(e, scopes);
                     break;
                 }
-                other => {
+                _ => {
                     // Process let/if/while/for/match etc. for their side effects
                     // on scope bindings. Only the last expression determines the
                     // lambda's return type; these statements return unit.
                     let unit = Type::Name("unit".into(), vec![]);
-                    self.check_stmt(other, &unit, scopes);
+                    self.check_stmt(stmt, &unit, scopes);
                     body_type = Type::Name("unit".into(), vec![]);
                 }
             }
@@ -51,7 +51,7 @@ impl<'a> Checker<'a> {
         let return_type = match ret {
             Some(r) => {
                 let rty = self.resolve_type(r);
-                if matches!(rty, Type::Infer) {
+                if matches!(rty.unlocated(), Type::Infer) {
                     body_type
                 } else {
                     let body_type = self.unification.resolve(&body_type);

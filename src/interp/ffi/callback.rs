@@ -553,12 +553,13 @@ impl<'a> Interpreter<'a> {
         match arg {
             Value::Closure { .. } => {
                 let closure = arg.clone();
-                let ret_is_float = matches!(ret_type, Type::Name(name, _) if name == "f64");
+                let ret_is_float =
+                    matches!(ret_type.unlocated(), Type::Name(name, _) if name == "f64");
 
                 // Build CIF matching the callback signature
                 let mut cif_arg_types: Vec<FfiType> = Vec::with_capacity(param_types.len());
                 for pt in param_types {
-                    match pt {
+                    match pt.unlocated() {
                         Type::Name(name, _) if name == "f64" => {
                             cif_arg_types.push(FfiType::f64());
                         }

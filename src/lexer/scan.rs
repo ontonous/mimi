@@ -628,6 +628,8 @@ impl<'a> super::Lexer<'a> {
                         kind: TokenKind::Indent,
                         line: self.line,
                         col: spaces,
+                        end_line: self.line,
+                        end_col: spaces,
                     });
                 } else if spaces < current {
                     while *self.indent_stack.last().unwrap_or(&0) > spaces {
@@ -636,6 +638,8 @@ impl<'a> super::Lexer<'a> {
                             kind: TokenKind::Dedent,
                             line: self.line,
                             col: spaces,
+                            end_line: self.line,
+                            end_col: spaces,
                         });
                     }
                     if *self.indent_stack.last().unwrap_or(&0) != spaces {
@@ -656,6 +660,8 @@ impl<'a> super::Lexer<'a> {
                     kind: TokenKind::Dedent,
                     line: self.line,
                     col: self.col,
+                    end_line: self.line,
+                    end_col: self.col,
                 });
             }
         }

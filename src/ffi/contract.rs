@@ -330,7 +330,10 @@ impl FfiContract {
         // Uses exact function name matching (not `contains`) to avoid false
         // positives on wrapper functions like `my_open_wrapper`.
         let fname: &str = &func.name;
-        let check_errno = matches!(&func.ret, Some(Type::Name(name, _)) if name == "i32" || name == "i64")
+        let check_errno = matches!(
+            func.ret.as_ref().map(Type::unlocated),
+            Some(Type::Name(name, _)) if name == "i32" || name == "i64"
+        )
             && ERRNO_CHECK_FUNC_NAMES.contains(&fname);
 
         Self {
@@ -357,7 +360,7 @@ impl FfiArgContract {
         record_type_names: &HashSet<String>,
         repr_c_record_names: &HashSet<String>,
     ) -> Self {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => {
                 if cap_names.contains(name.as_str()) {
                     return FfiArgContract::Cap(CapMode::Borrow);
@@ -411,7 +414,7 @@ impl FfiRetContract {
         record_type_names: &HashSet<String>,
         repr_c_record_names: &HashSet<String>,
     ) -> Self {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => FfiRetContract::Int(FfiScalarType::I32),
                 "i64" => FfiRetContract::Int(FfiScalarType::I64),

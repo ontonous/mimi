@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use crate::ast::{
-    ExternFunc, ExternParam, FuncDef, Type, TypeAttribute, TypeDef, TypeDefKind, VariantPayload,
+    AstNodeMeta, AstOrigin, ExternFunc, ExternParam, FuncDef, Type, TypeAttribute, TypeDef,
+    TypeDefKind, VariantPayload,
 };
 use crate::ffi::contract::{FfiArgContract, FfiContract};
 
@@ -365,7 +366,7 @@ impl CHeaderGenerator {
 
     /// Convert a Mimi type to a C type string
     fn mimi_type_to_c_type(&self, ty: &Type) -> String {
-        match ty {
+        match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => "int32_t".to_string(),
                 "i64" => "int64_t".to_string(),
@@ -538,18 +539,25 @@ impl CHeaderGenerator {
             .map(|(name, _)| name.clone())
             .collect();
 
+        let adapter_origin = AstOrigin::RuntimeSystem("ffi.c_header_import");
+        let adapter_meta = AstNodeMeta::inherited(func.meta.span, adapter_origin);
         let extern_func = ExternFunc {
+            meta: adapter_meta,
             name: func.name.clone(),
             params: func
                 .params
                 .iter()
-                .map(|p| ExternParam {
-                    name: p.name.clone(),
-                    ty: p.ty.clone(),
-                    cap_mode: None,
+                .map(|p| {
+                    let meta = AstNodeMeta::inherited(p.meta.span, adapter_origin);
+                    ExternParam {
+                        meta,
+                        name: p.name.clone(),
+                        ty: p.ty.clone().deep_reorigin(meta),
+                        cap_mode: None,
+                    }
                 })
                 .collect(),
-            ret: func.ret.clone(),
+            ret: func.ret.clone().map(|ty| ty.deep_reorigin(adapter_meta)),
             requires: None,
             ensures: None,
             variadic: false,
@@ -599,17 +607,24 @@ mod tests {
     use super::*;
     use crate::ast::{ExternParam, Type};
 
+    fn fixture_meta() -> AstNodeMeta {
+        AstNodeMeta::synthetic(AstOrigin::RuntimeSystem("test.ffi_fixture"))
+    }
+
     #[test]
     fn test_generate_simple_header() {
         let extern_funcs = vec![ExternFunc {
+            meta: fixture_meta(),
             name: "add".to_string(),
             params: vec![
                 ExternParam {
+                    meta: fixture_meta(),
                     name: "a".to_string(),
                     ty: Type::Name("i32".to_string(), vec![]),
                     cap_mode: None,
                 },
                 ExternParam {
+                    meta: fixture_meta(),
                     name: "b".to_string(),
                     ty: Type::Name("i32".to_string(), vec![]),
                     cap_mode: None,
@@ -635,14 +650,17 @@ mod tests {
     #[test]
     fn test_header_endif_after_declarations() {
         let extern_funcs = vec![ExternFunc {
+            meta: fixture_meta(),
             name: "add".to_string(),
             params: vec![
                 ExternParam {
+                    meta: fixture_meta(),
                     name: "a".to_string(),
                     ty: Type::Name("i32".to_string(), vec![]),
                     cap_mode: None,
                 },
                 ExternParam {
+                    meta: fixture_meta(),
                     name: "b".to_string(),
                     ty: Type::Name("i32".to_string(), vec![]),
                     cap_mode: None,

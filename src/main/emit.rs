@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::resolve_path;
 use mimi::ast::{self, File};
 use mimi::core::BackendProfile;
-use mimi::{ffi, lexer, parser};
+use mimi::{ffi, lexer};
 
 pub(crate) fn checked_component_input<'a>(
     file: &'a File,
@@ -46,12 +46,20 @@ pub(crate) fn resolved_extern_funcs(
                     signature.name
                 ));
             }
+            let block_span = block.origin.user_span();
+            let signature_span = signature.span.with_source(block_span.source_id);
+            let signature_meta = ast::AstNodeMeta::inherited(
+                signature_span,
+                ast::AstOrigin::RuntimeSystem("emit.extern_adapter"),
+            );
             funcs.push(ast::ExternFunc {
+                meta: signature_meta,
                 name: signature.name.clone(),
                 params: signature
                     .typed_params
                     .iter()
                     .map(|(name, ty, cap_mode)| ast::ExternParam {
+                        meta: signature_meta,
                         name: name.clone(),
                         ty: ty.clone(),
                         cap_mode: *cap_mode,
@@ -102,6 +110,10 @@ pub(crate) fn resolved_exported_funcs(
             ));
         }
         exported.push(ast::FuncDef {
+            meta: ast::AstNodeMeta::inherited(
+                function.origin.user_span(),
+                ast::AstOrigin::RuntimeSystem("emit.export_adapter"),
+            ),
             name: symbol,
             pub_: function.pub_,
             params: function.param_decls.clone(),
@@ -113,10 +125,6 @@ pub(crate) fn resolved_exported_funcs(
             is_comptime: function.is_comptime,
             is_async: function.is_async,
             extern_abi: Some(abi.clone()),
-            pos: {
-                let span = function.origin.user_span();
-                (span.start_line, span.start_col)
-            },
         });
     }
     Ok(exported)
@@ -129,7 +137,10 @@ pub(crate) fn resolved_type_defs(
     definitions.sort_by(|left, right| left.qualified_name.cmp(&right.qualified_name));
     let mut projected = HashMap::new();
     for definition in definitions {
-        if definition.declaration.decl_pos.is_none() {
+        // Skip type definitions without an honest source span: these are
+        // purely IR-synthesized (e.g. generated adapter types) and must not
+        // be projected as user declarations.
+        if definition.declaration.meta.span == mimi::span::Span::UNKNOWN {
             continue;
         }
         let name = definition
@@ -158,7 +169,8 @@ mod tests {
 
     fn parse(source: &str) -> mimi::ast::File {
         let tokens = mimi::lexer::Lexer::new(source).tokenize().expect("lex");
-        mimi::parser::Parser::new(tokens)
+        mimi::parser::Parser::new_memory(tokens, "main.emit.tests", "component", source)
+            .expect("register memory source")
             .parse_file()
             .expect("parse")
     }
@@ -273,7 +285,7 @@ pub(crate) fn emit_c_headers(path: Option<&Path>, output: Option<&Path>) -> Resu
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let file = parser::Parser::new(tokens).parse_file()?;
+    let file = mimi::loader::parser_for_path(tokens, &path)?.parse_file()?;
     let checked = checked_component_input(&file)?;
 
     let extern_funcs = resolved_extern_funcs(&checked)?;
@@ -307,7 +319,7 @@ pub(crate) fn emit_py_bindings(
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let file = parser::Parser::new(tokens).parse_file()?;
+    let file = mimi::loader::parser_for_path(tokens, &path)?.parse_file()?;
     let checked = checked_component_input(&file)?;
 
     let mut extern_funcs = resolved_extern_funcs(&checked)?;
@@ -315,12 +327,21 @@ pub(crate) fn emit_py_bindings(
     let type_defs = resolved_type_defs(&checked)?;
     // Also include exported functions as extern-like declarations for Python bindings
     for ef in &exported_funcs {
+        let adapter_meta = ast::AstNodeMeta::inherited(
+            ef.meta.span,
+            ast::AstOrigin::RuntimeSystem("emit.python_export_adapter"),
+        );
         let extern_func = ast::ExternFunc {
+            meta: adapter_meta,
             name: ef.name.clone(),
             params: ef
                 .params
                 .iter()
                 .map(|p| ast::ExternParam {
+                    meta: ast::AstNodeMeta::inherited(
+                        p.meta.span,
+                        ast::AstOrigin::RuntimeSystem("emit.python_export_param_adapter"),
+                    ),
                     name: p.name.clone(),
                     ty: p.ty.clone(),
                     cap_mode: None,
@@ -384,7 +405,7 @@ pub(crate) fn emit_rust_bindings(path: Option<&Path>, output: Option<&Path>) -> 
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let file = parser::Parser::new(tokens).parse_file()?;
+    let file = mimi::loader::parser_for_path(tokens, &path)?.parse_file()?;
     let checked = checked_component_input(&file)?;
 
     let extern_funcs = resolved_extern_funcs(&checked)?;
@@ -416,7 +437,7 @@ pub(crate) fn emit_go_bindings(path: Option<&Path>, output: Option<&Path>) -> Re
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let file = parser::Parser::new(tokens).parse_file()?;
+    let file = mimi::loader::parser_for_path(tokens, &path)?.parse_file()?;
     let checked = checked_component_input(&file)?;
 
     let extern_funcs = resolved_extern_funcs(&checked)?;
@@ -451,7 +472,7 @@ pub(crate) fn emit_node_bindings(
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let file = parser::Parser::new(tokens).parse_file()?;
+    let file = mimi::loader::parser_for_path(tokens, &path)?.parse_file()?;
     let checked = checked_component_input(&file)?;
 
     let extern_funcs = resolved_extern_funcs(&checked)?;
@@ -496,7 +517,7 @@ pub(crate) fn emit_java_bindings(
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let file = parser::Parser::new(tokens).parse_file()?;
+    let file = mimi::loader::parser_for_path(tokens, &path)?.parse_file()?;
     let checked = checked_component_input(&file)?;
 
     let extern_funcs = resolved_extern_funcs(&checked)?;
@@ -537,7 +558,7 @@ pub(crate) fn emit_cpp_bindings(path: Option<&Path>, output: Option<&Path>) -> R
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let file = parser::Parser::new(tokens).parse_file()?;
+    let file = mimi::loader::parser_for_path(tokens, &path)?.parse_file()?;
     let checked = checked_component_input(&file)?;
 
     let extern_funcs = resolved_extern_funcs(&checked)?;

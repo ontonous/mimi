@@ -2,7 +2,6 @@ use crate::ast::*;
 use crate::core::checker::Checker;
 use crate::core::helpers::{fmt_type, is_numeric_coercion, subst_type_params, suggest_name};
 use crate::diagnostic::Diagnostic;
-use crate::span::Span;
 use std::collections::HashMap;
 
 impl<'a> Checker<'a> {
@@ -17,7 +16,7 @@ impl<'a> Checker<'a> {
         // merge_all flattens imported module items, so the bare function
         // name is registered in self.funcs. Route csv::parse() to
         // check_call("parse", ...) when csv is a known module name.
-        if let Expr::Ident(module_name) = obj {
+        if let Expr::Ident(module_name) = obj.unlocated() {
             if self.use_imports.contains(module_name) {
                 return self.check_call(method_name, args, scopes);
             }
@@ -42,7 +41,7 @@ impl<'a> Checker<'a> {
                     .first()
                     .cloned()
                     .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
-                let overload_key = match &from_ty {
+                let overload_key = match from_ty.unlocated() {
                     Type::Name(n, _) => format!("{}::{}", short_key, n),
                     _ => short_key.clone(),
                 };
@@ -79,7 +78,7 @@ impl<'a> Checker<'a> {
                                         fmt_type(expected),
                                         fmt_type(actual)
                                     ),
-                                    Span::single(self.current_line, self.current_col),
+                                    self.diagnostic_span(),
                                 ));
                             }
                         }
@@ -102,7 +101,7 @@ impl<'a> Checker<'a> {
         let obj_ty = self.infer_expr(obj, scopes);
         // Newtype delegates method dispatch using the newtype name.
         // e.g. UserId(42).id() looks up trait methods for "UserId".
-        let (type_name, type_args): (&String, &[Type]) = match &obj_ty {
+        let (type_name, type_args): (&String, &[Type]) = match obj_ty.unlocated() {
             Type::Newtype(name, _) => (name, &[]),
             Type::Name(tn, ta) => (tn, ta.as_slice()),
             _ => {
@@ -272,6 +271,9 @@ impl<'a> Checker<'a> {
                                 let gen_slice: Vec<GenericParam> = trait_generic_names
                                     .iter()
                                     .map(|g| GenericParam {
+                                        meta: AstNodeMeta::synthetic(AstOrigin::RuntimeSystem(
+                                            "infer.trait_generic_substitution",
+                                        )),
                                         name: g.clone(),
                                         bounds: vec![],
                                     })
@@ -416,37 +418,37 @@ impl<'a> Checker<'a> {
                 Diagnostic::error_code(
                     crate::diagnostic::codes::E0221,
                     format!("type '{}' has no method '{}'", type_name, method_name),
-                    Span::single(self.current_line, self.current_col),
+                    self.diagnostic_span(),
                 )
                 .with_help(&help),
             );
             Type::Name("unknown".into(), vec![])
-        } else if let Type::DynTrait(traits) = &obj_ty {
+        } else if let Type::DynTrait(traits) = obj_ty.unlocated() {
             self.resolve_trait_method(traits, method_name, args, scopes)
-        } else if let Type::ImplTrait(traits) = &obj_ty {
+        } else if let Type::ImplTrait(traits) = obj_ty.unlocated() {
             self.resolve_trait_method(traits, method_name, args, scopes)
-        } else if let Type::Option(inner) = &obj_ty {
+        } else if let Type::Option(inner) = obj_ty.unlocated() {
             // Codegen supports `.deref()` on `Option<shared T>` / `Option<local_shared T>`
             // (produced by `weak.upgrade()`), where deref extracts the shared payload.
             if method_name == "deref"
-                && matches!(inner.as_ref(), Type::Shared(_) | Type::LocalShared(_))
+                && matches!(inner.unlocated(), Type::Shared(_) | Type::LocalShared(_))
             {
-                match inner.as_ref() {
+                match inner.unlocated() {
                     Type::Shared(i) | Type::LocalShared(i) => (**i).clone(),
                     _ => Type::Name("unknown".into(), vec![]),
                 }
             } else {
                 self.check_option_method(method_name, inner, args, scopes)
             }
-        } else if let Type::Result(ok_ty, err_ty) = &obj_ty {
+        } else if let Type::Result(ok_ty, err_ty) = obj_ty.unlocated() {
             self.check_result_method(method_name, ok_ty, err_ty, args, scopes)
-        } else if let Type::Shared(inner) = &obj_ty {
+        } else if let Type::Shared(inner) = obj_ty.unlocated() {
             self.check_shared_method(method_name, inner)
-        } else if let Type::LocalShared(inner) = &obj_ty {
+        } else if let Type::LocalShared(inner) = obj_ty.unlocated() {
             self.check_local_shared_method(method_name, inner)
-        } else if let Type::Weak(inner) = &obj_ty {
+        } else if let Type::Weak(inner) = obj_ty.unlocated() {
             self.check_weak_method(method_name, inner)
-        } else if let Type::WeakLocal(inner) = &obj_ty {
+        } else if let Type::WeakLocal(inner) = obj_ty.unlocated() {
             self.check_weak_local_method(method_name, inner)
         } else {
             self.errors.push(
@@ -456,7 +458,7 @@ impl<'a> Checker<'a> {
                         "method call requires a named type, found {}",
                         fmt_type(&obj_ty)
                     ),
-                    Span::single(self.current_line, self.current_col),
+                    self.diagnostic_span(),
                 )
                 .with_help("only named types (record, enum, actor) have methods"),
             );
@@ -516,7 +518,7 @@ impl<'a> Checker<'a> {
             Diagnostic::error_code(
                 crate::diagnostic::codes::E0221,
                 format!("trait object does not have method '{}'", method_name),
-                Span::single(self.current_line, self.current_col),
+                self.diagnostic_span(),
             )
             .with_help("check the method name spelling or available methods for this type"),
         );
@@ -536,7 +538,7 @@ impl<'a> Checker<'a> {
                             fmt_type(inner),
                             method
                         ),
-                        Span::single(self.current_line, self.current_col),
+                        self.diagnostic_span(),
                     )
                     .with_help("shared values support clone, deref, inner"),
                 );
@@ -562,7 +564,7 @@ impl<'a> Checker<'a> {
                             fmt_type(inner),
                             method
                         ),
-                        Span::single(self.current_line, self.current_col),
+                        self.diagnostic_span(),
                     )
                     .with_help("local_shared values support clone, deref, inner"),
                 );
@@ -579,7 +581,7 @@ impl<'a> Checker<'a> {
                     Diagnostic::error_code(
                         crate::diagnostic::codes::E0221,
                         format!("type 'weak {}' has no method '{}'", fmt_type(inner), method),
-                        Span::single(self.current_line, self.current_col),
+                        self.diagnostic_span(),
                     )
                     .with_help("weak values support upgrade"),
                 );
@@ -600,7 +602,7 @@ impl<'a> Checker<'a> {
                             fmt_type(inner),
                             method
                         ),
-                        Span::single(self.current_line, self.current_col),
+                        self.diagnostic_span(),
                     )
                     .with_help("weak_local values support upgrade"),
                 );

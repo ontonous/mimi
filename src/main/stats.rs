@@ -1,13 +1,13 @@
 use std::path::Path;
 
 use crate::resolve_path;
-use mimi::{lexer, parser};
+use mimi::{lexer, loader};
 
 pub(crate) fn stats(path: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
-    let file = parser::Parser::new(tokens).parse_file()?;
+    let file = loader::parser_for_path(tokens, &path)?.parse_file()?;
 
     let func_count = file
         .items

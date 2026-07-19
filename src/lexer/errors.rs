@@ -54,6 +54,25 @@ pub enum LexerError {
     },
 }
 
+impl LexerError {
+    pub fn position(&self) -> (usize, usize) {
+        match self {
+            LexerError::TabsNotAllowed { line, col }
+            | LexerError::IndentNotMultipleOfFour { line, col }
+            | LexerError::DedentMismatch { line, col }
+            | LexerError::UnexpectedDollar { line, col }
+            | LexerError::UnexpectedCharacter { line, col, .. }
+            | LexerError::UnterminatedString { line, col }
+            | LexerError::UnterminatedEscape { line, col }
+            | LexerError::UnterminatedFString { line, col }
+            | LexerError::UnterminatedFStringEscape { line, col }
+            | LexerError::UnterminatedInterpolation { line, col }
+            | LexerError::UnterminatedBlockComment { line, col }
+            | LexerError::InvalidEscape { line, col, .. } => (*line, *col),
+        }
+    }
+}
+
 impl fmt::Display for LexerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

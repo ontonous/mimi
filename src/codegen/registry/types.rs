@@ -432,14 +432,18 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Also register as a type definition for field access
         let type_def = crate::ast::TypeDef {
+            meta: crate::ast::AstNodeMeta::inherited(
+                actor.meta.span,
+                crate::ast::AstOrigin::RuntimeSystem("codegen.actor_type"),
+            ),
             name: actor.name.clone(),
-            decl_pos: None,
             pub_: actor.pub_,
             kind: crate::ast::TypeDefKind::Record(
                 actor
                     .fields
                     .iter()
                     .map(|f| crate::ast::Field {
+                        meta: f.meta,
                         name: f.name.clone(),
                         ty: f.ty.clone(),
                     })

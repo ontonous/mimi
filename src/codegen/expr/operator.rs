@@ -137,7 +137,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             UnOp::Ref | UnOp::RefMut => {
                 // Borrowed index: for scalar lists, return a pointer directly into
                 // the list's data slot rather than copying the element value.
-                if let Expr::Index(obj, idx_expr) = inner {
+                if let Expr::Index(obj, idx_expr) = inner.unlocated() {
                     let obj_type = self.infer_object_type(obj, vars);
                     let is_scalar_list = obj_type
                         .strip_prefix("List<")
@@ -158,7 +158,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             UnOp::Deref => {
                 if let BasicValueEnum::PointerValue(ptr) = v {
                     // Try to determine the pointee type from the inner expression's variable entry
-                    let pointee_ty = match inner {
+                    let pointee_ty = match inner.unlocated() {
                         Expr::Ident(name) => {
                             if let Some(&(_, ty)) = vars.get(name) {
                                 ty

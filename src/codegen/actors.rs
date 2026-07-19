@@ -458,15 +458,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.malloc_or_abort(struct_size_val_full, &format!("{}_fields", actor.name))?;
         // Cast the heap pointer to the struct type for GEP field access.
         let alloca = match actor_ty {
-            BasicTypeEnum::StructType(sty) => self
-                .builder
-                .build_bit_cast(
-                    raw_ptr,
-                    sty.ptr_type(inkwell::AddressSpace::default()),
-                    "fields_as_struct",
-                )
-                .map_err(|e| CompileError::LlvmError(format!("ptr cast: {}", e)))?
-                .into_pointer_value(),
+            // LLVM 18 uses opaque pointers, so malloc's pointer is already the
+            // representation required by the typed struct GEP below.
+            BasicTypeEnum::StructType(_) => raw_ptr,
             _ => return Err(CompileError::LlvmError("actor type error".to_string())),
         };
 
@@ -562,8 +556,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             })
             .or_else(|| {
                 self.flow_defs.get(&actor.name).and_then(|flow| {
-                    flow.annotations.iter().find_map(|ann| match ann {
-                        crate::ast::FlowAnnotation::MailboxDepth(d) => Some(*d),
+                    flow.annotations.iter().find_map(|ann| match &ann.kind {
+                        crate::ast::FlowAnnotationKind::MailboxDepth(d) => Some(*d),
                         _ => None,
                     })
                 })
@@ -771,15 +765,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         ret_type: BasicTypeEnum<'ctx>,
     ) -> Result<bool, CompileError> {
         // Run compensations before exit()
-        if let Stmt::Expr(Expr::Call(callee, _)) = stmt {
-            if let Expr::Ident(name) = &**callee {
-                if name == "exit" {
-                    self.compile_compensations(vars)?;
+        if let Stmt::Expr(expr) = stmt.unlocated() {
+            if let Expr::Call(callee, _) = expr.unlocated() {
+                if let Expr::Ident(name) = callee.unlocated() {
+                    if name == "exit" {
+                        self.compile_compensations(vars)?;
+                    }
                 }
             }
         }
 
-        match stmt {
+        match stmt.unlocated() {
             Stmt::Expr(expr) => {
                 *last_val = self.compile_expr(expr, vars)?;
                 *last_val = self.adjust_int_val(*last_val, ret_type)?;
@@ -823,8 +819,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ..
             } => {
                 // Shared ref copy: let v = shared_var
-                if let Pattern::Variable(name) = pat {
-                    if let Expr::Ident(src_name) = init {
+                if let PatternKind::Variable(name) = &pat.kind {
+                    if let Expr::Ident(src_name) = init.unlocated() {
                         if self.shared_var_names.contains(src_name.as_str()) {
                             self.compile_shared_ref_copy(name, src_name, vars)?;
                             return Ok(false);
@@ -832,12 +828,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 // Shared var clone: let v = shared_var.clone()
-                if let Pattern::Variable(name) = pat {
-                    if let Expr::Call(callee, cargs) = init {
+                if let PatternKind::Variable(name) = &pat.kind {
+                    if let Expr::Call(callee, cargs) = init.unlocated() {
                         if cargs.is_empty() {
-                            if let Expr::Field(obj, method_name) = callee.as_ref() {
+                            if let Expr::Field(obj, method_name) = callee.unlocated() {
                                 if method_name == "clone" {
-                                    if let Expr::Ident(src_name) = obj.as_ref() {
+                                    if let Expr::Ident(src_name) = obj.unlocated() {
                                         if self.shared_var_names.contains(src_name.as_str()) {
                                             self.compile_shared_ref_copy(name, src_name, vars)?;
                                             return Ok(false);
@@ -855,11 +851,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     val = self.adjust_int_val(val, target)?;
                 }
                 val = self.normalize_string_value(val, init)?;
-                if let Pattern::Variable(name) = pat {
-                    if let Expr::Record { ty: Some(tn), .. } = init {
+                if let PatternKind::Variable(name) = &pat.kind {
+                    if let Expr::Record { ty: Some(tn), .. } = init.unlocated() {
                         self.var_type_names.insert(name.clone(), tn.clone());
-                    } else if let Expr::Call(callee, _) = init {
-                        if let Expr::Field(obj, method_name) = callee.as_ref() {
+                    } else if let Expr::Call(callee, _) = init.unlocated() {
+                        if let Expr::Field(obj, method_name) = callee.unlocated() {
                             if method_name == "spawn" || method_name == "spawn_detached" {
                                 let obj_type = self.infer_object_type(obj, vars);
                                 if !obj_type.is_empty() {
@@ -876,7 +872,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             } else if method_name == "upgrade" {
                                 self.track_weak_upgrade_type(name, obj);
                             }
-                        } else if let Expr::Ident(func_name) = callee.as_ref() {
+                        } else if let Expr::Ident(func_name) = callee.unlocated() {
                             match func_name.as_str() {
                                 "Ok" | "Err" => {
                                     self.var_type_names
@@ -897,7 +893,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                     } else if let Some(fdef) = self.func_defs.get(func_name) {
                                         if let Some(ret_ty) = &fdef.ret {
-                                            match ret_ty {
+                                            match ret_ty.unlocated() {
                                                 Type::ImplTrait(traits) => {
                                                     self.var_type_names.insert(
                                                         name.clone(),
@@ -927,12 +923,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 // Track the "any" type for tuple elements from map_get
-                if let Pattern::Tuple(elements) = pat {
-                    if let Expr::Call(callee, _) = init {
-                        if let Expr::Ident(func_name) = callee.as_ref() {
+                if let PatternKind::Tuple(elements) = &pat.kind {
+                    if let Expr::Call(callee, _) = init.unlocated() {
+                        if let Expr::Ident(func_name) = callee.unlocated() {
                             if func_name == "map_get" && elements.len() == 2 {
                                 // map_get returns (bool, any); mark the second element as "any"
-                                if let Pattern::Variable(name) = &elements[1] {
+                                if let PatternKind::Variable(name) = &elements[1].kind {
                                     self.var_type_names.insert(name.clone(), "any".to_string());
                                 }
                             }
@@ -940,7 +936,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 // Track list element type for nested List<List<T>> indexing
-                if let Pattern::Variable(name) = pat {
+                if let PatternKind::Variable(name) = &pat.kind {
                     if let Some(decl_ty) = &ty {
                         self.register_list_elem_type(name, decl_ty);
                     }
@@ -1308,7 +1304,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         //
         // For now: if the object is `self`, we can call the method directly
         // using the self pointer we already have.
-        if let Expr::Ident(name) = obj {
+        if let Expr::Ident(name) = obj.unlocated() {
             if name == "self" {
                 // Direct call on self — call the method function directly.
                 let mangled = format!("{}__{}__method", obj_type, method_name);
@@ -1534,7 +1530,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("bitcast error: {}", e)))?
             .into_pointer_value();
 
-        let result_val: BasicValueEnum<'ctx> = match &method_ret_ty {
+        let result_val: BasicValueEnum<'ctx> = match method_ret_ty.as_ref().map(Type::unlocated) {
             Some(crate::ast::Type::Name(n, _)) if n == "f64" => {
                 self.build_load(self.context.f64_type(), result_cast, "result_f64")?
             }

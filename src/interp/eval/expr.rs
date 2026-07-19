@@ -79,16 +79,16 @@ impl<'a> Interpreter<'a> {
             },
             UnOp::Not => Ok(Value::Bool(!is_truthy(&v))),
             UnOp::Ref => {
-                if let Expr::Index(obj_expr, idx_expr) = e {
-                    if let Expr::Ident(owner) = obj_expr.as_ref() {
+                if let Expr::Index(obj_expr, idx_expr) = e.unlocated() {
+                    if let Expr::Ident(owner) = obj_expr.unlocated() {
                         return self.eval_borrowed_index(obj_expr, idx_expr, owner, false);
                     }
                 }
                 Ok(Value::Ref(Arc::new(RwLock::new(v))))
             }
             UnOp::RefMut => {
-                if let Expr::Index(obj_expr, idx_expr) = e {
-                    if let Expr::Ident(owner) = obj_expr.as_ref() {
+                if let Expr::Index(obj_expr, idx_expr) = e.unlocated() {
+                    if let Expr::Ident(owner) = obj_expr.unlocated() {
                         return self.eval_borrowed_index(obj_expr, idx_expr, owner, true);
                     }
                 }
@@ -426,15 +426,17 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, InterpError> {
         // Handle named args by resolving them to positional order.
         // If the call has named args, reorder before evaluating.
-        let has_named = args.iter().any(|a| matches!(a, Expr::NamedArg(_, _)));
+        let has_named = args
+            .iter()
+            .any(|a| matches!(a.unlocated(), Expr::NamedArg(_, _)));
         if has_named {
-            if let Expr::Ident(name) = callee {
+            if let Expr::Ident(name) = callee.unlocated() {
                 if let Some(f) = self.find_function(name) {
                     let mut ordered_exprs: Vec<Expr> = Vec::new();
                     let mut dest_idx = 0;
                     // Process positional args
                     for arg in args {
-                        match arg {
+                        match arg.unlocated() {
                             Expr::NamedArg(n, val) => {
                                 // Find position in params
                                 if let Some(pos) = f.params.iter().position(|p| p.name == *n) {
@@ -460,7 +462,7 @@ impl<'a> Interpreter<'a> {
                     // Fill in defaults
                     for (i, p) in f.params.iter().enumerate() {
                         if i >= ordered_exprs.len()
-                            || matches!(ordered_exprs[i], Expr::Literal(Lit::Unit))
+                            || matches!(ordered_exprs[i].unlocated(), Expr::Literal(Lit::Unit))
                         {
                             if let Some(ref default_expr) = p.default_value {
                                 if i >= ordered_exprs.len() {
@@ -476,14 +478,14 @@ impl<'a> Interpreter<'a> {
                     let vals = vals?;
                     return self.eval_call_dispatch(callee, &vals, args);
                 }
-            } else if let Expr::Field(obj, method) = callee {
+            } else if let Expr::Field(obj, method) = callee.unlocated() {
                 // Named args on method calls: resolve method params from actor
                 // methods (or bare functions) when possible.
                 if let Some(f) = self.find_method_def(obj, method) {
                     let mut ordered_exprs: Vec<Expr> = Vec::new();
                     let mut dest_idx = 0;
                     for arg in args {
-                        match arg {
+                        match arg.unlocated() {
                             Expr::NamedArg(n, val) => {
                                 if let Some(pos) = f.params.iter().position(|p| p.name == *n) {
                                     while ordered_exprs.len() <= pos {
@@ -506,7 +508,7 @@ impl<'a> Interpreter<'a> {
                     }
                     for (i, p) in f.params.iter().enumerate() {
                         if i >= ordered_exprs.len()
-                            || matches!(ordered_exprs[i], Expr::Literal(Lit::Unit))
+                            || matches!(ordered_exprs[i].unlocated(), Expr::Literal(Lit::Unit))
                         {
                             if let Some(ref default_expr) = p.default_value {
                                 if i >= ordered_exprs.len() {
@@ -538,7 +540,7 @@ impl<'a> Interpreter<'a> {
                 return Some(f);
             }
         }
-        if let Expr::Ident(name) = obj {
+        if let Expr::Ident(name) = obj.unlocated() {
             // Actor type name as static call: Counter.spawn is not a method with args.
             if let Some(actor) = self.find_actor(name) {
                 if let Some(m) = actor.methods.iter().find(|m| m.name == method) {
@@ -575,7 +577,7 @@ impl<'a> Interpreter<'a> {
                 .and_then(|function| function.params.get(param_index).map(|p| p.name.clone()));
             let target = args
                 .iter()
-                .find_map(|arg| match arg {
+                .find_map(|arg| match arg.unlocated() {
                     Expr::NamedArg(param_name, value_expr)
                         if named_param.as_deref() == Some(param_name) =>
                     {
@@ -585,11 +587,13 @@ impl<'a> Interpreter<'a> {
                 })
                 .or_else(|| {
                     args.iter()
-                        .filter(|arg| !matches!(arg, Expr::NamedArg(_, _)))
+                        .filter(|arg| !matches!(arg.unlocated(), Expr::NamedArg(_, _)))
                         .nth(param_index)
                 });
-            if let Some(Expr::Ident(var_name)) = target {
-                self.force_update(var_name, value);
+            if let Some(target) = target {
+                if let Expr::Ident(var_name) = target.unlocated() {
+                    self.force_update(var_name, value);
+                }
             }
         }
     }
@@ -602,7 +606,7 @@ impl<'a> Interpreter<'a> {
         args: &[Expr],
     ) -> Result<Value, InterpError> {
         let vals = vals.to_vec();
-        match callee {
+        match callee.unlocated() {
             Expr::Ident(name) => {
                 let result = self.call_named(name, vals)?;
                 // `mutate` parameters use a reference ABI in codegen. The
@@ -613,7 +617,7 @@ impl<'a> Interpreter<'a> {
                 // Returning Unit prevents push from leaking as a block value.
                 if name == "push" && !args.is_empty() {
                     if let Value::List(_) = &result {
-                        match &args[0] {
+                        match args[0].unlocated() {
                             // Case 1: push(var, val) — assign result back to var.
                             // push mutates the list in place in the codegen
                             // backend regardless of `mut`. The interpreter must
@@ -626,7 +630,7 @@ impl<'a> Interpreter<'a> {
                             }
                             // Case 2: push(self.field, val) — update actor field
                             Expr::Field(obj_expr, field_name) => {
-                                if let Expr::Ident(obj_name) = obj_expr.as_ref() {
+                                if let Expr::Ident(obj_name) = obj_expr.unlocated() {
                                     if obj_name == "self" {
                                         if let Some(Value::Actor(handle)) = self.lookup("self") {
                                             let mut inner = handle
@@ -648,7 +652,7 @@ impl<'a> Interpreter<'a> {
             Expr::Field(obj, method) => {
                 // Handle Type.spawn() - actor constructor
                 if method == "spawn" {
-                    if let Expr::Ident(type_name) = obj.as_ref() {
+                    if let Expr::Ident(type_name) = obj.unlocated() {
                         // Check if this is an actor type
                         if self.find_actor(type_name).is_some() {
                             return self.spawn_actor(type_name);
@@ -657,7 +661,7 @@ impl<'a> Interpreter<'a> {
                 }
                 // v0.29.37: Handle Type.spawn_detached() - detached actor constructor
                 if method == "spawn_detached" {
-                    if let Expr::Ident(type_name) = obj.as_ref() {
+                    if let Expr::Ident(type_name) = obj.unlocated() {
                         if self.find_actor(type_name).is_some() {
                             return self.spawn_detached_actor(type_name);
                         }
@@ -668,7 +672,7 @@ impl<'a> Interpreter<'a> {
                 // remaining args are the transition's event parameters.
                 // Overloads are distinguished by from_state (first arg type name).
                 // Prefer CheckedProgram transition table when present (TOOL-RESOLUTION-001).
-                if let Expr::Ident(flow_name) = obj.as_ref() {
+                if let Expr::Ident(flow_name) = obj.unlocated() {
                     if let Some(flow) = self.find_flow(flow_name) {
                         let from_name = vals.first().and_then(|v| match v {
                             Value::Record(Some(n), _) => Some(n.as_str()),
@@ -719,7 +723,7 @@ impl<'a> Interpreter<'a> {
                 // that value. This prevents module-import fallbacks from shadowing
                 // actor/record method calls (e.g. prelude `increment` shadowing
                 // `c.increment()` on an actor instance).
-                if let Expr::Ident(name) = obj.as_ref() {
+                if let Expr::Ident(name) = obj.unlocated() {
                     if self.lookup(name).is_some() {
                         let obj_val = self.eval_expr(obj)?;
                         return self.call_method(&obj_val, method, vals);
@@ -734,7 +738,7 @@ impl<'a> Interpreter<'a> {
                 // P1-16: Fallback for flattened module imports — try bare function name.
                 // When merge_all flattens imported module items, csv::parse is stored
                 // as "parse" (not "csv::parse") in the function index.
-                if let Expr::Ident(_module_name) = obj.as_ref() {
+                if let Expr::Ident(_module_name) = obj.unlocated() {
                     if let Some(f) = self.find_function(method) {
                         return self.call_func(&f, vals);
                     }
@@ -919,7 +923,7 @@ impl<'a> Interpreter<'a> {
                 });
             }
             // Check if it's an enum variant constructor (e.g., Color::Red)
-            if let Expr::Ident(_type_name) = obj {
+            if let Expr::Ident(_type_name) = obj.unlocated() {
                 if let Some(&ctor_arity) = self.constructors.get(field) {
                     if ctor_arity == 0 {
                         // 0-arity variant: return the variant value directly
@@ -927,9 +931,16 @@ impl<'a> Interpreter<'a> {
                     } else {
                         // N-arity variant: return a closure that constructs it
                         let field_clone = field.to_string();
+                        let origin = AstOrigin::RuntimeSystem("runtime.variant_constructor");
+                        let callee = Expr::Ident(field_clone).synthetic_with_origin(origin);
+                        let args = (0..ctor_arity)
+                            .map(|i| Expr::Ident(format!("arg{}", i)).synthetic_with_origin(origin))
+                            .collect();
+                        let call = Expr::Call(Box::new(callee), args).synthetic_with_origin(origin);
                         return Ok(Value::Closure {
                             params: (0..ctor_arity)
                                 .map(|i| Param {
+                                    meta: AstNodeMeta::synthetic(origin),
                                     name: format!("arg{}", i),
                                     ty: Type::Name("unknown".into(), vec![]),
                                     mut_: false,
@@ -938,12 +949,7 @@ impl<'a> Interpreter<'a> {
                                 })
                                 .collect(),
                             ret: None,
-                            body: vec![Stmt::Return(Some(Expr::Call(
-                                Box::new(Expr::Ident(field_clone)),
-                                (0..ctor_arity)
-                                    .map(|i| Expr::Ident(format!("arg{}", i)))
-                                    .collect(),
-                            )))],
+                            body: vec![Stmt::Return(Some(call)).synthetic_with_origin(origin)],
                             captured: HashMap::new(),
                         });
                     }
@@ -951,7 +957,7 @@ impl<'a> Interpreter<'a> {
             }
         }
         // Special case: if accessing field on "self" identifier, look up field directly
-        if let Expr::Ident(name) = obj {
+        if let Expr::Ident(name) = obj.unlocated() {
             if name == "self" {
                 // Look up self from scope
                 if let Some(Value::Actor(handle)) = self.lookup("self") {
@@ -1377,8 +1383,8 @@ impl<'a> Interpreter<'a> {
 
     pub(in crate::interp) fn eval_spawn(&mut self, expr: &Expr) -> Result<Value, InterpError> {
         // Check for actor method spawn: `spawn actor.method(args)`
-        if let Expr::Call(callee, args) = expr {
-            if let Expr::Field(obj, method) = callee.as_ref() {
+        if let Expr::Call(callee, args) = expr.unlocated() {
+            if let Expr::Field(obj, method) = callee.unlocated() {
                 let obj_val = self.eval_expr(obj)?;
                 let method_name = method.clone();
                 let args_vals: Vec<Value> = args
@@ -1401,8 +1407,8 @@ impl<'a> Interpreter<'a> {
         // I-H5: non-actor `spawn expr` must not evaluate the body on the
         // caller thread before returning a Future. Prefer Deferred for
         // named function calls so await runs them via executor_run.
-        if let Expr::Call(callee, args) = expr {
-            if let Expr::Ident(name) = callee.as_ref() {
+        if let Expr::Call(callee, args) = expr.unlocated() {
+            if let Expr::Ident(name) = callee.unlocated() {
                 if let Some(func) = self.find_function(name) {
                     let args_vals: Vec<Value> = args
                         .iter()
@@ -1538,7 +1544,7 @@ impl<'a> Interpreter<'a> {
         let len = block.len();
         for (i, stmt) in block.iter().enumerate() {
             let is_last = i == len - 1;
-            match stmt {
+            match stmt.unlocated() {
                 Stmt::Expr(e) if is_last => {
                     result = self.eval_expr(e)?;
                 }
@@ -1585,7 +1591,7 @@ impl<'a> Interpreter<'a> {
         val: Value,
         target: &Type,
     ) -> Result<Value, InterpError> {
-        match target {
+        match target.unlocated() {
             Type::Name(name, type_args) => match name.as_str() {
                 "i32" | "i64" | "i8" | "i16" => match val {
                     Value::Int(n) => Ok(Value::Int(n)),

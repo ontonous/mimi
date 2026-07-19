@@ -12,7 +12,7 @@ use mimi::ffi;
 pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
     let source = mimi::path_safety::read_source_capped(path)?;
     let tokens = mimi::lexer::Lexer::new(&source).tokenize()?;
-    let file = mimi::parser::Parser::new(tokens).parse_file()?;
+    let file = mimi::loader::parser_for_path(tokens, path)?.parse_file()?;
     let checked = crate::emit::checked_component_input(&file)?;
 
     let mut extern_funcs = crate::emit::resolved_extern_funcs(&checked)?;
@@ -25,12 +25,21 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
 
     // Include exported functions as extern-like declarations
     for ef in &exported_funcs {
+        let adapter_meta = ast::AstNodeMeta::inherited(
+            ef.meta.span,
+            ast::AstOrigin::RuntimeSystem("bindgen.export_adapter"),
+        );
         let extern_func = ast::ExternFunc {
+            meta: adapter_meta,
             name: ef.name.clone(),
             params: ef
                 .params
                 .iter()
                 .map(|p| ast::ExternParam {
+                    meta: ast::AstNodeMeta::inherited(
+                        p.meta.span,
+                        ast::AstOrigin::RuntimeSystem("bindgen.export_param_adapter"),
+                    ),
                     name: p.name.clone(),
                     ty: p.ty.clone(),
                     cap_mode: None,

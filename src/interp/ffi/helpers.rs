@@ -189,9 +189,9 @@ pub(crate) fn compute_arg_free_mask(param_types: &[Type]) -> Vec<bool> {
     param_types
         .iter()
         .map(|pt| {
-            matches!(pt, Type::Name(n, _) if n == "string")
-                || matches!(pt, Type::RawString)
-                || matches!(pt, Type::CBuffer(_))
+            matches!(pt.unlocated(), Type::Name(n, _) if n == "string")
+                || matches!(pt.unlocated(), Type::RawString)
+                || matches!(pt.unlocated(), Type::CBuffer(_))
         })
         .collect()
 }
@@ -203,7 +203,7 @@ pub(crate) fn compute_arg_kinds(
     use crate::interp::ffi::callback::CallbackArgKind;
     param_types
         .iter()
-        .map(|pt| match pt {
+        .map(|pt| match pt.unlocated() {
             Type::Name(n, _) if n == "f64" || n == "f32" => CallbackArgKind::Float,
             Type::Name(n, _) if n == "string" => CallbackArgKind::CString,
             Type::RawString | Type::CBuffer(_) => CallbackArgKind::CString,

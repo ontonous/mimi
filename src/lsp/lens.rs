@@ -9,7 +9,7 @@ impl LspServer {
     /// Compute code lenses for a document: reference counts and verification status
     pub fn compute_code_lens(&self, text: &str, uri: &str) -> Vec<Value> {
         let mut lenses = Vec::new();
-        let file = match self.parse_with_recovery(text) {
+        let file = match self.parse_with_recovery_for_uri(text, Some(uri)) {
             Some(f) => f,
             None => return lenses,
         };
@@ -28,23 +28,22 @@ impl LspServer {
                     // Add verification status lens if function has contracts
                     let has_contracts = f.body.iter().any(|s| {
                         matches!(
-                            s,
+                            s.unlocated(),
                             Stmt::Requires(_, _) | Stmt::Ensures(_, _) | Stmt::Invariant(_, _)
                         )
                     });
                     if has_contracts {
                         let cache_key = format!("{}:{}", uri, f.name);
-                        let verify_title = if let Some((_, status, msg)) =
-                            self.verification_cache.get(&cache_key)
-                        {
-                            match status {
-                                VerifStatus::Verified => format!("✓ {}", msg),
-                                VerifStatus::Failed => format!("✗ {}", msg),
-                                VerifStatus::Unknown => format!("? {}", msg),
-                            }
-                        } else {
-                            "verify".to_string()
-                        };
+                        let verify_title =
+                            if let Some(entry) = self.verification_cache.get(&cache_key) {
+                                match &entry.status {
+                                    VerifStatus::Verified => format!("✓ {}", entry.message),
+                                    VerifStatus::Failed => format!("✗ {}", entry.message),
+                                    VerifStatus::Unknown => format!("? {}", entry.message),
+                                }
+                            } else {
+                                "verify".to_string()
+                            };
                         lenses.push(serde_json::json!({
                             "range": {
                                 "start": { "line": def_line, "character": 0 },

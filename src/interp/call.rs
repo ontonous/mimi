@@ -7,6 +7,9 @@ impl<'a> Interpreter<'a> {
         func: &FuncDef,
         args: Vec<Value>,
     ) -> Result<Value, InterpError> {
+        if let Some(error) = &self.derive_expansion_error {
+            return Err(error.clone());
+        }
         self.last_mutate_writebacks.clear();
         // Prefer CheckedProgram arity when installed and the function has no defaults.
         if let Some(map) = self.resolved_functions.as_ref() {
@@ -79,8 +82,11 @@ impl<'a> Interpreter<'a> {
         // and `ensures` may reference `old(...)`. Avoid cloning every arg
         // on the hot path when verify_contracts is off.
         let mut old_snapshots: HashMap<String, Value> = HashMap::new();
-        let need_old =
-            self.verify_contracts && func.body.iter().any(|s| matches!(s, Stmt::Ensures(_, _)));
+        let need_old = self.verify_contracts
+            && func
+                .body
+                .iter()
+                .any(|s| matches!(s.unlocated(), Stmt::Ensures(_, _)));
         for (p, a) in func.params.iter().zip(filled_args) {
             if need_old {
                 old_snapshots.insert(p.name.clone(), a.clone());
@@ -100,7 +106,7 @@ impl<'a> Interpreter<'a> {
         // Extract and check requires conditions
         if self.verify_contracts {
             for stmt in &func.body {
-                if let Stmt::Requires(expr, _) = stmt {
+                if let Stmt::Requires(expr, _) = stmt.unlocated() {
                     let cond = match self.eval_expr(expr) {
                         Ok(c) => c,
                         Err(e) => {
@@ -156,7 +162,7 @@ impl<'a> Interpreter<'a> {
                 }
                 let ensures_ok = (|| {
                     for stmt in &func.body {
-                        if let Stmt::Ensures(expr, _) = stmt {
+                        if let Stmt::Ensures(expr, _) = stmt.unlocated() {
                             let cond = self.eval_expr(expr)?;
                             if !is_truthy(&cond) {
                                 return Err(InterpError::contract_violation(format!(
@@ -200,6 +206,9 @@ impl<'a> Interpreter<'a> {
     }
 
     pub fn call_named(&mut self, name: &str, args: Vec<Value>) -> Result<Value, InterpError> {
+        if let Some(error) = &self.derive_expansion_error {
+            return Err(error.clone());
+        }
         // First check if the name is bound to a closure in the local scope
         if let Some(v) = self.lookup(name) {
             match v {

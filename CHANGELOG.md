@@ -12,6 +12,25 @@
 
 > 当前 `CheckedProgram` 仍持有 Surface AST，consumer 尚未完整迁移到 Typed Resolved IR；`TOOL-RESOLUTION-001` 保持 partial。
 
+### v0.31.1-dev — Span / Origin
+
+- `SourceId` 明确为编译会话内的紧凑索引，稳定身份由规范化 `SourceKey` 承担；registry union/remap 事务化检测 path/URI 身份冲突，`ModuleLoader` 跨缓存命中持久保存来源表，workspace/package/stdlib/prelude/LSP buffer 均拥有显式身份。
+- lexer token 使用精确半开区间终点（含转义、多行与 `>>` 拆分）；parser 将 source-aware `AstNodeMeta { span, origin }` 写入 statement、expression、pattern、type、session、全部顶层声明及 param/field/variant/arm 等声明子节点。
+- `Type::Located` 与 `SessionType::Located` 的语义相等忽略 metadata；checker、interpreter、codegen、verifier、FFI 与 LSP 的生产匹配统一先取 `unlocated()`，避免位置包装造成静默语义失配。
+- loader 对磁盘、缓存、module merge 与内存 AST 递归 remap 所有 metadata；无 registry 但已有精确行列的单源内存 AST 在注册 Memory source 后回填 SourceId，不再遗失来源。
+- `AstOrigin` 的 generated 变体持久化固定 lowering rule；渐进式 Main、matrix fallback、Fault/reset/recover/peer_fault、FFI pinned 与 desugaring 直接写入来源规则，不再由 Resolved IR 按节点名字或行为标志猜测。
+- generated declaration 的 Field/Param/Type metadata 深层重标并继承触发构造的 source anchor；继承范围标为 `SourceAnchor`，不会伪装成 generated syntax 的 `Exact` span。
+- 唯一 `NodeIdBuilder` 使用 qualified declaration identity，用户匿名节点使用稳定 `SourceKey + 半开 span + kind`，generated 节点使用 `parent + rule + semantic role`；metadata/call-site walker 共用同一 builder，生产 ID 不再依赖 `stmt/arg/item/arm/field` Vec index。
+- NodeMeta catalog 覆盖 named item、Flow/state/transition、actor/impl/trait/extern/protocol/session 子声明、Type、record field、match arm 与 callable body；重复 ID 结构化报错，Origin catalog 验证 parent 存在、非 self、rule 非空、无环且最终落到 User。
+- ownership ledger 的 function/actor/impl/nested/transition owner 使用 canonical callable NodeId，并在 `CheckedProgram` 边界验证 owner 确实属于 callable catalog。
+- checker 从当前 Item/Stmt/Expr/Pattern/Type metadata 维护 source-aware 诊断上下文；ownership action/branch merge 同步保存真实 span，跨依赖文件的相同消息不再被错误去重。
+- verifier 的普通/FFI callee 前置条件指向真实 call expression，extern 合约指向 extern function；verification cache 保存结构化 span/origin，命中前后位置一致。
+- LSP parse cache 按 URI 隔离同文本 buffer，将 registry 回写 parser，并按 `SourceId -> canonical URI` 分组发布多文件诊断；未知来源保持 global/不发布，不再猜测为活动主文件。
+- 未知 attribute/repr/derive 默认 fail-closed；空 derive、未实现的 `Copy`/`Default` 与不适用声明均给 source-aware 错误，已实现的 `Debug`/`Clone`/`Eq`、`repr(C/transparent)` 与 extern `no_panic` 保留。
+- HM unification 的前置健全性修复具备失败原子性；复合统一后段失败回滚前段绑定，同一推断变量自统一为恒等成功。
+
+> `Span::UNKNOWN` 仅保留给无源码的 global/synthetic 或手工 legacy AST；生产 LSP 不会为这些节点伪造 URI 或 `(1,1)` 位置。
+
 ### v0.31.3-dev — CFG / ownership ledger（首个垂直切片）
 
 - `CheckedProgram` 持久化 per-callable 线性 `cap` 的 Introduce/Move/Drop/Return 动作与 branch merge 状态。

@@ -787,7 +787,7 @@ impl ActorHandle {
                         let mut contract_err = None;
                         if interp.verify_contracts {
                             for stmt in &func.body {
-                                if let Stmt::Requires(expr, _) = stmt {
+                                if let Stmt::Requires(expr, _) = stmt.unlocated() {
                                     match interp.eval_expr(expr) {
                                         Ok(cond)
                                             if !crate::interp::value::is_truthy(&cond) =>
@@ -829,7 +829,7 @@ impl ActorHandle {
                                 Ok(ref rv) => {
                                     let mut ens_err = None;
                                     for stmt in &func.body {
-                                        if let Stmt::Ensures(expr, _) = stmt {
+                                        if let Stmt::Ensures(expr, _) = stmt.unlocated() {
                                             if let Err(e) = interp.bind("result", rv.clone()) {
                                                 ens_err = Some(e);
                                                 break;
@@ -891,11 +891,7 @@ impl ActorHandle {
         // after actors drop without short_circuit_mailbox.
         if let Ok(mut map) = actor_handles().lock() {
             map.retain(|_, e| e.upgrade().is_some());
-            let parent_id = handle
-                .inner
-                .read()
-                .ok()
-                .and_then(|actor| actor.parent_id);
+            let parent_id = handle.inner.read().ok().and_then(|actor| actor.parent_id);
             let parent_live = parent_id.map_or(true, |parent_id| map.contains_key(&parent_id));
             if parent_live {
                 map.insert(id, WeakActorEntry::from_handle(&handle));
