@@ -6909,6 +6909,14 @@ fn build_canonical_function_signatures(
             if let Some(primitive) = crate::core::ResolvedTypeName::primitive(name) {
                 return Some(primitive);
             }
+            let flow_qualified = format!("{}::{name}", transition.id.flow.0);
+            if let Some(candidates) = nominal_catalog.get(&flow_qualified) {
+                if candidates.len() == 1 {
+                    return crate::core::NominalTypeId::new(candidates.iter().next()?.clone())
+                        .ok()
+                        .map(crate::core::ResolvedTypeName::Nominal);
+                }
+            }
             if let Some(module) = module {
                 let qualified = format!("{module}::{name}");
                 if let Some(candidates) = nominal_catalog.get(&qualified) {
@@ -7033,6 +7041,98 @@ fn build_canonical_function_signatures(
                 continue;
             }
         };
+        if let Some(expressions) = expression_types.get(&transition.node_id) {
+            for (node_id, ty) in expressions {
+                match types.intern_zonked(ty, &capabilities, &mut resolve_name) {
+                    Ok(ty) => {
+                        node_types.insert(node_id.clone(), ty);
+                    }
+                    Err(error) => errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: transition expression '{}' type is not canonical: {error}",
+                            node_id.0
+                        ),
+                        program
+                            .node_meta
+                            .get(node_id)
+                            .map(|meta| meta.origin.user_span())
+                            .unwrap_or(transition.span),
+                    )),
+                }
+                if let Some(type_operand) = program
+                    .node_meta
+                    .get(node_id)
+                    .and_then(|meta| meta.type_operand.as_ref())
+                {
+                    match ZonkedTy::from_resolved(type_operand.clone()) {
+                        Ok(operand) => match types.intern_zonked(
+                            &operand,
+                            &capabilities,
+                            &mut resolve_name,
+                        ) {
+                            Ok(operand) => {
+                                type_operands.insert(node_id.clone(), operand);
+                            }
+                            Err(error) => errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: transition type operand '{}' is not canonical: {error}",
+                                    node_id.0
+                                ),
+                                program.node_meta[node_id].origin.user_span(),
+                            )),
+                        },
+                        Err(error) => errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: transition type operand '{}' is not zonked: {error}",
+                                node_id.0
+                            ),
+                            program.node_meta[node_id].origin.user_span(),
+                        )),
+                    }
+                }
+                if let Some(arguments) = program
+                    .node_meta
+                    .get(node_id)
+                    .map(|meta| meta.type_arguments.as_slice())
+                    .filter(|arguments| !arguments.is_empty())
+                {
+                    let mut canonical = Vec::with_capacity(arguments.len());
+                    let mut failed = false;
+                    for argument in arguments {
+                        let zonked = match ZonkedTy::from_resolved(argument.clone()) {
+                            Ok(argument) => argument,
+                            Err(error) => {
+                                errors.push(Diagnostic::error(
+                                    format!(
+                                        "TOOL-RESOLUTION-001: transition generic argument at '{}' is not zonked: {error}",
+                                        node_id.0
+                                    ),
+                                    program.node_meta[node_id].origin.user_span(),
+                                ));
+                                failed = true;
+                                continue;
+                            }
+                        };
+                        match types.intern_zonked(&zonked, &capabilities, &mut resolve_name) {
+                            Ok(argument) => canonical.push(argument),
+                            Err(error) => {
+                                errors.push(Diagnostic::error(
+                                    format!(
+                                        "TOOL-RESOLUTION-001: transition generic argument at '{}' is not canonical: {error}",
+                                        node_id.0
+                                    ),
+                                    program.node_meta[node_id].origin.user_span(),
+                                ));
+                                failed = true;
+                            }
+                        }
+                    }
+                    if !failed {
+                        type_arguments.insert(node_id.clone(), canonical);
+                    }
+                }
+            }
+        }
         let signature = crate::core::ResolvedSignature {
             owner: transition.node_id.clone(),
             generic_parameters: Vec::new(),
