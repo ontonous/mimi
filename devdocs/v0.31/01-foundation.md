@@ -19,7 +19,7 @@
 ## 当前进度
 
 - **0.31.2 已收口**：canonical unification、binder-aware traversal、mandatory zonk、泛型 fresh instantiate 与 zonked function artifacts 已通过聚焦门禁；raw-body consumer 迁移按路线留给 0.31.4–0.31.5。
-- **0.31.3 进行中**：capability action/branch merge/loop back-edge ledger 已具备；borrow start/end place、复合 capability return/drop 与双后端 MCDD 已接入。固定点 CFG、nested place overlap 与完整 native reference ABI 仍未完成。
+- **0.31.3 实现完成、门禁待清零**：所有 callable 均持久化 stable-ID CFG；ownership 使用 reachable-predecessor fixed point，borrow 使用独立 LoanId、CFG liveness end edge 与结构化 Place overlap。nested field/tuple/constant/dynamic-index 引用已通过 interpreter/native ABI 回归，`ownership_cfg.mimi` 覆盖 branch、terminal、nested place 与循环内 loan。legacy `OwnershipLedger` 仍作为 canonical action extraction 的兼容投影，完整 typed-body consumer 迁移按边界留给 0.31.4–0.31.5。当前 real-world/Z3/focused 门禁已绿，但全量仍有独立 codegen/JSON/verifier 失败且 Clippy 1.93 基线未清，因此暂不升版 0.31.4-dev。
 
 ## 不变量
 
