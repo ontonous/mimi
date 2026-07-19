@@ -191,14 +191,14 @@ The pre-1.0 design requires:
 
 *[source: devdocs/pre-1.0/05-rc-migration-and-gates.md §2 Phase 2]*
 
-The normative requirement `TOOL-RESOLUTION-001` requires a typed resolved IR layer between checker and backends. This snapshot records that it is **not yet implemented**; the target semantics remain authoritative in the language specification.
+The normative requirement `TOOL-RESOLUTION-001` requires a typed resolved IR layer between checker and backends. The current implementation is partial: declaration catalogs and finalized function signatures exist, while body-level calls, conversions, effects, Session residuals, and general resource facts are not yet fully typed. The target semantics remain authoritative in the language specification.
 
 ### 4.1 Current State
 
-- Transition ID: string concatenation `{flow_name}__{transition}__from_{from_state}` (`src/codegen/compile.rs:267`) — not a resolved numeric ID
-- Effect set: raw `Vec<String>` (`ast.rs:148`) — not a resolved effect set
-- Session residual: checker-internal map (`src/core/checker.rs:93`) — not persisted in IR
-- Resource move/drop: not tracked in IR
+- Function/Flow/state/transition declarations use canonical, module-qualified `NodeId`/`FlowId`/`StateId`/`TransitionId`; process-local dense numeric IDs are not yet materialized.
+- Checker unification produces fail-closed `ZonkedTy` function signatures, persisted by `CheckedProgram` under canonical function `NodeId`; body expression types and checked conversions remain incomplete.
+- Effect names and declared Session bodies are persisted in resolved directories, but effect capability resolution and per-local Session residuals remain checker-internal.
+- Capability Introduce/Move/Drop/Return summaries are persisted per callable; general place/resource/loan identity awaits the CFG/ownership milestones.
 
 ### 4.2 Target State
 

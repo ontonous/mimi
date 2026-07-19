@@ -1,0 +1,50 @@
+// v0.31.2 MCDD: HM instantiation and canonical unification.
+// Every generic binder is fresh per call, while repeated occurrences inside
+// one call must resolve to exactly one concrete type.
+
+func identity<T>(value: T) -> T {
+    value
+}
+
+func choose<T>(condition: bool, left: T, right: T) -> T {
+    if condition {
+        left
+    } else {
+        right
+    }
+}
+
+func pair<A, B>(left: A, right: B) -> (A, B) {
+    (left, right)
+}
+
+func singleton<T>(value: T) -> List<T> {
+    [value]
+}
+
+func apply<T, U>(value: T, mapper: func(T) -> U) -> U {
+    mapper(value)
+}
+
+func increment(value: i32) -> i32 {
+    value + 1
+}
+
+func main() -> i32 {
+    // Two calls to the same scheme must instantiate independently.
+    let number = identity(41)
+    let offset = identity(1)
+
+    // Repeated T positions constrain both arguments through one TypeVar.
+    let selected = choose(true, number, 99)
+
+    // Nested constructors and multiple binders exercise the TypeFolder path.
+    let values = singleton(selected)
+    let product = pair(values[0], offset)
+
+    // Higher-order parameters constrain T and U from different arguments.
+    let mapped = apply(product.0 + product.1, increment)
+
+    println(mapped)
+    0
+}

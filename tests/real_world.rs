@@ -40,7 +40,8 @@ fn project_root() -> PathBuf {
 }
 
 fn can_link() -> bool {
-    Command::new("cc").arg("--version").output().is_ok()
+    static CAN_LINK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CAN_LINK.get_or_init(|| Command::new("cc").arg("--version").output().is_ok())
 }
 
 /// Strip the trailing `-> N` return-value line that `mimi run` prints.

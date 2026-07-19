@@ -23,10 +23,7 @@ proptest::proptest! {
 }
 
 fn can_link() -> bool {
-    std::process::Command::new("cc")
-        .arg("--version")
-        .output()
-        .is_ok()
+    crate::tests::can_link()
 }
 
 /// Codegen edge-case tests (require `cc` for linking).

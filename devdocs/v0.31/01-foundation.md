@@ -16,6 +16,10 @@
 - **0.31.28 MimiSpec parser 自举**：Mimi 与 Rust oracle AST 差分 100%。
 - **0.31.29 HM 自举**：Mimi 与 Rust inference/unification 差分 100%。
 
+## 当前进度
+
+- **0.31.2 已收口**：canonical unification、binder-aware traversal、mandatory zonk、泛型 fresh instantiate 与 zonked function artifacts 已通过聚焦门禁；raw-body consumer 迁移按路线留给 0.31.4–0.31.5。
+
 ## 不变量
 
 - Canonical ID 不依赖声明顺序或 Vec index。

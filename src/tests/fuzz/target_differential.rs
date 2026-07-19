@@ -10,10 +10,26 @@
 //! - Codegen:     `func main() -> i32 { BODY; println(RESULT); 0 }`
 //!   Then compares interp Value Display with codegen stdout.
 //!
-//! Run: `PROPTEST_CASES=1000 cargo test fuzz::target_differential -- --nocapture --include-ignored`
+//! Normal `cargo test` runs a small smoke sample because every case invokes
+//! LLVM object generation, the system linker, and a child executable.
+//!
+//! Extended fuzz run:
+//! `PROPTEST_CASES=1000 cargo test fuzz::target_differential -- --nocapture`
 
 use crate::tests::{compile_and_run, run_source};
 use proptest::prelude::*;
+
+const DIFFERENTIAL_SMOKE_CASES: u32 = 8;
+
+/// Keep the default suite fast while preserving proptest's standard
+/// `PROPTEST_CASES` override for dedicated fuzz runs.
+fn differential_config() -> ProptestConfig {
+    let mut config = ProptestConfig::default();
+    if std::env::var_os("PROPTEST_CASES").is_none() {
+        config.cases = DIFFERENTIAL_SMOKE_CASES;
+    }
+    config
+}
 
 // ─── General-purpose assertion helpers ───────────────────────────
 
@@ -383,6 +399,8 @@ fn arb_closure_record_match() -> impl Strategy<Value = String> {
 // ─── Proptest targets ────────────────────────────────────────────
 
 proptest! {
+    #![proptest_config(differential_config())]
+
     // Integer arithmetic
     #[test]
     fn differential_int(expr in arb_int_expr()) {

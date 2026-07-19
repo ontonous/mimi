@@ -341,10 +341,7 @@ fn adv_nested_block_deep() {
 
 #[allow(dead_code)]
 fn can_link() -> bool {
-    std::process::Command::new("cc")
-        .arg("--version")
-        .output()
-        .is_ok()
+    crate::tests::can_link()
 }
 
 // ===================== Previously Missing Codegen: Tuple/If-Expr/Range/Slice/Lambda/Comprehension =====================

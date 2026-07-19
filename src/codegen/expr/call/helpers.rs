@@ -492,7 +492,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[Expr],
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let var_name = match &args[0] {
+        let var_name = match args[0].unlocated() {
             Expr::Ident(n) => n.clone(),
             _ => return Err("keys/values: argument must be a variable name".into()),
         };
@@ -693,7 +693,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ret_type: Option<Box<Type>>,
             },
         }
-        let fn_ref = match &args[1] {
+        let fn_ref = match args[1].unlocated() {
             Expr::Ident(n) => {
                 let f = self
                     .module
@@ -1109,7 +1109,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 inkwell::values::PointerValue<'ctx>,
             ),
         }
-        let callee = match &args[1] {
+        let callee = match args[1].unlocated() {
             Expr::Ident(n) => ReduceCallee::Direct(
                 self.module
                     .get_function(n)

@@ -1,5 +1,4 @@
 use crate::ast::*;
-use crate::core::helpers::*;
 use std::collections::HashMap;
 
 use super::Checker;
@@ -50,115 +49,33 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Check if a type variable name occurs within a type (occurs check).
-    /// Prevents infinite types like `T = List<T>`.
-    pub(crate) fn occurs_check(name: &str, ty: &Type) -> bool {
-        match ty.unlocated() {
-            Type::Name(n, args) => n == name || args.iter().any(|a| Self::occurs_check(name, a)),
-            Type::Ref(_, inner) | Type::RefMut(_, inner) => Self::occurs_check(name, inner),
-            Type::Option(inner) => Self::occurs_check(name, inner),
-            Type::Result(ok, err) => Self::occurs_check(name, ok) || Self::occurs_check(name, err),
-            Type::Tuple(elems) => elems.iter().any(|e| Self::occurs_check(name, e)),
-            Type::Func(args, ret) => {
-                args.iter().any(|a| Self::occurs_check(name, a)) || Self::occurs_check(name, ret)
-            }
-            Type::Shared(inner)
-            | Type::LocalShared(inner)
-            | Type::Weak(inner)
-            | Type::WeakLocal(inner) => Self::occurs_check(name, inner),
-            Type::Newtype(_, inner) => Self::occurs_check(name, inner),
-            Type::Array(inner, _) | Type::Slice(inner) => Self::occurs_check(name, inner),
-            Type::ExternFunc(args, ret) => {
-                args.iter().any(|a| Self::occurs_check(name, a)) || Self::occurs_check(name, ret)
-            }
-            Type::CBuffer(inner)
-            | Type::RawPtr(inner)
-            | Type::RawPtrMut(inner)
-            | Type::CShared(inner)
-            | Type::CBorrow(inner)
-            | Type::CBorrowMut(inner) => Self::occurs_check(name, inner),
-            _ => false,
-        }
-    }
-
-    /// Infer type parameter bindings from a parameter type and actual argument type
-    pub(crate) fn infer_type_params(
-        &self,
-        param: &Type,
-        actual: &Type,
+    /// Instantiate a surface generic signature with one fresh inference variable
+    /// per binder. Repeated occurrences share the same variable and therefore
+    /// cannot take the old first-wins path.
+    pub(crate) fn instantiate_generic_signature(
+        &mut self,
+        params: &[Type],
+        ret: &Type,
         generics: &[GenericParam],
-        type_map: &mut HashMap<String, Type>,
-    ) {
-        match param.unlocated() {
-            // CK-C6: type-param arm must come first; the concrete Name arm below
-            // must not re-check is_type_param (that branch was dead).
-            Type::Name(name, _) if is_type_param(name, generics) => {
-                if !Self::occurs_check(name, actual) {
-                    type_map
-                        .entry(name.clone())
-                        .or_insert_with(|| actual.clone());
-                }
-            }
-            Type::Name(name, p_args) if !p_args.is_empty() => {
-                match actual.unlocated() {
-                    Type::Name(_, a_args) if p_args.len() == a_args.len() => {
-                        for (pa, aa) in p_args.iter().zip(a_args.iter()) {
-                            self.infer_type_params(pa, aa, generics, type_map);
-                        }
-                    }
-                    // Dual representation: Name("Option", [T]) <-> Option(T)
-                    Type::Option(a_inner) if name == "Option" && p_args.len() == 1 => {
-                        self.infer_type_params(&p_args[0], a_inner, generics, type_map);
-                    }
-                    Type::Result(a_ok, a_err) if name == "Result" && p_args.len() == 2 => {
-                        self.infer_type_params(&p_args[0], a_ok, generics, type_map);
-                        self.infer_type_params(&p_args[1], a_err, generics, type_map);
-                    }
-                    _ => {}
-                }
-            }
-            Type::Name(_, _) => {}
-            Type::Option(p_inner) => {
-                match actual.unlocated() {
-                    Type::Option(a_inner) => {
-                        self.infer_type_params(p_inner, a_inner, generics, type_map)
-                    }
-                    // Dual representation: Option(T) <-> Name("Option", [T])
-                    Type::Name(n, args) if n == "Option" && args.len() == 1 => {
-                        self.infer_type_params(p_inner, &args[0], generics, type_map);
-                    }
-                    _ => {}
-                }
-            }
-            Type::Result(p_ok, p_err) => match actual.unlocated() {
-                Type::Result(a_ok, a_err) => {
-                    self.infer_type_params(p_ok, a_ok, generics, type_map);
-                    self.infer_type_params(p_err, a_err, generics, type_map);
-                }
-                Type::Name(n, args) if n == "Result" && args.len() == 2 => {
-                    self.infer_type_params(p_ok, &args[0], generics, type_map);
-                    self.infer_type_params(p_err, &args[1], generics, type_map);
-                }
-                _ => {}
-            },
-            Type::Tuple(p_elems) => {
-                if let Type::Tuple(a_elems) = actual.unlocated() {
-                    for (pe, ae) in p_elems.iter().zip(a_elems.iter()) {
-                        self.infer_type_params(pe, ae, generics, type_map);
-                    }
-                }
-            }
-            Type::Func(p_args, p_ret) => {
-                if let Type::Func(a_args, a_ret) = actual.unlocated() {
-                    if p_args.len() == a_args.len() {
-                        for (pa, aa) in p_args.iter().zip(a_args.iter()) {
-                            self.infer_type_params(pa, aa, generics, type_map);
-                        }
-                        self.infer_type_params(p_ret, a_ret, generics, type_map);
-                    }
-                }
-            }
-            _ => {}
-        }
+    ) -> (Vec<Type>, Type, HashMap<String, Type>) {
+        let substitutions: HashMap<String, Type> = generics
+            .iter()
+            .map(|generic| {
+                (
+                    generic.name.clone(),
+                    Type::TypeVar(self.unification.fresh_var()),
+                )
+            })
+            .collect();
+        let instantiate = |ty: &Type| {
+            let mut folder =
+                crate::core::type_folder::NamedSubstitutionFolder::new(substitutions.clone());
+            crate::core::type_folder::walk_type(ty.clone(), &mut folder)
+        };
+        (
+            params.iter().map(instantiate).collect(),
+            instantiate(ret),
+            substitutions,
+        )
     }
 }

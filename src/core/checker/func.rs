@@ -9,6 +9,13 @@ use super::Checker;
 impl<'a> Checker<'a> {
     pub(crate) fn check_func(&mut self, func: &FuncDef) {
         self.set_span(func.meta.span);
+        // Function generic binders remain in scope while checking local type
+        // annotations in the body (`let xs: List<T> = ...`). Declaration
+        // collection already establishes this scope for the signature; body
+        // checking must mirror it instead of treating `T` as an unknown type.
+        let generic_scope_len = self.generic_scope.len();
+        self.generic_scope
+            .extend(func.generics.iter().map(|generic| generic.name.clone()));
         let owner_name = if self.module_path.is_empty() {
             func.name.clone()
         } else {
@@ -171,6 +178,7 @@ impl<'a> Checker<'a> {
         self.cap_vars.pop();
         self.current_ret = None;
         self.current_ownership_owner = None;
+        self.generic_scope.truncate(generic_scope_len);
     }
 
     /// Check if a block returns on all paths

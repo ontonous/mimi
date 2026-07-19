@@ -114,6 +114,21 @@ use crate::{core, interp, lexer, parser};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 
+/// Probe the system linker once per test process.
+///
+/// Codegen and dual-backend tests call this guard hundreds of times. Spawning
+/// `cc --version` for every test adds avoidable process overhead and can
+/// amplify contention when the test harness runs in parallel.
+pub(crate) fn can_link() -> bool {
+    static CAN_LINK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CAN_LINK.get_or_init(|| {
+        std::process::Command::new("cc")
+            .arg("--version")
+            .output()
+            .is_ok()
+    })
+}
+
 /// Cache the compiled runtime static library across test cases.
 /// Returns path to a cached `.a` compiled from `standalone.rs`.
 /// The cache key is a hash of `standalone.rs` + `mod.rs` sources.

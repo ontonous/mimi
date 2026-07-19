@@ -6,6 +6,8 @@ pub(crate) use std::collections::HashMap;
 mod borrow;
 mod checker;
 pub(crate) mod helpers;
+pub mod phase;
+pub mod type_folder;
 pub mod unification;
 
 mod check_stmt;
@@ -41,13 +43,13 @@ pub fn check_strict(file: &File) -> Result<(), Vec<Diagnostic>> {
 }
 
 pub fn check_program(file: &File) -> Result<CheckedProgram<'_>, Vec<Diagnostic>> {
-    let ownership = checker::flow::flow_check_with_artifacts(file)?;
-    CheckedProgram::from_checked_file_with_ownership(file, ownership)
+    let acc = checker::flow::flow_check_with_artifacts(file)?;
+    CheckedProgram::from_flow_acc(file, acc)
 }
 
 pub fn check_program_strict(file: &File) -> Result<CheckedProgram<'_>, Vec<Diagnostic>> {
-    let ownership = checker::flow::flow_check_strict_with_artifacts(file)?;
-    CheckedProgram::from_checked_file_with_ownership(file, ownership)
+    let acc = checker::flow::flow_check_strict_with_artifacts(file)?;
+    CheckedProgram::from_flow_acc(file, acc)
 }
 
 /// Verify that MMS rule attachments are consistent.
