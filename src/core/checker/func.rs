@@ -164,11 +164,7 @@ impl<'a> Checker<'a> {
         }
         if let Some(stmt) = func.body.last() {
             if let Stmt::Expr(expr) = stmt.unlocated() {
-                if let Expr::Ident(name) = expr.unlocated() {
-                    if matches!(self.cap_info(name), Some(info) if !info.consumed) {
-                        self.consume_capability(name, crate::core::ResourceActionKind::Return);
-                    }
-                }
+                self.consume_capabilities_in_expr(expr, crate::core::ResourceActionKind::Return);
             }
         }
         // Check for unconsumed caps before popping

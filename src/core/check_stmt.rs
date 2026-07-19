@@ -855,17 +855,10 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                let returned = if let Expr::Ident(name) = e.unlocated() {
-                    if self.cap_info(name).is_some() {
-                        self.consume_capability(name, crate::core::ResourceActionKind::Return);
-                        Some(name.as_str())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                self.check_return_capabilities(returned);
+                // A return transfers every capability contained in the value,
+                // including tuples/records rather than only a bare identifier.
+                self.consume_capabilities_in_expr(e, crate::core::ResourceActionKind::Return);
+                self.check_return_capabilities(None);
             }
             Stmt::Break(_) => {
                 if self.loop_depth == 0 {
@@ -1478,10 +1471,9 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                // Mark the capability as consumed
-                if let Expr::Ident(name) = expr.unlocated() {
-                    self.consume_capability(name, crate::core::ResourceActionKind::Drop);
-                }
+                // Dropping an aggregate consumes all capabilities contained in
+                // it in deterministic expression order.
+                self.consume_capabilities_in_expr(expr, crate::core::ResourceActionKind::Drop);
             }
             Stmt::Requires(expr, _) => {
                 let ty = self.infer_expr(expr, scopes);

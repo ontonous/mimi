@@ -1,10 +1,17 @@
 # Mimi 真实代码可用性评估结果
 
-**评估时间**：2026-07-12  
-**Mimi 版本**：0.29.41-dev  
-**最后更新**：2026-07-12  
-**评估命令**：`python3 tests/real_world/run_suite.py` + flow dual-backend smoke  
+**评估时间**：2026-07-19
+**Mimi 版本**：0.31.3-dev
+**最后更新**：2026-07-19
+**评估命令**：`cargo test real_world_cli_suite -- --test-threads=1` + 定向双后端 smoke
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
+
+## v0.31.2 收口 / v0.31.3 启动门禁
+
+- Cargo 自动发现的 real-world 套件全绿；每个非 interpreter-only 程序均执行 `mimi run`、`mimi build`、native executable 与 stdout 等价检查。
+- `hm_core.mimi` 覆盖 canonical HM instantiate/constraint/zonk；`ownership_cfg.mimi` 覆盖 0.31.3 borrow place、NLL end 与 branch path MCDD。
+- `flow_test_macros.mimi` 的 `assert_state`/`inject_fault` 契约保持 interpreter-only，Cargo runner 与 Python runner 均显式跳过 native build。
+- 收口期间修复 nested-generic `>>` 导致 Flow parser 跳过下一 `pub`、generic body binder scope、lambda 尾 `if`、CheckedProgram bare-name method arity collision，以及 codegen intrinsic 未剥离 `Located`。
 
 ## Flow 范式 MCDD — 阶段二+三 (v0.29.9–0.29.41)
 

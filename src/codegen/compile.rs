@@ -277,15 +277,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ledger
                     .actions
                     .iter()
-                    .map(|action| {
-                        let kind = match action.kind {
-                            crate::core::ResourceActionKind::Introduce => "introduce",
-                            crate::core::ResourceActionKind::Move => "move",
-                            crate::core::ResourceActionKind::Drop => "drop",
-                            crate::core::ResourceActionKind::Return => "return",
-                        };
-                        (kind.to_string(), action.resource.clone())
-                    })
+                    .map(|action| (action.kind.as_str().to_string(), action.resource.clone()))
                     .collect(),
             );
             ownership_merges.insert(

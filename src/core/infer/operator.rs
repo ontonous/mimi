@@ -123,6 +123,7 @@ impl<'a> Checker<'a> {
                     }
                     _ => {}
                 }
+                self.record_borrow_action(crate::core::ResourceActionKind::BorrowShared, e);
                 Type::Ref(None, Box::new(t))
             }
             UnOp::RefMut => {
@@ -235,6 +236,7 @@ impl<'a> Checker<'a> {
                     }
                     _ => {}
                 }
+                self.record_borrow_action(crate::core::ResourceActionKind::BorrowMut, e);
                 Type::RefMut(None, Box::new(t))
             }
             UnOp::Deref => match t.unlocated() {

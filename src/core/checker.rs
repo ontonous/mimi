@@ -264,6 +264,29 @@ impl<'a> Checker<'a> {
         });
     }
 
+    /// Convert an assignable expression into the stable place spelling used by
+    /// the ownership ledger. Index projections are deliberately conservative:
+    /// the current checker loans the whole collection, so the ledger records
+    /// `[*]` instead of pretending to know element disjointness.
+    pub(crate) fn ownership_place(expr: &Expr) -> Option<String> {
+        match expr.unlocated() {
+            Expr::Ident(name) => Some(name.clone()),
+            Expr::Field(base, field) => Some(format!("{}.{}", Self::ownership_place(base)?, field)),
+            Expr::TupleIndex(base, index) => {
+                Some(format!("{}.{}", Self::ownership_place(base)?, index))
+            }
+            Expr::Index(base, _) => Some(format!("{}[*]", Self::ownership_place(base)?)),
+            Expr::Unary(UnOp::Deref, base) => Some(format!("*{}", Self::ownership_place(base)?)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn record_borrow_action(&mut self, kind: super::ResourceActionKind, place: &Expr) {
+        if let Some(place) = Self::ownership_place(place) {
+            self.record_resource_action(kind, &place);
+        }
+    }
+
     pub(crate) fn merge_capability_branches(
         &mut self,
         then_caps: &[HashMap<String, CapVarInfo>],
@@ -414,28 +437,30 @@ impl<'a> Checker<'a> {
         expr: &Expr,
         kind: super::ResourceActionKind,
     ) {
-        fn collect(expr: &Expr, names: &mut HashSet<String>) {
+        fn collect(expr: &Expr, names: &mut Vec<String>, seen: &mut HashSet<String>) {
             match expr.unlocated() {
                 Expr::Ident(name) => {
-                    names.insert(name.clone());
+                    if seen.insert(name.clone()) {
+                        names.push(name.clone());
+                    }
                 }
                 Expr::Tuple(values) | Expr::List(values) | Expr::SetLiteral(values) => {
                     for value in values {
-                        collect(value, names);
+                        collect(value, names, seen);
                     }
                 }
                 Expr::TupleIndex(value, _)
                 | Expr::Field(value, _)
                 | Expr::Unary(_, value)
                 | Expr::Cast(value, _)
-                | Expr::NamedArg(_, value) => collect(value, names),
+                | Expr::NamedArg(_, value) => collect(value, names, seen),
                 Expr::Index(value, index) => {
-                    collect(value, names);
-                    collect(index, names);
+                    collect(value, names, seen);
+                    collect(index, names, seen);
                 }
                 Expr::Record { fields, .. } => {
                     for field in fields {
-                        collect(&field.value, names);
+                        collect(&field.value, names, seen);
                     }
                 }
                 Expr::If { then_, else_, .. } => {
@@ -443,22 +468,23 @@ impl<'a> Checker<'a> {
                         if let Some(stmt) = block.last() {
                             if let Stmt::Expr(value) | Stmt::Return(Some(value)) = stmt.unlocated()
                             {
-                                collect(value, names);
+                                collect(value, names, seen);
                             }
                         }
                     }
                 }
                 Expr::Match(_, arms) => {
                     for arm in arms {
-                        collect(&arm.body, names);
+                        collect(&arm.body, names, seen);
                     }
                 }
                 _ => {}
             }
         }
 
-        let mut names = HashSet::new();
-        collect(expr, &mut names);
+        let mut names = Vec::new();
+        let mut seen = HashSet::new();
+        collect(expr, &mut names, &mut seen);
         for name in names {
             if self.cap_info(&name).is_some() {
                 self.consume_capability(&name, kind.clone());
