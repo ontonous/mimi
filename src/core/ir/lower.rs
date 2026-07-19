@@ -7,9 +7,9 @@
 use super::{
     CheckedConversion, CheckedConversionKind, ResolvedBinaryOp, ResolvedBlock, ResolvedBody,
     ResolvedBodyError, ResolvedExpr, ResolvedExprKind, ResolvedLiteral, ResolvedLocal,
-    ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedSignature,
-    ResolvedStmt, ResolvedStmtKind, ResolvedType, ResolvedTypeId, ResolvedTypeTable,
-    ResolvedUnaryOp,
+    ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedProjection,
+    ResolvedSignature, ResolvedStmt, ResolvedStmtKind, ResolvedType, ResolvedTypeId,
+    ResolvedTypeTable, ResolvedUnaryOp,
 };
 use crate::ast::{AstOrigin, BinOp, Expr, FuncDef, Lit, Pattern, PatternKind, Stmt, UnOp};
 use crate::core::resolved::{
@@ -59,6 +59,7 @@ pub fn lower_function_body(
         ids: NodeIdBuilder::new(input.sources),
         unit,
         locals: BTreeMap::new(),
+        place_inputs: BTreeMap::new(),
         scopes: vec![BTreeMap::new()],
     };
     lowerer.install_parameters()?;
@@ -71,6 +72,7 @@ pub fn lower_function_body(
     let body = ResolvedBody {
         owner: input.signature.owner.clone(),
         locals: lowerer.locals,
+        place_inputs: lowerer.place_inputs,
         root,
     };
     body.validate(input.types)?;
@@ -86,6 +88,7 @@ struct BodyLowerer<'a> {
     ids: NodeIdBuilder<'a>,
     unit: ResolvedTypeId,
     locals: BTreeMap<ResolvedLocalId, ResolvedLocal>,
+    place_inputs: BTreeMap<NodeId, ResolvedExpr>,
     scopes: Vec<BTreeMap<String, ResolvedLocalId>>,
 }
 
@@ -344,6 +347,9 @@ impl BodyLowerer<'_> {
                 left: Box::new(self.lower_expr(left, &format!("{role}.left"))?),
                 right: Box::new(self.lower_expr(right, &format!("{role}.right"))?),
             },
+            Expr::Unary(UnOp::Deref, _) | Expr::Index(_, _) | Expr::TupleIndex(_, _) => {
+                ResolvedExprKind::Load(self.lower_place(expr, role)?)
+            }
             Expr::Unary(op, operand) => ResolvedExprKind::Unary {
                 op: self.lower_unary(*op),
                 operand: Box::new(self.lower_expr(operand, &format!("{role}.inner"))?),
@@ -412,8 +418,6 @@ impl BodyLowerer<'_> {
             }
             Expr::Call(_, _)
             | Expr::Field(_, _)
-            | Expr::Index(_, _)
-            | Expr::TupleIndex(_, _)
             | Expr::Comprehension { .. }
             | Expr::Match(_, _)
             | Expr::Record { .. }
@@ -517,8 +521,53 @@ impl BodyLowerer<'_> {
                         )]
                     })
             }
+            Expr::TupleIndex(base, index) => {
+                let mut place = self.lower_place(base, &format!("{role}.inner"))?;
+                let ty = self.expression_type(&node_id)?;
+                place
+                    .projections
+                    .push(ResolvedProjection::Tuple { index: *index, ty });
+                Ok(place)
+            }
+            Expr::Index(base, index) => {
+                let mut place = self.lower_place(base, &format!("{role}.left"))?;
+                let ty = self.expression_type(&node_id)?;
+                let index = match index.unlocated() {
+                    Expr::Literal(Lit::Int(value)) => super::ResolvedIndex::Constant(*value),
+                    _ => {
+                        let input = self.lower_expr(index, &format!("{role}.right"))?;
+                        let input_id = input.node_id.clone();
+                        if self.place_inputs.insert(input_id.clone(), input).is_some() {
+                            return Err(vec![ResolvedBodyError::new(
+                                input_id,
+                                "dynamic place input identity collision",
+                            )]);
+                        }
+                        super::ResolvedIndex::Dynamic(input_id)
+                    }
+                };
+                place
+                    .projections
+                    .push(ResolvedProjection::Index { index, ty });
+                Ok(place)
+            }
+            Expr::Unary(UnOp::Deref, base) => {
+                let mut place = self.lower_place(base, &format!("{role}.inner"))?;
+                let ty = self.expression_type(&node_id)?;
+                place.projections.push(ResolvedProjection::Deref { ty });
+                Ok(place)
+            }
             _ => self.unsupported(&node_id, "projected place lowering"),
         }
+    }
+
+    fn expression_type(&self, node_id: &NodeId) -> Result<ResolvedTypeId, Vec<ResolvedBodyError>> {
+        self.node_types.get(node_id).cloned().ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "place expression has no checker-finalized canonical type",
+            )]
+        })
     }
 
     fn place_type(
@@ -528,7 +577,7 @@ impl BodyLowerer<'_> {
     ) -> Result<ResolvedTypeId, Vec<ResolvedBodyError>> {
         self.locals
             .get(&place.base)
-            .map(|local| local.ty.clone())
+            .map(|local| place.projected_type(local).clone())
             .ok_or_else(|| {
                 vec![ResolvedBodyError::new(
                     node_id.clone(),
@@ -819,5 +868,69 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.message.contains("checker-finalized canonical type")));
+    }
+
+    #[test]
+    fn dynamic_index_is_retained_as_a_typed_place_input() {
+        let file = parse("func read(values: List<i32>, index: i32) -> i32 {\n  values[index]\n}");
+        let program = crate::core::check_program(&file).expect("check");
+        let resolved = program.function("read").expect("resolved function");
+        let body = lower_function_body(FunctionBodyInput {
+            function: function(&file, "read"),
+            signature: program
+                .resolved_signature(&resolved.node_id)
+                .expect("signature"),
+            node_types: program.resolved_node_types(),
+            types: program.resolved_types(),
+            node_meta: program.node_meta(),
+            sources: &file.sources,
+        })
+        .expect("lower body");
+
+        assert_eq!(body.place_inputs.len(), 1);
+        let result = body.root.result.as_ref().expect("tail result");
+        let ResolvedExprKind::Load(place) = &result.kind else {
+            panic!("index expression must lower to a place load");
+        };
+        assert!(matches!(
+            place.projections.as_slice(),
+            [ResolvedProjection::Index {
+                index: crate::core::ResolvedIndex::Dynamic(_),
+                ..
+            }]
+        ));
+        body.validate(program.resolved_types())
+            .expect("place input is a body node");
+    }
+
+    #[test]
+    fn indexed_assignment_uses_projected_target_type() {
+        let file = parse(
+            "func replace(mut values: List<i32>, index: i32) -> i32 {\n  values[index] = 7;\n  values[index]\n}",
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let resolved = program.function("replace").expect("resolved function");
+        let body = lower_function_body(FunctionBodyInput {
+            function: function(&file, "replace"),
+            signature: program
+                .resolved_signature(&resolved.node_id)
+                .expect("signature"),
+            node_types: program.resolved_node_types(),
+            types: program.resolved_types(),
+            node_meta: program.node_meta(),
+            sources: &file.sources,
+        })
+        .expect("lower body");
+
+        let ResolvedStmtKind::Assign {
+            target, conversion, ..
+        } = &body.root.statements[0].kind
+        else {
+            panic!("first statement must be assignment");
+        };
+        assert_eq!(conversion.to, target.projections[0].ty().clone());
+        assert_ne!(conversion.to, body.locals[&target.base].ty);
+        body.validate(program.resolved_types())
+            .expect("indexed assignment validates");
     }
 }

@@ -439,6 +439,9 @@ pub struct ResolvedBlock {
 pub struct ResolvedBody {
     pub owner: NodeId,
     pub locals: BTreeMap<ResolvedLocalId, ResolvedLocal>,
+    /// Typed expressions evaluated to compute structured places. A place
+    /// references these nodes by stable NodeId instead of retaining raw AST.
+    pub place_inputs: BTreeMap<NodeId, ResolvedExpr>,
     pub root: ResolvedBlock,
 }
 
@@ -491,6 +494,12 @@ impl ResolvedBody {
             if local.display_name.trim().is_empty() {
                 validator.error(&local.id.0, "local display name is empty");
             }
+        }
+        for (key, input) in &self.place_inputs {
+            if key != &input.node_id {
+                validator.error(key, "place input key disagrees with expression identity");
+            }
+            validator.visit_expr(input);
         }
         validator.visit_block(&self.root);
         for (owner, target, role) in validator.pending_nodes.clone() {
@@ -1043,6 +1052,7 @@ mod tests {
         ResolvedBody {
             owner: node("func.main"),
             locals: BTreeMap::from([(local.id.clone(), local)]),
+            place_inputs: BTreeMap::new(),
             root: ResolvedBlock {
                 node_id: node("block.root"),
                 origin: origin(),
@@ -1111,6 +1121,24 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.message.contains("dynamic index references missing")));
+    }
+
+    #[test]
+    fn validator_accepts_dynamic_index_from_typed_place_input_catalog() {
+        let (types, i32_ty, unit_ty) = types();
+        let mut body = valid_body(&i32_ty, &unit_ty);
+        let index = literal("expr.index", &i32_ty, 0);
+        body.place_inputs
+            .insert(index.node_id.clone(), index.clone());
+        let result = body.root.result.as_mut().unwrap();
+        let ResolvedExprKind::Load(place) = &mut result.kind else {
+            panic!("fixture result must be a load");
+        };
+        place.projections.push(ResolvedProjection::Index {
+            index: ResolvedIndex::Dynamic(index.node_id),
+            ty: i32_ty,
+        });
+        body.validate(&types).expect("dynamic index is owned");
     }
 
     #[test]
