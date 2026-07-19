@@ -1680,6 +1680,29 @@ fn collect_items(
                     .collect();
                 let mut method_signatures = Vec::new();
                 for method in &impl_def.methods {
+                    let method_id = impl_method_owner(&qualified, method);
+                    let self_param = (!method
+                        .params
+                        .first()
+                        .is_some_and(|param| param.name == "self"))
+                    .then(|| {
+                        implicit_self_param(
+                            method.meta.span,
+                            Type::Name(impl_def.type_name.clone(), impl_def.type_args.clone()),
+                        )
+                    });
+                    if let Some(self_param) = &self_param {
+                        insert_child_meta(
+                            self_param.meta,
+                            &method_id,
+                            "decl.parameter",
+                            "parameter.self",
+                            span,
+                            &ids,
+                            node_meta,
+                            errors,
+                        );
+                    }
                     for param in &method.params {
                         if contains_unresolved_type(&param.ty) {
                             errors.push(Diagnostic::error(
@@ -1718,6 +1741,36 @@ fn collect_items(
                             .unwrap_or_else(|| "unit".into()),
                         effects: method.effects.clone(),
                     });
+                    let mut param_decls = self_param.into_iter().collect::<Vec<_>>();
+                    param_decls.extend(method.params.clone());
+                    let params = param_decls
+                        .iter()
+                        .map(|param| (param.name.clone(), param.ty.clone()))
+                        .collect();
+                    functions.insert(
+                        method_id.clone(),
+                        ResolvedFunction {
+                            node_id: method_id.clone(),
+                            qualified_name: format!("{}_{}", impl_def.type_name, method.name),
+                            params,
+                            param_decls,
+                            ret: method
+                                .ret
+                                .clone()
+                                .unwrap_or_else(|| Type::Name("unit".into(), Vec::new())),
+                            effects: method.effects.clone(),
+                            pub_: method.pub_,
+                            is_comptime: method.is_comptime,
+                            is_async: method.is_async,
+                            extern_abi: method.extern_abi.clone(),
+                            generics: method.generics.clone(),
+                            where_clause: method.where_clause.clone(),
+                            origin: node_meta
+                                .get(&method_id)
+                                .map(|meta| meta.origin.clone())
+                                .unwrap_or_else(|| Origin::User(method.meta.span)),
+                        },
+                    );
                 }
                 impls.insert(
                     node_id.clone(),
@@ -1878,6 +1931,29 @@ fn collect_items(
                     .collect::<Vec<_>>();
                 let mut method_signatures = Vec::new();
                 for method in &actor.methods {
+                    let method_id = NodeId(format!("function:{qualified}::{}", method.name));
+                    let self_param = (!method
+                        .params
+                        .first()
+                        .is_some_and(|param| param.name == "self"))
+                    .then(|| {
+                        implicit_self_param(
+                            method.meta.span,
+                            Type::Name(actor.name.clone(), Vec::new()),
+                        )
+                    });
+                    if let Some(self_param) = &self_param {
+                        insert_child_meta(
+                            self_param.meta,
+                            &method_id,
+                            "decl.parameter",
+                            "parameter.self",
+                            span,
+                            &ids,
+                            node_meta,
+                            errors,
+                        );
+                    }
                     for param in &method.params {
                         if contains_unresolved_type(&param.ty) {
                             errors.push(Diagnostic::error(
@@ -1918,6 +1994,36 @@ fn collect_items(
                             .unwrap_or_else(|| "unit".into()),
                         effects: method.effects.clone(),
                     });
+                    let mut param_decls = self_param.into_iter().collect::<Vec<_>>();
+                    param_decls.extend(method.params.clone());
+                    let params = param_decls
+                        .iter()
+                        .map(|param| (param.name.clone(), param.ty.clone()))
+                        .collect();
+                    functions.insert(
+                        method_id.clone(),
+                        ResolvedFunction {
+                            node_id: method_id.clone(),
+                            qualified_name: format!("{qualified}::{}", method.name),
+                            params,
+                            param_decls,
+                            ret: method
+                                .ret
+                                .clone()
+                                .unwrap_or_else(|| Type::Name("unit".into(), Vec::new())),
+                            effects: method.effects.clone(),
+                            pub_: method.pub_,
+                            is_comptime: method.is_comptime,
+                            is_async: method.is_async,
+                            extern_abi: method.extern_abi.clone(),
+                            generics: method.generics.clone(),
+                            where_clause: method.where_clause.clone(),
+                            origin: node_meta
+                                .get(&method_id)
+                                .map(|meta| meta.origin.clone())
+                                .unwrap_or_else(|| Origin::User(method.meta.span)),
+                        },
+                    );
                 }
                 actors.insert(
                     node_id.clone(),
@@ -2769,6 +2875,20 @@ fn method_signature_key(name: &str, params: &[crate::ast::Param], ret: Option<&T
         ret.map(crate::core::fmt_type)
             .unwrap_or_else(|| "unit".to_string())
     )
+}
+
+fn implicit_self_param(span: Span, ty: Type) -> crate::ast::Param {
+    crate::ast::Param {
+        meta: AstNodeMeta::inherited(
+            span,
+            AstOrigin::Desugared("normalization.implicit_self_parameter"),
+        ),
+        name: "self".into(),
+        ty,
+        mut_: true,
+        default_value: None,
+        borrow: Some(crate::ast::ParamBorrow::Mutate),
+    }
 }
 
 fn extern_function_signature_key(function: &crate::ast::ExternFunc) -> String {
