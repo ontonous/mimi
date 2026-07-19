@@ -2131,7 +2131,7 @@ fn map_entry_semantic_key(entry: &(Expr, Expr)) -> String {
     )
 }
 
-fn map_entry_role(context: &str, entries: &[(Expr, Expr)], index: usize) -> String {
+pub(crate) fn map_entry_role(context: &str, entries: &[(Expr, Expr)], index: usize) -> String {
     semantic_sibling_role(context, entries, index, map_entry_semantic_key)
 }
 
