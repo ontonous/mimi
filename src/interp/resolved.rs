@@ -5,7 +5,7 @@
 //! `ResolvedBody` nodes; unsupported typed constructs fail closed instead of
 //! consulting the compatibility surface program.
 
-use super::{is_truthy, ops, values_equal, InterpError, Value};
+use super::{is_truthy, ops, values_equal, InterpError, LocalSharedInner, Value};
 use crate::core::ir::{
     ResolvedBinaryOp, ResolvedFStringPart, ResolvedLambda, ResolvedValueProjection,
 };
@@ -547,6 +547,13 @@ fn eval_expr(
                         arguments,
                     )
                 }
+                ResolvedCallee::ActorMethod { method, .. }
+                | ResolvedCallee::ProtocolMethod { method, .. } => execute_call(
+                    program,
+                    state,
+                    &NodeId(method.as_str().to_string()),
+                    arguments,
+                ),
                 _ => Err(unsupported(
                     &expression.node_id,
                     "callee is not yet in the typed scalar execution subset",
@@ -1341,6 +1348,28 @@ fn eval_builtin(
         "str_trim" => string_unary(name, &arguments, |value| value.trim().to_string()),
         "str_to_upper" => string_unary(name, &arguments, str::to_uppercase),
         "str_to_lower" => string_unary(name, &arguments, str::to_lowercase),
+        "str_parse_int" | "string_to_int" => {
+            expect_arity(name, &arguments, 1)?;
+            match &arguments[0] {
+                Value::String(value) => Ok(value
+                    .trim()
+                    .parse::<i64>()
+                    .map(|value| Value::Tuple(vec![Value::Bool(true), Value::Int(value)]))
+                    .unwrap_or_else(|_| Value::Tuple(vec![Value::Bool(false), Value::Int(0)]))),
+                _ => Err(builtin_type_error(name, "one string")),
+            }
+        }
+        "str_parse_float" => {
+            expect_arity(name, &arguments, 1)?;
+            match &arguments[0] {
+                Value::String(value) => Ok(value
+                    .trim()
+                    .parse::<f64>()
+                    .map(|value| Value::Tuple(vec![Value::Bool(true), Value::Float(value)]))
+                    .unwrap_or_else(|_| Value::Tuple(vec![Value::Bool(false), Value::Float(0.0)]))),
+                _ => Err(builtin_type_error(name, "one string")),
+            }
+        }
         "str_contains" | "str_starts_with" | "str_ends_with" => string_predicate(name, &arguments),
         "str_split" => match arguments.as_slice() {
             [Value::String(value), Value::String(separator)] => Ok(Value::List(
@@ -1385,6 +1414,8 @@ fn eval_builtin_method(
             sequence_len(&arguments[0]).map(|length| Value::Int(length as i64))
         }
         "set" => set_method(node, method, arguments),
+        "shared" | "local_shared" => strong_ownership_method(node, method, arguments),
+        "weak" | "weak_local" => weak_ownership_method(node, method, arguments),
         _ => Err(unsupported(
             node,
             &format!("builtin method '{identity}' is outside the typed execution subset"),
@@ -1445,10 +1476,79 @@ fn option_result_method(
                 _ => Err(builtin_type_error(method, "an Option receiver")),
             }
         }
+        "deref" => {
+            expect_arity(method, &arguments, 1)?;
+            let value = match variant.as_str() {
+                "Some" | "Ok" => payload
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| builtin_type_error(method, "a payload"))?,
+                "None" | "Err" => {
+                    return Err(InterpError::builtin_error(format!(
+                        "called deref on {variant}"
+                    )))
+                }
+                _ => return Err(builtin_type_error(method, "an Option receiver")),
+            };
+            read_owned_value(method, value)
+        }
         _ => Err(unsupported(
             node,
             &format!("Option/Result method '{method}' requires typed callable support"),
         )),
+    }
+}
+
+fn strong_ownership_method(
+    node: &NodeId,
+    method: &str,
+    arguments: Vec<Value>,
+) -> Result<Value, InterpError> {
+    expect_arity(method, &arguments, 1)?;
+    match method {
+        "clone" => Ok(arguments[0].clone()),
+        "deref" | "inner" => read_owned_value(method, arguments[0].clone()),
+        _ => Err(unsupported(
+            node,
+            &format!("strong ownership method '{method}' is unknown"),
+        )),
+    }
+}
+
+fn weak_ownership_method(
+    node: &NodeId,
+    method: &str,
+    arguments: Vec<Value>,
+) -> Result<Value, InterpError> {
+    expect_arity(method, &arguments, 1)?;
+    if method != "upgrade" {
+        return Err(unsupported(
+            node,
+            &format!("weak ownership method '{method}' is unknown"),
+        ));
+    }
+    let upgraded = match &arguments[0] {
+        Value::WeakShared(value) => value.upgrade().map(Value::Shared),
+        Value::WeakLocal(value) => value.upgrade().map(Value::LocalShared),
+        _ => return Err(builtin_type_error(method, "a weak ownership receiver")),
+    };
+    Ok(match upgraded {
+        Some(value) => Value::Variant("Some".into(), vec![value]),
+        None => Value::Variant("None".into(), Vec::new()),
+    })
+}
+
+fn read_owned_value(name: &str, value: Value) -> Result<Value, InterpError> {
+    match value {
+        Value::Shared(value) | Value::Ref(value) | Value::RefMut(value) => value
+            .read()
+            .map_err(|_| InterpError::lock_error(format!("poisoned {name} value")))
+            .map(|value| value.clone()),
+        Value::LocalShared(value) => value
+            .lock()
+            .map_err(|_| InterpError::lock_error(format!("poisoned {name} value")))
+            .map(|value| value.clone()),
+        _ => Err(builtin_type_error(name, "a strong ownership value")),
     }
 }
 
@@ -1964,13 +2064,49 @@ fn apply_conversion(
                 "newtype unwrap source is not a newtype value",
             )),
         },
-        CheckedConversionKind::OwnershipWrap
-        | CheckedConversionKind::OwnershipDowngrade
-        | CheckedConversionKind::OwnershipRead
-        | CheckedConversionKind::DynamicPack
-        | CheckedConversionKind::DynamicDowncastChecked => Err(InterpError::new(
-            "conversion is outside the typed scalar execution subset",
-        )),
+        CheckedConversionKind::OwnershipWrap => {
+            match program.resolved_types().get(&conversion.to) {
+                Some(ResolvedType::Ownership {
+                    kind: crate::core::OwnershipTypeKind::Shared,
+                    ..
+                }) => Ok(Value::Shared(std::sync::Arc::new(std::sync::RwLock::new(
+                    value,
+                )))),
+                Some(ResolvedType::Ownership {
+                    kind: crate::core::OwnershipTypeKind::LocalShared,
+                    ..
+                }) => Ok(Value::LocalShared(LocalSharedInner::new(value))),
+                _ => Err(InterpError::type_mismatch(
+                    "ownership wrap target is not shared/local_shared",
+                )),
+            }
+        }
+        CheckedConversionKind::OwnershipDowngrade => match value {
+            Value::Shared(value) => Ok(Value::WeakShared(std::sync::Arc::downgrade(&value))),
+            Value::LocalShared(value) => Ok(Value::WeakLocal(value.downgrade())),
+            _ => Err(InterpError::type_mismatch(
+                "ownership downgrade source is not strong ownership",
+            )),
+        },
+        CheckedConversionKind::OwnershipRead => match value {
+            Value::Shared(value) | Value::Ref(value) | Value::RefMut(value) => value
+                .read()
+                .map_err(|_| InterpError::lock_error("poisoned typed ownership value"))
+                .map(|value| value.clone()),
+            Value::LocalShared(value) => value
+                .lock()
+                .map_err(|_| InterpError::lock_error("poisoned typed local ownership value"))
+                .map(|value| value.clone()),
+            _ => Err(InterpError::type_mismatch(
+                "ownership read source is not strong ownership",
+            )),
+        },
+        CheckedConversionKind::DynamicPack | CheckedConversionKind::DynamicDowncastChecked => {
+            Err(InterpError::new(format!(
+                "conversion {:?} is outside the typed scalar execution subset",
+                conversion.kind
+            )))
+        }
     }
 }
 
@@ -2217,6 +2353,67 @@ mod tests {
             ResolvedInterpreter::new(&program).run_main().unwrap(),
             Value::Int(6)
         );
+    }
+
+    #[test]
+    fn typed_real_world_core_value_suite_runs_without_surface_ast() {
+        let fixtures = [
+            (
+                "core_basic_control",
+                include_str!("../../tests/real_world/core_basic_control.mimi"),
+            ),
+            (
+                "core_closures",
+                include_str!("../../tests/real_world/core_closures.mimi"),
+            ),
+            (
+                "core_enums_match",
+                include_str!("../../tests/real_world/core_enums_match.mimi"),
+            ),
+            (
+                "core_functions_recursion",
+                include_str!("../../tests/real_world/core_functions_recursion.mimi"),
+            ),
+            (
+                "core_generics_adt",
+                include_str!("../../tests/real_world/core_generics_adt.mimi"),
+            ),
+            (
+                "core_list_index",
+                include_str!("../../tests/real_world/core_list_index.mimi"),
+            ),
+            (
+                "core_newtype",
+                include_str!("../../tests/real_world/core_newtype.mimi"),
+            ),
+            (
+                "core_option_result",
+                include_str!("../../tests/real_world/core_option_result.mimi"),
+            ),
+            (
+                "core_records",
+                include_str!("../../tests/real_world/core_records.mimi"),
+            ),
+            (
+                "core_try_operator",
+                include_str!("../../tests/real_world/core_try_operator.mimi"),
+            ),
+            (
+                "core_traits_methods",
+                include_str!("../../tests/real_world/core_traits_methods.mimi"),
+            ),
+            (
+                "core_shared_weak",
+                include_str!("../../tests/real_world/core_shared_weak.mimi"),
+            ),
+        ];
+        for (name, source) in fixtures {
+            let program = checked(source);
+            let value = ResolvedInterpreter::new(&program)
+                .run_main()
+                .unwrap_or_else(|error| panic!("typed fixture '{name}' failed: {error}"));
+            assert_eq!(value, Value::Int(0), "typed fixture '{name}'");
+        }
     }
 
     #[test]
