@@ -331,10 +331,25 @@ impl<'a> Checker<'a> {
                         crate::diagnostic::codes::E0242,
                         "enumerate expects 1 argument (list)",
                     );
-                } else {
-                    self.infer_expr(&args[0], scopes);
+                    return Type::Name("unknown".into(), vec![]);
                 }
-                return Type::Name("List".into(), vec![Type::Name("unknown".into(), vec![])]);
+                let list_ty = self.infer_expr(&args[0], scopes);
+                let element = match list_ty.unlocated() {
+                    Type::Name(name, elements) if name == "List" && elements.len() == 1 => {
+                        elements[0].clone()
+                    }
+                    _ => {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("enumerate expects a list, found {}", fmt_type(&list_ty)),
+                        );
+                        return Type::Name("unknown".into(), vec![]);
+                    }
+                };
+                return Type::Name(
+                    "List".into(),
+                    vec![Type::Tuple(vec![Type::Name("i32".into(), vec![]), element])],
+                );
             }
             "exit" => {
                 if args.len() > 1 {
@@ -495,7 +510,7 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("unknown".into(), vec![]);
             }
-            "sort" | "reverse" | "flatten" => {
+            "sort" | "reverse" => {
                 if args.len() != 1 {
                     self.emit_code(
                         crate::diagnostic::codes::E0242,
@@ -510,6 +525,36 @@ impl<'a> Checker<'a> {
                     _ => Type::Name("unknown".into(), vec![]),
                 };
                 return Type::Name("List".into(), vec![elem_ty]);
+            }
+            "flatten" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "flatten expects 1 argument",
+                    );
+                    return Type::Name("unknown".into(), vec![]);
+                }
+                let list_ty = self.infer_expr(&args[0], scopes);
+                let element = match list_ty.unlocated() {
+                    Type::Name(name, outer) if name == "List" && outer.len() == 1 => {
+                        match outer[0].unlocated() {
+                            Type::Name(inner_name, inner)
+                                if inner_name == "List" && inner.len() == 1 =>
+                            {
+                                inner[0].clone()
+                            }
+                            _ => outer[0].clone(),
+                        }
+                    }
+                    _ => {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("flatten expects a list, found {}", fmt_type(&list_ty)),
+                        );
+                        return Type::Name("unknown".into(), vec![]);
+                    }
+                };
+                return Type::Name("List".into(), vec![element]);
             }
             "sort_f64" => {
                 if args.len() != 1 {
@@ -539,11 +584,32 @@ impl<'a> Checker<'a> {
                         crate::diagnostic::codes::E0242,
                         "zip expects 2 arguments (list, list)",
                     );
-                } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                    return Type::Name("unknown".into(), vec![]);
                 }
-                return Type::Name("List".into(), vec![Type::Name("unknown".into(), vec![])]);
+                let left = self.infer_expr(&args[0], scopes);
+                let right = self.infer_expr(&args[1], scopes);
+                let element = |ty: &Type| match ty.unlocated() {
+                    Type::Name(name, elements) if name == "List" && elements.len() == 1 => {
+                        Some(elements[0].clone())
+                    }
+                    _ => None,
+                };
+                let (Some(left_element), Some(right_element)) = (element(&left), element(&right))
+                else {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        format!(
+                            "zip expects two lists, found {} and {}",
+                            fmt_type(&left),
+                            fmt_type(&right)
+                        ),
+                    );
+                    return Type::Name("unknown".into(), vec![]);
+                };
+                return Type::Name(
+                    "List".into(),
+                    vec![Type::Tuple(vec![left_element, right_element])],
+                );
             }
             "sum" => {
                 if args.len() != 1 {
