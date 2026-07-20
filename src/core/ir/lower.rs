@@ -1810,6 +1810,17 @@ impl BodyLowerer<'_> {
             }
         }
         if site.kind == ResolvedCallKind::Unknown {
+            if matches!(callee.unlocated(), Expr::Field(_, _)) {
+                if let Some(call) = self.lower_builtin_method_call(
+                    node_id,
+                    callee,
+                    arguments,
+                    role,
+                    type_arguments,
+                )? {
+                    return Ok(call);
+                }
+            }
             if let Expr::Ident(name) = callee.unlocated() {
                 if let Some(call) =
                     self.lower_type_constructor_call(node_id, name, arguments, role)?
@@ -2936,6 +2947,75 @@ impl BodyLowerer<'_> {
             effects,
             session: Vec::new(),
         })
+    }
+
+    fn lower_builtin_method_call(
+        &mut self,
+        node_id: &NodeId,
+        callee: &Expr,
+        arguments: &[Expr],
+        role: &str,
+        explicit_type_arguments: &[ResolvedTypeId],
+    ) -> Result<Option<ResolvedCall>, Vec<ResolvedBodyError>> {
+        let Expr::Field(receiver, method_name) = callee.unlocated() else {
+            return Ok(None);
+        };
+        let receiver = self.lower_expr(receiver, &format!("{role}.callee.inner"))?;
+        let Some(method) =
+            crate::core::builtins::resolve_builtin_method(&receiver.ty, method_name, self.types)
+        else {
+            return Ok(None);
+        };
+        if !explicit_type_arguments.is_empty() {
+            return self.unsupported(
+                node_id,
+                "generic arguments on language-provided method call",
+            );
+        }
+        let builtin =
+            super::BuiltinId::new(method.identity.clone()).map_err(|error| vec![error])?;
+        let receiver_parameter =
+            super::ResolvedParameterId(NodeId(format!("{}/parameter:self", builtin.as_str())));
+        let receiver_ty = receiver.ty.clone();
+        let mut lowered = vec![ResolvedArgument {
+            parameter: receiver_parameter,
+            value: receiver,
+            conversion: CheckedConversion {
+                kind: CheckedConversionKind::Identity,
+                from: receiver_ty.clone(),
+                to: receiver_ty,
+            },
+        }];
+        for index in 0..arguments.len() {
+            if matches!(arguments[index].unlocated(), Expr::NamedArg(_, _)) {
+                return self
+                    .unsupported(node_id, "named arguments on language-provided method call");
+            }
+            let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
+            let value = self.lower_expr(&arguments[index], &argument_role)?;
+            let value_ty = value.ty.clone();
+            lowered.push(ResolvedArgument {
+                parameter: super::ResolvedParameterId(NodeId(format!(
+                    "{}/parameter:{index}",
+                    builtin.as_str()
+                ))),
+                value,
+                conversion: CheckedConversion {
+                    kind: CheckedConversionKind::Identity,
+                    from: value_ty.clone(),
+                    to: value_ty,
+                },
+            });
+        }
+        Ok(Some(ResolvedCall {
+            callee: ResolvedCallee::Builtin(builtin),
+            result: self.expression_type(node_id)?,
+            type_arguments: Vec::new(),
+            arguments: lowered,
+            permission: Some(method.permission),
+            effects: Vec::new(),
+            session: Vec::new(),
+        }))
     }
 
     fn lower_expr_list(
@@ -5978,6 +6058,61 @@ mod tests {
         ));
         body.validate(program.resolved_types())
             .expect("valid closed callable body");
+    }
+
+    #[test]
+    fn language_methods_resolve_from_canonical_receiver_types() {
+        // TOOL-RESOLUTION-001: call-site surface spelling may be Unknown, but
+        // typed-body lowering must close language methods from the zonked
+        // receiver type rather than defer resolution to a backend.
+        let file = parse(
+            r#"
+func double(value: i32) -> i32 { value * 2 }
+func option_status(value: Option<i32>) -> bool { value.is_some() }
+func result_map(value: Result<i32, string>) -> Result<i32, string> { value.map(double) }
+func shared_value() -> i32 {
+    shared value = 1
+    let copied = value.clone()
+    copied.deref()
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check language methods");
+
+        let tail_call = |owner: &str| {
+            let body = program
+                .resolved_body(&NodeId(owner.into()))
+                .unwrap_or_else(|| panic!("missing body {owner}"));
+            let result = body.root.result.as_deref().expect("tail result");
+            let ResolvedExprKind::Call(call) = &result.kind else {
+                panic!("tail expression is not a call for {owner}");
+            };
+            call
+        };
+        let option = tail_call("function:option_status");
+        assert!(matches!(
+            &option.callee,
+            ResolvedCallee::Builtin(id)
+                if id.as_str() == "builtin.method.option.is_some"
+        ));
+        assert_eq!(option.arguments.len(), 1);
+        assert_eq!(option.permission, Some(crate::core::Permission::View));
+
+        let result = tail_call("function:result_map");
+        assert!(matches!(
+            &result.callee,
+            ResolvedCallee::Builtin(id) if id.as_str() == "builtin.method.result.map"
+        ));
+        assert_eq!(result.arguments.len(), 2);
+        assert_eq!(result.permission, Some(crate::core::Permission::Consume));
+
+        let shared = tail_call("function:shared_value");
+        assert!(matches!(
+            &shared.callee,
+            ResolvedCallee::Builtin(id) if id.as_str() == "builtin.method.shared.deref"
+        ));
+        assert_eq!(shared.permission, Some(crate::core::Permission::View));
     }
 
     #[test]

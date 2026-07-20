@@ -4,6 +4,16 @@
 //! that a known builtin is unsupported, but they must not maintain a separate
 //! list that changes semantic resolution.
 
+use crate::core::ir::{
+    OwnershipTypeKind, Permission, PrimitiveType, ResolvedType, ResolvedTypeId, ResolvedTypeTable,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedBuiltinMethod {
+    pub identity: String,
+    pub permission: Permission,
+}
+
 pub fn is_builtin_callable(name: &str) -> bool {
     matches!(
         name,
@@ -206,4 +216,113 @@ pub fn is_builtin_callable(name: &str) -> bool {
 
 pub fn is_language_constructor(name: &str) -> bool {
     matches!(name, "Some" | "None" | "Ok" | "Err")
+}
+
+/// Resolve a language-provided method from the checker-finalized receiver
+/// type. Surface receiver spelling is deliberately not an input.
+pub fn resolve_builtin_method(
+    receiver: &ResolvedTypeId,
+    method: &str,
+    types: &ResolvedTypeTable,
+) -> Option<ResolvedBuiltinMethod> {
+    let (family, known, permission) = match types.get(receiver)? {
+        ResolvedType::Option(inner) => {
+            let known = matches!(
+                method,
+                "unwrap"
+                    | "expect"
+                    | "unwrap_or"
+                    | "is_some"
+                    | "is_none"
+                    | "ok_or"
+                    | "map"
+                    | "and_then"
+                    | "map_err"
+            ) || (method == "deref"
+                && matches!(
+                    types.get(inner),
+                    Some(ResolvedType::Ownership {
+                        kind: OwnershipTypeKind::Shared | OwnershipTypeKind::LocalShared,
+                        ..
+                    })
+                ));
+            ("option", known, observation_or_consume(method))
+        }
+        ResolvedType::Result { .. } => (
+            "result",
+            matches!(
+                method,
+                "unwrap"
+                    | "expect"
+                    | "unwrap_or"
+                    | "is_ok"
+                    | "is_err"
+                    | "ok_or"
+                    | "map"
+                    | "and_then"
+                    | "map_err"
+            ),
+            observation_or_consume(method),
+        ),
+        ResolvedType::Ownership { kind, .. } => match kind {
+            OwnershipTypeKind::Shared => (
+                "shared",
+                matches!(method, "clone" | "deref" | "inner"),
+                Permission::View,
+            ),
+            OwnershipTypeKind::LocalShared => (
+                "local_shared",
+                matches!(method, "clone" | "deref" | "inner"),
+                Permission::View,
+            ),
+            OwnershipTypeKind::Weak => ("weak", method == "upgrade", Permission::View),
+            OwnershipTypeKind::WeakLocal => ("weak_local", method == "upgrade", Permission::View),
+        },
+        ResolvedType::Primitive(PrimitiveType::String) => (
+            "string",
+            matches!(
+                method,
+                "len"
+                    | "trim"
+                    | "to_upper"
+                    | "to_lower"
+                    | "parse_int"
+                    | "parse_float"
+                    | "contains"
+                    | "starts_with"
+                    | "ends_with"
+                    | "split"
+                    | "replace"
+                    | "repeat"
+                    | "char_at"
+                    | "substring"
+                    | "index_of"
+            ),
+            Permission::View,
+        ),
+        ResolvedType::Nominal { item, .. } if item.as_str() == "builtin:type:List" => {
+            ("list", method == "len", Permission::View)
+        }
+        ResolvedType::Nominal { item, .. } if item.as_str() == "builtin:type:Set" => (
+            "set",
+            matches!(
+                method,
+                "size" | "len" | "is_empty" | "contains" | "insert" | "remove" | "to_list"
+            ),
+            Permission::View,
+        ),
+        _ => return None,
+    };
+    known.then(|| ResolvedBuiltinMethod {
+        identity: format!("builtin.method.{family}.{method}"),
+        permission,
+    })
+}
+
+fn observation_or_consume(method: &str) -> Permission {
+    if matches!(method, "is_some" | "is_none" | "is_ok" | "is_err" | "deref") {
+        Permission::View
+    } else {
+        Permission::Consume
+    }
 }
