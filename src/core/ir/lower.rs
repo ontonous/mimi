@@ -700,10 +700,7 @@ impl BodyLowerer<'_> {
                 ref_,
                 ..
             } => {
-                if *ref_ {
-                    return self.unsupported(&node_id, "arena reference binding");
-                }
-                let initializer = init
+                let mut initializer = init
                     .as_ref()
                     .map(|expr| self.lower_expr(expr, &format!("{role}.initializer")))
                     .transpose()?
@@ -713,20 +710,49 @@ impl BodyLowerer<'_> {
                             "binding without an initializer has no checker-persisted value type",
                         )]
                     })?;
-                let binding_type = declared_type
+                let mut binding_type = declared_type
                     .as_ref()
                     .filter(|ty| !matches!(ty.unlocated(), crate::ast::Type::Infer))
                     .map(|ty| self.annotation_type(ty, &format!("{role}.type")))
                     .transpose()?
                     .unwrap_or_else(|| initializer.ty.clone());
-                let initializer =
-                    self.apply_implicit_conversion(&node_id, initializer, &binding_type)?;
-                let pattern = self.lower_binding_pattern(
+                if *ref_ {
+                    binding_type = self.reference_binding_type(&node_id, &initializer.ty)?;
+                    initializer = ResolvedExpr {
+                        node_id: NodeId(format!("{}/temporary-borrow", node_id.0)),
+                        origin: Origin::Desugared {
+                            parent: node_id.clone(),
+                            rule: "resolved_body.reference_binding".into(),
+                            span: origin.user_span(),
+                        },
+                        ty: binding_type.clone(),
+                        effects: initializer.effects.clone(),
+                        backend_requirements: initializer.backend_requirements.clone(),
+                        kind: ResolvedExprKind::Unary {
+                            op: ResolvedUnaryOp::BorrowShared,
+                            operand: Box::new(initializer),
+                        },
+                    };
+                } else {
+                    initializer =
+                        self.apply_implicit_conversion(&node_id, initializer, &binding_type)?;
+                }
+                let mut pattern = self.lower_binding_pattern(
                     pat,
                     &format!("{role}.pattern"),
                     binding_type,
                     *mut_,
                 )?;
+                if *ref_ {
+                    let ResolvedPatternKind::Binding { by_reference, .. } = &mut pattern.kind
+                    else {
+                        return self.unsupported(
+                            &node_id,
+                            "reference binding with a non-variable pattern",
+                        );
+                    };
+                    *by_reference = Some(super::Permission::View);
+                }
                 ResolvedStmtKind::Bind {
                     pattern,
                     initializer: Some(initializer),
@@ -972,6 +998,14 @@ impl BodyLowerer<'_> {
             } => {
                 let value = self.lower_expr(init, &format!("{role}.initializer"))?;
                 let local_ty = self.shared_binding_type(&node_id, *kind, &value.ty)?;
+                let conversion_kind = match kind {
+                    crate::ast::SharedKind::Weak | crate::ast::SharedKind::WeakLocal => {
+                        CheckedConversionKind::OwnershipDowngrade
+                    }
+                    crate::ast::SharedKind::Shared | crate::ast::SharedKind::LocalShared => {
+                        CheckedConversionKind::OwnershipWrap
+                    }
+                };
                 let pattern_id = NodeId(format!("{}/shared-pattern", node_id.0));
                 let local_id = ResolvedLocalId(NodeId(format!("{}/local", pattern_id.0)));
                 let pattern_origin = Origin::Desugared {
@@ -987,7 +1021,7 @@ impl BodyLowerer<'_> {
                     backend_requirements: Vec::new(),
                     kind: ResolvedExprKind::Cast {
                         conversion: CheckedConversion {
-                            kind: CheckedConversionKind::OwnershipWrap,
+                            kind: conversion_kind,
                             from: value.ty.clone(),
                             to: local_ty.clone(),
                         },
@@ -1206,26 +1240,67 @@ impl BodyLowerer<'_> {
                         if let [state] = states.as_slice() {
                             ResolvedExprKind::Constant(state.node_id.clone())
                         } else {
-                            let candidates = self
-                                .constants
-                                .values()
-                                .filter(|constant| {
-                                    constant.qualified_name == *name
-                                        || constant
-                                            .qualified_name
-                                            .rsplit_once("::")
-                                            .is_some_and(|(_, short)| short == name)
-                                })
-                                .collect::<Vec<_>>();
-                            let [constant] = candidates.as_slice() else {
-                                return Err(vec![ResolvedBodyError::new(
+                            let unit_variants = match self.types.get(&ty) {
+                                Some(ResolvedType::Nominal { item, .. }) => {
+                                    let owner = NodeId(item.as_str().to_string());
+                                    self.type_defs.get(&owner).and_then(|definition| {
+                                        match &definition.declaration.kind {
+                                            crate::ast::TypeDefKind::Enum(variants) => variants
+                                                .iter()
+                                                .find(|variant| {
+                                                    variant.name == *name
+                                                        && variant.payload.is_none()
+                                                })
+                                                .map(|variant| (owner, variant)),
+                                            _ => None,
+                                        }
+                                    })
+                                }
+                                _ => None,
+                            };
+                            if let Some((owner, variant)) = unit_variants {
+                                let mut diagnostics = Vec::new();
+                                let variant_id = self.ids.anonymous(
+                                    &owner,
+                                    "decl.variant",
+                                    &format!("variant.{}", stable_id_fragment(name)),
+                                    usable_span(variant.meta.span),
+                                    variant.meta.origin,
+                                    &mut diagnostics,
+                                );
+                                if !diagnostics.is_empty()
+                                    || !self.node_meta.contains_key(&variant_id)
+                                {
+                                    return Err(vec![ResolvedBodyError::new(
+                                        node_id.clone(),
+                                        format!(
+                                            "unit variant '{name}' has no stable declaration identity"
+                                        ),
+                                    )]);
+                                }
+                                ResolvedExprKind::Constant(variant_id)
+                            } else {
+                                let candidates = self
+                                    .constants
+                                    .values()
+                                    .filter(|constant| {
+                                        constant.qualified_name == *name
+                                            || constant
+                                                .qualified_name
+                                                .rsplit_once("::")
+                                                .is_some_and(|(_, short)| short == name)
+                                    })
+                                    .collect::<Vec<_>>();
+                                let [constant] = candidates.as_slice() else {
+                                    return Err(vec![ResolvedBodyError::new(
                             node_id.clone(),
                             format!(
                                 "identifier '{name}' does not resolve to exactly one local or constant"
                             ),
                         )]);
-                            };
-                            ResolvedExprKind::Constant(constant.node_id.clone())
+                                };
+                                ResolvedExprKind::Constant(constant.node_id.clone())
+                            }
                         }
                     }
                 }
@@ -1823,6 +1898,11 @@ impl BodyLowerer<'_> {
             }
             if let Expr::Ident(name) = callee.unlocated() {
                 if let Some(call) =
+                    self.lower_variant_constructor_call(node_id, name, arguments, role)?
+                {
+                    return Ok(call);
+                }
+                if let Some(call) =
                     self.lower_type_constructor_call(node_id, name, arguments, role)?
                 {
                     return Ok(call);
@@ -1858,8 +1938,17 @@ impl BodyLowerer<'_> {
             }
         }
         if site.kind == ResolvedCallKind::Builtin {
-            if !type_arguments.is_empty() {
+            if !type_arguments.is_empty() && site.callee != "from_json" {
                 return self.unsupported(node_id, "generic arguments on builtin call");
+            }
+            let result = self.expression_type(node_id)?;
+            if site.callee == "from_json"
+                && (type_arguments.len() != 1 || type_arguments.first() != Some(&result))
+            {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    "from_json type argument disagrees with checker-finalized result type",
+                )]);
             }
             let builtin =
                 super::BuiltinId::new(site.callee.clone()).map_err(|error| vec![error])?;
@@ -1886,8 +1975,8 @@ impl BodyLowerer<'_> {
             }
             return Ok(ResolvedCall {
                 callee: ResolvedCallee::Builtin(builtin),
-                result: self.expression_type(node_id)?,
-                type_arguments: Vec::new(),
+                result,
+                type_arguments: type_arguments.to_vec(),
                 arguments: lowered,
                 permission: None,
                 effects: Vec::new(),
@@ -2682,6 +2771,171 @@ impl BodyLowerer<'_> {
         }))
     }
 
+    fn lower_variant_constructor_call(
+        &mut self,
+        node_id: &NodeId,
+        name: &str,
+        arguments: &[Expr],
+        role: &str,
+    ) -> Result<Option<ResolvedCall>, Vec<ResolvedBodyError>> {
+        let result = self.expression_type(node_id)?;
+        let (owner, type_arguments) = match self.types.get(&result) {
+            Some(ResolvedType::Nominal { item, arguments }) => {
+                (NodeId(item.as_str().to_string()), arguments.clone())
+            }
+            _ => return Ok(None),
+        };
+        let Some(definition) = self.type_defs.get(&owner) else {
+            return Ok(None);
+        };
+        let crate::ast::TypeDefKind::Enum(variants) = &definition.declaration.kind else {
+            return Ok(None);
+        };
+        let Some(variant) = variants.iter().find(|variant| variant.name == name) else {
+            return Ok(None);
+        };
+        let mut diagnostics = Vec::new();
+        let variant_id = self.ids.anonymous(
+            &owner,
+            "decl.variant",
+            &format!("variant.{}", stable_id_fragment(name)),
+            usable_span(variant.meta.span),
+            variant.meta.origin,
+            &mut diagnostics,
+        );
+        if !diagnostics.is_empty() || !self.node_meta.contains_key(&variant_id) {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!("variant '{name}' has no stable declaration identity"),
+            )]);
+        }
+        let declared = match &variant.payload {
+            Some(crate::ast::VariantPayload::Tuple(payload)) => {
+                let mut declared = Vec::with_capacity(payload.len());
+                for index in 0..payload.len() {
+                    let meta = payload[index].meta();
+                    let field = self.ids.anonymous(
+                        &variant_id,
+                        type_kind(&payload[index]),
+                        &type_sibling_role("payload.element", payload, index),
+                        meta.and_then(|meta| usable_span(meta.span)),
+                        meta.map(|meta| meta.origin).unwrap_or(AstOrigin::User),
+                        &mut diagnostics,
+                    );
+                    let declaration_ty = self.field_types.get(&field).ok_or_else(|| {
+                        vec![ResolvedBodyError::new(
+                            field.clone(),
+                            "enum tuple payload has no canonical declaration type",
+                        )]
+                    })?;
+                    let ty = self.instantiate_member_type(node_id, &result, declaration_ty)?;
+                    declared.push((format!("_{index}"), field, ty));
+                }
+                declared
+            }
+            Some(crate::ast::VariantPayload::Record(payload)) => {
+                let mut declared = Vec::with_capacity(payload.len());
+                for field in payload {
+                    let field_id = self.ids.anonymous(
+                        &variant_id,
+                        "decl.field",
+                        &format!("payload.field.{}", stable_id_fragment(&field.name)),
+                        usable_span(field.meta.span),
+                        field.meta.origin,
+                        &mut diagnostics,
+                    );
+                    let declaration_ty = self.field_types.get(&field_id).ok_or_else(|| {
+                        vec![ResolvedBodyError::new(
+                            field_id.clone(),
+                            "enum record payload has no canonical declaration type",
+                        )]
+                    })?;
+                    let ty = self.instantiate_member_type(node_id, &result, declaration_ty)?;
+                    declared.push((field.name.clone(), field_id, ty));
+                }
+                declared
+            }
+            None => Vec::new(),
+        };
+        if !diagnostics.is_empty() {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!("variant '{name}' payload identities are not stable"),
+            )]);
+        }
+        if arguments.len() != declared.len() {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "variant constructor '{name}' expects {} arguments, got {}",
+                    declared.len(),
+                    arguments.len()
+                ),
+            )]);
+        }
+        let mut slots = vec![None; declared.len()];
+        let mut next_positional = 0;
+        for (index, argument) in arguments.iter().enumerate() {
+            let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
+            let (slot, value, value_role) = match argument.unlocated() {
+                Expr::NamedArg(name, value) => {
+                    let slot = declared
+                        .iter()
+                        .position(|(field, _, _)| field == name)
+                        .ok_or_else(|| {
+                            vec![ResolvedBodyError::new(
+                                node_id.clone(),
+                                format!("variant constructor has no field '{name}'"),
+                            )]
+                        })?;
+                    (slot, value.as_ref(), format!("{argument_role}.inner"))
+                }
+                _ => {
+                    while next_positional < slots.len() && slots[next_positional].is_some() {
+                        next_positional += 1;
+                    }
+                    let slot = next_positional;
+                    next_positional += 1;
+                    (slot, argument, argument_role)
+                }
+            };
+            if slots[slot].replace((value, value_role)).is_some() {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "variant constructor field '{}' is supplied twice",
+                        declared[slot].0
+                    ),
+                )]);
+            }
+        }
+        let mut lowered = Vec::with_capacity(declared.len());
+        for ((name, field, target), slot) in declared.iter().zip(slots) {
+            let (value, value_role) = slot.ok_or_else(|| {
+                vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("variant constructor field '{name}' has no argument"),
+                )]
+            })?;
+            let value = self.lower_expr(value, &value_role)?;
+            let conversion = self.implicit_conversion(node_id, &value.ty, target)?;
+            lowered.push(ResolvedArgument {
+                parameter: super::ResolvedParameterId(field.clone()),
+                value,
+                conversion,
+            });
+        }
+        Ok(Some(ResolvedCall {
+            callee: ResolvedCallee::Constructor(variant_id),
+            result,
+            type_arguments,
+            arguments: lowered,
+            permission: None,
+            effects: Vec::new(),
+            session: Vec::new(),
+        }))
+    }
+
     fn lower_actor_spawn_call(
         &mut self,
         node_id: &NodeId,
@@ -2758,7 +3012,7 @@ impl BodyLowerer<'_> {
             }
             _ => None,
         };
-        let (function_id, resolved_callee) = if let Some(actor_id) = actor_id {
+        let (function_id, resolved_callee, mut substitutions) = if let Some(actor_id) = actor_id {
             let actor = &self.actors[&actor_id];
             let function_id = NodeId(format!(
                 "function:{}::{}",
@@ -2781,6 +3035,7 @@ impl BodyLowerer<'_> {
                     actor: actor_id,
                     method,
                 },
+                BTreeMap::new(),
             )
         } else {
             let mut candidates = Vec::new();
@@ -2797,17 +3052,20 @@ impl BodyLowerer<'_> {
                     let Some(signature) = self.signatures.get(&function.node_id) else {
                         continue;
                     };
-                    if signature
-                        .parameters
-                        .first()
-                        .is_some_and(|parameter| parameter.ty == receiver.ty)
-                    {
-                        candidates.push((impl_def, function));
+                    if let Some(parameter) = signature.parameters.first() {
+                        let mut substitutions = BTreeMap::new();
+                        if self.collect_instantiation(
+                            &parameter.ty,
+                            &receiver.ty,
+                            &mut substitutions,
+                        ) {
+                            candidates.push((impl_def, function, substitutions));
+                        }
                     }
                 }
             }
-            candidates.sort_by(|(_, left), (_, right)| left.node_id.cmp(&right.node_id));
-            let [(impl_def, function)] = candidates.as_slice() else {
+            candidates.sort_by(|(_, left, _), (_, right, _)| left.node_id.cmp(&right.node_id));
+            let [(impl_def, function, substitutions)] = candidates.as_slice() else {
                 return Err(vec![ResolvedBodyError::new(
                     node_id.clone(),
                     format!(
@@ -2846,9 +3104,10 @@ impl BodyLowerer<'_> {
                     protocol: protocol.node_id.clone(),
                     method,
                 },
+                substitutions.clone(),
             )
         };
-        let signature = self.signatures.get(&function_id).ok_or_else(|| {
+        let signature = self.signatures.get(&function_id).cloned().ok_or_else(|| {
             vec![ResolvedBodyError::new(
                 node_id.clone(),
                 format!("method '{}' has no canonical signature", function_id.0),
@@ -2878,8 +3137,10 @@ impl BodyLowerer<'_> {
             )]);
         }
 
+        let receiver_target =
+            self.substitute_member_type(node_id, &receiver_parameter.ty, &substitutions)?;
         let receiver_conversion =
-            self.identity_conversion(node_id, &receiver.ty, &receiver_parameter.ty)?;
+            self.identity_conversion(node_id, &receiver.ty, &receiver_target)?;
         let mut lowered = vec![ResolvedArgument {
             parameter: receiver_parameter.id.clone(),
             value: receiver,
@@ -2929,19 +3190,48 @@ impl BodyLowerer<'_> {
                 )]
             })?;
             let value = self.lower_expr(value, &value_role)?;
-            let conversion = self.implicit_conversion(node_id, &value.ty, &parameter.ty)?;
+            let mut inferred = substitutions.clone();
+            if self.collect_instantiation(&parameter.ty, &value.ty, &mut inferred) {
+                substitutions = inferred;
+            }
+            let parameter_ty =
+                self.substitute_member_type(node_id, &parameter.ty, &substitutions)?;
+            let conversion = self.implicit_conversion(node_id, &value.ty, &parameter_ty)?;
             lowered.push(ResolvedArgument {
                 parameter: parameter.id.clone(),
                 value,
                 conversion,
             });
         }
+        let type_arguments = signature
+            .generic_parameters
+            .iter()
+            .map(|parameter| {
+                substitutions.get(parameter).cloned().ok_or_else(|| {
+                    vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        format!(
+                            "generic method parameter '{}' has no checker-closed instantiation",
+                            parameter.0
+                        ),
+                    )]
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = self.substitute_member_type(node_id, &signature.result, &substitutions)?;
+        let checked_result = self.expression_type(node_id)?;
+        if result != checked_result {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "instantiated method result disagrees with checker-finalized expression type",
+            )]);
+        }
         let permission = receiver_parameter.permission;
         let effects = signature.effects.clone();
         Ok(ResolvedCall {
             callee: resolved_callee,
-            result: signature.result.clone(),
-            type_arguments: Vec::new(),
+            result,
+            type_arguments,
             arguments: lowered,
             permission,
             effects,
@@ -3172,6 +3462,30 @@ impl BodyLowerer<'_> {
         ty: &ResolvedTypeId,
         mutable: bool,
     ) -> Result<Option<ResolvedPatternKind>, Vec<ResolvedBodyError>> {
+        if let Some(ResolvedType::Newtype { item, inner }) = self.types.get(ty) {
+            let owner = NodeId(item.as_str().to_string());
+            let matches_name = self.type_defs.get(&owner).is_some_and(|definition| {
+                definition.kind == ResolvedTypeKind::Newtype
+                    && (definition.qualified_name == name
+                        || definition
+                            .qualified_name
+                            .rsplit_once("::")
+                            .is_some_and(|(_, short)| short == name))
+            });
+            if matches_name {
+                let declared = vec![(
+                    "_0".to_string(),
+                    NodeId(format!("{}/payload:0", owner.0)),
+                    inner.clone(),
+                )];
+                let lowered =
+                    self.lower_constructor_fields(node_id, fields, role, &declared, mutable)?;
+                return Ok(Some(ResolvedPatternKind::Constructor {
+                    variant: owner,
+                    fields: lowered,
+                }));
+            }
+        }
         if let Some(ResolvedType::Nominal { item, .. }) = self.types.get(ty) {
             let owner = NodeId(item.as_str().to_string());
             if let Some(definition) = self.type_defs.get(&owner) {
@@ -3991,6 +4305,32 @@ impl BodyLowerer<'_> {
         }
     }
 
+    fn reference_binding_type(
+        &self,
+        node_id: &NodeId,
+        initializer: &ResolvedTypeId,
+    ) -> Result<ResolvedTypeId, Vec<ResolvedBodyError>> {
+        let matches = self
+            .types
+            .iter()
+            .filter_map(|(id, ty)| match ty {
+                ResolvedType::Reference {
+                    lifetime: None,
+                    mutable: false,
+                    target,
+                } if target == initializer => Some(id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [reference] = matches.as_slice() else {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "reference binding has no unique checker-finalized canonical reference type",
+            )]);
+        };
+        Ok(reference.clone())
+    }
+
     fn shared_binding_type(
         &self,
         node_id: &NodeId,
@@ -4003,15 +4343,39 @@ impl BodyLowerer<'_> {
             crate::ast::SharedKind::Weak => super::OwnershipTypeKind::Weak,
             crate::ast::SharedKind::WeakLocal => super::OwnershipTypeKind::WeakLocal,
         };
+        let desired_target = match (kind, self.types.get(initializer)) {
+            (
+                crate::ast::SharedKind::Weak,
+                Some(ResolvedType::Ownership {
+                    kind: super::OwnershipTypeKind::Shared,
+                    target,
+                }),
+            )
+            | (
+                crate::ast::SharedKind::WeakLocal,
+                Some(ResolvedType::Ownership {
+                    kind: super::OwnershipTypeKind::LocalShared,
+                    target,
+                }),
+            ) => target,
+            (crate::ast::SharedKind::Weak | crate::ast::SharedKind::WeakLocal, _) => {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    "weak binding initializer has no compatible canonical strong ownership type",
+                )])
+            }
+            (crate::ast::SharedKind::Shared | crate::ast::SharedKind::LocalShared, _) => {
+                initializer
+            }
+        };
         let matches = self
             .types
             .iter()
             .filter_map(|(id, ty)| match ty {
-                ResolvedType::Ownership { kind, target }
-                    if *kind == expected && target == initializer =>
-                {
-                    Some(id.clone())
-                }
+                ResolvedType::Ownership {
+                    kind,
+                    target: candidate_target,
+                } if *kind == expected && candidate_target == desired_target => Some(id.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -4168,6 +4532,27 @@ impl BodyLowerer<'_> {
                 });
             }
         }
+        if matches!(self.types.get(from), Some(ResolvedType::Slice(target)) if target == to) {
+            return Ok(CheckedConversion {
+                kind: CheckedConversionKind::SliceView,
+                from: from.clone(),
+                to: to.clone(),
+            });
+        }
+        if matches!(
+            self.types.get(from),
+            Some(ResolvedType::Ownership {
+                kind: super::OwnershipTypeKind::Shared
+                    | super::OwnershipTypeKind::LocalShared,
+                target,
+            }) if target == to
+        ) {
+            return Ok(CheckedConversion {
+                kind: CheckedConversionKind::OwnershipRead,
+                from: from.clone(),
+                to: to.clone(),
+            });
+        }
         let primitives = match (self.types.get(from), self.types.get(to)) {
             (Some(ResolvedType::Primitive(from)), Some(ResolvedType::Primitive(to))) => {
                 (*from, *to)
@@ -4176,9 +4561,11 @@ impl BodyLowerer<'_> {
                 return Err(vec![ResolvedBodyError::new(
                     node_id.clone(),
                     format!(
-                        "checked implicit conversion is required from '{}' to '{}'",
+                        "checked implicit conversion is required from '{}' ({:?}) to '{}' ({:?})",
                         from.as_str(),
-                        to.as_str()
+                        self.types.get(from),
+                        to.as_str(),
+                        self.types.get(to)
                     ),
                 )])
             }
@@ -5808,6 +6195,83 @@ mod tests {
     }
 
     #[test]
+    fn enum_and_newtype_constructors_are_closed_in_calls_and_patterns() {
+        let file = parse(
+            "newtype UserId = i32\ntype Shape { Circle(f64) }\nfunc main() -> i32 { let shape = Circle(1.0); let id = UserId(7); match id { UserId(value) => if value == 7 { 0 } else { 1 } } }",
+        );
+        let program = crate::core::check_program(&file).expect("check constructors");
+        let body = program
+            .resolved_body(&NodeId("function:main".into()))
+            .expect("resolved main");
+        let ResolvedStmtKind::Bind {
+            initializer: Some(shape),
+            ..
+        } = &body.root.statements[0].kind
+        else {
+            panic!("shape binding expected");
+        };
+        assert!(matches!(
+            shape.kind,
+            ResolvedExprKind::Call(ResolvedCall {
+                callee: ResolvedCallee::Constructor(ref variant),
+                ..
+            }) if variant.0.starts_with("type:Shape/node:decl.variant@")
+        ));
+        let result = body.root.result.as_deref().expect("match result");
+        let ResolvedExprKind::Match { arms, .. } = &result.kind else {
+            panic!("newtype match expected");
+        };
+        assert!(matches!(
+            arms[0].pattern.kind,
+            ResolvedPatternKind::Constructor { ref variant, .. }
+                if variant == &NodeId("type:UserId".into())
+        ));
+    }
+
+    #[test]
+    fn slice_and_typed_json_builtin_retain_explicit_semantics() {
+        let file = parse(
+            "type Config { value: i32 }\nfunc take<T>(values: List<T>, n: i32) -> List<T> { if n < len(values) { values[0..n] } else { values } }\nfunc decode(text: string) -> Config { from_json::<Config>(text) }",
+        );
+        let program = crate::core::check_program(&file).expect("check typed operations");
+        let take = program
+            .resolved_body(&NodeId("function:take".into()))
+            .expect("resolved take");
+        let ResolvedExprKind::If { then_block, .. } =
+            &take.root.result.as_deref().expect("take result").kind
+        else {
+            panic!("take if expected");
+        };
+        assert!(matches!(
+            then_block.result.as_deref().map(|result| &result.kind),
+            Some(ResolvedExprKind::Cast {
+                conversion: CheckedConversion {
+                    kind: CheckedConversionKind::SliceView,
+                    ..
+                },
+                ..
+            })
+        ));
+
+        let decode = program
+            .resolved_body(&NodeId("function:decode".into()))
+            .expect("resolved decode");
+        let ResolvedExprKind::Call(call) =
+            &decode.root.result.as_deref().expect("decode result").kind
+        else {
+            panic!("from_json call expected");
+        };
+        assert!(matches!(
+            call.callee,
+            ResolvedCallee::Builtin(ref builtin) if builtin.as_str() == "from_json"
+        ));
+        assert_eq!(
+            call.type_arguments.as_slice(),
+            std::slice::from_ref(&call.result)
+        );
+    }
+
+    #[test]
     fn shared_binding_has_explicit_ownership_wrap() {
         let file = parse("func main() { shared value = 42; println(value) }");
         let program = crate::core::check_program(&file).expect("check");
@@ -5827,6 +6291,78 @@ mod tests {
         assert_eq!(conversion.to, pattern.ty);
         body.validate(program.resolved_types())
             .expect("valid shared body");
+    }
+
+    #[test]
+    fn weak_binding_has_explicit_strong_to_weak_conversion() {
+        let file = parse(
+            "func main() -> i32 { shared strong = 42; weak observer = strong; if observer.upgrade().deref() == 42 { 0 } else { 1 } }",
+        );
+        let program = crate::core::check_program(&file).expect("check weak binding");
+        let body = program
+            .resolved_body(&NodeId("function:main".into()))
+            .expect("resolved main");
+        let ResolvedStmtKind::Bind {
+            pattern,
+            initializer: Some(initializer),
+        } = &body.root.statements[1].kind
+        else {
+            panic!("weak binding expected");
+        };
+        let ResolvedExprKind::Cast { conversion, .. } = &initializer.kind else {
+            panic!("ownership downgrade expected");
+        };
+        assert_eq!(conversion.kind, CheckedConversionKind::OwnershipDowngrade);
+        assert_eq!(conversion.to, pattern.ty);
+    }
+
+    #[test]
+    fn reference_binding_and_shared_read_are_explicit() {
+        let file = parse(
+            "func read(value: shared i32) -> i32 { value }\nfunc main() -> i32 { arena { let ref value = 42; *value } }",
+        );
+        let program = crate::core::check_program(&file).expect("check references");
+        let read = program
+            .resolved_body(&NodeId("function:read".into()))
+            .expect("resolved shared read");
+        assert!(matches!(
+            read.root.result.as_deref().map(|result| &result.kind),
+            Some(ResolvedExprKind::Cast {
+                conversion: CheckedConversion {
+                    kind: CheckedConversionKind::OwnershipRead,
+                    ..
+                },
+                ..
+            })
+        ));
+
+        let main = program
+            .resolved_body(&NodeId("function:main".into()))
+            .expect("resolved arena reference");
+        let ResolvedStmtKind::Scope { body: arena, .. } = &main.root.statements[0].kind else {
+            panic!("arena scope expected");
+        };
+        let ResolvedStmtKind::Bind {
+            pattern,
+            initializer: Some(initializer),
+        } = &arena.statements[0].kind
+        else {
+            panic!("reference binding expected");
+        };
+        assert!(matches!(
+            pattern.kind,
+            ResolvedPatternKind::Binding {
+                by_reference: Some(crate::core::Permission::View),
+                ..
+            }
+        ));
+        assert!(matches!(
+            initializer.kind,
+            ResolvedExprKind::Unary {
+                op: ResolvedUnaryOp::BorrowShared,
+                ..
+            }
+        ));
     }
 
     #[test]

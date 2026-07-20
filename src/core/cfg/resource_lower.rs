@@ -479,14 +479,13 @@ impl<'a> ActionEmitter<'a> {
                 operand,
             } => {
                 self.visit_expr(operand, None);
-                let ResolvedExprKind::Load(source) = &operand.kind else {
-                    self.errors.push(Diagnostic::error(
-                        "borrow operand is not a typed place".to_string(),
-                        expression.origin.user_span(),
-                    ));
-                    return;
+                let mut source = match &operand.kind {
+                    ResolvedExprKind::Load(source) => self.canonical_place(source),
+                    _ => Place::root(
+                        LocalId(NodeId(format!("{}/temporary", expression.node_id.0))),
+                        "<temporary>",
+                    ),
                 };
-                let mut source = self.canonical_place(source);
                 let kind = match &expression.kind {
                     ResolvedExprKind::Unary {
                         op: ResolvedUnaryOp::BorrowMutable,
