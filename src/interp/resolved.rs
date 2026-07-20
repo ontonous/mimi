@@ -45,6 +45,13 @@ enum RuntimeCallable {
 }
 
 #[derive(Clone)]
+enum RuntimeArgument {
+    Missing,
+    Value(Value),
+    Callable(RuntimeCallable),
+}
+
+#[derive(Clone)]
 struct RuntimeLambda {
     body_owner: NodeId,
     lambda: ResolvedLambda,
@@ -91,7 +98,7 @@ impl<'a> ResolvedInterpreter<'a> {
             self.program,
             &mut self.state,
             owner,
-            arguments.into_iter().map(Some).collect(),
+            arguments.into_iter().map(RuntimeArgument::Value).collect(),
         )
     }
 
@@ -104,7 +111,7 @@ fn execute_call(
     program: &CheckedProgram,
     state: &mut ExecutionState,
     owner: &NodeId,
-    arguments: Vec<Option<Value>>,
+    arguments: Vec<RuntimeArgument>,
 ) -> Result<Value, InterpError> {
     if state.call_depth >= MAX_TYPED_CALL_DEPTH {
         return Err(InterpError::new(
@@ -158,9 +165,15 @@ fn execute_call(
             ));
         }
     }
-    for (local, value) in body.parameters.iter().zip(arguments) {
-        if let Some(value) = value {
-            values.insert(local.clone(), value);
+    for (local, argument) in body.parameters.iter().zip(arguments) {
+        match argument {
+            RuntimeArgument::Missing => {}
+            RuntimeArgument::Value(value) => {
+                values.insert(local.clone(), value);
+            }
+            RuntimeArgument::Callable(callable) => {
+                callables.insert(local.clone(), callable);
+            }
         }
     }
     state.frames.push(Frame {
@@ -176,6 +189,9 @@ fn execute_call(
             if current_frame(state)?
                 .values
                 .contains_key(&body.parameters[index])
+                || current_frame(state)?
+                    .callables
+                    .contains_key(&body.parameters[index])
             {
                 continue;
             }
@@ -187,6 +203,9 @@ fn execute_call(
                 ))
             })?;
             let value = eval_expr(program, state, body, default)?;
+            if signal_pending(state)? {
+                break;
+            }
             current_frame(state)?
                 .values
                 .insert(body.parameters[index].clone(), value);
@@ -213,6 +232,9 @@ fn eval_block(
     body: &ResolvedBody,
     block: &ResolvedBlock,
 ) -> Result<Value, InterpError> {
+    if signal_pending(state)? {
+        return Ok(Value::Unit);
+    }
     for statement in &block.statements {
         eval_stmt(program, state, body, statement)?;
         if current_frame(state)?.signal.is_some() {
@@ -222,7 +244,14 @@ fn eval_block(
     block
         .result
         .as_deref()
-        .map(|result| eval_expr(program, state, body, result))
+        .map(|result| {
+            let value = eval_expr(program, state, body, result)?;
+            if signal_pending(state)? {
+                Ok(Value::Unit)
+            } else {
+                Ok(value)
+            }
+        })
         .unwrap_or(Ok(Value::Unit))
 }
 
@@ -248,6 +277,9 @@ fn eval_stmt(
                 .map(|value| eval_expr(program, state, body, value))
                 .transpose()?
                 .unwrap_or(Value::Unit);
+            if signal_pending(state)? {
+                return Ok(());
+            }
             bind_pattern(program, state, pattern, value)?;
         }
         ResolvedStmtKind::Assign {
@@ -256,6 +288,9 @@ fn eval_stmt(
             conversion,
         } => {
             let value = eval_expr(program, state, body, value)?;
+            if signal_pending(state)? {
+                return Ok(());
+            }
             let value = apply_conversion(program, conversion, value)?;
             write_place(program, state, body, target, value)?;
         }
@@ -263,6 +298,9 @@ fn eval_stmt(
             let value = match (value, conversion) {
                 (Some(value), Some(conversion)) => {
                     let value = eval_expr(program, state, body, value)?;
+                    if signal_pending(state)? {
+                        return Ok(());
+                    }
                     apply_conversion(program, conversion, value)?
                 }
                 (None, None) => Value::Unit,
@@ -275,6 +313,9 @@ fn eval_stmt(
                 .as_ref()
                 .map(|value| eval_expr(program, state, body, value))
                 .transpose()?;
+            if signal_pending(state)? {
+                return Ok(());
+            }
             current_frame(state)?.signal = Some(ControlSignal::Break(value));
         }
         ResolvedStmtKind::Continue => {
@@ -288,6 +329,9 @@ fn eval_stmt(
             body: loop_body,
         } => loop {
             let condition = eval_expr(program, state, body, condition)?;
+            if signal_pending(state)? {
+                return Ok(());
+            }
             if !is_truthy(&condition) {
                 break;
             }
@@ -302,6 +346,9 @@ fn eval_stmt(
             body: loop_body,
         } => loop {
             let initializer = eval_expr(program, state, body, initializer)?;
+            if signal_pending(state)? {
+                return Ok(());
+            }
             if !try_bind_pattern(program, state, pattern, initializer)? {
                 break;
             }
@@ -322,6 +369,9 @@ fn eval_stmt(
             body: loop_body,
         } => {
             let iterable = eval_expr(program, state, body, iterable)?;
+            if signal_pending(state)? {
+                return Ok(());
+            }
             for value in iterable_values(&statement.node_id, iterable)? {
                 bind_pattern(program, state, pattern, value)?;
                 eval_block(program, state, body, loop_body)?;
@@ -342,6 +392,9 @@ fn eval_stmt(
         }
         ResolvedStmtKind::Contract { kind, condition } => {
             let condition = eval_expr(program, state, body, condition)?;
+            if signal_pending(state)? {
+                return Ok(());
+            }
             if !is_truthy(&condition) {
                 return Err(InterpError::contract_violation(format!(
                     "typed {:?} contract failed at '{}'",
@@ -352,6 +405,9 @@ fn eval_stmt(
         ResolvedStmtKind::Math(expressions) => {
             for expression in expressions {
                 eval_expr(program, state, body, expression)?;
+                if signal_pending(state)? {
+                    return Ok(());
+                }
             }
         }
         ResolvedStmtKind::Scope {
@@ -384,7 +440,10 @@ fn eval_expr(
                 match part {
                     ResolvedFStringPart::Text(text) => output.push_str(text),
                     ResolvedFStringPart::Interpolation(value) => {
-                        output.push_str(&eval_expr(program, state, body, value)?.to_string());
+                        let Some(value) = eval_child(program, state, body, value)? else {
+                            return Ok(Value::Unit);
+                        };
+                        output.push_str(&value.to_string());
                     }
                 }
             }
@@ -393,18 +452,24 @@ fn eval_expr(
         ResolvedExprKind::Load(place) => read_place(program, state, body, place),
         ResolvedExprKind::Constant(identity) => constant_value(program, identity),
         ResolvedExprKind::Binary { op, left, right } => {
-            let left = eval_expr(program, state, body, left)?;
+            let Some(left) = eval_child(program, state, body, left)? else {
+                return Ok(Value::Unit);
+            };
             if *op == ResolvedBinaryOp::LogicalAnd && !is_truthy(&left) {
                 return Ok(Value::Bool(false));
             }
             if *op == ResolvedBinaryOp::LogicalOr && is_truthy(&left) {
                 return Ok(Value::Bool(true));
             }
-            let right = eval_expr(program, state, body, right)?;
+            let Some(right) = eval_child(program, state, body, right)? else {
+                return Ok(Value::Unit);
+            };
             ops::apply_binary(*op, left, right)
         }
         ResolvedExprKind::Unary { op, operand } => {
-            let operand = eval_expr(program, state, body, operand)?;
+            let Some(operand) = eval_child(program, state, body, operand)? else {
+                return Ok(Value::Unit);
+            };
             ops::apply_unary(*op, operand)
         }
         ResolvedExprKind::Call(call) => {
@@ -423,10 +488,14 @@ fn eval_expr(
                             "default argument identity disagrees with its callable slot",
                         ));
                     }
-                    arguments.push(None);
+                    arguments.push(RuntimeArgument::Missing);
+                } else if let Some(callable) = eval_callable(state, body, &argument.value)? {
+                    arguments.push(RuntimeArgument::Callable(callable));
                 } else {
-                    let value = eval_expr(program, state, body, &argument.value)?;
-                    arguments.push(Some(apply_conversion(
+                    let Some(value) = eval_child(program, state, body, &argument.value)? else {
+                        return Ok(Value::Unit);
+                    };
+                    arguments.push(RuntimeArgument::Value(apply_conversion(
                         program,
                         &argument.conversion,
                         value,
@@ -436,7 +505,7 @@ fn eval_expr(
             match &call.callee {
                 ResolvedCallee::Function(owner) => execute_call(program, state, owner, arguments),
                 ResolvedCallee::Constructor(owner) => {
-                    let arguments = require_complete_arguments(&expression.node_id, arguments)?;
+                    let arguments = require_value_arguments(&expression.node_id, arguments)?;
                     if program.type_defs().get(owner).is_some_and(|definition| {
                         definition.kind == crate::core::ResolvedTypeKind::Newtype
                     }) {
@@ -455,11 +524,12 @@ fn eval_expr(
                         Ok(Value::Variant(name, arguments))
                     }
                 }
-                ResolvedCallee::Builtin(builtin) => eval_builtin(
+                ResolvedCallee::Builtin(builtin) => eval_runtime_builtin(
+                    program,
                     state,
                     &expression.node_id,
                     builtin.as_str(),
-                    require_complete_arguments(&expression.node_id, arguments)?,
+                    arguments,
                 ),
                 ResolvedCallee::LocalClosure(local) => {
                     let callable = state
@@ -474,7 +544,7 @@ fn eval_expr(
                         state,
                         &expression.node_id,
                         callable,
-                        require_complete_arguments(&expression.node_id, arguments)?,
+                        arguments,
                     )
                 }
                 _ => Err(unsupported(
@@ -492,14 +562,18 @@ fn eval_expr(
         ResolvedExprKind::Map(entries) => {
             let mut fields = HashMap::with_capacity(entries.len());
             for (key, value) in entries {
-                let key = eval_expr(program, state, body, key)?;
+                let Some(key) = eval_child(program, state, body, key)? else {
+                    return Ok(Value::Unit);
+                };
                 let Value::String(key) = key else {
                     return Err(unsupported(
                         &expression.node_id,
                         "typed map keys are not strings",
                     ));
                 };
-                let value = eval_expr(program, state, body, value)?;
+                let Some(value) = eval_child(program, state, body, value)? else {
+                    return Ok(Value::Unit);
+                };
                 fields.insert(key, value);
             }
             Ok(Value::Record(None, fields))
@@ -521,7 +595,9 @@ fn eval_expr(
             then_block,
             else_block,
         } => {
-            let condition = eval_expr(program, state, body, condition)?;
+            let Some(condition) = eval_child(program, state, body, condition)? else {
+                return Ok(Value::Unit);
+            };
             if is_truthy(&condition) {
                 eval_block(program, state, body, then_block)
             } else {
@@ -529,14 +605,18 @@ fn eval_expr(
             }
         }
         ResolvedExprKind::Match { scrutinee, arms } => {
-            let value = eval_expr(program, state, body, scrutinee)?;
+            let Some(value) = eval_child(program, state, body, scrutinee)? else {
+                return Ok(Value::Unit);
+            };
             for arm in arms {
                 let previous = current_frame(state)?.values.clone();
                 if !try_bind_pattern(program, state, &arm.pattern, value.clone())? {
                     continue;
                 }
                 if let Some(guard) = &arm.guard {
-                    let guard = eval_expr(program, state, body, guard)?;
+                    let Some(guard) = eval_child(program, state, body, guard)? else {
+                        return Ok(Value::Unit);
+                    };
                     if !is_truthy(&guard) {
                         current_frame(state)?.values = previous;
                         continue;
@@ -549,10 +629,13 @@ fn eval_expr(
             ))
         }
         ResolvedExprKind::Range { start, end } => {
-            match (
-                eval_expr(program, state, body, start)?,
-                eval_expr(program, state, body, end)?,
-            ) {
+            let Some(start) = eval_child(program, state, body, start)? else {
+                return Ok(Value::Unit);
+            };
+            let Some(end) = eval_child(program, state, body, end)? else {
+                return Ok(Value::Unit);
+            };
+            match (start, end) {
                 (Value::Int(start), Value::Int(end)) => Ok(Value::Range { start, end }),
                 _ => Err(unsupported(
                     &expression.node_id,
@@ -561,11 +644,15 @@ fn eval_expr(
             }
         }
         ResolvedExprKind::Cast { value, conversion } => {
-            let value = eval_expr(program, state, body, value)?;
+            let Some(value) = eval_child(program, state, body, value)? else {
+                return Ok(Value::Unit);
+            };
             apply_conversion(program, conversion, value)
         }
         ResolvedExprKind::Project { value, projection } => {
-            let value = eval_expr(program, state, body, value)?;
+            let Some(value) = eval_child(program, state, body, value)? else {
+                return Ok(Value::Unit);
+            };
             read_projection(program, state, body, value, projection)
         }
         ResolvedExprKind::Old(value) => eval_expr(program, state, body, value),
@@ -578,7 +665,9 @@ fn eval_expr(
                 let name = program.resolved_member_name(&field.field).ok_or_else(|| {
                     unsupported(&field.field, "record field has no resolved display name")
                 })?;
-                let value = eval_expr(program, state, body, &field.value)?;
+                let Some(value) = eval_child(program, state, body, &field.value)? else {
+                    return Ok(Value::Unit);
+                };
                 let value = apply_conversion(program, &field.conversion, value)?;
                 values.insert(name.to_string(), value);
             }
@@ -597,17 +686,27 @@ fn eval_expr(
             iterable,
             guard,
         } => {
-            let iterable = eval_expr(program, state, body, iterable)?;
+            let Some(iterable) = eval_child(program, state, body, iterable)? else {
+                return Ok(Value::Unit);
+            };
             let mut values = Vec::new();
             for item in iterable_values(&expression.node_id, iterable)? {
                 let previous = current_frame(state)?.values.clone();
                 if try_bind_pattern(program, state, pattern, item)? {
                     let selected = match guard {
-                        Some(guard) => is_truthy(&eval_expr(program, state, body, guard)?),
+                        Some(guard) => {
+                            let Some(guard) = eval_child(program, state, body, guard)? else {
+                                return Ok(Value::Unit);
+                            };
+                            is_truthy(&guard)
+                        }
                         None => true,
                     };
                     if selected {
-                        values.push(eval_expr(program, state, body, value)?);
+                        let Some(value) = eval_child(program, state, body, value)? else {
+                            return Ok(Value::Unit);
+                        };
+                        values.push(value);
                     }
                 }
                 current_frame(state)?.values = previous;
@@ -617,7 +716,9 @@ fn eval_expr(
         ResolvedExprKind::OptionalChain {
             receiver, field, ..
         } => {
-            let receiver = eval_expr(program, state, body, receiver)?;
+            let Some(receiver) = eval_child(program, state, body, receiver)? else {
+                return Ok(Value::Unit);
+            };
             match receiver {
                 Value::Variant(name, mut values)
                     if matches!(name.as_str(), "Some" | "Ok") && values.len() == 1 =>
@@ -640,13 +741,52 @@ fn eval_expr(
             }
         }
         ResolvedExprKind::Slice { target, start, end } => {
-            let target = eval_expr(program, state, body, target)?;
+            let Some(target) = eval_child(program, state, body, target)? else {
+                return Ok(Value::Unit);
+            };
             let start = eval_optional_index(program, state, body, start.as_deref())?;
+            if signal_pending(state)? {
+                return Ok(Value::Unit);
+            }
             let end = eval_optional_index(program, state, body, end.as_deref())?;
+            if signal_pending(state)? {
+                return Ok(Value::Unit);
+            }
             slice_value(&expression.node_id, target, start, end)
         }
+        ResolvedExprKind::Try {
+            value,
+            propagation_target,
+        } => {
+            if current_frame(state)?.owner != *propagation_target {
+                return Err(unsupported(
+                    &expression.node_id,
+                    "Try propagation target disagrees with the active callable",
+                ));
+            }
+            let value = eval_expr(program, state, body, value)?;
+            if signal_pending(state)? {
+                return Ok(Value::Unit);
+            }
+            match value {
+                Value::Variant(name, mut payload) if matches!(name.as_str(), "Some" | "Ok") => {
+                    Ok(payload.drain(..).next().unwrap_or(Value::Unit))
+                }
+                Value::Variant(name, payload) if matches!(name.as_str(), "None" | "Err") => {
+                    current_frame(state)?.signal =
+                        Some(ControlSignal::Return(Value::Variant(name, payload)));
+                    Ok(Value::Unit)
+                }
+                value @ Value::Error(_) => {
+                    current_frame(state)?.signal = Some(ControlSignal::Return(value));
+                    Ok(Value::Unit)
+                }
+                _ => Err(InterpError::type_mismatch(
+                    "Try operator requires an Option or Result value",
+                )),
+            }
+        }
         ResolvedExprKind::TypeOf(_)
-        | ResolvedExprKind::Try { .. }
         | ResolvedExprKind::Spawn(_)
         | ResolvedExprKind::Await(_)
         | ResolvedExprKind::Lambda(_)
@@ -667,10 +807,14 @@ fn eval_values(
     body: &ResolvedBody,
     values: &[ResolvedExpr],
 ) -> Result<Vec<Value>, InterpError> {
-    values
-        .iter()
-        .map(|value| eval_expr(program, state, body, value))
-        .collect()
+    let mut evaluated = Vec::with_capacity(values.len());
+    for value in values {
+        let Some(value) = eval_child(program, state, body, value)? else {
+            return Ok(Vec::new());
+        };
+        evaluated.push(value);
+    }
+    Ok(evaluated)
 }
 
 fn eval_callable(
@@ -680,6 +824,12 @@ fn eval_callable(
 ) -> Result<Option<RuntimeCallable>, InterpError> {
     match &expression.kind {
         ResolvedExprKind::Callable(callee) => Ok(Some(RuntimeCallable::Direct(callee.clone()))),
+        ResolvedExprKind::Load(place) if place.projections.is_empty() => Ok(state
+            .frames
+            .iter()
+            .rev()
+            .find_map(|frame| frame.callables.get(&place.base))
+            .cloned()),
         ResolvedExprKind::Lambda(lambda) => {
             let mut captured_values = BTreeMap::new();
             let mut captured_callables = BTreeMap::new();
@@ -743,24 +893,21 @@ fn execute_runtime_callable(
     state: &mut ExecutionState,
     call_node: &NodeId,
     callable: RuntimeCallable,
-    arguments: Vec<Value>,
+    arguments: Vec<RuntimeArgument>,
 ) -> Result<Value, InterpError> {
     match callable {
-        RuntimeCallable::Direct(ResolvedCallee::Function(owner)) => execute_call(
-            program,
-            state,
-            &owner,
-            arguments.into_iter().map(Some).collect(),
-        ),
+        RuntimeCallable::Direct(ResolvedCallee::Function(owner)) => {
+            execute_call(program, state, &owner, arguments)
+        }
         RuntimeCallable::Direct(ResolvedCallee::Builtin(builtin)) => {
-            eval_builtin(state, call_node, builtin.as_str(), arguments)
+            eval_runtime_builtin(program, state, call_node, builtin.as_str(), arguments)
         }
         RuntimeCallable::Lambda(runtime) => {
             let RuntimeLambda {
                 body_owner,
                 lambda,
                 mut captured_values,
-                captured_callables,
+                mut captured_callables,
             } = *runtime;
             if state.call_depth >= MAX_TYPED_CALL_DEPTH {
                 return Err(InterpError::new(
@@ -779,10 +926,23 @@ fn execute_runtime_callable(
                 .resolved_body(&body_owner)
                 .ok_or_else(|| unsupported(&body_owner, "lambda owner body is absent"))?;
             for (parameter, argument) in lambda.parameters.iter().zip(arguments) {
-                captured_values.insert(parameter.clone(), argument);
+                match argument {
+                    RuntimeArgument::Missing => {
+                        return Err(unsupported(
+                            call_node,
+                            "lambda call contains a default argument",
+                        ));
+                    }
+                    RuntimeArgument::Value(value) => {
+                        captured_values.insert(parameter.clone(), value);
+                    }
+                    RuntimeArgument::Callable(callable) => {
+                        captured_callables.insert(parameter.clone(), callable);
+                    }
+                }
             }
             state.frames.push(Frame {
-                owner: lambda.owner.clone(),
+                owner: body_owner,
                 values: captured_values,
                 callables: captured_callables,
                 signal: None,
@@ -809,20 +969,23 @@ fn execute_runtime_callable(
     }
 }
 
-fn require_complete_arguments(
+fn require_value_arguments(
     node: &NodeId,
-    arguments: Vec<Option<Value>>,
+    arguments: Vec<RuntimeArgument>,
 ) -> Result<Vec<Value>, InterpError> {
     arguments
         .into_iter()
         .enumerate()
-        .map(|(index, value)| {
-            value.ok_or_else(|| {
-                unsupported(
-                    node,
-                    &format!("non-function callee has a default argument at slot {index}"),
-                )
-            })
+        .map(|(index, argument)| match argument {
+            RuntimeArgument::Value(value) => Ok(value),
+            RuntimeArgument::Missing => Err(unsupported(
+                node,
+                &format!("non-function callee has a default argument at slot {index}"),
+            )),
+            RuntimeArgument::Callable(_) => Err(unsupported(
+                node,
+                &format!("callee does not accept a callable at slot {index}"),
+            )),
         })
         .collect()
 }
@@ -859,20 +1022,21 @@ fn eval_optional_index(
     body: &ResolvedBody,
     expression: Option<&ResolvedExpr>,
 ) -> Result<Option<usize>, InterpError> {
-    expression
-        .map(
-            |expression| match eval_expr(program, state, body, expression)? {
-                Value::Int(index) => usize::try_from(index)
-                    .map(Some)
-                    .map_err(|_| InterpError::index_out_of_bounds("negative slice bound")),
-                _ => Err(unsupported(
-                    &expression.node_id,
-                    "slice bound is not an integer",
-                )),
-            },
-        )
-        .transpose()
-        .map(Option::flatten)
+    let Some(expression) = expression else {
+        return Ok(None);
+    };
+    let Some(value) = eval_child(program, state, body, expression)? else {
+        return Ok(None);
+    };
+    match value {
+        Value::Int(index) => usize::try_from(index)
+            .map(Some)
+            .map_err(|_| InterpError::index_out_of_bounds("negative slice bound")),
+        _ => Err(unsupported(
+            &expression.node_id,
+            "slice bound is not an integer",
+        )),
+    }
 }
 
 fn slice_value(
@@ -925,6 +1089,152 @@ fn slice_value(
             Ok(Value::String(characters[start..end].iter().collect()))
         }
         _ => Err(unsupported(node, "slice target is not a sequence")),
+    }
+}
+
+fn eval_runtime_builtin(
+    program: &CheckedProgram,
+    state: &mut ExecutionState,
+    node: &NodeId,
+    name: &str,
+    arguments: Vec<RuntimeArgument>,
+) -> Result<Value, InterpError> {
+    match name {
+        "map" | "filter" | "reduce" => {
+            eval_collection_callable(program, state, node, name, arguments)
+        }
+        "builtin.method.option.map"
+        | "builtin.method.option.and_then"
+        | "builtin.method.result.map"
+        | "builtin.method.result.and_then"
+        | "builtin.method.result.map_err" => {
+            eval_variant_callable(program, state, node, name, arguments)
+        }
+        _ => eval_builtin(state, node, name, require_value_arguments(node, arguments)?),
+    }
+}
+
+fn eval_collection_callable(
+    program: &CheckedProgram,
+    state: &mut ExecutionState,
+    node: &NodeId,
+    name: &str,
+    arguments: Vec<RuntimeArgument>,
+) -> Result<Value, InterpError> {
+    let expected = if name == "reduce" { 3 } else { 2 };
+    if arguments.len() != expected {
+        return Err(InterpError::wrong_arg_count(format!(
+            "builtin '{name}' expects {expected} arguments, got {}",
+            arguments.len()
+        )));
+    }
+    let values = match &arguments[0] {
+        RuntimeArgument::Value(Value::List(values)) => values.clone(),
+        _ => return Err(builtin_type_error(name, "a list and callable")),
+    };
+    let callable = match &arguments[1] {
+        RuntimeArgument::Callable(callable) => callable.clone(),
+        _ => return Err(builtin_type_error(name, "a list and callable")),
+    };
+    match name {
+        "map" => values
+            .into_iter()
+            .map(|value| {
+                execute_runtime_callable(
+                    program,
+                    state,
+                    node,
+                    callable.clone(),
+                    vec![RuntimeArgument::Value(value)],
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::List),
+        "filter" => {
+            let mut selected = Vec::new();
+            for value in values {
+                let predicate = execute_runtime_callable(
+                    program,
+                    state,
+                    node,
+                    callable.clone(),
+                    vec![RuntimeArgument::Value(value.clone())],
+                )?;
+                if is_truthy(&predicate) {
+                    selected.push(value);
+                }
+            }
+            Ok(Value::List(selected))
+        }
+        "reduce" => {
+            let mut accumulator = match &arguments[2] {
+                RuntimeArgument::Value(value) => value.clone(),
+                _ => return Err(builtin_type_error(name, "a concrete initial value")),
+            };
+            for value in values {
+                accumulator = execute_runtime_callable(
+                    program,
+                    state,
+                    node,
+                    callable.clone(),
+                    vec![
+                        RuntimeArgument::Value(accumulator),
+                        RuntimeArgument::Value(value),
+                    ],
+                )?;
+            }
+            Ok(accumulator)
+        }
+        _ => Err(unsupported(node, "unknown canonical collection callable")),
+    }
+}
+
+fn eval_variant_callable(
+    program: &CheckedProgram,
+    state: &mut ExecutionState,
+    node: &NodeId,
+    name: &str,
+    arguments: Vec<RuntimeArgument>,
+) -> Result<Value, InterpError> {
+    if arguments.len() != 2 {
+        return Err(InterpError::wrong_arg_count(format!(
+            "builtin '{name}' expects a receiver and callable"
+        )));
+    }
+    let (variant, payload) = match &arguments[0] {
+        RuntimeArgument::Value(Value::Variant(variant, payload)) => {
+            (variant.clone(), payload.clone())
+        }
+        _ => return Err(builtin_type_error(name, "an Option/Result receiver")),
+    };
+    let callable = match &arguments[1] {
+        RuntimeArgument::Callable(callable) => callable.clone(),
+        _ => return Err(builtin_type_error(name, "a callable argument")),
+    };
+    let method = name
+        .rsplit_once('.')
+        .map(|(_, method)| method)
+        .unwrap_or(name);
+    let should_call = match method {
+        "map" | "and_then" => matches!(variant.as_str(), "Some" | "Ok"),
+        "map_err" => variant == "Err",
+        _ => false,
+    };
+    if !should_call {
+        return Ok(Value::Variant(variant, payload));
+    }
+    let argument = payload.first().cloned().unwrap_or(Value::Unit);
+    let mapped = execute_runtime_callable(
+        program,
+        state,
+        node,
+        callable,
+        vec![RuntimeArgument::Value(argument)],
+    )?;
+    if method == "and_then" {
+        Ok(mapped)
+    } else {
+        Ok(Value::Variant(variant, vec![mapped]))
     }
 }
 
@@ -1485,7 +1795,10 @@ fn evaluate_projections(
                         let input = body.place_inputs.get(node).ok_or_else(|| {
                             unsupported(node, "dynamic place index has no typed input")
                         })?;
-                        match eval_expr(program, state, body, input)? {
+                        let Some(input) = eval_child(program, state, body, input)? else {
+                            return Ok(Vec::new());
+                        };
+                        match input {
                             Value::Int(index) => usize::try_from(index).map_err(|_| {
                                 InterpError::index_out_of_bounds("negative resolved index")
                             })?,
@@ -1573,7 +1886,10 @@ fn read_projection(
             project_value(value, &RuntimeProjection::Tuple(*index))
         }
         ResolvedValueProjection::Index(index) => {
-            let index = match eval_expr(program, state, body, index)? {
+            let Some(index_value) = eval_child(program, state, body, index)? else {
+                return Ok(Value::Unit);
+            };
+            let index = match index_value {
                 Value::Int(index) => usize::try_from(index)
                     .map_err(|_| InterpError::index_out_of_bounds("negative resolved index"))?,
                 _ => {
@@ -1679,6 +1995,24 @@ fn consume_loop_signal(state: &mut ExecutionState) -> Result<bool, InterpError> 
         }
         None => Ok(false),
     }
+}
+
+fn eval_child(
+    program: &CheckedProgram,
+    state: &mut ExecutionState,
+    body: &ResolvedBody,
+    expression: &ResolvedExpr,
+) -> Result<Option<Value>, InterpError> {
+    let value = eval_expr(program, state, body, expression)?;
+    if signal_pending(state)? {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
+}
+
+fn signal_pending(state: &mut ExecutionState) -> Result<bool, InterpError> {
+    Ok(current_frame(state)?.signal.is_some())
 }
 
 fn current_frame(state: &mut ExecutionState) -> Result<&mut Frame, InterpError> {
@@ -1849,6 +2183,39 @@ mod tests {
         assert_eq!(
             ResolvedInterpreter::new(&program).run_main().unwrap(),
             Value::Int(13)
+        );
+    }
+
+    #[test]
+    fn typed_try_propagation_survives_nested_parent_expressions() {
+        let program = checked(
+            "type Res { Ok(i32) Err(string) }\nfunc increment(value: Res) -> Res { Ok(value? + 1) }\nfunc code(value: Res) -> i32 { match increment(value) { Ok(inner) => inner, Err(_) => 9 } }\nfunc main() -> i32 { code(Ok(4)) * 10 + code(Err(\"stop\")) }",
+        );
+        assert_eq!(
+            ResolvedInterpreter::new(&program).run_main().unwrap(),
+            Value::Int(59)
+        );
+    }
+
+    #[test]
+    fn typed_higher_order_builtins_accept_callable_parameters() {
+        let program = checked(
+            "func transform(values: List<i32>, mapper: func(i32) -> i32) -> List<i32> { map(values, mapper) }\nfunc main() -> i32 { let mapped = transform([1, 2, 3], fn(value: i32) -> i32 { value * 3 }); let even = filter(mapped, fn(value: i32) -> bool { value % 2 == 0 }); reduce(mapped, fn(total: i32, value: i32) -> i32 { total + value }, 0) + len(even) }",
+        );
+        assert_eq!(
+            ResolvedInterpreter::new(&program).run_main().unwrap(),
+            Value::Int(19)
+        );
+    }
+
+    #[test]
+    fn typed_option_map_invokes_canonical_callable_argument() {
+        let program = checked(
+            "func main() -> i32 { let mapped = Some(4).map(fn(value: i32) -> i32 { value + 2 }); match mapped { Some(value) => value, None => 0 } }",
+        );
+        assert_eq!(
+            ResolvedInterpreter::new(&program).run_main().unwrap(),
+            Value::Int(6)
         );
     }
 
