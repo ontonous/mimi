@@ -7,24 +7,6 @@ use std::collections::HashSet;
 use super::borrow::BorrowState;
 use super::unification::UnificationTable;
 
-/// v0.29.50: Linear capability variable tracking info.
-/// `consumed` records whether the linear capability has been used.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct CapVarInfo {
-    pub consumed: bool,
-    pub maybe_consumed: bool,
-}
-
-fn cap_resource_state(info: &CapVarInfo) -> super::ResourceState {
-    if info.maybe_consumed {
-        super::ResourceState::MaybeConsumed
-    } else if info.consumed {
-        super::ResourceState::Consumed
-    } else {
-        super::ResourceState::Available
-    }
-}
-
 pub(crate) struct Checker<'a> {
     pub(crate) file: &'a File,
     pub(crate) errors: Vec<Diagnostic>,
@@ -38,8 +20,6 @@ pub(crate) struct Checker<'a> {
     pub(crate) types: HashMap<String, TypeDef>,
     /// Track newtype definitions: name -> inner type (unresolved)
     pub(crate) newtypes: HashMap<String, Type>,
-    /// Track linear capabilities in scope: name -> consumed
-    pub(crate) cap_vars: Vec<HashMap<String, CapVarInfo>>,
     /// Track borrow state of variables: name -> borrow state
     pub(crate) borrows: Vec<HashMap<String, BorrowState>>,
     /// Track field-level borrow state: (var_name, field_path) -> borrow state
@@ -119,9 +99,8 @@ pub(crate) struct Checker<'a> {
     pub(crate) mutate_params: std::collections::HashSet<String>,
     /// v0.29.27: nesting depth of `pinned { }` blocks (FFI anchor).
     pub(crate) in_pinned_depth: usize,
-    pub(crate) ownership_ledgers: HashMap<super::NodeId, super::OwnershipLedger>,
-    pub(crate) current_ownership_owner: Option<super::NodeId>,
-    pub(crate) ownership_control_path: Vec<String>,
+    /// Callable identity currently producing checker-finalized typed artifacts.
+    pub(crate) current_callable_owner: Option<super::NodeId>,
     /// v0.31.2: Typed artifacts — schemes recorded during generalization.
     pub(crate) schemes: HashMap<super::NodeId, crate::core::phase::TypeScheme>,
     /// v0.31.2: Typed artifacts — resolved function signatures packed as ZonkedTy.
@@ -214,7 +193,6 @@ impl<'a> Checker<'a> {
             alias_spans: HashMap::new(),
             types: HashMap::new(),
             newtypes: HashMap::new(),
-            cap_vars: vec![HashMap::new()],
             borrows: vec![HashMap::new()],
             field_borrows: vec![HashMap::new()],
             traits: HashMap::new(),
@@ -250,9 +228,7 @@ impl<'a> Checker<'a> {
             view_params: std::collections::HashSet::new(),
             mutate_params: std::collections::HashSet::new(),
             in_pinned_depth: 0,
-            ownership_ledgers: HashMap::new(),
-            current_ownership_owner: None,
-            ownership_control_path: Vec::new(),
+            current_callable_owner: None,
             schemes: HashMap::new(),
             zonked_func_types: HashMap::new(),
             zonked_nested_func_types: HashMap::new(),
@@ -343,294 +319,12 @@ impl<'a> Checker<'a> {
         }
     }
 
-    pub(crate) fn cap_info(&self, name: &str) -> Option<&CapVarInfo> {
-        self.cap_vars.iter().rev().find_map(|scope| scope.get(name))
+    pub(crate) fn begin_callable(&mut self, owner: super::NodeId) -> Option<super::NodeId> {
+        self.current_callable_owner.replace(owner)
     }
 
-    pub(crate) fn cap_info_mut(&mut self, name: &str) -> Option<&mut CapVarInfo> {
-        self.cap_vars
-            .iter_mut()
-            .rev()
-            .find_map(|scope| scope.get_mut(name))
-    }
-
-    pub(crate) fn record_resource_action(
-        &mut self,
-        kind: super::ResourceActionKind,
-        resource: &str,
-    ) {
-        let Some(owner) = self.current_ownership_owner.clone() else {
-            return;
-        };
-        let span = self.diagnostic_span();
-        let ledger = self
-            .ownership_ledgers
-            .entry(owner.clone())
-            .or_insert_with(|| super::OwnershipLedger::new(owner));
-        ledger.actions.push(super::ResourceAction {
-            kind,
-            resource: resource.to_string(),
-            control_path: self.ownership_control_path.clone(),
-            span,
-        });
-    }
-
-    /// Convert an assignable expression into the stable place spelling used by
-    /// the ownership ledger. Index projections are deliberately conservative:
-    /// the current checker loans the whole collection, so the ledger records
-    /// `[*]` instead of pretending to know element disjointness.
-    pub(crate) fn ownership_place(expr: &Expr) -> Option<String> {
-        match expr.unlocated() {
-            Expr::Ident(name) => Some(name.clone()),
-            Expr::Field(base, field) => Some(format!("{}.{}", Self::ownership_place(base)?, field)),
-            Expr::TupleIndex(base, index) => {
-                Some(format!("{}.{}", Self::ownership_place(base)?, index))
-            }
-            Expr::Index(base, _) => Some(format!("{}[*]", Self::ownership_place(base)?)),
-            Expr::Unary(UnOp::Deref, base) => Some(format!("*{}", Self::ownership_place(base)?)),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn record_borrow_action(&mut self, kind: super::ResourceActionKind, place: &Expr) {
-        if let Some(place) = Self::ownership_place(place) {
-            self.record_resource_action(kind, &place);
-        }
-    }
-
-    pub(crate) fn merge_capability_branches(
-        &mut self,
-        then_caps: &[HashMap<String, CapVarInfo>],
-        else_caps: &[HashMap<String, CapVarInfo>],
-    ) {
-        let owner = self.current_ownership_owner.clone();
-        let span = self.diagnostic_span();
-        let mut merges = Vec::new();
-        let mut inconsistent = Vec::new();
-
-        for scope_index in 0..self.cap_vars.len() {
-            let names: Vec<String> = self.cap_vars[scope_index].keys().cloned().collect();
-            for name in names {
-                let then_state = then_caps
-                    .get(scope_index)
-                    .and_then(|scope| scope.get(&name))
-                    .map(cap_resource_state)
-                    .unwrap_or(crate::core::ResourceState::Available);
-                let else_state = else_caps
-                    .get(scope_index)
-                    .and_then(|scope| scope.get(&name))
-                    .map(cap_resource_state)
-                    .unwrap_or(crate::core::ResourceState::Available);
-                let merged_state = if then_state == else_state {
-                    then_state
-                } else {
-                    crate::core::ResourceState::MaybeConsumed
-                };
-
-                if let Some(info) = self.cap_vars[scope_index].get_mut(&name) {
-                    info.consumed = merged_state == crate::core::ResourceState::Consumed;
-                    info.maybe_consumed = merged_state == crate::core::ResourceState::MaybeConsumed;
-                }
-                if merged_state == crate::core::ResourceState::MaybeConsumed {
-                    inconsistent.push(name.clone());
-                }
-                merges.push(crate::core::BranchMerge {
-                    resource: name,
-                    then_state,
-                    else_state,
-                    merged_state,
-                    span,
-                });
-            }
-        }
-
-        if let Some(owner) = owner {
-            if let Some(ledger) = self.ownership_ledgers.get_mut(&owner) {
-                ledger.branch_merges.extend(merges);
-            }
-        }
-        for name in inconsistent {
-            self.errors.push(
-                Diagnostic::error_code(
-                    crate::diagnostic::codes::E0304,
-                    format!(
-                        "capability '{}' is consumed on only some control-flow paths",
-                        name
-                    ),
-                    span,
-                )
-                .with_help(
-                    "move, return, transfer, or drop the capability on every branch, or on none",
-                ),
-            );
-        }
-    }
-
-    pub(crate) fn check_return_capabilities(&mut self, returned: Option<&str>) {
-        let mut unconsumed = Vec::new();
-        for scope in &self.cap_vars {
-            for (name, info) in scope {
-                if returned != Some(name.as_str()) && (!info.consumed || info.maybe_consumed) {
-                    unconsumed.push(name.clone());
-                }
-            }
-        }
-        for name in unconsumed {
-            self.emit_code(
-                crate::diagnostic::codes::E0256,
-                format!(
-                    "linear capability '{}' must be consumed before this return path",
-                    name
-                ),
-            );
-        }
-    }
-
-    pub(crate) fn merge_loop_capabilities(
-        &mut self,
-        entry_caps: Vec<HashMap<String, CapVarInfo>>,
-        body_caps: &[HashMap<String, CapVarInfo>],
-    ) {
-        let mut changed = Vec::new();
-        for (scope_index, entry_scope) in entry_caps.iter().enumerate() {
-            for (name, entry_info) in entry_scope {
-                let body_info = body_caps
-                    .get(scope_index)
-                    .and_then(|scope| scope.get(name))
-                    .unwrap_or(entry_info);
-                if cap_resource_state(entry_info) != cap_resource_state(body_info) {
-                    changed.push(name.clone());
-                }
-            }
-        }
-        self.cap_vars = entry_caps;
-        for name in changed {
-            self.errors.push(
-                Diagnostic::error_code(
-                    crate::diagnostic::codes::E0304,
-                    format!(
-                        "capability '{}' cannot be consumed inside a potentially repeating loop",
-                        name
-                    ),
-                    self.diagnostic_span(),
-                )
-                .with_help(
-                    "move or drop the capability outside the loop; loop-carried ownership requires CFG fixed-point analysis",
-                ),
-            );
-        }
-    }
-
-    pub(crate) fn consume_capability(&mut self, name: &str, kind: super::ResourceActionKind) {
-        let mut transitioned = false;
-        let mut already_consumed = false;
-        if let Some(info) = self.cap_info_mut(name) {
-            if info.consumed || info.maybe_consumed {
-                already_consumed = true;
-            } else {
-                info.consumed = true;
-                info.maybe_consumed = false;
-                transitioned = true;
-            }
-        }
-        if already_consumed {
-            self.emit_code(
-                crate::diagnostic::codes::E0304,
-                format!("capability '{}' has already been consumed", name),
-            );
-        } else if transitioned {
-            self.record_resource_action(kind, name);
-        }
-    }
-
-    pub(crate) fn consume_capabilities_in_expr(
-        &mut self,
-        expr: &Expr,
-        kind: super::ResourceActionKind,
-    ) {
-        fn collect(expr: &Expr, names: &mut Vec<String>, seen: &mut HashSet<String>) {
-            match expr.unlocated() {
-                Expr::Ident(name) => {
-                    if seen.insert(name.clone()) {
-                        names.push(name.clone());
-                    }
-                }
-                Expr::Tuple(values) | Expr::List(values) | Expr::SetLiteral(values) => {
-                    for value in values {
-                        collect(value, names, seen);
-                    }
-                }
-                Expr::TupleIndex(value, _)
-                | Expr::Field(value, _)
-                | Expr::Unary(_, value)
-                | Expr::Cast(value, _)
-                | Expr::NamedArg(_, value) => collect(value, names, seen),
-                Expr::Index(value, index) => {
-                    collect(value, names, seen);
-                    collect(index, names, seen);
-                }
-                Expr::Record { fields, .. } => {
-                    for field in fields {
-                        collect(&field.value, names, seen);
-                    }
-                }
-                Expr::If { then_, else_, .. } => {
-                    for block in std::iter::once(then_).chain(else_.iter()) {
-                        if let Some(stmt) = block.last() {
-                            if let Stmt::Expr(value) | Stmt::Return(Some(value)) = stmt.unlocated()
-                            {
-                                collect(value, names, seen);
-                            }
-                        }
-                    }
-                }
-                Expr::Match(_, arms) => {
-                    for arm in arms {
-                        collect(&arm.body, names, seen);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let mut names = Vec::new();
-        let mut seen = HashSet::new();
-        collect(expr, &mut names, &mut seen);
-        for name in names {
-            if self.cap_info(&name).is_some() {
-                self.consume_capability(&name, kind.clone());
-            }
-        }
-    }
-
-    pub(crate) fn begin_callable_ownership(
-        &mut self,
-        owner: super::NodeId,
-        params: &[(String, Type)],
-    ) -> Option<super::NodeId> {
-        let previous = self.current_ownership_owner.replace(owner.clone());
-        self.ownership_ledgers
-            .entry(owner.clone())
-            .or_insert_with(|| super::OwnershipLedger::new(owner));
-        for (name, ty) in params {
-            if matches!(ty.unlocated(), Type::Cap(_)) {
-                if let Some(scope) = self.cap_vars.last_mut() {
-                    scope.insert(
-                        name.clone(),
-                        CapVarInfo {
-                            consumed: false,
-                            maybe_consumed: false,
-                        },
-                    );
-                }
-                self.record_resource_action(super::ResourceActionKind::Introduce, name);
-            }
-        }
-        previous
-    }
-
-    pub(crate) fn end_callable_ownership(&mut self, previous: Option<super::NodeId>) {
-        self.current_ownership_owner = previous;
+    pub(crate) fn end_callable(&mut self, previous: Option<super::NodeId>) {
+        self.current_callable_owner = previous;
     }
 
     /// Set the current position for fallback error spans.
@@ -835,7 +529,7 @@ impl<'a> Checker<'a> {
             let forall = Type::ForAll(param_names, Box::new(remapped_body.clone()));
             // Record the monotype body separately from its binders. The legacy
             // `Type::ForAll` wrapper remains only in the inference environment.
-            if let Some(owner) = &self.current_ownership_owner {
+            if let Some(owner) = &self.current_callable_owner {
                 let binders: Vec<_> = (0..generalized.len() as u32)
                     .map(crate::core::phase::InferVarId)
                     .collect();

@@ -98,7 +98,7 @@ fn lower_function_body_with_captures(
     let capture_ids = captures
         .values()
         .map(|local| local.id.clone())
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
     let capture_scope = captures
         .iter()
         .map(|(name, local)| (name.clone(), local.id.clone()))
@@ -134,6 +134,8 @@ fn lower_function_body_with_captures(
         locals: capture_locals,
         place_inputs: BTreeMap::new(),
         default_values: BTreeMap::new(),
+        capture_candidates: capture_ids,
+        callable_captures: BTreeSet::new(),
         lambda_contexts: Vec::new(),
         scopes: vec![capture_scope],
         nested_environments: BTreeMap::new(),
@@ -149,7 +151,7 @@ fn lower_function_body_with_captures(
     let body = ResolvedBody {
         owner: input.signature.owner.clone(),
         locals: lowerer.locals,
-        captures: capture_ids,
+        captures: lowerer.callable_captures.iter().cloned().collect(),
         place_inputs: lowerer.place_inputs,
         default_values: lowerer.default_values,
         root,
@@ -512,6 +514,8 @@ struct BodyLowerer<'a> {
     locals: BTreeMap<ResolvedLocalId, ResolvedLocal>,
     place_inputs: BTreeMap<NodeId, ResolvedExpr>,
     default_values: BTreeMap<super::ResolvedParameterId, ResolvedExpr>,
+    capture_candidates: BTreeSet<ResolvedLocalId>,
+    callable_captures: BTreeSet<ResolvedLocalId>,
     lambda_contexts: Vec<LambdaCaptureContext>,
     scopes: Vec<BTreeMap<String, ResolvedLocalId>>,
     nested_environments: BTreeMap<NodeId, BTreeMap<String, ResolvedLocalId>>,
@@ -4250,6 +4254,9 @@ impl BodyLowerer<'_> {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())?;
+        if self.capture_candidates.contains(&local) {
+            self.callable_captures.insert(local.clone());
+        }
         for context in self.lambda_contexts.iter_mut().rev() {
             if context.owned.contains(&local) {
                 break;
@@ -6016,6 +6023,24 @@ mod tests {
         nested
             .validate(program.resolved_types())
             .expect("valid captured nested body");
+    }
+
+    #[test]
+    fn nested_callable_capture_catalog_contains_only_used_outer_locals() {
+        // RESOURCE-LINEAR-001: lexical environment availability is not proof
+        // of capture; only a typed local load closes over the outer resource.
+        let file = parse(
+            "cap Token\nfunc outer(token: cap Token) -> i32 { func idle() -> i32 { 0 }; drop(token); 0 }\nfunc main() -> i32 { 0 }",
+        );
+        let program = crate::core::check_program(&file).expect("unused capture is not transferred");
+        let outer = program
+            .resolved_body(&NodeId("function:outer".into()))
+            .expect("outer body");
+        let ResolvedStmtKind::NestedCallable(nested_owner) = &outer.root.statements[0].kind else {
+            panic!("nested declaration expected");
+        };
+        let nested = program.resolved_body(nested_owner).expect("nested body");
+        assert!(nested.captures.is_empty());
     }
 
     #[test]

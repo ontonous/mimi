@@ -2101,12 +2101,6 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            for (arg, param) in args.iter().zip(params.iter()) {
-                if matches!(param.unlocated(), Type::Cap(_)) {
-                    self.consume_capabilities_in_expr(arg, crate::core::ResourceActionKind::Move);
-                }
-            }
-
             // Check effects
             if let Some(required_effects) = self.func_effects.get(name).cloned() {
                 for effect in &required_effects {

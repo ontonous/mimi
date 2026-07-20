@@ -73,12 +73,36 @@ impl<'a> ActionEmitter<'a> {
 
     fn emit(mut self) -> Result<ResourceAnalysis, Vec<Diagnostic>> {
         self.build_resource_catalog();
+        self.reject_linear_callable_captures();
         self.introduce_parameters();
         self.visit_block(&self.body.root, true);
         if self.errors.is_empty() {
             analyze_canonical(self.cfg, self.actions, self.loans, &BTreeMap::new())
         } else {
             Err(self.errors)
+        }
+    }
+
+    fn reject_linear_callable_captures(&mut self) {
+        for capture in &self.body.captures {
+            let Some(local) = self.body.locals.get(capture) else {
+                continue;
+            };
+            if self.is_linear(&local.ty) {
+                self.errors.push(
+                    Diagnostic::error_code(
+                        crate::diagnostic::codes::E0304,
+                        format!(
+                            "linear resource '{}' is not owned by the current callable",
+                            local.display_name
+                        ),
+                        local.origin.user_span(),
+                    )
+                    .with_help(
+                        "pass the resource as an explicit parameter or transfer it into a closure",
+                    ),
+                );
+            }
         }
     }
 
@@ -558,6 +582,25 @@ impl<'a> ActionEmitter<'a> {
                     self.visit_arm(arm);
                 }
             }
+            ResolvedExprKind::Lambda(lambda) => {
+                let captures = lambda
+                    .captures
+                    .iter()
+                    .filter(|capture| {
+                        self.body
+                            .locals
+                            .get(capture)
+                            .is_some_and(|local| self.is_linear(&local.ty))
+                    })
+                    .map(|capture| self.place_from_local(capture))
+                    .collect();
+                self.emit_consumes(
+                    CanonicalActionKind::TransferChild,
+                    captures,
+                    &expression.node_id,
+                    &expression.origin,
+                );
+            }
             ResolvedExprKind::Block(block)
             | ResolvedExprKind::Scope { body: block, .. }
             | ResolvedExprKind::Comptime(block)
@@ -718,6 +761,39 @@ impl<'a> ActionEmitter<'a> {
             ResolvedExprKind::Record { fields, .. } => {
                 for field in fields {
                     self.collect_capability_places(&field.value, places);
+                }
+            }
+            ResolvedExprKind::Project { value, projection } => {
+                let selected = match (projection, &value.kind) {
+                    (
+                        ResolvedValueProjection::Field(projected),
+                        ResolvedExprKind::Record { fields, .. },
+                    ) => fields
+                        .iter()
+                        .find(|field| &field.field == projected)
+                        .map(|field| &field.value),
+                    (ResolvedValueProjection::Tuple(index), ResolvedExprKind::Tuple(values)) => {
+                        values.get(*index)
+                    }
+                    (ResolvedValueProjection::Index(index), ResolvedExprKind::List(values)) => {
+                        match &index.kind {
+                            ResolvedExprKind::Literal(crate::core::ResolvedLiteral::Int(index))
+                                if *index >= 0 =>
+                            {
+                                values.get(*index as usize)
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(selected) = selected {
+                    self.collect_capability_places(selected, places);
+                } else {
+                    // The typed projection is closed but not statically
+                    // separable. Conservatively consume all candidate linear
+                    // inputs instead of inventing a partial-move identity.
+                    self.collect_capability_places(value, places);
                 }
             }
             ResolvedExprKind::Cast { value, .. } => self.collect_capability_places(value, places),
@@ -960,30 +1036,6 @@ mod tests {
                 .any(|point| point.source.node == action.location.point)
     }
 
-    fn typed_program_after_legacy_ownership_oracle(
-        file: &crate::ast::File,
-    ) -> crate::core::CheckedProgram {
-        use crate::core::checker::flow::{CheckerState, FlowEvent};
-
-        let mut state = CheckerState::new(file);
-        while !state.is_done() {
-            state = state
-                .transition(FlowEvent::Step)
-                .expect("checker transition");
-        }
-        let artifacts = state.into_output();
-        assert!(
-            artifacts
-                .errors
-                .iter()
-                .all(|error| error.code.as_deref() == Some(crate::diagnostic::codes::E0256)),
-            "only the legacy binding-move ownership oracle may reject this typed fixture: {:#?}",
-            artifacts.errors
-        );
-        crate::core::CheckedProgram::from_flow_acc(file, artifacts)
-            .expect("typed move artifacts lower")
-    }
-
     #[test]
     fn typed_binding_move_preserves_resource_identity_and_only_root_result_returns() {
         // RESOURCE-LINEAR-001: a binding move changes the owner place, not the
@@ -998,7 +1050,7 @@ func forward(token: cap Token) -> cap Token {
 func main() -> i32 { 0 }
 "#,
         );
-        let program = typed_program_after_legacy_ownership_oracle(&file);
+        let program = crate::core::check_program(&file).expect("typed binding move checks");
         let owner = NodeId("function:forward".into());
         let body = program.resolved_body(&owner).expect("forward body");
         let token = body
@@ -1083,5 +1135,52 @@ func main() -> i32 { inspect([1, 2], 1) }
             .actions
             .iter()
             .all(|action| action_location_exists(cfg, action)));
+    }
+
+    #[test]
+    fn canonical_return_gate_rejects_available_linear_resource() {
+        // RESOURCE-LINEAR-001: return-path completeness belongs to the CFG
+        // fixed point, not the legacy checker scope snapshots.
+        let file = parse(
+            r#"
+cap Token
+func leak(token: cap Token) -> i32 { 0 }
+func main() -> i32 { 0 }
+"#,
+        );
+        let errors = crate::core::check_program(&file)
+            .expect_err("canonical return gate must reject the leak");
+        assert!(errors.iter().any(|error| {
+            error.code.as_deref() == Some(crate::diagnostic::codes::E0256)
+                && error.message
+                    == "linear resource 'token' must be consumed before this return path"
+        }));
+    }
+
+    #[test]
+    fn linear_lambda_capture_transfers_resource_to_child() {
+        // RESOURCE-LINEAR-001: closure construction is an explicit ownership
+        // transfer from the enclosing callable's resource state.
+        let file = parse(
+            r#"
+cap Token
+func capture(token: cap Token) -> i32 {
+    let child = fn() -> i32 { drop(token); 0 }
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("closure capture transfers token");
+        let analysis = program
+            .resource_analysis(&NodeId("function:capture".into()))
+            .expect("capture resource analysis");
+        assert!(analysis.actions.iter().any(|action| {
+            action.kind == CanonicalActionKind::TransferChild
+                && action
+                    .source
+                    .as_ref()
+                    .is_some_and(|place| place.display() == "token")
+        }));
     }
 }

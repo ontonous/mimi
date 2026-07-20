@@ -239,6 +239,7 @@ pub struct OwnershipLedger {
 }
 
 impl OwnershipLedger {
+    #[cfg(test)]
     pub(crate) fn new(owner: NodeId) -> Self {
         Self {
             owner,

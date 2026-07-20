@@ -9,43 +9,6 @@ impl<'a> Checker<'a> {
     pub(crate) fn lookup_var(&mut self, name: &str, scopes: &mut [HashMap<String, Type>]) -> Type {
         for scope in scopes.iter().rev() {
             if let Some(t) = scope.get(name) {
-                if matches!(t.unlocated(), Type::Cap(_)) {
-                    if let Some(info) = self.cap_info(name) {
-                        if info.consumed || info.maybe_consumed {
-                            self.errors.push(
-                                Diagnostic::error_code(
-                                    crate::diagnostic::codes::E0304,
-                                    if info.maybe_consumed {
-                                        format!(
-                                            "capability '{}' is consumed on only some control-flow paths",
-                                            name
-                                        )
-                                    } else {
-                                        format!("capability '{}' has already been consumed", name)
-                                    },
-                                    self.diagnostic_span(),
-                                )
-                                .with_help(
-                                    "linear capabilities must have the same ownership state on every reachable path",
-                                ),
-                            );
-                        }
-                    } else if self.current_ownership_owner.is_some() {
-                        self.errors.push(
-                            Diagnostic::error_code(
-                                crate::diagnostic::codes::E0304,
-                                format!(
-                                    "capability '{}' is not owned by the current callable",
-                                    name
-                                ),
-                                self.diagnostic_span(),
-                            )
-                            .with_help(
-                                "capture linear capabilities with an explicit ownership transfer",
-                            ),
-                        );
-                    }
-                }
                 // Arch-4: resolve TypeVars before returning so downstream unify calls
                 // get concrete types rather than unresolved inference variables.
                 // CO-C1: instantiate ForAll so each use of a polymorphic let gets fresh vars.

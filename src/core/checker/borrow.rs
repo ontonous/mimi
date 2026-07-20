@@ -13,23 +13,8 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn pop_borrow_scope(&mut self) {
-        let mut ended = Vec::new();
-        if let Some(scope) = self.borrows.pop() {
-            ended.extend(scope.into_iter().filter_map(|(name, state)| {
-                (!matches!(state, BorrowState::Unborrowed)).then_some(name)
-            }));
-        }
-        if let Some(scope) = self.field_borrows.pop() {
-            ended.extend(scope.into_iter().filter_map(|((root, path), state)| {
-                (!matches!(state, BorrowState::Unborrowed))
-                    .then(|| format!("{}.{}", root, path.join(".")))
-            }));
-        }
-        ended.sort();
-        ended.dedup();
-        for place in ended {
-            self.record_resource_action(crate::core::ResourceActionKind::BorrowEnd, &place);
-        }
+        self.borrows.pop();
+        self.field_borrows.pop();
     }
 
     // ─── Whole-variable borrow tracking ──────────────────────
@@ -50,33 +35,20 @@ impl<'a> Checker<'a> {
 
     /// Release a borrow (set back to Unborrowed) — NLL last-use release
     pub(crate) fn release_borrow(&mut self, name: &str) {
-        let mut ended = false;
         if let Some(scope) = self.borrows.last_mut() {
             if matches!(scope.get(name), Some(state) if !matches!(state, BorrowState::Unborrowed)) {
                 scope.insert(name.into(), BorrowState::Unborrowed);
-                ended = true;
             }
-        }
-        if ended {
-            self.record_resource_action(crate::core::ResourceActionKind::BorrowEnd, name);
         }
     }
 
     /// E5: Release a field-level borrow — NLL last-use release.
     pub(crate) fn release_field_borrow(&mut self, var: &str, field: &str) {
-        let mut ended = false;
         if let Some(scope) = self.field_borrows.last_mut() {
             let key = (var.to_string(), vec![field.to_string()]);
             if matches!(scope.get(&key), Some(state) if !matches!(state, BorrowState::Unborrowed)) {
                 scope.insert(key, BorrowState::Unborrowed);
-                ended = true;
             }
-        }
-        if ended {
-            self.record_resource_action(
-                crate::core::ResourceActionKind::BorrowEnd,
-                &format!("{}.{}", var, field),
-            );
         }
     }
 
