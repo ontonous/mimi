@@ -546,9 +546,25 @@ impl<'a> Checker<'a> {
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
         match method {
-            "size" | "len" => Type::Name("i32".into(), vec![]),
-            "is_empty" | "contains" => Type::Name("bool".into(), vec![]),
-            "insert" | "remove" => {
+            "size" | "len" => {
+                if !args.is_empty() {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        format!("set.{method} expects no arguments"),
+                    );
+                }
+                Type::Name("i32".into(), vec![])
+            }
+            "is_empty" => {
+                if !args.is_empty() {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "set.is_empty expects no arguments",
+                    );
+                }
+                Type::Name("bool".into(), vec![])
+            }
+            "contains" | "insert" | "remove" => {
                 if args.len() != 1 {
                     self.emit_code(
                         crate::diagnostic::codes::E0242,
@@ -568,9 +584,21 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                Type::Name("Set".into(), vec![self.unification.resolve(inner)])
+                if method == "contains" {
+                    Type::Name("bool".into(), vec![])
+                } else {
+                    Type::Name("Set".into(), vec![self.unification.resolve(inner)])
+                }
             }
-            "to_list" => Type::Name("List".into(), vec![(*inner).clone()]),
+            "to_list" => {
+                if !args.is_empty() {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "set.to_list expects no arguments",
+                    );
+                }
+                Type::Name("List".into(), vec![(*inner).clone()])
+            }
             _ => {
                 self.emit_code(
                     crate::diagnostic::codes::E0242,

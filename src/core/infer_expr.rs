@@ -119,7 +119,17 @@ impl<'a> Checker<'a> {
             // ensure every intermediate statement is type-checked.
             Expr::Block(block) => self.check_block_expr(block, expected, scopes),
             // C3: if — check both branches against expected type
-            Expr::If { then_, else_, .. } => {
+            Expr::If { cond, then_, else_ } => {
+                let condition_ty = self.infer_expr(cond, scopes);
+                if !crate::core::helpers::is_bool(&condition_ty) {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0202,
+                        format!(
+                            "if condition must be bool, found {}",
+                            crate::core::helpers::fmt_type(&condition_ty)
+                        ),
+                    );
+                }
                 // Use check_block_expr to propagate expected type to branches
                 let then_ty = self.check_block_expr(then_, expected, scopes);
                 if let Some(else_block) = else_ {

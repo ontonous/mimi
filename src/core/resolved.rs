@@ -422,6 +422,9 @@ pub struct ResolvedFunction {
     pub is_async: bool,
     pub extern_abi: Option<String>,
     pub generics: Vec<crate::ast::GenericParam>,
+    /// Canonical generic binders visible to this callable, including binders
+    /// inherited from an enclosing impl or callable.
+    pub generic_binders: Vec<(String, NodeId)>,
     pub where_clause: Vec<crate::ast::WhereClause>,
     pub origin: Origin,
 }
@@ -1389,6 +1392,8 @@ fn collect_items(
                     errors,
                 );
                 let node_id = NodeId(format!("function:{}", qualified));
+                let generic_binders =
+                    callable_generic_binders(&function.generics, &node_id, &ids, errors);
                 let origin = resolve_named_origin(
                     ResolvedItemKind::Function,
                     &qualified,
@@ -1443,6 +1448,7 @@ fn collect_items(
                         is_async: function.is_async,
                         extern_abi: function.extern_abi.clone(),
                         generics: function.generics.clone(),
+                        generic_binders: generic_binders.clone(),
                         where_clause: function.where_clause.clone(),
                         origin,
                     },
@@ -1451,6 +1457,7 @@ fn collect_items(
                     &function.body,
                     &node_id,
                     &qualified,
+                    (&ids, &generic_binders),
                     node_meta,
                     functions,
                     errors,
@@ -1747,6 +1754,8 @@ fn collect_items(
                     errors,
                 );
                 let node_id = NodeId(format!("impl:{}", qualified));
+                let impl_generic_binders =
+                    callable_generic_binders(&impl_def.generics, &node_id, &ids, errors);
                 let methods = impl_def
                     .methods
                     .iter()
@@ -1755,6 +1764,13 @@ fn collect_items(
                 let mut method_signatures = Vec::new();
                 for method in &impl_def.methods {
                     let method_id = impl_method_owner(&qualified, method);
+                    let mut generic_binders = impl_generic_binders.clone();
+                    generic_binders.extend(callable_generic_binders(
+                        &method.generics,
+                        &method_id,
+                        &ids,
+                        errors,
+                    ));
                     let self_param = (!method
                         .params
                         .first()
@@ -1838,6 +1854,7 @@ fn collect_items(
                             is_async: method.is_async,
                             extern_abi: method.extern_abi.clone(),
                             generics: method.generics.clone(),
+                            generic_binders: generic_binders.clone(),
                             where_clause: method.where_clause.clone(),
                             origin: node_meta
                                 .get(&method_id)
@@ -1849,6 +1866,7 @@ fn collect_items(
                         &method.body,
                         &method_id,
                         &format!("{}_{}", impl_def.type_name, method.name),
+                        (&ids, &generic_binders),
                         node_meta,
                         functions,
                         errors,
@@ -2029,6 +2047,8 @@ fn collect_items(
                 let mut method_signatures = Vec::new();
                 for method in &actor.methods {
                     let method_id = NodeId(format!("function:{qualified}::{}", method.name));
+                    let generic_binders =
+                        callable_generic_binders(&method.generics, &method_id, &ids, errors);
                     let self_param = (!method
                         .params
                         .first()
@@ -2114,6 +2134,7 @@ fn collect_items(
                             is_async: method.is_async,
                             extern_abi: method.extern_abi.clone(),
                             generics: method.generics.clone(),
+                            generic_binders: generic_binders.clone(),
                             where_clause: method.where_clause.clone(),
                             origin: node_meta
                                 .get(&method_id)
@@ -2125,6 +2146,7 @@ fn collect_items(
                         &method.body,
                         &method_id,
                         &format!("{qualified}::{}", method.name),
+                        (&ids, &generic_binders),
                         node_meta,
                         functions,
                         errors,
@@ -2265,15 +2287,24 @@ fn collect_nested_function_records(
     block: &[Stmt],
     owner: &NodeId,
     parent_qualified: &str,
+    generic_context: (&NodeIdBuilder<'_>, &[(String, NodeId)]),
     node_meta: &HashMap<NodeId, NodeMeta>,
     functions: &mut HashMap<NodeId, ResolvedFunction>,
     errors: &mut Vec<Diagnostic>,
 ) {
+    let (ids, inherited_generic_binders) = generic_context;
     for statement in block {
         match statement.unlocated() {
             Stmt::Func(function) => {
                 let node_id = nested_function_owner(owner, function);
                 let qualified_name = format!("{parent_qualified}::{}", function.name);
+                let mut generic_binders = inherited_generic_binders.to_vec();
+                generic_binders.extend(callable_generic_binders(
+                    &function.generics,
+                    &node_id,
+                    ids,
+                    errors,
+                ));
                 let params = function
                     .params
                     .iter()
@@ -2295,6 +2326,7 @@ fn collect_nested_function_records(
                     is_async: function.is_async,
                     extern_abi: function.extern_abi.clone(),
                     generics: function.generics.clone(),
+                    generic_binders: generic_binders.clone(),
                     where_clause: function.where_clause.clone(),
                     origin: node_meta
                         .get(&node_id)
@@ -2314,6 +2346,7 @@ fn collect_nested_function_records(
                     &function.body,
                     &node_id,
                     &qualified_name,
+                    (ids, &generic_binders),
                     node_meta,
                     functions,
                     errors,
@@ -2324,6 +2357,7 @@ fn collect_nested_function_records(
                     then_,
                     owner,
                     parent_qualified,
+                    (ids, inherited_generic_binders),
                     node_meta,
                     functions,
                     errors,
@@ -2333,6 +2367,7 @@ fn collect_nested_function_records(
                         else_,
                         owner,
                         parent_qualified,
+                        (ids, inherited_generic_binders),
                         node_meta,
                         functions,
                         errors,
@@ -2354,6 +2389,7 @@ fn collect_nested_function_records(
                 body,
                 owner,
                 parent_qualified,
+                (ids, inherited_generic_binders),
                 node_meta,
                 functions,
                 errors,
@@ -2889,6 +2925,28 @@ fn collect_generic_param_meta(
         out,
         errors,
     );
+}
+
+fn callable_generic_binders(
+    generics: &[crate::ast::GenericParam],
+    owner: &NodeId,
+    ids: &NodeIdBuilder<'_>,
+    errors: &mut Vec<Diagnostic>,
+) -> Vec<(String, NodeId)> {
+    generics
+        .iter()
+        .map(|generic| {
+            let id = ids.anonymous(
+                owner,
+                "decl.generic_parameter",
+                &format!("generic.{}", stable_id_fragment(&generic.name)),
+                ast_meta_anchor(generic.meta).map(|(span, _)| span),
+                generic.meta.origin,
+                errors,
+            );
+            (generic.name.clone(), id)
+        })
+        .collect()
 }
 
 fn collect_param_meta(
@@ -6459,7 +6517,20 @@ fn resolve_named_call_callee(
     externs: &HashMap<String, (usize, String)>,
     methods: &HashMap<String, (usize, Vec<String>, String)>,
 ) -> ResolvedCalleeFacts {
-    if let Some((arity, effects, ret)) = functions.get(name) {
+    // Keep the same precedence as Checker::check_call: language builtins are
+    // resolved before flattened stdlib functions with the same surface name.
+    if crate::core::builtins::is_builtin_callable(name)
+        || crate::core::builtins::is_language_intrinsic_callable(name)
+        || crate::core::builtins::is_language_constructor(name)
+    {
+        (
+            name.to_string(),
+            ResolvedCallKind::Builtin,
+            None,
+            Vec::new(),
+            None,
+        )
+    } else if let Some((arity, effects, ret)) = functions.get(name) {
         (
             name.to_string(),
             ResolvedCallKind::Function,
@@ -6474,16 +6545,6 @@ fn resolve_named_call_callee(
             Some(*arity),
             Vec::new(),
             Some(ret.clone()),
-        )
-    } else if crate::core::builtins::is_builtin_callable(name)
-        || crate::core::builtins::is_language_constructor(name)
-    {
-        (
-            name.to_string(),
-            ResolvedCallKind::Builtin,
-            None,
-            Vec::new(),
-            None,
         )
     } else if let Some((arity, effects, ret)) = methods.get(name) {
         (
@@ -6777,16 +6838,8 @@ fn build_canonical_function_signatures(
 
         let mut generic_names = BTreeMap::new();
         let mut generic_parameters = Vec::new();
-        for generic in &function.generics {
-            let id = ids.anonymous(
-                &function.node_id,
-                "decl.generic_parameter",
-                &format!("generic.{}", stable_id_fragment(&generic.name)),
-                usable_span(generic.meta.span),
-                generic.meta.origin,
-                &mut errors,
-            );
-            if !program.node_meta.contains_key(&id) {
+        for (name, id) in &function.generic_binders {
+            if !program.node_meta.contains_key(id) {
                 errors.push(Diagnostic::error(
                     format!(
                         "TOOL-RESOLUTION-001: generic parameter '{}' is absent from NodeMeta",
@@ -6795,8 +6848,8 @@ fn build_canonical_function_signatures(
                     function.origin.user_span(),
                 ));
             }
-            generic_names.insert(generic.name.clone(), id.clone());
-            generic_parameters.push(id);
+            generic_names.insert(name.clone(), id.clone());
+            generic_parameters.push(id.clone());
         }
 
         let module = function
@@ -7946,6 +7999,38 @@ mod tests {
             program.resolved_types().get(&signature.result),
             Some(crate::core::ResolvedType::GenericParameter(parameter))
                 if parameter == &signature.generic_parameters[0]
+        ));
+    }
+
+    #[test]
+    fn canonical_impl_method_signature_inherits_impl_binder() {
+        let file = parse(
+            "trait Head<T> { func head() -> T }\nimpl<T> Head<T> for List<T> { func head() -> T { self[0] } }\nfunc first<T>(values: List<T>) -> T { values.head() }",
+        );
+        let program = crate::core::check_program(&file).expect("check generic impl");
+        let method = program
+            .functions()
+            .values()
+            .find(|function| function.qualified_name == "List_head")
+            .expect("resolved impl method");
+        let signature = program
+            .resolved_signature(&method.node_id)
+            .expect("canonical impl signature");
+
+        assert_eq!(signature.generic_parameters.len(), 1);
+        assert!(matches!(
+            program.resolved_types().get(&signature.result),
+            Some(crate::core::ResolvedType::GenericParameter(parameter))
+                if parameter == &signature.generic_parameters[0]
+        ));
+        assert!(matches!(
+            program.resolved_types().get(&signature.parameters[0].ty),
+            Some(crate::core::ResolvedType::Nominal { item, arguments })
+                if item.as_str() == "builtin:type:List"
+                    && matches!(
+                        arguments.as_slice(),
+                        [argument] if argument == &signature.result
+                    )
         ));
     }
 

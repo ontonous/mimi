@@ -118,6 +118,11 @@ pub enum CheckedConversionKind {
     NewtypeWrap,
     NewtypeUnwrap,
     OwnershipWrap,
+    OwnershipDowngrade,
+    OwnershipRead,
+    /// A checked slice expression reuses the source sequence ABI while
+    /// narrowing its visible bounds.
+    SliceView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

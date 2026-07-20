@@ -214,6 +214,12 @@ pub fn is_builtin_callable(name: &str) -> bool {
     )
 }
 
+/// Higher-order operations resolved as language intrinsics but lowered by a
+/// dedicated consumer path rather than the ordinary backend builtin registry.
+pub fn is_language_intrinsic_callable(name: &str) -> bool {
+    matches!(name, "map" | "filter" | "reduce")
+}
+
 pub fn is_language_constructor(name: &str) -> bool {
     matches!(name, "Some" | "None" | "Ok" | "Err")
 }
