@@ -120,6 +120,9 @@ pub enum CheckedConversionKind {
     OwnershipWrap,
     OwnershipDowngrade,
     OwnershipRead,
+    /// The checker admitted a reference lifetime annotation/rebinding while
+    /// preserving mutability and referent type.
+    LifetimeRebind,
     /// A checked slice expression reuses the source sequence ABI while
     /// narrowing its visible bounds.
     SliceView,

@@ -166,6 +166,9 @@ pub struct NodeMeta {
     /// Ephemeral checker correlation key. Cleared before `CheckedProgram`
     /// crosses its construction boundary and never used as semantic identity.
     expression_key: Option<ExpressionTypeKey>,
+    /// Ephemeral shared-binding kind and initializer correlation key used to
+    /// materialize the binding's canonical ownership type.
+    shared_binding: Option<(crate::ast::SharedKind, ExpressionTypeKey)>,
     /// Ephemeral explicit type operand consumed while constructing canonical IR.
     type_operand: Option<Type>,
     /// Ephemeral ordered generic arguments consumed while constructing canonical IR.
@@ -687,9 +690,6 @@ impl CheckedProgram {
             return Err(errors);
         }
         let stable_expression_types = stabilize_expression_types(&program, &zonked_expr_types)?;
-        for meta in program.node_meta.values_mut() {
-            meta.expression_key = None;
-        }
         program.type_schemes = schemes;
         program.zonked_function_types = zonked_by_node;
         let (
@@ -702,6 +702,8 @@ impl CheckedProgram {
             resolved_type_arguments,
         ) = build_canonical_function_signatures(&program, &stable_expression_types)?;
         for meta in program.node_meta.values_mut() {
+            meta.expression_key = None;
+            meta.shared_binding = None;
             meta.type_operand = None;
             meta.type_arguments.clear();
         }
@@ -3957,7 +3959,7 @@ fn collect_stmt_meta(
         errors,
     );
     insert_node_meta(
-        node_id,
+        node_id.clone(),
         ast_origin,
         meta.map(|meta| meta.parent).unwrap_or(AstParentHint::None),
         anchor,
@@ -3967,6 +3969,11 @@ fn collect_stmt_meta(
         out,
         errors,
     );
+    if let Stmt::SharedLet { kind, init, .. } = stmt.unlocated() {
+        if let Some(meta) = out.get_mut(&node_id) {
+            meta.shared_binding = Some((*kind, expression_type_key(init)));
+        }
+    }
     match stmt.unlocated() {
         Stmt::Let { pat, ty, init, .. } => {
             collect_pattern_meta(
@@ -4995,6 +5002,7 @@ fn insert_node_meta(
             origin,
             precision,
             expression_key: None,
+            shared_binding: None,
             type_operand: None,
             type_arguments: Vec::new(),
         },
@@ -6621,6 +6629,37 @@ type CanonicalFunctionArtifacts = (
     BTreeMap<NodeId, Vec<crate::core::ResolvedTypeId>>,
 );
 
+fn canonical_shared_binding_type(
+    kind: crate::ast::SharedKind,
+    initializer: &ZonkedTy,
+) -> Result<ZonkedTy, String> {
+    let ty = match kind {
+        crate::ast::SharedKind::Shared => Type::Shared(Box::new(initializer.as_type().clone())),
+        crate::ast::SharedKind::LocalShared => {
+            Type::LocalShared(Box::new(initializer.as_type().clone()))
+        }
+        crate::ast::SharedKind::Weak => match initializer.as_type().unlocated() {
+            Type::Shared(target) => Type::Weak(target.clone()),
+            other => {
+                return Err(format!(
+                    "weak binding initializer is not shared: {}",
+                    crate::core::fmt_type(other)
+                ))
+            }
+        },
+        crate::ast::SharedKind::WeakLocal => match initializer.as_type().unlocated() {
+            Type::LocalShared(target) => Type::WeakLocal(target.clone()),
+            other => {
+                return Err(format!(
+                    "weak_local binding initializer is not local_shared: {}",
+                    crate::core::fmt_type(other)
+                ))
+            }
+        },
+    };
+    ZonkedTy::from_resolved(ty).map_err(|error| error.to_string())
+}
+
 fn stabilize_expression_types(
     program: &CheckedProgram,
     ephemeral: &EphemeralExpressionTypes,
@@ -7011,6 +7050,68 @@ fn build_canonical_function_signatures(
                     if !failed {
                         type_arguments.insert(node_id.clone(), canonical);
                     }
+                }
+            }
+
+            let expression_types_by_key = expressions
+                .iter()
+                .filter_map(|(node_id, ty)| {
+                    program
+                        .node_meta
+                        .get(node_id)
+                        .and_then(|meta| meta.expression_key.clone())
+                        .map(|key| (key, ty))
+                })
+                .collect::<BTreeMap<_, _>>();
+            let owner_prefix = format!("{}/", function.node_id.0);
+            let shared_bindings = program
+                .node_meta
+                .iter()
+                .filter(|(node_id, _)| {
+                    node_id.0.starts_with(&owner_prefix)
+                        && !program.functions.keys().any(|nested| {
+                            nested != &function.node_id
+                                && node_id.0.starts_with(&format!("{}/", nested.0))
+                        })
+                })
+                .filter_map(|(node_id, meta)| {
+                    meta.shared_binding
+                        .as_ref()
+                        .map(|(kind, key)| (node_id.clone(), *kind, key.clone()))
+                })
+                .collect::<Vec<_>>();
+            for (node_id, kind, initializer_key) in shared_bindings {
+                let Some(initializer) = expression_types_by_key.get(&initializer_key) else {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: shared binding '{}' has no checker-finalized initializer type",
+                            node_id.0
+                        ),
+                        program.node_meta[&node_id].origin.user_span(),
+                    ));
+                    continue;
+                };
+                let binding = match canonical_shared_binding_type(kind, initializer) {
+                    Ok(binding) => binding,
+                    Err(message) => {
+                        errors.push(Diagnostic::error(
+                            format!("TOOL-RESOLUTION-001: {message}"),
+                            program.node_meta[&node_id].origin.user_span(),
+                        ));
+                        continue;
+                    }
+                };
+                match types.intern_zonked(&binding, &capabilities, &mut resolve_name) {
+                    Ok(binding) => {
+                        node_types.insert(node_id, binding);
+                    }
+                    Err(error) => errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: shared binding '{}' type is not canonical: {error}",
+                            node_id.0
+                        ),
+                        program.node_meta[&node_id].origin.user_span(),
+                    )),
                 }
             }
         }
