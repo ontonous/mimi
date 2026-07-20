@@ -230,7 +230,7 @@ pub func times(n: i32, f: func() -> ()) {
 // to_int_safe: Parses s as integer, returns default on failure.
 pub func to_int_safe(s: string, default: i32) -> i32 {
     let tis_parsed = str_parse_int(s)
-    if tis_parsed.0 { tis_parsed.1 } else { default }
+    if tis_parsed.0 { tis_parsed.1 as i32 } else { default }
 }
 
 // to_float_safe: Parses s as float, returns default on failure.

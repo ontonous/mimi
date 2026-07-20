@@ -5131,37 +5131,24 @@ mod tests {
 
     #[test]
     fn explicit_numeric_cast_records_checked_conversion() {
-        let file = parse("func widen(value: i32) -> i64 { value as i64 }");
+        let file = parse(
+            "func widen(value: i32) -> i64 { value as i64 }\nfunc narrow(value: i64) -> i32 { value as i32 }",
+        );
         let program = crate::core::check_program(&file).expect("check");
-        let resolved = program.function("widen").expect("resolved widen");
-        let body = lower_function_body(FunctionBodyInput {
-            function: function(&file, "widen"),
-            signature: program.resolved_signature(&resolved.node_id).unwrap(),
-            signatures: program.resolved_signatures(),
-            functions: program.functions(),
-            type_defs: program.type_defs(),
-            actors: program.actors(),
-            flows: program.flows(),
-            traits: program.traits(),
-            impls: program.impls(),
-            field_types: program.resolved_field_types(),
-            type_targets: program.resolved_type_targets(),
-            call_sites: program.call_sites(),
-            extern_blocks: program.extern_blocks(),
-            constants: program.constants(),
-            node_types: program.resolved_node_types(),
-            type_operands: program.resolved_type_operands(),
-            type_arguments: program.resolved_type_arguments(),
-            types: program.resolved_types(),
-            node_meta: program.node_meta(),
-            sources: &file.sources,
-        })
-        .expect("lower cast");
-        let ResolvedExprKind::Cast { conversion, .. } = &body.root.result.as_ref().unwrap().kind
-        else {
-            panic!("cast expected");
-        };
-        assert_eq!(conversion.kind, CheckedConversionKind::NumericWiden);
+        for (name, expected) in [
+            ("widen", CheckedConversionKind::NumericWiden),
+            ("narrow", CheckedConversionKind::NumericNarrowChecked),
+        ] {
+            let body = program
+                .resolved_body(&NodeId(format!("function:{name}")))
+                .unwrap_or_else(|| panic!("resolved {name}"));
+            let ResolvedExprKind::Cast { conversion, .. } =
+                &body.root.result.as_ref().unwrap().kind
+            else {
+                panic!("cast expected for {name}");
+            };
+            assert_eq!(conversion.kind, expected);
+        }
     }
 
     #[test]
