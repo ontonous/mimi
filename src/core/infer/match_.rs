@@ -24,11 +24,7 @@ impl<'a> Checker<'a> {
         let mut covered_variants: Vec<String> = Vec::new();
         let mut has_catchall = false;
         let mut result_ty: Option<Type> = None;
-        let entry_caps = self.cap_vars.clone();
-        let mut arm_caps = Vec::with_capacity(arms.len());
-
-        for (arm_index, arm) in arms.iter().enumerate() {
-            self.cap_vars = entry_caps.clone();
+        for arm in arms {
             let (pattern_covered, is_catchall) =
                 self.pattern_covers_variants(&arm.pat, &subject_ty);
             if is_catchall {
@@ -41,8 +37,6 @@ impl<'a> Checker<'a> {
             }
 
             scopes.push(HashMap::new());
-            self.ownership_control_path
-                .push(format!("match-arm:{arm_index}"));
             self.check_pattern(&arm.pat, &subject_ty, scopes);
             if let Some(guard) = &arm.guard {
                 let gt = self.infer_expr(guard, scopes);
@@ -54,9 +48,7 @@ impl<'a> Checker<'a> {
                 }
             }
             let body_ty = self.infer_expr(&arm.body, scopes);
-            self.ownership_control_path.pop();
             scopes.pop();
-            arm_caps.push(self.cap_vars.clone());
 
             match &result_ty {
                 None => result_ty = Some(body_ty),
@@ -73,15 +65,6 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-            }
-        }
-
-        self.cap_vars = entry_caps;
-        if let Some(first) = arm_caps.first().cloned() {
-            self.cap_vars = first;
-            for next in arm_caps.iter().skip(1) {
-                let current = self.cap_vars.clone();
-                self.merge_capability_branches(&current, next);
             }
         }
 

@@ -25,12 +25,11 @@ impl<'a> Checker<'a> {
             .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
 
         // Mirror the scope setup used by check_block_with_implicit_return so
-        // that borrow tracking, cap tracking and shadowing detection are all
-        // active inside a block expression.
+        // that borrow tracking and shadowing detection are active inside a
+        // block expression. Resource state is handled by typed CFG dataflow.
         self.var_scopes.push(HashMap::new());
         self.mut_vars.push(HashMap::new());
         scopes.push(HashMap::new());
-        self.cap_vars.push(HashMap::new());
         self.push_borrow_scope();
 
         let last_idx = block.len() - 1;
@@ -44,9 +43,7 @@ impl<'a> Checker<'a> {
         let last = &block[last_idx];
         let result_type = process_last(self, last, scopes, &ret);
 
-        self.check_unconsumed_caps();
         self.pop_borrow_scope();
-        self.cap_vars.pop();
         scopes.pop();
         self.mut_vars.pop();
         self.var_scopes.pop();
@@ -126,19 +123,9 @@ impl<'a> Checker<'a> {
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
         self.infer_expr(cond, scopes);
-        let entry_caps = self.cap_vars.clone();
-        self.ownership_control_path.push("expr-then".to_string());
         let then_ty = self.infer_block_expr(then_, scopes);
-        self.ownership_control_path.pop();
-        let then_caps = self.cap_vars.clone();
-        self.cap_vars = entry_caps.clone();
         if let Some(eb) = else_ {
-            self.ownership_control_path.push("expr-else".to_string());
             let else_ty = self.infer_block_expr(eb, scopes);
-            self.ownership_control_path.pop();
-            let else_caps = self.cap_vars.clone();
-            self.cap_vars = entry_caps;
-            self.merge_capability_branches(&then_caps, &else_caps);
             // Bug-3: use unify instead of same_type to enable bidirectional type inference.
             // This allows the expected type to propagate into both branches, so
             // `Some(1)` in an `Option<i64>` context can infer i64 from the expected type.
@@ -156,8 +143,6 @@ impl<'a> Checker<'a> {
                 Type::Name("unknown".into(), vec![])
             }
         } else {
-            self.cap_vars = entry_caps;
-            self.merge_capability_branches(&then_caps, &self.cap_vars.clone());
             then_ty
         }
     }

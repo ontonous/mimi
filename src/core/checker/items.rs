@@ -1104,23 +1104,14 @@ impl<'a> Checker<'a> {
                         .map(|t| self.resolve_type(t))
                         .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
                     self.var_scopes.push(HashMap::new());
-                    self.cap_vars.push(HashMap::new());
-                    let ownership_params: Vec<(String, Type)> = method
-                        .params
-                        .iter()
-                        .map(|p| (p.name.clone(), self.resolve_type(&p.ty)))
-                        .collect();
                     let actor_name = if self.module_path.is_empty() {
                         actor.name.clone()
                     } else {
                         format!("{}::{}", self.module_path.join("::"), actor.name)
                     };
-                    let previous_owner = self.begin_callable_ownership(
-                        crate::core::NodeId(format!("function:{}::{}", actor_name, method.name)),
-                        &ownership_params,
-                    );
                     let method_owner =
                         crate::core::NodeId(format!("function:{}::{}", actor_name, method.name));
+                    let previous_owner = self.begin_callable(method_owner.clone());
                     self.unification.reset();
                     self.begin_expression_type_capture(method_owner);
                     let implicit_return =
@@ -1130,10 +1121,8 @@ impl<'a> Checker<'a> {
                         &ret,
                         implicit_return,
                     );
-                    self.check_unconsumed_caps();
                     self.finish_expression_type_capture();
-                    self.end_callable_ownership(previous_owner);
-                    self.cap_vars.pop();
+                    self.end_callable(previous_owner);
                     self.var_scopes.pop();
                 }
             }
@@ -1314,18 +1303,9 @@ impl<'a> Checker<'a> {
                         scopes[0].insert(p.name.clone(), ty);
                     }
                     self.var_scopes.push(HashMap::new());
-                    self.cap_vars.push(HashMap::new());
-                    let ownership_params: Vec<(String, Type)> = method
-                        .params
-                        .iter()
-                        .map(|p| (p.name.clone(), self.resolve_type(&p.ty)))
-                        .collect();
-                    let previous_owner = self.begin_callable_ownership(
-                        crate::core::resolved::impl_method_owner(&impl_qualified_name, method),
-                        &ownership_params,
-                    );
                     let method_owner =
                         crate::core::resolved::impl_method_owner(&impl_qualified_name, method);
+                    let previous_owner = self.begin_callable(method_owner.clone());
                     self.unification.reset();
                     self.begin_expression_type_capture(method_owner);
                     let implicit_return =
@@ -1338,11 +1318,9 @@ impl<'a> Checker<'a> {
                         &ret,
                         implicit_return,
                     );
-                    self.check_unconsumed_caps();
                     self.finish_expression_type_capture();
-                    self.end_callable_ownership(previous_owner);
+                    self.end_callable(previous_owner);
                     self.var_scopes.pop();
-                    self.cap_vars.pop();
                     self.generic_scope
                         .truncate(self.generic_scope.len() - method_generic_names.len());
                 }
@@ -1579,12 +1557,6 @@ impl<'a> Checker<'a> {
                         };
                         self.current_ret = Some(ret_type.clone());
                         self.var_scopes.push(std::collections::HashMap::new());
-                        self.cap_vars.push(std::collections::HashMap::new());
-                        let ownership_params: Vec<(String, Type)> = t
-                            .params
-                            .iter()
-                            .map(|p| (p.name.clone(), self.resolve_type(&p.ty)))
-                            .collect();
                         let flow_name = if self.module_path.is_empty() {
                             f.name.clone()
                         } else {
@@ -1594,8 +1566,7 @@ impl<'a> Checker<'a> {
                             "transition:{}::{}::{}",
                             flow_name, t.name, t.from_state
                         ));
-                        let previous_owner = self
-                            .begin_callable_ownership(transition_owner.clone(), &ownership_params);
+                        let previous_owner = self.begin_callable(transition_owner.clone());
                         let capture_typed_body = matches!(t.meta.origin, AstOrigin::User);
                         if capture_typed_body {
                             self.begin_expression_type_capture(transition_owner);
@@ -1605,9 +1576,7 @@ impl<'a> Checker<'a> {
                         if capture_typed_body {
                             self.finish_expression_type_capture();
                         }
-                        self.check_unconsumed_caps();
-                        self.end_callable_ownership(previous_owner);
-                        self.cap_vars.pop();
+                        self.end_callable(previous_owner);
                         self.var_scopes.pop();
                         self.current_ret = prev_ret;
                         self.flow_return_targets = prev_flow_targets;

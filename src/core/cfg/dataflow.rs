@@ -8,7 +8,7 @@ use crate::core::{
 use crate::core::{IndexProjection, LocalId, OwnershipLedger, PlaceProjection, ResourceActionKind};
 use crate::diagnostic::Diagnostic;
 
-use super::{BasicBlockId, CallableCfg, EdgeKind};
+use super::{BasicBlockId, CallableCfg, EdgeKind, Terminator};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct FlowState {
@@ -311,6 +311,8 @@ pub(super) fn analyze_canonical(
         }
     }
 
+    validate_return_resources(cfg, &out_flow, &mut errors);
+
     dedup_errors(&mut errors);
     if !errors.is_empty() {
         return Err(errors);
@@ -328,6 +330,55 @@ pub(super) fn analyze_canonical(
             .map(|(block, state)| (block, state.resources))
             .collect(),
     })
+}
+
+fn validate_return_resources(
+    cfg: &CallableCfg,
+    out: &BTreeMap<BasicBlockId, FlowState>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    for (block_id, block) in &cfg.blocks {
+        if !cfg.reachable.contains(block_id)
+            || !matches!(block.terminator, Terminator::Return { .. })
+        {
+            continue;
+        }
+        let Some(state) = out.get(block_id) else {
+            errors.push(Diagnostic::error(
+                format!(
+                    "resource analysis did not reach return block '{}'",
+                    block_id.0 .0
+                ),
+                block.source.span,
+            ));
+            continue;
+        };
+        let source = block
+            .points
+            .last()
+            .map_or(&block.source, |point| &point.source);
+        for (resource, fact) in &state.resources {
+            if fact.availability != Availability::Available {
+                continue;
+            }
+            let name = fact
+                .owner
+                .as_ref()
+                .map(Place::display)
+                .unwrap_or_else(|| resource.0 .0.clone());
+            errors.push(
+                Diagnostic::error_code(
+                    crate::diagnostic::codes::E0256,
+                    format!(
+                        "linear resource '{}' must be consumed before this return path",
+                        name
+                    ),
+                    source.span,
+                )
+                .with_help("move, return, transfer, or drop the resource before returning"),
+            );
+        }
+    }
 }
 
 fn predecessors_ready(

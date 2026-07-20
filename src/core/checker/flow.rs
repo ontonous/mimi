@@ -23,7 +23,6 @@ pub struct FlowAcc {
     /// Warnings accumulated during type checking (reserved for future use).
     #[allow(dead_code)]
     pub warnings: Vec<Diagnostic>,
-    pub ownership_ledgers: HashMap<crate::core::NodeId, crate::core::OwnershipLedger>,
     /// v0.31.2: Type schemes recorded during generalization (NodeId -> scheme).
     pub schemes: HashMap<crate::core::NodeId, TypeScheme>,
     /// v0.31.2: Zonked function signatures for backend consumption.
@@ -136,7 +135,6 @@ fn extract_acc(checker: &mut Checker) -> FlowAcc {
     FlowAcc {
         errors: deduped,
         warnings: std::mem::take(&mut checker.warnings),
-        ownership_ledgers: std::mem::take(&mut checker.ownership_ledgers),
         schemes: std::mem::take(&mut checker.schemes),
         zonked_func_types: std::mem::take(&mut checker.zonked_func_types),
         zonked_nested_func_types: std::mem::take(&mut checker.zonked_nested_func_types),

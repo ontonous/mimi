@@ -22,11 +22,8 @@ impl<'a> Checker<'a> {
             format!("{}::{}", self.module_path.join("::"), func.name)
         };
         let owner = crate::core::NodeId(format!("function:{}", owner_name));
-        self.current_ownership_owner = Some(owner.clone());
+        self.current_callable_owner = Some(owner.clone());
         self.begin_expression_type_capture(owner.clone());
-        self.ownership_ledgers
-            .entry(owner.clone())
-            .or_insert_with(|| crate::core::OwnershipLedger::new(owner));
         // C2: reset unification table for each function
         self.unification.reset();
         // v0.29.19: session residual tracking is per-function.
@@ -54,23 +51,8 @@ impl<'a> Checker<'a> {
         let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
         // Push function-level variable scope for shadowing detection
         self.var_scopes.push(HashMap::new());
-        // Push cap scope for function body
-        self.cap_vars.push(HashMap::new());
         for p in &func.params {
             let ty = self.resolve_type(&p.ty);
-            // If param is a cap type, track it
-            if matches!(ty.unlocated(), Type::Cap(_)) {
-                if let Some(s) = self.cap_vars.last_mut() {
-                    s.insert(
-                        p.name.clone(),
-                        super::CapVarInfo {
-                            consumed: false,
-                            maybe_consumed: false,
-                        },
-                    );
-                }
-                self.record_resource_action(crate::core::ResourceActionKind::Introduce, &p.name);
-            }
             // SessionChan<S> params: seed residual from declared session body.
             if let Type::Name(n, args) = ty.unlocated() {
                 if (n == "SessionChan" || n == "session_chan") && !args.is_empty() {
@@ -187,19 +169,11 @@ impl<'a> Checker<'a> {
                 );
             }
         }
-        if let Some(stmt) = func.body.last() {
-            if let Stmt::Expr(expr) = stmt.unlocated() {
-                self.consume_capabilities_in_expr(expr, crate::core::ResourceActionKind::Return);
-            }
-        }
-        // Check for unconsumed caps before popping
-        self.check_unconsumed_caps();
         self.available_effects.pop();
         self.var_scopes.pop();
-        self.cap_vars.pop();
         self.finish_expression_type_capture();
         self.current_ret = None;
-        self.current_ownership_owner = None;
+        self.current_callable_owner = None;
         self.generic_scope.truncate(generic_scope_len);
     }
 
@@ -280,84 +254,5 @@ impl<'a> Checker<'a> {
             }
         }
         false
-    }
-
-    /// Conservative: body has no `continue` and every path ends in `break`/`return`.
-    /// Such bodies cannot form a capability-carrying back-edge.
-    pub(crate) fn block_exits_loop_without_backedge(&self, block: &Block) -> bool {
-        if block.iter().any(|stmt| self.stmt_contains_continue(stmt)) {
-            return false;
-        }
-        block
-            .last()
-            .map(|stmt| self.stmt_always_exits_loop(stmt))
-            .unwrap_or(false)
-    }
-
-    fn stmt_contains_continue(&self, stmt: &Stmt) -> bool {
-        match stmt.unlocated() {
-            Stmt::Continue => true,
-            Stmt::If { then_, else_, .. } => {
-                then_.iter().any(|s| self.stmt_contains_continue(s))
-                    || else_
-                        .as_ref()
-                        .is_some_and(|b| b.iter().any(|s| self.stmt_contains_continue(s)))
-            }
-            Stmt::Block(b)
-            | Stmt::Do(b)
-            | Stmt::Arena(b)
-            | Stmt::Loop(b)
-            | Stmt::While { body: b, .. }
-            | Stmt::WhileLet { body: b, .. }
-            | Stmt::For { body: b, .. }
-            | Stmt::Alloc { body: b, .. } => b.iter().any(|s| self.stmt_contains_continue(s)),
-            _ => false,
-        }
-    }
-
-    fn stmt_always_exits_loop(&self, stmt: &Stmt) -> bool {
-        match stmt.unlocated() {
-            Stmt::Break(_) | Stmt::Return(_) => true,
-            Stmt::Continue => false,
-            Stmt::If { then_, else_, .. } => {
-                self.block_exits_loop_without_backedge(then_)
-                    && else_
-                        .as_ref()
-                        .is_some_and(|b| self.block_exits_loop_without_backedge(b))
-            }
-            Stmt::Block(b) | Stmt::Do(b) | Stmt::Arena(b) | Stmt::Alloc { body: b, .. } => {
-                self.block_exits_loop_without_backedge(b)
-            }
-            _ => false,
-        }
-    }
-
-    pub(crate) fn check_unconsumed_caps(&mut self) {
-        if let Some(scope) = self.cap_vars.last() {
-            // v0.29.50: fast path — if all consumed, return immediately.
-            let total = scope.len();
-            let consumed_count = scope
-                .values()
-                .filter(|info| info.consumed && !info.maybe_consumed)
-                .count();
-            if consumed_count == total {
-                return; // O(1) fast path via count comparison
-            }
-            // Slow path: find unconsumed vars
-            let unconsumed: Vec<String> = scope
-                .iter()
-                .filter(|(_, info)| !info.consumed || info.maybe_consumed)
-                .map(|(name, _)| name.clone())
-                .collect();
-            for name in unconsumed {
-                self.emit_code(
-                    crate::diagnostic::codes::E0256,
-                    format!(
-                        "linear capability '{}' must be consumed (via drop) before end of scope",
-                        name
-                    ),
-                );
-            }
-        }
     }
 }

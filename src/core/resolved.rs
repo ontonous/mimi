@@ -629,22 +629,22 @@ pub struct CheckedProgram {
 impl CheckedProgram {
     #[cfg(test)]
     pub(crate) fn from_checked_file(file: &File) -> Result<Self, Vec<Diagnostic>> {
-        Self::from_checked_file_with_ownership(file, HashMap::new())
+        Self::from_checked_file_base(file)
     }
 
-    /// v0.31.2: Construct CheckedProgram from FlowAcc (typed artifacts + ownership).
+    /// Construct `CheckedProgram` from checker-finalized typed artifacts.
+    /// Canonical ownership is derived later from `ResolvedBody` and CFG.
     /// Uses checker-resolved function types for ResolvedFunction when available,
     /// falling back to AST clone for items the checker didn't process.
     pub(crate) fn from_flow_acc(file: &File, acc: FlowAcc) -> Result<Self, Vec<Diagnostic>> {
         let FlowAcc {
-            ownership_ledgers,
             schemes,
             zonked_func_types,
             zonked_nested_func_types,
             zonked_expr_types,
             ..
         } = acc;
-        let mut program = Self::from_checked_file_with_ownership(file, ownership_ledgers)?;
+        let mut program = Self::from_checked_file_base(file)?;
         let mut errors = Vec::new();
         let mut zonked_by_node = HashMap::new();
 
@@ -746,10 +746,7 @@ impl CheckedProgram {
         Ok(program)
     }
 
-    pub(crate) fn from_checked_file_with_ownership(
-        file: &File,
-        ownership_ledgers: HashMap<NodeId, OwnershipLedger>,
-    ) -> Result<Self, Vec<Diagnostic>> {
+    fn from_checked_file_base(file: &File) -> Result<Self, Vec<Diagnostic>> {
         let mut transitions = HashMap::new();
         let mut flows = HashMap::new();
         let mut items = HashMap::new();
@@ -807,34 +804,6 @@ impl CheckedProgram {
             &mut backend_requirements,
             &mut errors,
         );
-        if !errors.is_empty() {
-            return Err(errors);
-        }
-        for (owner, ledger) in &ownership_ledgers {
-            if ledger.owner != *owner {
-                errors.push(Diagnostic::error(
-                    format!(
-                        "TOOL-RESOLUTION-001: ownership ledger key '{}' disagrees with ledger.owner '{}'",
-                        owner.0, ledger.owner.0
-                    ),
-                    Span::UNKNOWN,
-                ));
-            }
-            let catalogued = functions.contains_key(owner)
-                || transitions
-                    .values()
-                    .any(|transition| transition.node_id == *owner)
-                || (is_callable_catalog_root(owner) && node_meta.contains_key(owner));
-            if !catalogued {
-                errors.push(Diagnostic::error(
-                    format!(
-                        "TOOL-RESOLUTION-001: ownership ledger owner '{}' is not present in the callable NodeMeta/function/transition catalog",
-                        owner.0
-                    ),
-                    Span::UNKNOWN,
-                ));
-            }
-        }
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -924,7 +893,7 @@ impl CheckedProgram {
             type_defs,
             extern_blocks,
             backend_requirements,
-            ownership_ledgers,
+            ownership_ledgers: HashMap::new(),
             type_schemes: HashMap::new(),
             zonked_function_types: HashMap::new(),
             resolved_types: crate::core::ResolvedTypeTable::new(),
@@ -1311,17 +1280,6 @@ impl CheckedProgram {
             Err(unsupported)
         }
     }
-}
-
-fn is_callable_catalog_root(node_id: &NodeId) -> bool {
-    if node_id.0.starts_with("transition:") {
-        return !node_id.0.contains('/');
-    }
-    node_id.0.starts_with("function:")
-        && node_id
-            .0
-            .split('/')
-            .all(|segment| segment.starts_with("function:"))
 }
 
 fn backend_supports(backend: BackendProfile, capability: &str) -> bool {
@@ -11061,31 +11019,6 @@ func main() -> i32 { 0 }
     }
 
     #[test]
-    fn ownership_ledger_rejects_body_node_that_only_looks_like_a_callable_prefix() {
-        let file = parse("func main() -> i32 { 0 }");
-        let plain = CheckedProgram::from_checked_file(&file).expect("plain catalog");
-        let body_id = plain
-            .node_meta()
-            .keys()
-            .find(|node_id| {
-                node_id.0.starts_with("function:main/")
-                    && (node_id.0.contains("/node:")
-                        || node_id.0.contains("/fallback:")
-                        || node_id.0.contains("/generated:"))
-            })
-            .cloned()
-            .expect("body node");
-        drop(plain);
-        let mut ledgers = HashMap::new();
-        ledgers.insert(body_id.clone(), OwnershipLedger::new(body_id));
-        let diagnostics = CheckedProgram::from_checked_file_with_ownership(&file, ledgers)
-            .expect_err("body node must not be accepted as callable owner");
-        assert!(diagnostics.iter().any(|diagnostic| diagnostic
-            .message
-            .contains("not present in the callable NodeMeta/function/transition catalog")));
-    }
-
-    #[test]
     fn production_node_ids_do_not_encode_vec_indexes() {
         let file = parse(
             r#"
@@ -11454,9 +11387,11 @@ func main() -> i32 { 0 }
 "#,
         );
         let diagnostics = crate::core::check_program(&file).expect_err("branch mismatch");
+        // RESOURCE-LINEAR-001: the typed CFG join, not checker snapshots,
+        // reports the mismatch between reachable predecessors.
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0304)
-                && diagnostic.message.contains("some control-flow paths")
+                && diagnostic.message.contains("some reachable CFG paths")
         }));
     }
 
@@ -11525,9 +11460,10 @@ func main() -> i32 { 0 }
 "#,
         );
         let diagnostics = crate::core::check_program(&file).expect_err("loop consumption");
+        // RESOURCE-LINEAR-001: loop ownership is a fixed-point join.
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0304)
-                && diagnostic.message.contains("potentially repeating loop")
+                && diagnostic.message.contains("some reachable CFG paths")
         }));
     }
 
@@ -11550,7 +11486,7 @@ func main() -> i32 { 0 }
         let diagnostics = crate::core::check_program(&file).expect_err("zero-iteration leak");
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0304)
-                && diagnostic.message.contains("some control-flow paths")
+                && diagnostic.message.contains("some reachable CFG paths")
         }));
     }
 
@@ -11607,7 +11543,9 @@ func main() -> i32 { 0 }
         let diagnostics = crate::core::check_program(&file).expect_err("double consume");
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0304)
-                && diagnostic.message.contains("already been consumed")
+                && diagnostic
+                    .message
+                    .contains("consumed more than once on this CFG path")
         }));
     }
 

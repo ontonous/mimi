@@ -242,11 +242,9 @@ fn ownership_ledger_actions_and_merges_are_source_aware() {
     let mut loader = crate::loader::ModuleLoader::new(root.clone());
     loader.load_main(&main_path).expect("load ownership source");
     let file = loader.merge_all().expect("merge ownership source");
-    let mut checker = crate::core::Checker::new(&file);
-    checker.check().expect("check ownership source");
-    let ledger = checker
-        .ownership_ledgers
-        .get(&crate::core::NodeId("function:close".into()))
+    let program = crate::core::check_program(&file).expect("check ownership source");
+    let ledger = program
+        .ownership_ledger(&crate::core::NodeId("function:close".into()))
         .expect("close ownership ledger");
     assert!(ledger.actions.iter().all(|action| {
         action.span.source_id.is_known() && action.span.start_line > 0 && action.span.start_col > 0
