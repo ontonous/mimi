@@ -19,9 +19,6 @@ impl<'a> Checker<'a> {
         ret: &Type,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Option<Type> {
-        // Push borrow scope for the block. Linear resources are validated from
-        // the typed CFG after checker zonk completes.
-        self.push_borrow_scope();
         let mut seen_return = false;
         let mut last_expr_type = None;
         for (i, stmt) in block.iter().enumerate() {
@@ -35,10 +32,6 @@ impl<'a> Checker<'a> {
             }
             if let Stmt::Return(_) = stmt.unlocated() {
                 seen_return = true;
-            }
-            // NLL: Release borrows whose last use was in a previous statement
-            if i > 0 {
-                self.release_borrows_at_last_use(block, i);
             }
             // CO-H2 (audit): update the fallback error span to the actual
             // statement position so type errors reference the offending
@@ -63,7 +56,6 @@ impl<'a> Checker<'a> {
             }
             self.check_stmt(stmt, ret, scopes);
         }
-        self.pop_borrow_scope();
         last_expr_type
     }
 
@@ -1065,26 +1057,6 @@ impl<'a> Checker<'a> {
                                     name
                                 ),
                             );
-                        }
-                        // T-C2: reject writes while a shared/mut borrow of the place is live.
-                        if let Some(state) = self.lookup_borrow(name) {
-                            match state {
-                                crate::core::borrow::BorrowState::BorrowedImm { span }
-                                | crate::core::borrow::BorrowState::BorrowedMut { span } => {
-                                    self.errors.push(
-                                        crate::diagnostic::Diagnostic::error_code(
-                                            crate::diagnostic::codes::E0302,
-                                            format!(
-                                                "cannot assign to '{}' while it is borrowed",
-                                                name
-                                            ),
-                                            self.diagnostic_span(),
-                                        )
-                                        .with_note("borrow occurs here", *span),
-                                    );
-                                }
-                                crate::core::borrow::BorrowState::Unborrowed => {}
-                            }
                         }
                         // v0.29.29: mutate params can be read-modify-written (x = f(x)),
                         // but wholesale realloc of owned memory (e.g. `xs = [1,2]` on a List)

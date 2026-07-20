@@ -493,13 +493,27 @@ fn transfer(
                     && new_loan.parent.as_ref() != Some(active_id)
                     && (new_loan.kind == LoanKind::Mutable || active.kind == LoanKind::Mutable)
                 {
+                    let (code, qualifier, existing) = match (new_loan.kind, active.kind) {
+                        (LoanKind::Mutable, LoanKind::Shared) => {
+                            (crate::diagnostic::codes::E0300, "mutable", "immutably")
+                        }
+                        (LoanKind::Mutable, LoanKind::Mutable) => {
+                            (crate::diagnostic::codes::E0301, "mutable", "mutably")
+                        }
+                        (LoanKind::Shared, LoanKind::Mutable) => {
+                            (crate::diagnostic::codes::E0302, "immutable", "mutably")
+                        }
+                        (LoanKind::Shared, LoanKind::Shared) => {
+                            unreachable!("shared loans do not conflict with other shared loans")
+                        }
+                    };
                     errors.push(Diagnostic::error_code(
-                        crate::diagnostic::codes::E0415,
+                        code,
                         format!(
-                            "{} borrow of '{}' conflicts with an active {} borrow",
-                            loan_kind_name(new_loan.kind),
+                            "cannot borrow '{}' as {} because it is already {} borrowed",
                             new_loan.place.display(),
-                            loan_kind_name(active.kind)
+                            qualifier,
+                            existing,
                         ),
                         action.span,
                     ));
@@ -1009,13 +1023,6 @@ fn stable_place_fragment(value: &str) -> String {
             }
         })
         .collect()
-}
-
-fn loan_kind_name(kind: LoanKind) -> &'static str {
-    match kind {
-        LoanKind::Shared => "shared",
-        LoanKind::Mutable => "mutable",
-    }
 }
 
 fn dedup_errors(errors: &mut Vec<Diagnostic>) {

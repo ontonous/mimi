@@ -24,13 +24,11 @@ impl<'a> Checker<'a> {
             .clone()
             .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
 
-        // Mirror the scope setup used by check_block_with_implicit_return so
-        // that borrow tracking and shadowing detection are active inside a
-        // block expression. Resource state is handled by typed CFG dataflow.
+        // Mirror the lexical scope setup used by statements. Resource and loan
+        // state is handled by typed CFG dataflow after checker zonk.
         self.var_scopes.push(HashMap::new());
         self.mut_vars.push(HashMap::new());
         scopes.push(HashMap::new());
-        self.push_borrow_scope();
 
         let last_idx = block.len() - 1;
         for (i, stmt) in block.iter().enumerate() {
@@ -43,7 +41,6 @@ impl<'a> Checker<'a> {
         let last = &block[last_idx];
         let result_type = process_last(self, last, scopes, &ret);
 
-        self.pop_borrow_scope();
         scopes.pop();
         self.mut_vars.pop();
         self.var_scopes.pop();
