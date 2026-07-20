@@ -5,7 +5,7 @@ use crate::core::ir::{
     ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedProjection, ResolvedStmt,
     ResolvedStmtKind, ResolvedValueProjection,
 };
-use crate::core::{NodeId, Origin, ResolvedBody};
+use crate::core::{IndexProjection, LocalId, NodeId, Origin, Place, PlaceProjection, ResolvedBody};
 use crate::diagnostic::Diagnostic;
 
 use super::{
@@ -34,6 +34,8 @@ struct PointAccesses {
     defs: Vec<String>,
     reads: Vec<String>,
     writes: Vec<String>,
+    read_places: Vec<Place>,
+    write_places: Vec<Place>,
 }
 
 struct ResolvedCfgLowerer<'a> {
@@ -108,6 +110,10 @@ impl<'a> ResolvedCfgLowerer<'a> {
         accesses.reads.dedup();
         accesses.writes.sort();
         accesses.writes.dedup();
+        accesses.read_places.sort();
+        accesses.read_places.dedup();
+        accesses.write_places.sort();
+        accesses.write_places.dedup();
         let Some(block) = self.blocks.get_mut(block) else {
             self.errors.push(Diagnostic::error(
                 "attempted to append a point to a missing CFG block".to_string(),
@@ -122,6 +128,8 @@ impl<'a> ResolvedCfgLowerer<'a> {
             defs: accesses.defs,
             reads: accesses.reads,
             writes: accesses.writes,
+            read_places: accesses.read_places,
+            write_places: accesses.write_places,
         });
     }
 
@@ -247,6 +255,7 @@ impl<'a> ResolvedCfgLowerer<'a> {
                 let current = self.lower_expr(value, current, CfgPointKind::Expression)?;
                 let current = self.lower_place_inputs(target, current)?;
                 let spelling = self.place_spelling(target);
+                let target_place = self.canonical_place(target);
                 let defs = target
                     .projections
                     .is_empty()
@@ -262,6 +271,7 @@ impl<'a> ResolvedCfgLowerer<'a> {
                         uses: vec![self.local_name(&target.base)],
                         defs,
                         writes: vec![spelling],
+                        write_places: vec![target_place],
                         ..PointAccesses::default()
                     },
                 );
@@ -390,6 +400,10 @@ impl<'a> ResolvedCfgLowerer<'a> {
                             .iter()
                             .map(|place| self.place_spelling(place))
                             .collect(),
+                        read_places: places
+                            .iter()
+                            .map(|place| self.canonical_place(place))
+                            .collect(),
                         ..PointAccesses::default()
                     },
                 );
@@ -418,6 +432,7 @@ impl<'a> ResolvedCfgLowerer<'a> {
                     PointAccesses {
                         uses: vec![self.local_name(&source.base)],
                         reads: vec![self.place_spelling(source)],
+                        read_places: vec![self.canonical_place(source)],
                         ..PointAccesses::default()
                     },
                 );
@@ -493,7 +508,7 @@ impl<'a> ResolvedCfgLowerer<'a> {
             }
             _ => {
                 let current = self.lower_expr_children(expression, current)?;
-                let (uses, reads) = self.direct_accesses(expression);
+                let (uses, reads, read_places) = self.direct_accesses(expression);
                 self.point(
                     &current,
                     &expression.node_id,
@@ -502,6 +517,7 @@ impl<'a> ResolvedCfgLowerer<'a> {
                     PointAccesses {
                         uses,
                         reads,
+                        read_places,
                         ..PointAccesses::default()
                     },
                 );
@@ -917,11 +933,12 @@ impl<'a> ResolvedCfgLowerer<'a> {
         Some(current)
     }
 
-    fn direct_accesses(&self, expression: &ResolvedExpr) -> (Vec<String>, Vec<String>) {
+    fn direct_accesses(&self, expression: &ResolvedExpr) -> (Vec<String>, Vec<String>, Vec<Place>) {
         match &expression.kind {
             ResolvedExprKind::Load(place) => (
                 vec![self.local_name(&place.base)],
                 vec![self.place_spelling(place)],
+                vec![self.canonical_place(place)],
             ),
             ResolvedExprKind::Lambda(lambda) => {
                 let names = lambda
@@ -929,9 +946,9 @@ impl<'a> ResolvedCfgLowerer<'a> {
                     .iter()
                     .map(|capture| self.local_name(capture))
                     .collect::<Vec<_>>();
-                (names.clone(), names)
+                (names.clone(), names, Vec::new())
             }
-            _ => (Vec::new(), Vec::new()),
+            _ => (Vec::new(), Vec::new(), Vec::new()),
         }
     }
 
@@ -980,34 +997,32 @@ impl<'a> ResolvedCfgLowerer<'a> {
     }
 
     fn place_spelling(&self, place: &ResolvedPlace) -> String {
-        let mut spelling = self.local_name(&place.base);
+        self.canonical_place(place).display()
+    }
+
+    fn canonical_place(&self, place: &ResolvedPlace) -> Place {
+        let mut projections = Vec::with_capacity(place.projections.len());
         for projection in &place.projections {
-            match projection {
-                ResolvedProjection::Field { field, .. } => {
-                    let name = field
-                        .0
-                        .rsplit_once("::")
-                        .map(|(_, name)| name)
-                        .unwrap_or(&field.0);
-                    spelling.push('.');
-                    spelling.push_str(name);
-                }
-                ResolvedProjection::Tuple { index, .. } => {
-                    spelling.push('.');
-                    spelling.push_str(&index.to_string());
-                }
+            projections.push(match projection {
+                ResolvedProjection::Field { field, name, .. } => PlaceProjection::Field {
+                    field: field.clone(),
+                    name: name.clone(),
+                },
+                ResolvedProjection::Tuple { index, .. } => PlaceProjection::Tuple(*index),
                 ResolvedProjection::Index { index, .. } => match index {
                     ResolvedIndex::Constant(index) => {
-                        spelling.push('[');
-                        spelling.push_str(&index.to_string());
-                        spelling.push(']');
+                        PlaceProjection::Index(IndexProjection::Constant(*index))
                     }
-                    ResolvedIndex::Dynamic(_) => spelling.push_str("[*]"),
+                    ResolvedIndex::Dynamic(_) => PlaceProjection::Index(IndexProjection::Dynamic),
                 },
-                ResolvedProjection::Deref { .. } => spelling = format!("*{spelling}"),
-            }
+                ResolvedProjection::Deref { .. } => PlaceProjection::Deref,
+            });
         }
-        spelling
+        Place {
+            base: LocalId(place.base.0.clone()),
+            base_name: self.local_name(&place.base),
+            projections,
+        }
     }
 
     fn finish(

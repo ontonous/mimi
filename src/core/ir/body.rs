@@ -56,6 +56,7 @@ pub enum ResolvedIndex {
 pub enum ResolvedProjection {
     Field {
         field: NodeId,
+        name: String,
         ty: ResolvedTypeId,
     },
     Tuple {
@@ -1186,8 +1187,10 @@ impl BodyValidator<'_> {
         for projection in &place.projections {
             self.require_type(owner, projection.ty());
             match projection {
-                ResolvedProjection::Field { field, .. } if field.0.trim().is_empty() => {
-                    self.error(owner, "place field identity is empty");
+                ResolvedProjection::Field { field, name, .. }
+                    if field.0.trim().is_empty() || name.trim().is_empty() =>
+                {
+                    self.error(owner, "place field identity or display name is empty");
                 }
                 ResolvedProjection::Index {
                     index: ResolvedIndex::Dynamic(node),

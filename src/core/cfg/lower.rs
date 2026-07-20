@@ -182,6 +182,8 @@ impl<'a> Lowerer<'a> {
                 defs,
                 reads,
                 writes,
+                read_places: Vec::new(),
+                write_places: Vec::new(),
             });
         }
         node

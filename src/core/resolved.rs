@@ -727,8 +727,22 @@ impl CheckedProgram {
                 }
             };
         program.callable_cfgs = crate::core::cfg::lower_resolved_bodies(&program.resolved_bodies)?;
-        program.resource_analyses =
-            crate::core::cfg::analyze_cfgs(&program.callable_cfgs, &program.ownership_ledgers)?;
+        program.resource_analyses = crate::core::cfg::analyze_resolved_bodies(
+            &program.callable_cfgs,
+            &program.resolved_bodies,
+            &program.resolved_signatures,
+            &program.resolved_types,
+        )?;
+        program.ownership_ledgers = program
+            .resource_analyses
+            .iter()
+            .map(|(owner, analysis)| {
+                (
+                    owner.clone(),
+                    OwnershipLedger::from_analysis(analysis, &program.callable_cfgs[owner]),
+                )
+            })
+            .collect();
         Ok(program)
     }
 
@@ -11356,10 +11370,12 @@ func main() -> i32 { 0 }
             .collect();
         assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowShared, "p.left")));
         assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowMut, "p.right")));
-        assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowShared, "xs[*]")));
+        // RESOURCE-LINEAR-001: canonical places retain constant-index
+        // disjointness; only genuinely dynamic indices project as `[*]`.
+        assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowShared, "xs[0]")));
         assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowEnd, "p.left")));
         assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowEnd, "p.right")));
-        assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowEnd, "xs")));
+        assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowEnd, "xs[0]")));
 
         let interp = crate::interp::Interpreter::from_checked(&program);
         assert!(interp
