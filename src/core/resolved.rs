@@ -552,6 +552,34 @@ pub enum ResolvedTypeKind {
     Union,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedVariantShape {
+    Unit,
+    Tuple,
+    Record,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedVariantMember {
+    pub node_id: NodeId,
+    pub name: String,
+    pub ty: crate::core::ResolvedTypeId,
+}
+
+/// Checker-owned schema for one enum variant.
+///
+/// The schema contains stable declaration identities and canonical member
+/// types only. Consumers must not recover payload structure from the retained
+/// surface declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedVariantSchema {
+    pub node_id: NodeId,
+    pub owner: NodeId,
+    pub name: String,
+    pub shape: ResolvedVariantShape,
+    pub members: Vec<ResolvedVariantMember>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedTypeDef {
     pub node_id: NodeId,
@@ -567,6 +595,8 @@ pub struct ResolvedTypeDef {
     pub variants: Vec<(String, Option<String>)>,
     /// Stable enum variant identities keyed by their display names.
     pub variant_ids: BTreeMap<String, NodeId>,
+    /// Stable generic binder identities in declaration order.
+    pub generic_parameters: Vec<(String, NodeId)>,
     /// Complete checked declaration snapshot for declaration-only consumers.
     pub declaration: crate::ast::TypeDef,
     pub origin: Origin,
@@ -630,6 +660,7 @@ pub struct CheckedProgram {
     resolved_type_operands: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     resolved_type_arguments: BTreeMap<NodeId, Vec<crate::core::ResolvedTypeId>>,
     resolved_field_types: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    resolved_variants: BTreeMap<NodeId, ResolvedVariantSchema>,
     resolved_type_targets: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     resolved_bodies: BTreeMap<NodeId, crate::core::ResolvedBody>,
     callable_cfgs: BTreeMap<NodeId, crate::core::cfg::CallableCfg>,
@@ -702,6 +733,7 @@ impl CheckedProgram {
             resolved_node_types,
             resolved_type_operands,
             resolved_field_types,
+            resolved_variants,
             resolved_type_targets,
             resolved_type_arguments,
         ) = build_canonical_function_signatures(&program, &stable_expression_types)?;
@@ -716,8 +748,10 @@ impl CheckedProgram {
         program.resolved_node_types = resolved_node_types;
         program.resolved_type_operands = resolved_type_operands;
         program.resolved_field_types = resolved_field_types;
+        program.resolved_variants = resolved_variants;
         program.resolved_type_targets = resolved_type_targets;
         program.resolved_type_arguments = resolved_type_arguments;
+        validate_resolved_variant_schemas(&program)?;
         program.resolved_bodies =
             match crate::core::ir::lower::lower_checked_callable_bodies(file, &program) {
                 Ok(bodies) => bodies,
@@ -912,6 +946,7 @@ impl CheckedProgram {
             resolved_type_operands: BTreeMap::new(),
             resolved_type_arguments: BTreeMap::new(),
             resolved_field_types: BTreeMap::new(),
+            resolved_variants: BTreeMap::new(),
             resolved_type_targets: BTreeMap::new(),
             resolved_bodies: BTreeMap::new(),
             callable_cfgs: BTreeMap::new(),
@@ -1202,6 +1237,23 @@ impl CheckedProgram {
         self.resolved_field_types.get(field)
     }
 
+    pub fn resolved_variants(&self) -> &BTreeMap<NodeId, ResolvedVariantSchema> {
+        &self.resolved_variants
+    }
+
+    pub fn resolved_variant(&self, variant: &NodeId) -> Option<&ResolvedVariantSchema> {
+        self.resolved_variants.get(variant)
+    }
+
+    pub fn resolved_variant_named(
+        &self,
+        owner: &NodeId,
+        name: &str,
+    ) -> Option<&ResolvedVariantSchema> {
+        let variant = self.type_defs.get(owner)?.variant_ids.get(name)?;
+        self.resolved_variants.get(variant)
+    }
+
     /// Return the checker-owned display name for a declaration member without
     /// consulting its retained surface declaration. Consumers dispatch by the
     /// `NodeId`; the name is only runtime/debug presentation metadata.
@@ -1422,6 +1474,118 @@ fn validate_resolved_callable_bodies(program: &CheckedProgram) -> Result<(), Vec
     }
 }
 
+fn validate_resolved_variant_schemas(program: &CheckedProgram) -> Result<(), Vec<Diagnostic>> {
+    let mut errors = Vec::new();
+    let mut referenced = std::collections::BTreeSet::new();
+    for definition in program.type_defs.values() {
+        for (name, binder) in &definition.generic_parameters {
+            if !program.node_meta.contains_key(binder) {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: generic binder '{}::{}' has no NodeMeta",
+                        definition.qualified_name, name
+                    ),
+                    definition.origin.user_span(),
+                ));
+            }
+        }
+        if definition.kind != ResolvedTypeKind::Enum {
+            continue;
+        }
+        for (name, variant_id) in &definition.variant_ids {
+            referenced.insert(variant_id.clone());
+            let Some(schema) = program.resolved_variants.get(variant_id) else {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: enum variant '{}::{}' has no canonical schema",
+                        definition.qualified_name, name
+                    ),
+                    definition.origin.user_span(),
+                ));
+                continue;
+            };
+            if schema.node_id != *variant_id
+                || schema.owner != definition.node_id
+                || schema.name != *name
+            {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: enum variant schema '{}' disagrees with its declaration catalog",
+                        variant_id.0
+                    ),
+                    definition.origin.user_span(),
+                ));
+            }
+            if !program.node_meta.contains_key(variant_id) {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: enum variant '{}' has no NodeMeta",
+                        variant_id.0
+                    ),
+                    definition.origin.user_span(),
+                ));
+            }
+            let mut member_ids = std::collections::BTreeSet::new();
+            let mut member_names = std::collections::BTreeSet::new();
+            for member in &schema.members {
+                if !member_ids.insert(member.node_id.clone())
+                    || !member_names.insert(member.name.clone())
+                {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: enum variant '{}' has duplicate canonical members",
+                            variant_id.0
+                        ),
+                        definition.origin.user_span(),
+                    ));
+                }
+                if !program.node_meta.contains_key(&member.node_id)
+                    || program.resolved_field_types.get(&member.node_id) != Some(&member.ty)
+                    || program.resolved_types.get(&member.ty).is_none()
+                {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: enum member '{}' has incomplete canonical facts",
+                            member.node_id.0
+                        ),
+                        definition.origin.user_span(),
+                    ));
+                }
+            }
+            if schema.shape == ResolvedVariantShape::Unit && !schema.members.is_empty() {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: unit variant '{}' has payload members",
+                        variant_id.0
+                    ),
+                    definition.origin.user_span(),
+                ));
+            }
+        }
+    }
+    for (variant_id, schema) in &program.resolved_variants {
+        if !referenced.contains(variant_id) {
+            errors.push(Diagnostic::error(
+                format!(
+                    "TOOL-RESOLUTION-001: variant schema '{}' is not owned by a resolved enum",
+                    variant_id.0
+                ),
+                schema
+                    .members
+                    .first()
+                    .and_then(|member| program.node_meta.get(&member.node_id))
+                    .map(|meta| meta.origin.user_span())
+                    .unwrap_or(Span::UNKNOWN),
+            ));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
 fn backend_supports(backend: BackendProfile, capability: &str) -> bool {
     match backend {
         // Interpreter implements the current Flow surface, including experimental multi-target.
@@ -1625,6 +1789,8 @@ fn collect_items(
                 let mut field_ids = BTreeMap::new();
                 let mut variants = Vec::new();
                 let mut variant_ids = BTreeMap::new();
+                let generic_parameters =
+                    callable_generic_binders(&type_def.generics, &node_id, &ids, errors);
                 match &type_def.kind {
                     crate::ast::TypeDefKind::Alias(ty) | crate::ast::TypeDefKind::Newtype(ty) => {
                         if contains_unresolved_type(ty) {
@@ -1739,6 +1905,7 @@ fn collect_items(
                         field_ids,
                         variants,
                         variant_ids,
+                        generic_parameters,
                         declaration: type_def.clone(),
                         origin: resolve_named_origin(
                             ResolvedItemKind::Type,
@@ -6786,6 +6953,7 @@ type CanonicalFunctionArtifacts = (
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    BTreeMap<NodeId, ResolvedVariantSchema>,
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     BTreeMap<NodeId, Vec<crate::core::ResolvedTypeId>>,
 );
@@ -7007,6 +7175,7 @@ fn build_canonical_function_signatures(
     let mut type_operands = BTreeMap::new();
     let mut type_arguments = BTreeMap::new();
     let mut field_types = BTreeMap::new();
+    let mut resolved_variants = BTreeMap::new();
     let mut type_targets = BTreeMap::new();
     let mut errors = Vec::new();
     let mut functions = program.functions.values().collect::<Vec<_>>();
@@ -7681,18 +7850,11 @@ fn build_canonical_function_signatures(
     let mut definitions = program.type_defs.values().collect::<Vec<_>>();
     definitions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
     for definition in definitions {
-        let mut generic_names = BTreeMap::new();
-        for generic in &definition.declaration.generics {
-            let id = ids.anonymous(
-                &definition.node_id,
-                "decl.generic_parameter",
-                &format!("generic.{}", stable_id_fragment(&generic.name)),
-                usable_span(generic.meta.span),
-                generic.meta.origin,
-                &mut errors,
-            );
-            generic_names.insert(generic.name.clone(), id);
-        }
+        let generic_names = definition
+            .generic_parameters
+            .iter()
+            .cloned()
+            .collect::<BTreeMap<_, _>>();
         let module = definition
             .qualified_name
             .rsplit_once("::")
@@ -7753,15 +7915,19 @@ fn build_canonical_function_signatures(
             }
             crate::ast::TypeDefKind::Enum(variants) => {
                 for variant in variants {
-                    let variant_id = ids.anonymous(
-                        &definition.node_id,
-                        "decl.variant",
-                        &format!("variant.{}", stable_id_fragment(&variant.name)),
-                        usable_span(variant.meta.span),
-                        variant.meta.origin,
-                        &mut errors,
-                    );
-                    match &variant.payload {
+                    let Some(variant_id) = definition.variant_ids.get(&variant.name).cloned()
+                    else {
+                        errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: variant '{}::{}' has no stable identity",
+                                definition.qualified_name, variant.name
+                            ),
+                            definition.origin.user_span(),
+                        ));
+                        continue;
+                    };
+                    let mut members = Vec::new();
+                    let shape = match &variant.payload {
                         Some(crate::ast::VariantPayload::Tuple(payload)) => {
                             for index in 0..payload.len() {
                                 let role = type_sibling_role("payload.element", payload, index);
@@ -7775,7 +7941,7 @@ fn build_canonical_function_signatures(
                                     &mut errors,
                                 );
                                 canonicalize_declaration_member(
-                                    member_id,
+                                    member_id.clone(),
                                     &format!("{}[{index}]", variant.name),
                                     &payload[index],
                                     definition,
@@ -7787,7 +7953,15 @@ fn build_canonical_function_signatures(
                                         errors: &mut errors,
                                     },
                                 );
+                                if let Some(ty) = field_types.get(&member_id).cloned() {
+                                    members.push(ResolvedVariantMember {
+                                        node_id: member_id,
+                                        name: format!("_{index}"),
+                                        ty,
+                                    });
+                                }
                             }
+                            ResolvedVariantShape::Tuple
                         }
                         Some(crate::ast::VariantPayload::Record(fields)) => {
                             for field in fields {
@@ -7800,7 +7974,7 @@ fn build_canonical_function_signatures(
                                     &mut errors,
                                 );
                                 canonicalize_declaration_member(
-                                    member_id,
+                                    member_id.clone(),
                                     &field.name,
                                     &field.ty,
                                     definition,
@@ -7812,9 +7986,33 @@ fn build_canonical_function_signatures(
                                         errors: &mut errors,
                                     },
                                 );
+                                if let Some(ty) = field_types.get(&member_id).cloned() {
+                                    members.push(ResolvedVariantMember {
+                                        node_id: member_id,
+                                        name: field.name.clone(),
+                                        ty,
+                                    });
+                                }
                             }
+                            ResolvedVariantShape::Record
                         }
-                        None => {}
+                        None => ResolvedVariantShape::Unit,
+                    };
+                    let schema = ResolvedVariantSchema {
+                        node_id: variant_id.clone(),
+                        owner: definition.node_id.clone(),
+                        name: variant.name.clone(),
+                        shape,
+                        members,
+                    };
+                    if resolved_variants.insert(variant_id, schema).is_some() {
+                        errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: duplicate canonical variant '{}::{}'",
+                                definition.qualified_name, variant.name
+                            ),
+                            definition.origin.user_span(),
+                        ));
                     }
                 }
             }
@@ -8049,6 +8247,7 @@ fn build_canonical_function_signatures(
             node_types,
             type_operands,
             field_types,
+            resolved_variants,
             type_targets,
             type_arguments,
         ))
@@ -9961,6 +10160,110 @@ func main() -> i32 { 0 }
         assert!(codegen
             .resolved_type_fields("Point")
             .is_some_and(|fields| fields.iter().any(|(n, _)| n == "y")));
+    }
+
+    #[test]
+    fn enum_payload_schema_owns_stable_canonical_member_types() {
+        let file = parse(
+            r#"
+type Message<T> {
+    Empty
+    One(T)
+    Pair { left: T, right: List<T> }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let definition = program.type_def("Message").expect("Message");
+        let [(generic_name, generic_id)] = definition.generic_parameters.as_slice() else {
+            panic!("one generic parameter expected");
+        };
+        assert_eq!(generic_name, "T");
+
+        let empty = program
+            .resolved_variant_named(&definition.node_id, "Empty")
+            .expect("Empty schema");
+        assert_eq!(empty.shape, ResolvedVariantShape::Unit);
+        assert!(empty.members.is_empty());
+
+        let one = program
+            .resolved_variant_named(&definition.node_id, "One")
+            .expect("One schema");
+        assert_eq!(one.shape, ResolvedVariantShape::Tuple);
+        assert_eq!(one.members.len(), 1);
+        assert!(matches!(
+            program.resolved_types().get(&one.members[0].ty),
+            Some(crate::core::ResolvedType::GenericParameter(parameter)) if parameter == generic_id
+        ));
+
+        let pair = program
+            .resolved_variant_named(&definition.node_id, "Pair")
+            .expect("Pair schema");
+        assert_eq!(pair.shape, ResolvedVariantShape::Record);
+        assert_eq!(
+            pair.members
+                .iter()
+                .map(|member| member.name.as_str())
+                .collect::<Vec<_>>(),
+            ["left", "right"]
+        );
+        for member in &pair.members {
+            assert!(program.node_meta().contains_key(&member.node_id));
+            assert_eq!(
+                program.resolved_field_type(&member.node_id),
+                Some(&member.ty)
+            );
+        }
+        let right = &pair.members[1];
+        assert!(matches!(
+            program.resolved_types().get(&right.ty),
+            Some(crate::core::ResolvedType::Nominal { item, arguments })
+                if item.as_str() == "builtin:type:List"
+                    && matches!(
+                        arguments.as_slice(),
+                        [argument]
+                            if matches!(
+                                program.resolved_types().get(argument),
+                                Some(crate::core::ResolvedType::GenericParameter(parameter))
+                                    if parameter == generic_id
+                            )
+                    )
+        ));
+    }
+
+    #[test]
+    fn enum_schema_validator_rejects_missing_canonical_variant() {
+        let file = parse("type Choice { Value(i32), Empty }\nfunc main() -> i32 { 0 }");
+        let mut program = crate::core::check_program(&file).expect("check");
+        let variant = program
+            .type_def("Choice")
+            .and_then(|definition| definition.variant_ids.get("Value"))
+            .cloned()
+            .expect("Value identity");
+        program.resolved_variants.remove(&variant);
+        let errors = validate_resolved_variant_schemas(&program)
+            .expect_err("missing variant schema must fail closed");
+        assert!(errors
+            .iter()
+            .any(|error| error.message.contains("has no canonical schema")));
+    }
+
+    #[test]
+    fn typed_body_lowering_does_not_consult_retained_type_declaration() {
+        let file = parse(
+            "type Choice { Value(i32), Empty }\nfunc read(choice: Choice) -> i32 { match choice { Value(value) => value, Empty => 0 } }",
+        );
+        let mut program = crate::core::check_program(&file).expect("check");
+        let definition = program
+            .type_defs
+            .get_mut(&NodeId("type:Choice".into()))
+            .expect("Choice definition");
+        definition.declaration.kind =
+            crate::ast::TypeDefKind::Alias(Type::Name("string".into(), Vec::new()));
+        let bodies = crate::core::ir::lower::lower_checked_function_bodies(&file, &program)
+            .expect("lower from canonical schema");
+        assert!(bodies.contains_key(&NodeId("function:read".into())));
     }
 
     #[test]
