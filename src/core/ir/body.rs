@@ -517,6 +517,9 @@ pub struct ResolvedBlock {
 pub struct ResolvedBody {
     pub owner: NodeId,
     pub locals: BTreeMap<ResolvedLocalId, ResolvedLocal>,
+    /// Callable parameters in canonical signature order, represented by the
+    /// exact local identities used by loads and places in this body.
+    pub parameters: Vec<ResolvedLocalId>,
     /// Lexically captured locals owned by enclosing callable bodies.
     pub captures: Vec<ResolvedLocalId>,
     /// Typed expressions evaluated to compute structured places. A place
@@ -573,6 +576,18 @@ impl ResolvedBody {
             }
             if !self.locals.contains_key(capture) {
                 validator.error(&capture.0, "capture is absent from the local catalog");
+            }
+        }
+        let mut parameters = BTreeSet::new();
+        for parameter in &self.parameters {
+            if !parameters.insert(parameter) {
+                validator.error(&parameter.0, "parameter local identity is duplicated");
+            }
+            if !self.locals.contains_key(parameter) {
+                validator.error(&parameter.0, "parameter is absent from the local catalog");
+            }
+            if captures.contains(parameter) {
+                validator.error(&parameter.0, "parameter is also listed as a capture");
             }
         }
         for (key, local) in &self.locals {
@@ -1319,6 +1334,7 @@ mod tests {
         ResolvedBody {
             owner: node("func.main"),
             locals: BTreeMap::from([(local.id.clone(), local)]),
+            parameters: Vec::new(),
             captures: Vec::new(),
             place_inputs: BTreeMap::new(),
             default_values: BTreeMap::new(),
@@ -1337,6 +1353,18 @@ mod tests {
         let (types, i32_ty, unit_ty) = types();
         let body = valid_body(&i32_ty, &unit_ty);
         assert!(body.validate(&types).is_ok());
+    }
+
+    #[test]
+    fn validator_rejects_parameter_without_exact_local_identity() {
+        let (types, i32_ty, unit_ty) = types();
+        let mut body = valid_body(&i32_ty, &unit_ty);
+        body.parameters
+            .push(ResolvedLocalId(node("missing.parameter.local")));
+        let errors = body.validate(&types).expect_err("missing parameter local");
+        assert!(errors
+            .iter()
+            .any(|error| error.message.contains("absent from the local catalog")));
     }
 
     #[test]

@@ -132,6 +132,7 @@ fn lower_function_body_with_captures(
         ids: NodeIdBuilder::new(input.sources),
         unit,
         locals: capture_locals,
+        parameters: Vec::new(),
         place_inputs: BTreeMap::new(),
         default_values: BTreeMap::new(),
         capture_candidates: capture_ids,
@@ -151,6 +152,7 @@ fn lower_function_body_with_captures(
     let body = ResolvedBody {
         owner: input.signature.owner.clone(),
         locals: lowerer.locals,
+        parameters: lowerer.parameters,
         captures: lowerer.callable_captures.iter().cloned().collect(),
         place_inputs: lowerer.place_inputs,
         default_values: lowerer.default_values,
@@ -512,6 +514,7 @@ struct BodyLowerer<'a> {
     ids: NodeIdBuilder<'a>,
     unit: ResolvedTypeId,
     locals: BTreeMap<ResolvedLocalId, ResolvedLocal>,
+    parameters: Vec<ResolvedLocalId>,
     place_inputs: BTreeMap<NodeId, ResolvedExpr>,
     default_values: BTreeMap<super::ResolvedParameterId, ResolvedExpr>,
     capture_candidates: BTreeSet<ResolvedLocalId>,
@@ -534,6 +537,7 @@ impl BodyLowerer<'_> {
         for parameter in &self.signature.parameters {
             let origin = self.origin(&parameter.id.0)?;
             let local_id = ResolvedLocalId(NodeId(format!("{}/local", parameter.id.0 .0)));
+            self.parameters.push(local_id.clone());
             self.insert_local(
                 parameter.name.clone(),
                 ResolvedLocal {

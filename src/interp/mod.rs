@@ -8,9 +8,11 @@ pub mod error;
 mod eval;
 mod ffi;
 mod ffi_call;
+mod ops;
 mod pattern;
 pub(crate) mod pool;
 mod quote;
+mod resolved;
 mod scope_env;
 mod value;
 

@@ -731,6 +731,7 @@ impl CheckedProgram {
                         .collect())
                 }
             };
+        validate_resolved_callable_bodies(&program)?;
         program.callable_cfgs = crate::core::cfg::lower_resolved_bodies(&program.resolved_bodies)?;
         program.resource_analyses = crate::core::cfg::analyze_resolved_bodies(
             &program.callable_cfgs,
@@ -1284,6 +1285,77 @@ impl CheckedProgram {
         } else {
             Err(unsupported)
         }
+    }
+}
+
+fn validate_resolved_callable_bodies(program: &CheckedProgram) -> Result<(), Vec<Diagnostic>> {
+    let mut errors = Vec::new();
+    for (owner, body) in &program.resolved_bodies {
+        let span = program
+            .node_meta
+            .get(owner)
+            .map(|meta| meta.origin.user_span())
+            .unwrap_or(Span::UNKNOWN);
+        if &body.owner != owner {
+            errors.push(Diagnostic::error(
+                format!(
+                    "TOOL-RESOLUTION-001: body map key '{}' disagrees with owner '{}'",
+                    owner.0, body.owner.0
+                ),
+                span,
+            ));
+        }
+        let Some(signature) = program.resolved_signatures.get(owner) else {
+            errors.push(Diagnostic::error(
+                format!(
+                    "TOOL-RESOLUTION-001: callable body '{}' has no canonical signature",
+                    owner.0
+                ),
+                span,
+            ));
+            continue;
+        };
+        if body.parameters.len() != signature.parameters.len() {
+            errors.push(Diagnostic::error(
+                format!(
+                    "TOOL-RESOLUTION-001: callable '{}' body has {} parameters but its signature has {}",
+                    owner.0,
+                    body.parameters.len(),
+                    signature.parameters.len()
+                ),
+                span,
+            ));
+            continue;
+        }
+        for (local_id, parameter) in body.parameters.iter().zip(&signature.parameters) {
+            let Some(local) = body.locals.get(local_id) else {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: callable '{}' parameter local '{}' is missing",
+                        owner.0, local_id.0 .0
+                    ),
+                    span,
+                ));
+                continue;
+            };
+            if local.ty != parameter.ty
+                || local.mutable != parameter.mutable
+                || local.display_name != parameter.name
+            {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: callable '{}' parameter local '{}' disagrees with canonical parameter '{}'",
+                        owner.0, local_id.0 .0, parameter.id.0 .0
+                    ),
+                    local.origin.user_span(),
+                ));
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
     }
 }
 
@@ -8045,6 +8117,23 @@ mod tests {
         assert_eq!(ret.as_type(), &Type::Name("i32".into(), vec![]));
         assert_eq!(function.params[0].1, params[0].as_type().clone());
         assert_eq!(function.ret, ret.as_type().clone());
+    }
+
+    #[test]
+    fn checked_program_validator_rejects_body_signature_parameter_drift() {
+        let file = parse("func identity(value: i32) -> i32 { value }");
+        let mut program = crate::core::check_program(&file).expect("check identity");
+        program
+            .resolved_bodies
+            .get_mut(&NodeId("function:identity".into()))
+            .expect("resolved identity body")
+            .parameters
+            .clear();
+        let errors = validate_resolved_callable_bodies(&program)
+            .expect_err("parameter drift must invalidate CheckedProgram");
+        assert!(errors
+            .iter()
+            .any(|error| error.message.contains("body has 0 parameters")));
     }
 
     #[test]

@@ -213,6 +213,17 @@ impl InterpError {
         })
     }
 
+    /// Create a non-exhaustive-match error (E0805).
+    pub fn non_exhaustive_match(msg: impl Into<String>) -> Self {
+        Self::NonExhaustiveMatch(ErrorContext {
+            msg: msg.into(),
+            function: None,
+            operation: None,
+            help: None,
+            call_stack: Vec::new(),
+        })
+    }
+
     /// Create a lock error (E0806).
     pub fn lock_error(msg: impl Into<String>) -> Self {
         Self::LockError(ErrorContext {
