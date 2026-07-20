@@ -4368,23 +4368,24 @@ impl BodyLowerer<'_> {
                 initializer
             }
         };
-        let matches = self
-            .types
-            .iter()
-            .filter_map(|(id, ty)| match ty {
-                ResolvedType::Ownership {
-                    kind,
-                    target: candidate_target,
-                } if *kind == expected && candidate_target == desired_target => Some(id.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let [ty] = matches.as_slice() else {
+        let Some(ty) = self.node_types.get(node_id) else {
             return Err(vec![ResolvedBodyError::new(
                 node_id.clone(),
-                "shared binding has no unique canonical ownership type",
+                "shared binding has no checker-finalized canonical ownership type",
             )]);
         };
+        if !matches!(
+            self.types.get(ty),
+            Some(ResolvedType::Ownership {
+                kind,
+                target,
+            }) if *kind == expected && target == desired_target
+        ) {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "shared binding canonical type disagrees with its kind or initializer",
+            )]);
+        }
         Ok(ty.clone())
     }
 
@@ -4549,6 +4550,27 @@ impl BodyLowerer<'_> {
         ) {
             return Ok(CheckedConversion {
                 kind: CheckedConversionKind::OwnershipRead,
+                from: from.clone(),
+                to: to.clone(),
+            });
+        }
+        if matches!(
+            (self.types.get(from), self.types.get(to)),
+            (
+                Some(ResolvedType::Reference {
+                    mutable: from_mutable,
+                    target: from_target,
+                    ..
+                }),
+                Some(ResolvedType::Reference {
+                    mutable: to_mutable,
+                    target: to_target,
+                    ..
+                })
+            ) if from_mutable == to_mutable && from_target == to_target
+        ) {
+            return Ok(CheckedConversion {
+                kind: CheckedConversionKind::LifetimeRebind,
                 from: from.clone(),
                 to: to.clone(),
             });
