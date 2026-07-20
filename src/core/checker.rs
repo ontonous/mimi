@@ -4,7 +4,6 @@ use crate::span::Span;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use super::borrow::BorrowState;
 use super::unification::UnificationTable;
 
 pub(crate) struct Checker<'a> {
@@ -20,10 +19,6 @@ pub(crate) struct Checker<'a> {
     pub(crate) types: HashMap<String, TypeDef>,
     /// Track newtype definitions: name -> inner type (unresolved)
     pub(crate) newtypes: HashMap<String, Type>,
-    /// Track borrow state of variables: name -> borrow state
-    pub(crate) borrows: Vec<HashMap<String, BorrowState>>,
-    /// Track field-level borrow state: (var_name, field_path) -> borrow state
-    pub(crate) field_borrows: Vec<HashMap<(String, Vec<String>), BorrowState>>,
     /// Track trait definitions: trait_name -> list of method names
     pub(crate) traits: HashMap<String, Vec<String>>,
     /// Track trait generic params: trait_name -> list of generic param names
@@ -193,8 +188,6 @@ impl<'a> Checker<'a> {
             alias_spans: HashMap::new(),
             types: HashMap::new(),
             newtypes: HashMap::new(),
-            borrows: vec![HashMap::new()],
-            field_borrows: vec![HashMap::new()],
             traits: HashMap::new(),
             trait_generics: HashMap::new(),
             impls: HashMap::new(),
@@ -674,6 +667,8 @@ mod diagnostic_dedup_tests {
     }
 }
 
+// Raw-AST use collection is retained only for the test-only CFG oracle.
+#[cfg(test)]
 mod borrow;
 pub(crate) mod flow;
 mod func;

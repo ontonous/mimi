@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::core::ir::{
     MatchArm, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFStringPart, ResolvedIndex,
     ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedProjection, ResolvedStmt,
-    ResolvedStmtKind, ResolvedValueProjection,
+    ResolvedStmtKind, ResolvedUnaryOp, ResolvedValueProjection,
 };
 use crate::core::{IndexProjection, LocalId, NodeId, Origin, Place, PlaceProjection, ResolvedBody};
 use crate::diagnostic::Diagnostic;
@@ -556,6 +556,31 @@ impl<'a> ResolvedCfgLowerer<'a> {
             ResolvedExprKind::Binary { left, right, .. } => {
                 lower!(left);
                 lower!(right);
+            }
+            ResolvedExprKind::Unary {
+                op: ResolvedUnaryOp::BorrowShared | ResolvedUnaryOp::BorrowMutable,
+                operand,
+            } => {
+                if let ResolvedExprKind::Load(place) = &operand.kind {
+                    current = self.lower_place_inputs(place, current)?;
+                    // Borrowing evaluates the place identity, but it is not an
+                    // ordinary value read. Keep the root use for loan liveness
+                    // without emitting a read-place action that would obscure
+                    // the canonical loan-vs-loan diagnostic.
+                    self.point(
+                        &current,
+                        &operand.node_id,
+                        &operand.origin,
+                        CfgPointKind::Expression,
+                        PointAccesses {
+                            uses: vec![self.local_name(&place.base)],
+                            reads: vec![self.place_spelling(place)],
+                            ..PointAccesses::default()
+                        },
+                    );
+                } else {
+                    lower!(operand);
+                }
             }
             ResolvedExprKind::Unary { operand, .. }
             | ResolvedExprKind::TypeOf(operand)

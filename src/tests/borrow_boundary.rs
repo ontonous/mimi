@@ -2,19 +2,13 @@ use super::*;
 
 // ===== Stage 4: Borrow checker boundary tests =====
 //
-// These tests document what the current borrow checker
-// (core/borrow.rs) CAN and CANNOT verify.
+// OWN-PERMISSION-001 / RESOURCE-LINEAR-001: these tests exercise the
+// canonical LoanId + typed-CFG dataflow boundary.
 //
-// Current capability (v1.0):
-// - BorrowState: Unborrowed | BorrowedImm{span} | BorrowedMut{span}
-// - NLL: borrow ends at last use, not block end
-// - Rejects simultaneous &mut + & of same variable
-//
-// v1.2 gaps (tracked in AGENTS.mimi.md):
-// - No field-level borrow tracking: p.x borrows entire p
-// - No closure capture borrow tracking
-// - No lifetime annotations or inference
-// - No borrow inference across function return boundaries
+// - Every borrow has an independent stable LoanId.
+// - Backwards CFG use-def liveness ends loans after their last use.
+// - Structured Place overlap separates provably disjoint projections.
+// - Mutable overlap with a read, write, move, drop, or loan is rejected.
 
 // ── Basic borrow patterns (should pass) ─────────────────────────
 
@@ -267,9 +261,7 @@ func main() -> i32 {
     );
 }
 
-// ── Known gaps (v1.2+) ──────────────────────────────────────────
-// These tests document features that would pass once implemented.
-// Currently the parser or checker rejects them.
+// ── Structured-place and control-flow coverage ─────────────────
 
 #[test]
 fn borrow_field_level_disjoint() {

@@ -21,7 +21,8 @@ func main() -> i32 {
 
 #[test]
 fn typecheck_double_mut_borrow_error() {
-    // NLL: double &mut is only an error if the first is used later
+    // OWN-PERMISSION-001: canonical LoanId analysis preserves E0301 and does
+    // not misclassify forming the second loan as an ordinary place read.
     let src = r#"
 func main() -> i32 {
     let mut x = 42;
@@ -35,9 +36,10 @@ func main() -> i32 {
     let result = core::check(&file);
     assert!(result.is_err());
     let errors = result.unwrap_err();
-    let has_borrow_error = errors
-        .iter()
-        .any(|e| e.message.contains("already mutably borrowed"));
+    let has_borrow_error = errors.iter().any(|e| {
+        e.code.as_deref() == Some(crate::diagnostic::codes::E0301)
+            && e.message.contains("already mutably borrowed")
+    });
     assert!(
         has_borrow_error,
         "Expected mutable borrow error, got: {:?}",
@@ -47,7 +49,8 @@ func main() -> i32 {
 
 #[test]
 fn typecheck_imm_mut_borrow_error() {
-    // NLL: &x then &mut x is only an error if &x reference is used later
+    // OWN-PERMISSION-001: canonical LoanId analysis preserves E0300 when a
+    // mutable loan overlaps a still-live shared loan.
     let src = r#"
 func main() -> i32 {
     let x = 42;
@@ -61,9 +64,10 @@ func main() -> i32 {
     let result = core::check(&file);
     assert!(result.is_err());
     let errors = result.unwrap_err();
-    let has_borrow_error = errors
-        .iter()
-        .any(|e| e.message.contains("already immutably borrowed"));
+    let has_borrow_error = errors.iter().any(|e| {
+        e.code.as_deref() == Some(crate::diagnostic::codes::E0300)
+            && e.message.contains("already immutably borrowed")
+    });
     assert!(
         has_borrow_error,
         "Expected immutable borrow error, got: {:?}",
