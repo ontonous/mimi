@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::core::{
-    Availability, CanonicalActionKind, CanonicalResourceAction, CfgLocation, IndexProjection, Loan,
-    LoanId, LoanKind, LocalId, OwnershipLedger, Place, PlaceProjection, ResourceActionKind,
-    ResourceAnalysis, ResourceFact, ResourceId,
+    Availability, CanonicalActionKind, CanonicalResourceAction, CfgLocation, Loan, LoanId,
+    LoanKind, Place, ResourceAnalysis, ResourceFact, ResourceId,
 };
+#[cfg(test)]
+use crate::core::{IndexProjection, LocalId, OwnershipLedger, PlaceProjection, ResourceActionKind};
 use crate::diagnostic::Diagnostic;
 
 use super::{BasicBlockId, CallableCfg, EdgeKind};
@@ -15,6 +16,7 @@ struct FlowState {
     active_loans: BTreeSet<LoanId>,
 }
 
+#[cfg(test)]
 pub fn analyze_cfgs(
     cfgs: &BTreeMap<crate::core::NodeId, CallableCfg>,
     ledgers: &std::collections::HashMap<crate::core::NodeId, OwnershipLedger>,
@@ -49,6 +51,7 @@ pub fn analyze_cfgs(
     }
 }
 
+#[cfg(test)]
 fn analyze_one(
     cfg: &CallableCfg,
     ledger: &OwnershipLedger,
@@ -58,7 +61,15 @@ fn analyze_one(
     let mut legacy_ends: BTreeMap<String, Vec<CfgLocation>> = BTreeMap::new();
 
     for (ordinal, legacy) in ledger.actions.iter().enumerate() {
-        let mut place = parse_place(&cfg.owner, &legacy.resource);
+        let parsed = parse_place(&cfg.owner, &legacy.resource);
+        let mut place = cfg
+            .blocks
+            .values()
+            .flat_map(|block| block.points.iter())
+            .flat_map(|point| point.read_places.iter().chain(&point.write_places))
+            .find(|place| place.display() == legacy.resource)
+            .cloned()
+            .unwrap_or(parsed);
         let parent = if place.projections.first() == Some(&PlaceProjection::Deref) {
             loans
                 .iter()
@@ -131,7 +142,25 @@ fn analyze_one(
         });
     }
 
+    analyze_canonical(cfg, actions, loans, &legacy_ends)
+}
+
+pub(super) fn analyze_canonical(
+    cfg: &CallableCfg,
+    mut actions: Vec<CanonicalResourceAction>,
+    mut loans: Vec<Loan>,
+    fallback_ends: &BTreeMap<String, Vec<CfgLocation>>,
+) -> Result<ResourceAnalysis, Vec<Diagnostic>> {
     let (live_in, live_out) = compute_liveness(cfg);
+    let loan_resources = actions
+        .iter()
+        .filter_map(|action| {
+            action
+                .loan
+                .as_ref()
+                .map(|loan| (loan.clone(), action.resource.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
     for loan in &mut loans {
         let locations = loan
             .reference_name
@@ -141,7 +170,7 @@ fn analyze_one(
             })
             .filter(|locations| !locations.is_empty())
             .unwrap_or_else(|| {
-                legacy_ends
+                fallback_ends
                     .get(&loan.place.display())
                     .cloned()
                     .unwrap_or_default()
@@ -154,7 +183,10 @@ fn analyze_one(
             let (span, origin) = location_source(cfg, &location);
             actions.push(CanonicalResourceAction {
                 kind: CanonicalActionKind::BorrowEnd,
-                resource: ResourceId(loan.place.base.0.clone()),
+                resource: loan_resources
+                    .get(&loan.id)
+                    .cloned()
+                    .unwrap_or_else(|| ResourceId(loan.place.base.0.clone())),
                 source: Some(loan.place.clone()),
                 target: None,
                 loan: Some(loan.id.clone()),
@@ -166,24 +198,29 @@ fn analyze_one(
     }
     let borrowed_roots: BTreeMap<_, _> = loans
         .iter()
-        .map(|loan| (loan.place.base_name.clone(), loan.place.base.clone()))
+        .map(|loan| {
+            (
+                loan.place.base.clone(),
+                loan_resources
+                    .get(&loan.id)
+                    .cloned()
+                    .unwrap_or_else(|| ResourceId(loan.place.base.0.clone())),
+            )
+        })
         .collect();
     for (block_id, block) in &cfg.blocks {
         if !cfg.reachable.contains(block_id) {
             continue;
         }
         for point in &block.points {
-            for spelling in &point.reads {
-                let place = parse_place(&cfg.owner, spelling);
-                let Some(local) = borrowed_roots.get(&place.base_name) else {
+            for place in &point.read_places {
+                let Some(resource) = borrowed_roots.get(&place.base) else {
                     continue;
                 };
-                let mut place = place;
-                place.base = local.clone();
                 actions.push(CanonicalResourceAction {
                     kind: CanonicalActionKind::Read,
-                    resource: ResourceId(local.0.clone()),
-                    source: Some(place),
+                    resource: resource.clone(),
+                    source: Some(place.clone()),
                     target: None,
                     loan: None,
                     location: CfgLocation {
@@ -195,17 +232,14 @@ fn analyze_one(
                     origin: point.source.origin.clone(),
                 });
             }
-            for spelling in &point.writes {
-                let place = parse_place(&cfg.owner, spelling);
-                let Some(local) = borrowed_roots.get(&place.base_name) else {
+            for place in &point.write_places {
+                let Some(resource) = borrowed_roots.get(&place.base) else {
                     continue;
                 };
-                let mut place = place;
-                place.base = local.clone();
                 actions.push(CanonicalResourceAction {
                     kind: CanonicalActionKind::Write,
-                    resource: ResourceId(local.0.clone()),
-                    source: Some(place),
+                    resource: resource.clone(),
+                    source: Some(place.clone()),
                     target: None,
                     loan: None,
                     location: CfgLocation {
@@ -330,8 +364,38 @@ fn transfer(
                 },
             );
         }
-        CanonicalActionKind::Move
-        | CanonicalActionKind::Drop
+        CanonicalActionKind::Move => {
+            reject_conflicting_loans(action, state, loans, errors);
+            let fact = state
+                .resources
+                .entry(action.resource.clone())
+                .or_insert(ResourceFact {
+                    availability: Availability::Available,
+                    owner: action.source.clone(),
+                });
+            if fact.availability != Availability::Available {
+                errors.push(Diagnostic::error_code(
+                    crate::diagnostic::codes::E0304,
+                    format!(
+                        "resource '{}' is moved after it was consumed",
+                        action
+                            .source
+                            .as_ref()
+                            .map(Place::display)
+                            .unwrap_or_else(|| action.resource.0 .0.clone())
+                    ),
+                    action.span,
+                ));
+            }
+            if let Some(target) = &action.target {
+                fact.availability = Availability::Available;
+                fact.owner = Some(target.clone());
+            } else {
+                fact.availability = Availability::Consumed;
+                fact.owner = None;
+            }
+        }
+        CanonicalActionKind::Drop
         | CanonicalActionKind::Return
         | CanonicalActionKind::TransferChild
         | CanonicalActionKind::DelegateConsume => {
@@ -583,6 +647,7 @@ fn emit_incompatible_join(
     );
 }
 
+#[cfg(test)]
 fn infer_reference_name(cfg: &CallableCfg, start: &CfgLocation) -> Option<String> {
     let block = cfg.block(&start.block)?;
     let start_index = block
@@ -760,6 +825,7 @@ fn location_source(
         ))
 }
 
+#[cfg(test)]
 fn locate(cfg: &CallableCfg, span: crate::span::Span) -> CfgLocation {
     for (block_id, block) in &cfg.blocks {
         if !cfg.reachable.contains(block_id) {
@@ -786,14 +852,19 @@ fn locate(cfg: &CallableCfg, span: crate::span::Span) -> CfgLocation {
 fn point_order(cfg: &CallableCfg, block: &BasicBlockId, point: &crate::core::NodeId) -> usize {
     cfg.block(block)
         .and_then(|block| {
+            if &block.source.node == point {
+                return Some(0);
+            }
             block
                 .points
                 .iter()
                 .position(|candidate| &candidate.source.node == point)
+                .map(|position| position + 1)
         })
         .unwrap_or(usize::MAX)
 }
 
+#[cfg(test)]
 fn canonical_kind(kind: ResourceActionKind) -> CanonicalActionKind {
     match kind {
         ResourceActionKind::Introduce => CanonicalActionKind::Introduce,
@@ -825,6 +896,7 @@ fn action_rank(kind: CanonicalActionKind) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn parse_place(owner: &crate::core::NodeId, spelling: &str) -> Place {
     let mut rest = spelling;
     let mut deref = false;
@@ -851,9 +923,10 @@ fn parse_place(owner: &crate::core::NodeId, spelling: &str) -> Place {
             if let Ok(index) = segment.parse::<usize>() {
                 place.projections.push(PlaceProjection::Tuple(index));
             } else {
-                place
-                    .projections
-                    .push(PlaceProjection::Field(segment.to_string()));
+                place.projections.push(PlaceProjection::Field {
+                    field: crate::core::NodeId(format!("legacy:field:{segment}")),
+                    name: segment.to_string(),
+                });
             }
             rest = &field[end..];
         } else if let Some(index) = rest.strip_prefix('[') {
@@ -873,6 +946,7 @@ fn parse_place(owner: &crate::core::NodeId, spelling: &str) -> Place {
     place
 }
 
+#[cfg(test)]
 fn stable_place_fragment(value: &str) -> String {
     value
         .bytes()
@@ -947,7 +1021,18 @@ func main() -> i32 { 0 }
         let analysis = program
             .resource_analysis(&owner)
             .expect("resource analysis");
-        let token = ResourceId(crate::core::NodeId("function:close/local:token".into()));
+        let token = analysis
+            .actions
+            .iter()
+            .find(|action| {
+                action.kind == CanonicalActionKind::Introduce
+                    && action
+                        .source
+                        .as_ref()
+                        .is_some_and(|place| place.display() == "token")
+            })
+            .map(|action| action.resource.clone())
+            .expect("typed token resource identity");
         assert!(analysis.out_states.values().any(|state| state
             .get(&token)
             .is_some_and(|fact| { fact.availability == Availability::Consumed })));
@@ -981,7 +1066,7 @@ func main() -> i32 { read() }
             .iter()
             .filter(|loan| loan.kind == LoanKind::Shared && loan.place.display() == "p.value")
             .collect();
-        assert_eq!(loans.len(), 2);
+        assert_eq!(loans.len(), 2, "typed loans: {:#?}", analysis.loans);
         assert_ne!(loans[0].id, loans[1].id);
         assert_eq!(loans[0].reference_name.as_deref(), Some("a"));
         assert_eq!(loans[1].reference_name.as_deref(), Some("b"));

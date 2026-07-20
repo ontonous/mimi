@@ -100,9 +100,10 @@ func main() -> i32 {
     a
 }
 "#;
+    let result = check_source(src);
     assert!(
-        check_source(src).is_ok(),
-        "reborrow &mut T as &T should pass"
+        result.is_ok(),
+        "reborrow &mut T as &T should pass: {result:#?}"
     );
 }
 
@@ -118,9 +119,10 @@ func main() -> i32 {
     a
 }
 "#;
+    let result = check_source(src);
     assert!(
-        check_source(src).is_ok(),
-        "reborrow &mut T as &mut T should pass"
+        result.is_ok(),
+        "reborrow &mut T as &mut T should pass: {result:#?}"
     );
 }
 

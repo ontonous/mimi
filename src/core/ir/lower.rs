@@ -3362,9 +3362,11 @@ impl BodyLowerer<'_> {
                 let base_ty = self.place_type(&node_id, &place)?;
                 let field = self.resolve_field(&node_id, &base_ty, name)?;
                 let ty = self.expression_type(&node_id)?;
-                place
-                    .projections
-                    .push(ResolvedProjection::Field { field, ty });
+                place.projections.push(ResolvedProjection::Field {
+                    field,
+                    name: name.clone(),
+                    ty,
+                });
                 Ok(place)
             }
             Expr::Index(base, index) => {
@@ -4774,7 +4776,7 @@ mod tests {
         let ResolvedExprKind::Load(place) = &body.root.result.as_ref().unwrap().kind else {
             panic!("field read must be a place load");
         };
-        let ResolvedProjection::Field { field, ty } = &place.projections[0] else {
+        let ResolvedProjection::Field { field, ty, .. } = &place.projections[0] else {
             panic!("field projection expected");
         };
         assert!(field.0.starts_with("type:Point/node:decl.field@"));
@@ -5596,7 +5598,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             place.projections.as_slice(),
-            [ResolvedProjection::Field { field: projected, ty }]
+            [ResolvedProjection::Field { field: projected, ty, .. }]
                 if projected == result_field
                     && Some(ty) == program.resolved_field_type(result_field)
         ));
@@ -5789,7 +5791,7 @@ mod tests {
         else {
             panic!("actor field must lower as a place load");
         };
-        let ResolvedProjection::Field { field, ty } = &place.projections[0] else {
+        let ResolvedProjection::Field { field, ty, .. } = &place.projections[0] else {
             panic!("actor field projection expected");
         };
         assert!(field.0.starts_with("actor:Counter/node:decl.actor_field@"));

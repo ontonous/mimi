@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::span::Span;
 
-use super::cfg::{BasicBlockId, EdgeId};
+use super::cfg::{BasicBlockId, CallableCfg, EdgeId};
 use super::{NodeId, Origin};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -22,7 +22,7 @@ pub enum IndexProjection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PlaceProjection {
-    Field(String),
+    Field { field: NodeId, name: String },
     Tuple(usize),
     Index(IndexProjection),
     Deref,
@@ -58,7 +58,10 @@ impl Place {
                 continue;
             }
             return match (left, right) {
-                (PlaceProjection::Field(left), PlaceProjection::Field(right)) => left == right,
+                (
+                    PlaceProjection::Field { field: left, .. },
+                    PlaceProjection::Field { field: right, .. },
+                ) => left == right,
                 (PlaceProjection::Tuple(left), PlaceProjection::Tuple(right)) => left == right,
                 (
                     PlaceProjection::Index(IndexProjection::Constant(left)),
@@ -76,7 +79,7 @@ impl Place {
         let mut value = self.base_name.clone();
         for projection in &self.projections {
             match projection {
-                PlaceProjection::Field(field) => {
+                PlaceProjection::Field { name: field, .. } => {
                     value.push('.');
                     value.push_str(field);
                 }
@@ -266,5 +269,107 @@ impl OwnershipLedger {
         self.branch_merges
             .iter()
             .any(|merge| merge.merged_state == ResourceState::MaybeConsumed)
+    }
+
+    /// Compatibility projection for consumers not yet migrated to canonical
+    /// `ResourceAnalysis`. It is never an analysis input.
+    pub(crate) fn from_analysis(analysis: &ResourceAnalysis, cfg: &CallableCfg) -> Self {
+        let actions = analysis
+            .actions
+            .iter()
+            .filter_map(|action| {
+                let kind = match action.kind {
+                    CanonicalActionKind::Read | CanonicalActionKind::Write => return None,
+                    CanonicalActionKind::Introduce => ResourceActionKind::Introduce,
+                    CanonicalActionKind::Move => ResourceActionKind::Move,
+                    CanonicalActionKind::Drop => ResourceActionKind::Drop,
+                    CanonicalActionKind::Return => ResourceActionKind::Return,
+                    CanonicalActionKind::TransferSession => ResourceActionKind::TransferSession,
+                    CanonicalActionKind::TransferChild => ResourceActionKind::TransferChild,
+                    CanonicalActionKind::DelegateConsume => ResourceActionKind::DelegateConsume,
+                    CanonicalActionKind::BorrowShared => ResourceActionKind::BorrowShared,
+                    CanonicalActionKind::BorrowMut => ResourceActionKind::BorrowMut,
+                    CanonicalActionKind::BorrowEnd => ResourceActionKind::BorrowEnd,
+                };
+                Some(ResourceAction {
+                    kind,
+                    resource: action
+                        .source
+                        .as_ref()
+                        .or(action.target.as_ref())
+                        .map(Place::display)
+                        .unwrap_or_else(|| action.resource.0 .0.clone()),
+                    control_path: Vec::new(),
+                    span: action.span,
+                })
+            })
+            .collect();
+
+        let mut branch_merges = Vec::new();
+        for (block, incoming) in &analysis.in_states {
+            let predecessors = cfg
+                .predecessors(block)
+                .into_iter()
+                .filter(|edge| cfg.reachable.contains(&edge.from))
+                .filter_map(|edge| analysis.out_states.get(&edge.from))
+                .collect::<Vec<_>>();
+            if predecessors.len() < 2 {
+                continue;
+            }
+            let resources = predecessors
+                .iter()
+                .flat_map(|state| state.keys().cloned())
+                .collect::<std::collections::BTreeSet<_>>();
+            for resource in resources {
+                let state = |fact: Option<&ResourceFact>| {
+                    fact.map(|fact| match fact.availability {
+                        Availability::Available => ResourceState::Available,
+                        Availability::Consumed => ResourceState::Consumed,
+                        Availability::MaybeConsumed => ResourceState::MaybeConsumed,
+                    })
+                    .unwrap_or(ResourceState::MaybeConsumed)
+                };
+                let name = incoming
+                    .get(&resource)
+                    .and_then(|fact| fact.owner.as_ref())
+                    .or_else(|| {
+                        predecessors.iter().find_map(|facts| {
+                            facts.get(&resource).and_then(|fact| fact.owner.as_ref())
+                        })
+                    })
+                    .map(Place::display)
+                    .unwrap_or_else(|| {
+                        analysis
+                            .actions
+                            .iter()
+                            .find(|action| action.resource == resource)
+                            .and_then(|action| action.source.as_ref())
+                            .map(Place::display)
+                            .unwrap_or_else(|| resource.0 .0.clone())
+                    });
+                branch_merges.push(BranchMerge {
+                    resource: name,
+                    then_state: state(predecessors[0].get(&resource)),
+                    else_state: state(predecessors[1].get(&resource)),
+                    merged_state: state(incoming.get(&resource)),
+                    span: cfg
+                        .block(block)
+                        .map(|block| block.source.span)
+                        .unwrap_or(Span::UNKNOWN),
+                });
+            }
+        }
+        branch_merges.sort_by(|left, right| {
+            (left.span.start_line, left.span.start_col, &left.resource).cmp(&(
+                right.span.start_line,
+                right.span.start_col,
+                &right.resource,
+            ))
+        });
+        Self {
+            owner: analysis.owner.clone(),
+            actions,
+            branch_merges,
+        }
     }
 }

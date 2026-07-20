@@ -7,6 +7,7 @@ mod dataflow;
 #[cfg(test)]
 mod lower;
 mod resolved_lower;
+mod resource_lower;
 mod validate;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,12 +15,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 
-use super::{NodeId, Origin};
+use super::{NodeId, Origin, Place};
 
+#[cfg(test)]
 pub use dataflow::analyze_cfgs;
 #[cfg(test)]
 pub use lower::lower_file;
 pub use resolved_lower::lower_resolved_bodies;
+pub use resource_lower::analyze_resolved_bodies;
 pub use validate::validate_cfg;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -57,6 +60,11 @@ pub struct CfgPoint {
     pub reads: Vec<String>,
     /// Stable structured place spellings written at this point.
     pub writes: Vec<String>,
+    /// Canonical typed places read at this point. Production resource analysis
+    /// consumes these identities; `reads` remains a compatibility display.
+    pub read_places: Vec<Place>,
+    /// Canonical typed places written at this point.
+    pub write_places: Vec<Place>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
