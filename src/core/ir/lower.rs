@@ -474,6 +474,17 @@ fn collect_transition_syntax<'a>(
     }
 }
 
+struct IfControlInput<'a> {
+    statement: &'a NodeId,
+    origin: &'a Origin,
+    condition: &'a Expr,
+    then_block: &'a [Stmt],
+    else_block: Option<&'a [Stmt]>,
+    role: &'a str,
+    result_type: ResolvedTypeId,
+    has_tail_result: bool,
+}
+
 struct BodyLowerer<'a> {
     owner: NodeId,
     fallback: Span,
@@ -585,20 +596,43 @@ impl BodyLowerer<'_> {
         let tail_index = has_tail_result
             .then(|| block.len().checked_sub(1))
             .flatten()
-            .filter(|index| matches!(block[*index].unlocated(), Stmt::Expr(_)));
+            .filter(|index| {
+                matches!(
+                    block[*index].unlocated(),
+                    Stmt::Expr(_) | Stmt::If { else_: Some(_), .. }
+                )
+            });
         let mut statements = Vec::with_capacity(block.len());
         let mut result = None;
         for index in 0..block.len() {
             let stmt_role = stmt_sibling_role(role, block, index);
             if Some(index) == tail_index {
-                let Stmt::Expr(expression) = block[index].unlocated() else {
-                    self.scopes.pop();
-                    return Err(vec![ResolvedBodyError::new(
-                        node_id.clone(),
-                        "tail expression selection does not reference an expression statement",
-                    )]);
+                let lowered = match block[index].unlocated() {
+                    Stmt::Expr(expression) => {
+                        self.lower_expr(expression, &format!("{stmt_role}.expression"))?
+                    }
+                    Stmt::If { cond, then_, else_ } => {
+                        let statement_id = self.stmt_id(&block[index], &stmt_role)?;
+                        let statement_origin = self.origin(&statement_id)?;
+                        self.lower_if_control(IfControlInput {
+                            statement: &statement_id,
+                            origin: &statement_origin,
+                            condition: cond,
+                            then_block: then_,
+                            else_block: else_.as_deref(),
+                            role: &stmt_role,
+                            result_type: block_ty.clone(),
+                            has_tail_result: true,
+                        })?
+                    }
+                    _ => {
+                        self.scopes.pop();
+                        return Err(vec![ResolvedBodyError::new(
+                            node_id.clone(),
+                            "tail selection is not a value-producing statement",
+                        )]);
+                    }
                 };
-                let lowered = self.lower_expr(expression, &format!("{stmt_role}.expression"))?;
                 let lowered = self.apply_implicit_conversion(&node_id, lowered, &block_ty)?;
                 result = Some(Box::new(lowered));
             } else if let Some(statement) = self.lower_stmt(&block[index], &stmt_role)? {
@@ -612,6 +646,37 @@ impl BodyLowerer<'_> {
             ty: block_ty,
             statements,
             result,
+        })
+    }
+
+    fn lower_if_control(
+        &mut self,
+        input: IfControlInput<'_>,
+    ) -> Result<ResolvedExpr, Vec<ResolvedBodyError>> {
+        let condition = self.lower_expr(input.condition, &format!("{}.condition", input.role))?;
+        let then_block = self.lower_block(
+            input.then_block,
+            &format!("{}.then", input.role),
+            input.result_type.clone(),
+            input.has_tail_result,
+        )?;
+        let else_block = self.lower_block(
+            input.else_block.unwrap_or_default(),
+            &format!("{}.else", input.role),
+            input.result_type.clone(),
+            input.has_tail_result,
+        )?;
+        Ok(ResolvedExpr {
+            node_id: NodeId(format!("{}/control-expression", input.statement.0)),
+            origin: input.origin.clone(),
+            ty: input.result_type,
+            effects: Vec::new(),
+            backend_requirements: Vec::new(),
+            kind: ResolvedExprKind::If {
+                condition: Box::new(condition),
+                then_block: Box::new(then_block),
+                else_block: Box::new(else_block),
+            },
         })
     }
 
@@ -698,28 +763,16 @@ impl BodyLowerer<'_> {
                 }
             }
             Stmt::If { cond, then_, else_ } => {
-                let condition = self.lower_expr(cond, &format!("{role}.condition"))?;
-                let then_block =
-                    self.lower_block(then_, &format!("{role}.then"), self.unit.clone(), false)?;
-                let else_block = self.lower_block(
-                    else_.as_deref().unwrap_or_default(),
-                    &format!("{role}.else"),
-                    self.unit.clone(),
-                    false,
-                )?;
-                let control_id = NodeId(format!("{}/control-expression", node_id.0));
-                ResolvedStmtKind::Expr(ResolvedExpr {
-                    node_id: control_id,
-                    origin: origin.clone(),
-                    ty: self.unit.clone(),
-                    effects: Vec::new(),
-                    backend_requirements: Vec::new(),
-                    kind: ResolvedExprKind::If {
-                        condition: Box::new(condition),
-                        then_block: Box::new(then_block),
-                        else_block: Box::new(else_block),
-                    },
-                })
+                ResolvedStmtKind::Expr(self.lower_if_control(IfControlInput {
+                    statement: &node_id,
+                    origin: &origin,
+                    condition: cond,
+                    then_block: then_,
+                    else_block: else_.as_deref(),
+                    role,
+                    result_type: self.unit.clone(),
+                    has_tail_result: false,
+                })?)
             }
             Stmt::While { cond, body } => ResolvedStmtKind::While {
                 condition: self.lower_expr(cond, &format!("{role}.condition"))?,

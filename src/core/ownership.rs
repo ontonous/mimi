@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 
-use crate::ast::AstOrigin;
 use crate::span::Span;
 
 use super::cfg::{BasicBlockId, EdgeId};
-use super::NodeId;
+use super::{NodeId, Origin};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LocalId(pub NodeId);
@@ -136,7 +135,7 @@ pub struct CanonicalResourceAction {
     pub loan: Option<LoanId>,
     pub location: CfgLocation,
     pub span: Span,
-    pub origin: AstOrigin,
+    pub origin: Origin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

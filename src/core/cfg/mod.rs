@@ -4,19 +4,22 @@
 //! vector indexes, so declaration reordering cannot silently retarget a fact.
 
 mod dataflow;
+#[cfg(test)]
 mod lower;
+mod resolved_lower;
 mod validate;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ast::AstOrigin;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 
-use super::NodeId;
+use super::{NodeId, Origin};
 
 pub use dataflow::analyze_cfgs;
+#[cfg(test)]
 pub use lower::lower_file;
+pub use resolved_lower::lower_resolved_bodies;
 pub use validate::validate_cfg;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -29,7 +32,7 @@ pub struct EdgeId(pub NodeId);
 pub struct CfgSource {
     pub node: NodeId,
     pub span: Span,
-    pub origin: AstOrigin,
+    pub origin: Origin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

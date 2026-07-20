@@ -4,7 +4,7 @@ use crate::ast::{
     AstNodeMeta, AstOrigin, Block, Expr, File, Item, Lit, Pattern, PatternKind, Stmt,
 };
 use crate::core::resolved::{impl_method_owner, nested_function_owner, NodeIdBuilder};
-use crate::core::NodeId;
+use crate::core::{NodeId, Origin};
 use crate::diagnostic::Diagnostic;
 use crate::span::SourceRegistry;
 
@@ -86,7 +86,24 @@ impl<'a> Lowerer<'a> {
         CfgSource {
             node,
             span: meta.span,
-            origin: meta.origin,
+            origin: match meta.origin {
+                AstOrigin::User => Origin::User(meta.span),
+                AstOrigin::Desugared(rule) => Origin::Desugared {
+                    parent: self.owner.clone(),
+                    rule: rule.into(),
+                    span: meta.span,
+                },
+                AstOrigin::PrototypeFallback(rule) => Origin::PrototypeFallback {
+                    parent: self.owner.clone(),
+                    rule: rule.into(),
+                    span: meta.span,
+                },
+                AstOrigin::RuntimeSystem(rule) => Origin::RuntimeSystem {
+                    parent: self.owner.clone(),
+                    rule: rule.into(),
+                    span: meta.span,
+                },
+            },
         }
     }
 

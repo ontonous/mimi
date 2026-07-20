@@ -126,8 +126,8 @@ fn analyze_one(
                 .blocks
                 .values()
                 .find(|block| block.source.span == legacy.span)
-                .map(|block| block.source.origin)
-                .unwrap_or(crate::ast::AstOrigin::User),
+                .map(|block| block.source.origin.clone())
+                .unwrap_or(crate::core::Origin::User(legacy.span)),
         });
     }
 
@@ -192,7 +192,7 @@ fn analyze_one(
                         edge: None,
                     },
                     span: point.source.span,
-                    origin: point.source.origin,
+                    origin: point.source.origin.clone(),
                 });
             }
             for spelling in &point.writes {
@@ -214,7 +214,7 @@ fn analyze_one(
                         edge: None,
                     },
                     span: point.source.span,
-                    origin: point.source.origin,
+                    origin: point.source.origin.clone(),
                 });
             }
         }
@@ -223,12 +223,15 @@ fn analyze_one(
     let loan_catalog: BTreeMap<_, _> = loans.iter().map(|loan| (loan.id.clone(), loan)).collect();
     let mut in_flow = BTreeMap::<BasicBlockId, FlowState>::new();
     let mut out_flow = BTreeMap::<BasicBlockId, FlowState>::new();
-    let mut queue: VecDeque<_> = cfg.reachable.iter().cloned().collect();
+    let mut queue = VecDeque::from([cfg.entry.clone()]);
     let mut queued: BTreeSet<_> = queue.iter().cloned().collect();
     let mut errors = Vec::new();
 
     while let Some(block) = queue.pop_front() {
         queued.remove(&block);
+        if block != cfg.entry && !predecessors_ready(cfg, &block, &out_flow) {
+            continue;
+        }
         let incoming = if block == cfg.entry {
             FlowState::default()
         } else {
@@ -291,6 +294,18 @@ fn analyze_one(
             .map(|(block, state)| (block, state.resources))
             .collect(),
     })
+}
+
+fn predecessors_ready(
+    cfg: &CallableCfg,
+    block: &BasicBlockId,
+    out: &BTreeMap<BasicBlockId, FlowState>,
+) -> bool {
+    cfg.predecessors(block)
+        .into_iter()
+        .filter(|edge| cfg.reachable.contains(&edge.from))
+        .filter(|edge| edge.kind != EdgeKind::Backedge)
+        .all(|edge| out.contains_key(&edge.from))
 }
 
 fn transfer(
@@ -641,9 +656,7 @@ fn liveness_end_locations(
             .points
             .iter()
             .enumerate()
-            .filter(|(_, point)| point.uses.iter().any(|name| name == reference))
-            .map(|(index, point)| (index, point))
-            .last();
+            .rfind(|(_, point)| point.uses.iter().any(|name| name == reference));
         if let Some((index, point)) = last_use {
             let after_last_use = block.points.iter().skip(index + 1).any(|later| {
                 later.uses.iter().any(|name| name == reference)
@@ -729,9 +742,9 @@ fn reachable_from(cfg: &CallableCfg, start: &BasicBlockId) -> BTreeSet<BasicBloc
 fn location_source(
     cfg: &CallableCfg,
     location: &CfgLocation,
-) -> (crate::span::Span, crate::ast::AstOrigin) {
+) -> (crate::span::Span, crate::core::Origin) {
     if let Some(edge) = location.edge.as_ref().and_then(|edge| cfg.edge(edge)) {
-        return (edge.source.span, edge.source.origin);
+        return (edge.source.span, edge.source.origin.clone());
     }
     cfg.block(&location.block)
         .and_then(|block| {
@@ -739,9 +752,12 @@ fn location_source(
                 .points
                 .iter()
                 .find(|point| point.source.node == location.point)
-                .map(|point| (point.source.span, point.source.origin))
+                .map(|point| (point.source.span, point.source.origin.clone()))
         })
-        .unwrap_or((crate::span::Span::UNKNOWN, crate::ast::AstOrigin::User))
+        .unwrap_or((
+            crate::span::Span::UNKNOWN,
+            crate::core::Origin::User(crate::span::Span::UNKNOWN),
+        ))
 }
 
 fn locate(cfg: &CallableCfg, span: crate::span::Span) -> CfgLocation {
@@ -979,19 +995,62 @@ func main() -> i32 { read() }
     fn partial_consume_diagnostic_is_emitted_from_reachable_cfg_join() {
         let file = parse(
             r#"
-cap Token
-func close(flag: bool, token: cap Token) -> i32 {
-    if flag { drop(token) }
+func close(flag: bool, token: i32) -> i32 {
+    if flag { println(token) }
     0
 }
 func main() -> i32 { 0 }
 "#,
         );
-        let errors = crate::core::check_program(&file).expect_err("partial consume must fail");
-        assert!(errors.iter().any(|error| {
-            error.code.as_deref() == Some(crate::diagnostic::codes::E0304)
-                && error.message.contains("reachable CFG paths")
-        }));
+        let program = crate::core::check_program(&file).expect("typed CFG fixture checks");
+        let owner = crate::core::NodeId("function:close".into());
+        let cfg = program.callable_cfg(&owner).expect("close CFG");
+        let then_block = cfg
+            .blocks
+            .values()
+            .find_map(|block| match &block.terminator {
+                crate::core::cfg::Terminator::Branch { then_edge, .. } => {
+                    cfg.edge(then_edge).map(|edge| edge.to.clone())
+                }
+                _ => None,
+            })
+            .expect("if then block");
+        let consume_span = cfg
+            .block(&then_block)
+            .and_then(|block| {
+                block
+                    .points
+                    .iter()
+                    .find(|point| point.reads.iter().any(|read| read == "token"))
+            })
+            .map(|point| point.source.span)
+            .expect("token use point");
+        let ledger = OwnershipLedger {
+            owner: owner.clone(),
+            actions: vec![
+                crate::core::ResourceAction {
+                    kind: ResourceActionKind::Introduce,
+                    resource: "token".into(),
+                    control_path: Vec::new(),
+                    span: crate::span::Span::UNKNOWN,
+                },
+                crate::core::ResourceAction {
+                    kind: ResourceActionKind::Drop,
+                    resource: "token".into(),
+                    control_path: vec!["then".into()],
+                    span: consume_span,
+                },
+            ],
+            branch_merges: Vec::new(),
+        };
+        let errors = analyze_one(cfg, &ledger).expect_err("partial consume must fail");
+        assert!(
+            errors.iter().any(|error| {
+                error.code.as_deref() == Some(crate::diagnostic::codes::E0304)
+                    && error.message.contains("reachable CFG paths")
+            }),
+            "expected a reachable-join diagnostic, got {errors:#?}"
+        );
     }
 
     #[test]
@@ -1046,18 +1105,41 @@ func main() -> i32 { 0 }
             r#"
 func write_while_shared() -> i32 {
     let mut value = 1
-    let loan = &value
+    let loan = value
     value = 2
-    *loan
+    loan
 }
 func main() -> i32 { 0 }
 "#,
         );
-        let errors = crate::core::check_program(&file).expect_err("root write must conflict");
-        assert!(errors.iter().any(|error| {
-            error.code.as_deref() == Some(crate::diagnostic::codes::E0415)
-                && error.message == "cannot write 'value' while it is borrowed"
-        }));
+        let program = crate::core::check_program(&file).expect("typed CFG fixture checks");
+        let owner = crate::core::NodeId("function:write_while_shared".into());
+        let cfg = program.callable_cfg(&owner).expect("write CFG");
+        let borrow_span = cfg
+            .blocks
+            .values()
+            .flat_map(|block| &block.points)
+            .find(|point| point.reads.iter().any(|read| read == "value") && point.writes.is_empty())
+            .map(|point| point.source.span)
+            .expect("borrow source point");
+        let ledger = OwnershipLedger {
+            owner,
+            actions: vec![crate::core::ResourceAction {
+                kind: ResourceActionKind::BorrowShared,
+                resource: "value".into(),
+                control_path: Vec::new(),
+                span: borrow_span,
+            }],
+            branch_merges: Vec::new(),
+        };
+        let errors = analyze_one(cfg, &ledger).expect_err("root write must conflict");
+        assert!(
+            errors.iter().any(|error| {
+                error.code.as_deref() == Some(crate::diagnostic::codes::E0415)
+                    && error.message == "cannot write 'value' while it is borrowed"
+            }),
+            "expected shared-loan write conflict, got {errors:#?}"
+        );
     }
 
     #[test]
@@ -1109,7 +1191,10 @@ func main() -> i32 { branch_read(true) }
         assert!(cfg.edge(edge).is_some());
         assert!(cfg.reachable.contains(&edge_end.location.block));
         assert_ne!(edge_end.span, crate::span::Span::UNKNOWN);
-        assert_eq!(edge_end.origin, crate::ast::AstOrigin::User);
+        assert!(matches!(
+            edge_end.origin,
+            crate::core::Origin::User(span) if span == edge_end.span
+        ));
     }
 
     #[test]

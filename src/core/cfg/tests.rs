@@ -113,6 +113,92 @@ fn checked_program_persists_validated_cfgs() {
 }
 
 #[test]
+fn checked_cfg_is_owned_and_traces_resolved_control_nodes() {
+    let program = {
+        let file = parse(
+            "func choose(flag: bool) -> i32 { if flag { 1 } else { 2 } }\nfunc main() -> i32 { choose(true) }",
+        );
+        crate::core::check_program(&file).expect("checked program")
+    };
+    let owner = crate::core::NodeId("function:choose".into());
+    let body = program.resolved_body(&owner).expect("owned body");
+    let cfg = program.callable_cfg(&owner).expect("owned CFG");
+    assert_eq!(cfg.owner, body.owner);
+    assert_eq!(
+        cfg.block(&cfg.entry).map(|block| &block.source.node),
+        Some(&body.root.node_id)
+    );
+    let result = body.root.result.as_deref().expect("resolved if result");
+    let crate::core::ResolvedExprKind::If {
+        condition,
+        then_block,
+        else_block,
+    } = &result.kind
+    else {
+        panic!("resolved if result expected");
+    };
+    let branch = cfg
+        .blocks
+        .values()
+        .find_map(|block| match &block.terminator {
+            Terminator::Branch {
+                condition,
+                then_edge,
+                else_edge,
+            } => Some((condition, then_edge, else_edge)),
+            _ => None,
+        })
+        .expect("typed branch");
+    assert_eq!(branch.0, &condition.node_id);
+    assert_eq!(
+        cfg.edge(branch.1)
+            .and_then(|edge| cfg.block(&edge.to))
+            .map(|block| &block.source.node),
+        Some(&then_block.node_id)
+    );
+    assert_eq!(
+        cfg.edge(branch.2)
+            .and_then(|edge| cfg.block(&edge.to))
+            .map(|block| &block.source.node),
+        Some(&else_block.node_id)
+    );
+    assert!(cfg.blocks.values().any(|block| {
+        block
+            .points
+            .iter()
+            .any(|point| point.source.node == result.node_id)
+    }));
+}
+
+#[test]
+fn checked_cfg_catalog_matches_owned_body_catalog_and_reorders_stably() {
+    let first = parse(
+        "func helper() -> i32 { 1 }\nfunc target(x: i32) -> i32 { if x > 0 { x } else { 0 } }",
+    );
+    let mut reordered = first.clone();
+    reordered.items.swap(0, 1);
+    let first = crate::core::check_program(&first).expect("first checked program");
+    let reordered = crate::core::check_program(&reordered).expect("reordered checked program");
+    assert_eq!(
+        first.callable_cfgs().keys().collect::<Vec<_>>(),
+        first.resolved_bodies().keys().collect::<Vec<_>>()
+    );
+    let owner = crate::core::NodeId("function:target".into());
+    let left = first.callable_cfg(&owner).expect("first target CFG");
+    let right = reordered
+        .callable_cfg(&owner)
+        .expect("reordered target CFG");
+    assert_eq!(
+        left.blocks.keys().collect::<Vec<_>>(),
+        right.blocks.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        left.edges.keys().collect::<Vec<_>>(),
+        right.edges.keys().collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn nested_control_flow_roles_disambiguate_inherited_spans() {
     let file = parse(
         r#"
