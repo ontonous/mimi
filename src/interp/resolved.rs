@@ -10,10 +10,11 @@ use crate::core::ir::{
     ResolvedBinaryOp, ResolvedFStringPart, ResolvedLambda, ResolvedValueProjection,
 };
 use crate::core::{
-    CheckedConversion, CheckedConversionKind, CheckedProgram, NodeId, ResolvedBlock, ResolvedBody,
-    ResolvedCallee, ResolvedConstValue, ResolvedExpr, ResolvedExprKind, ResolvedIndex,
-    ResolvedLiteral, ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace,
-    ResolvedProjection, ResolvedStmt, ResolvedStmtKind, ResolvedType,
+    CheckedConversion, CheckedConversionKind, CheckedProgram, NodeId, PrimitiveType, ResolvedBlock,
+    ResolvedBody, ResolvedCall, ResolvedCallee, ResolvedConstValue, ResolvedExpr, ResolvedExprKind,
+    ResolvedIndex, ResolvedLiteral, ResolvedLocalId, ResolvedPattern, ResolvedPatternKind,
+    ResolvedPlace, ResolvedProjection, ResolvedStmt, ResolvedStmtKind, ResolvedType,
+    ResolvedTypeId, ResolvedTypeKind,
 };
 use std::collections::{BTreeMap, HashMap};
 
@@ -526,8 +527,18 @@ fn eval_expr(
                 }
                 ResolvedCallee::Builtin(builtin) => {
                     let name = builtin.as_str();
-                    let result =
-                        eval_runtime_builtin(program, state, &expression.node_id, name, arguments)?;
+                    let result = if matches!(name, "to_json" | "from_json") {
+                        eval_checked_json_builtin(
+                            program,
+                            &expression.node_id,
+                            name,
+                            call,
+                            require_value_arguments(&expression.node_id, arguments)?,
+                        )
+                        .map_err(|error| error.at_op(expression.node_id.0.clone()))?
+                    } else {
+                        eval_runtime_builtin(program, state, &expression.node_id, name, arguments)?
+                    };
                     if name == "push" {
                         let target = call
                             .arguments
@@ -1118,6 +1129,953 @@ fn slice_value(
     }
 }
 
+const MAX_TYPED_JSON_DEPTH: usize = 256;
+
+fn eval_checked_json_builtin(
+    program: &CheckedProgram,
+    node: &NodeId,
+    name: &str,
+    call: &ResolvedCall,
+    arguments: Vec<Value>,
+) -> Result<Value, InterpError> {
+    match name {
+        "to_json" => {
+            let [value] = arguments.as_slice() else {
+                return Err(InterpError::wrong_arg_count(format!(
+                    "to_json expects 1 argument, got {}",
+                    arguments.len()
+                )));
+            };
+            let argument_type = call
+                .arguments
+                .first()
+                .map(|argument| &argument.conversion.to)
+                .ok_or_else(|| unsupported(node, "to_json has no canonical argument type"))?;
+            let json = encode_checked_json(program, node, value, argument_type, 0)?;
+            serde_json::to_string(&json)
+                .map(Value::String)
+                .map_err(|error| InterpError::builtin_error(format!("to_json error: {error}")))
+        }
+        "from_json" => {
+            let [Value::String(source)] = arguments.as_slice() else {
+                return Err(builtin_type_error(name, "one JSON string"));
+            };
+            let json = serde_json::from_str::<serde_json::Value>(source).map_err(|error| {
+                InterpError::builtin_error(format!("from_json parse error: {error}"))
+            })?;
+            match call.type_arguments.as_slice() {
+                [] => Ok(Value::String(source.clone())),
+                [target] if target == &call.result => {
+                    decode_checked_json(program, node, &json, target, 0)
+                }
+                [target] => Err(unsupported(
+                    node,
+                    &format!(
+                        "from_json result type '{}' disagrees with canonical target '{}'",
+                        call.result.as_str(),
+                        target.as_str()
+                    ),
+                )),
+                _ => Err(unsupported(
+                    node,
+                    "from_json must contain exactly one canonical type argument",
+                )),
+            }
+        }
+        _ => Err(unsupported(node, "unknown checked JSON builtin")),
+    }
+}
+
+fn encode_checked_json(
+    program: &CheckedProgram,
+    node: &NodeId,
+    value: &Value,
+    type_id: &ResolvedTypeId,
+    depth: usize,
+) -> Result<serde_json::Value, InterpError> {
+    check_json_depth(node, depth)?;
+    let ty = program
+        .resolved_types()
+        .get(type_id)
+        .ok_or_else(|| unsupported(node, "JSON argument type is absent from ResolvedTypeTable"))?;
+    match ty {
+        ResolvedType::Primitive(primitive) => encode_json_primitive(node, *primitive, value),
+        ResolvedType::Nominal { item, arguments } => {
+            encode_json_nominal(program, node, item.as_str(), arguments, value, depth + 1)
+        }
+        ResolvedType::Option(inner) => {
+            encode_json_variant(program, node, value, "Some", "None", inner, depth + 1)
+        }
+        ResolvedType::Result { ok, error } => {
+            let Value::Variant(variant, payload) = value else {
+                return Err(json_type_error(node, type_id, "an Ok/Err value", value));
+            };
+            let target = match variant.as_str() {
+                "Ok" => ok,
+                "Err" => error,
+                _ => return Err(json_type_error(node, type_id, "an Ok/Err value", value)),
+            };
+            let [payload] = payload.as_slice() else {
+                return Err(json_type_error(
+                    node,
+                    type_id,
+                    "a single Result payload",
+                    value,
+                ));
+            };
+            tagged_json(
+                variant,
+                encode_checked_json(program, node, payload, target, depth + 1)?,
+            )
+        }
+        ResolvedType::Tuple(elements) => {
+            let Value::Tuple(values) = value else {
+                return Err(json_type_error(node, type_id, "a tuple", value));
+            };
+            encode_json_elements(program, node, values, elements, depth + 1)
+                .map(serde_json::Value::Array)
+        }
+        ResolvedType::Array { element, length } => {
+            let values = match value {
+                Value::Array(values) | Value::List(values) => values,
+                _ => return Err(json_type_error(node, type_id, "an array", value)),
+            };
+            if values.len() != *length {
+                return Err(InterpError::builtin_error(format!(
+                    "typed JSON array expects {length} elements, got {}",
+                    values.len()
+                )));
+            }
+            values
+                .iter()
+                .map(|value| encode_checked_json(program, node, value, element, depth + 1))
+                .collect::<Result<Vec<_>, _>>()
+                .map(serde_json::Value::Array)
+        }
+        ResolvedType::Slice(element) => {
+            let values = sequence_values(value)
+                .ok_or_else(|| json_type_error(node, type_id, "a slice", value))?;
+            values
+                .iter()
+                .map(|value| encode_checked_json(program, node, value, element, depth + 1))
+                .collect::<Result<Vec<_>, _>>()
+                .map(serde_json::Value::Array)
+        }
+        ResolvedType::Newtype { inner, .. } => {
+            let Value::Newtype(_, value) = value else {
+                return Err(json_type_error(node, type_id, "a newtype value", value));
+            };
+            encode_checked_json(program, node, value, inner, depth + 1)
+        }
+        ResolvedType::DynamicAny { .. } => encode_dynamic_json(node, value, depth + 1),
+        ResolvedType::GenericParameter(_)
+        | ResolvedType::Reference { .. }
+        | ResolvedType::Function { .. }
+        | ResolvedType::CBuffer(_)
+        | ResolvedType::Capability(_)
+        | ResolvedType::Ownership { .. }
+        | ResolvedType::Nothing
+        | ResolvedType::Allocator
+        | ResolvedType::Trait { .. }
+        | ResolvedType::RawPointer { .. }
+        | ResolvedType::CShared(_)
+        | ResolvedType::CBorrow { .. }
+        | ResolvedType::RawString => Err(unsupported(
+            node,
+            &format!(
+                "canonical type '{}' is not in the typed JSON subset",
+                type_id.as_str()
+            ),
+        )),
+    }
+}
+
+fn encode_json_primitive(
+    node: &NodeId,
+    primitive: PrimitiveType,
+    value: &Value,
+) -> Result<serde_json::Value, InterpError> {
+    match (primitive, value) {
+        (
+            primitive @ (PrimitiveType::I8
+            | PrimitiveType::I16
+            | PrimitiveType::I32
+            | PrimitiveType::I64
+            | PrimitiveType::I128
+            | PrimitiveType::U8
+            | PrimitiveType::U16
+            | PrimitiveType::U32
+            | PrimitiveType::U64
+            | PrimitiveType::U128
+            | PrimitiveType::Isize
+            | PrimitiveType::Usize),
+            Value::Int(value),
+        ) if integer_fits_primitive(primitive, *value) => {
+            Ok(serde_json::Value::Number((*value).into()))
+        }
+        (PrimitiveType::F32 | PrimitiveType::F64, Value::Float(value)) => {
+            serde_json::Number::from_f64(*value)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| {
+                    InterpError::builtin_error(format!(
+                        "float {value} cannot be represented in JSON"
+                    ))
+                })
+        }
+        (PrimitiveType::Bool, Value::Bool(value)) => Ok(serde_json::Value::Bool(*value)),
+        (PrimitiveType::String, Value::String(value)) => {
+            Ok(serde_json::Value::String(value.clone()))
+        }
+        (PrimitiveType::Char, Value::String(value)) if value.chars().count() == 1 => {
+            Ok(serde_json::Value::String(value.clone()))
+        }
+        (PrimitiveType::Unit, Value::Unit) => Ok(serde_json::Value::Null),
+        _ => Err(unsupported(
+            node,
+            &format!("runtime value '{value}' disagrees with JSON primitive {primitive:?}"),
+        )),
+    }
+}
+
+fn encode_json_nominal(
+    program: &CheckedProgram,
+    node: &NodeId,
+    item: &str,
+    arguments: &[ResolvedTypeId],
+    value: &Value,
+    depth: usize,
+) -> Result<serde_json::Value, InterpError> {
+    match item {
+        "builtin:type:List" if arguments.len() == 1 => {
+            let Value::List(values) = value else {
+                return Err(unsupported(node, "typed JSON List has a non-list value"));
+            };
+            values
+                .iter()
+                .map(|value| encode_checked_json(program, node, value, &arguments[0], depth + 1))
+                .collect::<Result<Vec<_>, _>>()
+                .map(serde_json::Value::Array)
+        }
+        "builtin:type:Set" if arguments.len() == 1 => {
+            let Value::Set(values) = value else {
+                return Err(unsupported(node, "typed JSON Set has a non-set value"));
+            };
+            let mut values = values
+                .iter()
+                .map(|value| encode_checked_json(program, node, value, &arguments[0], depth + 1))
+                .collect::<Result<Vec<_>, _>>()?;
+            values.sort_by_key(serde_json::Value::to_string);
+            Ok(serde_json::Value::Array(values))
+        }
+        "builtin:type:Map" if arguments.len() == 2 => {
+            require_json_string_key(program, node, &arguments[0])?;
+            let Value::Record(_, fields) = value else {
+                return Err(unsupported(node, "typed JSON Map has a non-record value"));
+            };
+            let mut object = serde_json::Map::new();
+            for (key, value) in fields {
+                object.insert(
+                    key.clone(),
+                    encode_checked_json(program, node, value, &arguments[1], depth + 1)?,
+                );
+            }
+            Ok(serde_json::Value::Object(object))
+        }
+        "builtin:type:Record" if arguments.is_empty() => {
+            encode_dynamic_json(node, value, depth + 1)
+        }
+        "builtin:type:Option" if arguments.len() == 1 => encode_json_variant(
+            program,
+            node,
+            value,
+            "Some",
+            "None",
+            &arguments[0],
+            depth + 1,
+        ),
+        "builtin:type:Result" if arguments.len() == 2 => {
+            let synthetic = ResolvedType::Result {
+                ok: arguments[0].clone(),
+                error: arguments[1].clone(),
+            };
+            encode_synthetic_json_type(program, node, value, synthetic, depth + 1)
+        }
+        _ => encode_user_json_type(program, node, item, value, depth + 1),
+    }
+}
+
+fn encode_synthetic_json_type(
+    program: &CheckedProgram,
+    node: &NodeId,
+    value: &Value,
+    ty: ResolvedType,
+    depth: usize,
+) -> Result<serde_json::Value, InterpError> {
+    match ty {
+        ResolvedType::Result { ok, error } => {
+            let Value::Variant(variant, payload) = value else {
+                return Err(unsupported(
+                    node,
+                    "typed JSON Result has a non-variant value",
+                ));
+            };
+            let target = if variant == "Ok" {
+                ok
+            } else if variant == "Err" {
+                error
+            } else {
+                return Err(unsupported(node, "typed JSON Result variant is not Ok/Err"));
+            };
+            let [payload] = payload.as_slice() else {
+                return Err(unsupported(
+                    node,
+                    "typed JSON Result payload arity is not one",
+                ));
+            };
+            tagged_json(
+                variant,
+                encode_checked_json(program, node, payload, &target, depth + 1)?,
+            )
+        }
+        _ => Err(unsupported(node, "unknown synthetic JSON type")),
+    }
+}
+
+fn encode_json_variant(
+    program: &CheckedProgram,
+    node: &NodeId,
+    value: &Value,
+    present: &str,
+    absent: &str,
+    inner: &ResolvedTypeId,
+    depth: usize,
+) -> Result<serde_json::Value, InterpError> {
+    let Value::Variant(variant, payload) = value else {
+        return Err(unsupported(
+            node,
+            "typed JSON option value is not a variant",
+        ));
+    };
+    if variant == absent && payload.is_empty() {
+        return Ok(serde_json::Value::String(absent.to_string()));
+    }
+    if variant != present || payload.len() != 1 {
+        return Err(unsupported(
+            node,
+            "typed JSON option variant or payload arity is invalid",
+        ));
+    }
+    tagged_json(
+        present,
+        encode_checked_json(program, node, &payload[0], inner, depth + 1)?,
+    )
+}
+
+fn tagged_json(
+    variant: &str,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, InterpError> {
+    let mut object = serde_json::Map::new();
+    object.insert(variant.to_string(), serde_json::Value::Array(vec![payload]));
+    Ok(serde_json::Value::Object(object))
+}
+
+fn encode_user_json_type(
+    program: &CheckedProgram,
+    node: &NodeId,
+    item: &str,
+    value: &Value,
+    depth: usize,
+) -> Result<serde_json::Value, InterpError> {
+    let identity = NodeId(item.to_string());
+    let definition = program
+        .type_defs()
+        .get(&identity)
+        .ok_or_else(|| unsupported(node, "nominal JSON type has no resolved declaration"))?;
+    match definition.kind {
+        ResolvedTypeKind::Alias => {
+            let target = program
+                .resolved_type_target(&definition.node_id)
+                .ok_or_else(|| unsupported(node, "alias JSON type has no canonical target"))?;
+            encode_checked_json(program, node, value, target, depth + 1)
+        }
+        ResolvedTypeKind::Newtype => {
+            let target = program
+                .resolved_type_target(&definition.node_id)
+                .ok_or_else(|| unsupported(node, "newtype JSON type has no canonical target"))?;
+            let Value::Newtype(runtime_identity, inner) = value else {
+                return Err(unsupported(node, "newtype JSON value is not wrapped"));
+            };
+            if runtime_identity != &definition.node_id.0 {
+                return Err(unsupported(node, "newtype JSON identity mismatch"));
+            }
+            encode_checked_json(program, node, inner, target, depth + 1)
+        }
+        ResolvedTypeKind::Record | ResolvedTypeKind::Union => {
+            let Value::Record(runtime_name, fields) = value else {
+                return Err(unsupported(node, "record JSON value is not a record"));
+            };
+            if runtime_name
+                .as_deref()
+                .is_some_and(|name| name != definition.qualified_name)
+            {
+                return Err(unsupported(node, "record JSON nominal identity mismatch"));
+            }
+            let mut object = serde_json::Map::new();
+            for (field, _) in &definition.fields {
+                let field_id = definition
+                    .field_ids
+                    .get(field)
+                    .ok_or_else(|| unsupported(node, "record JSON field has no stable identity"))?;
+                let field_type = program
+                    .resolved_field_type(field_id)
+                    .ok_or_else(|| unsupported(node, "record JSON field has no canonical type"))?;
+                let field_value = fields.get(field).ok_or_else(|| {
+                    InterpError::builtin_error(format!(
+                        "record '{}' is missing JSON field '{field}'",
+                        definition.qualified_name
+                    ))
+                })?;
+                object.insert(
+                    field.clone(),
+                    encode_checked_json(program, node, field_value, field_type, depth + 1)?,
+                );
+            }
+            Ok(serde_json::Value::Object(object))
+        }
+        ResolvedTypeKind::Enum => {
+            let Value::Variant(variant, payload) = value else {
+                return Err(unsupported(node, "enum JSON value is not a variant"));
+            };
+            if !definition.variant_ids.contains_key(variant) {
+                return Err(unsupported(node, "enum JSON variant identity is unknown"));
+            }
+            if payload.is_empty() {
+                Ok(serde_json::Value::String(variant.clone()))
+            } else {
+                Err(unsupported(
+                    node,
+                    "payload-bearing user enum JSON requires canonical variant payload schema",
+                ))
+            }
+        }
+    }
+}
+
+fn decode_checked_json(
+    program: &CheckedProgram,
+    node: &NodeId,
+    json: &serde_json::Value,
+    type_id: &ResolvedTypeId,
+    depth: usize,
+) -> Result<Value, InterpError> {
+    check_json_depth(node, depth)?;
+    let ty = program
+        .resolved_types()
+        .get(type_id)
+        .ok_or_else(|| unsupported(node, "JSON target type is absent from ResolvedTypeTable"))?;
+    match ty {
+        ResolvedType::Primitive(primitive) => decode_json_primitive(*primitive, json),
+        ResolvedType::Nominal { item, arguments } => {
+            decode_json_nominal(program, node, item.as_str(), arguments, json, depth + 1)
+        }
+        ResolvedType::Option(inner) => decode_json_option(program, node, json, inner, depth + 1),
+        ResolvedType::Result { ok, error } => {
+            decode_json_result(program, node, json, ok, error, depth + 1)
+        }
+        ResolvedType::Tuple(elements) => {
+            let serde_json::Value::Array(values) = json else {
+                return Err(InterpError::type_mismatch("expected JSON array for tuple"));
+            };
+            decode_json_elements(program, node, values, elements, depth + 1).map(Value::Tuple)
+        }
+        ResolvedType::Array { element, length } => {
+            let serde_json::Value::Array(values) = json else {
+                return Err(InterpError::type_mismatch("expected JSON array"));
+            };
+            if values.len() != *length {
+                return Err(InterpError::type_mismatch(format!(
+                    "expected JSON array length {length}, got {}",
+                    values.len()
+                )));
+            }
+            values
+                .iter()
+                .map(|value| decode_checked_json(program, node, value, element, depth + 1))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Array)
+        }
+        ResolvedType::Slice(element) => {
+            let serde_json::Value::Array(values) = json else {
+                return Err(InterpError::type_mismatch("expected JSON array for slice"));
+            };
+            values
+                .iter()
+                .map(|value| decode_checked_json(program, node, value, element, depth + 1))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::List)
+        }
+        ResolvedType::Newtype { item, inner } => {
+            decode_checked_json(program, node, json, inner, depth + 1)
+                .map(|value| Value::Newtype(item.as_str().to_string(), Box::new(value)))
+        }
+        ResolvedType::DynamicAny { .. } => Ok(decode_dynamic_json(json)),
+        ResolvedType::GenericParameter(_)
+        | ResolvedType::Reference { .. }
+        | ResolvedType::Function { .. }
+        | ResolvedType::CBuffer(_)
+        | ResolvedType::Capability(_)
+        | ResolvedType::Ownership { .. }
+        | ResolvedType::Nothing
+        | ResolvedType::Allocator
+        | ResolvedType::Trait { .. }
+        | ResolvedType::RawPointer { .. }
+        | ResolvedType::CShared(_)
+        | ResolvedType::CBorrow { .. }
+        | ResolvedType::RawString => Err(unsupported(
+            node,
+            &format!(
+                "canonical type '{}' is not in the typed JSON subset",
+                type_id.as_str()
+            ),
+        )),
+    }
+}
+
+fn decode_json_primitive(
+    primitive: PrimitiveType,
+    json: &serde_json::Value,
+) -> Result<Value, InterpError> {
+    match primitive {
+        primitive @ (PrimitiveType::I8
+        | PrimitiveType::I16
+        | PrimitiveType::I32
+        | PrimitiveType::I64
+        | PrimitiveType::I128
+        | PrimitiveType::Isize
+        | PrimitiveType::U8
+        | PrimitiveType::U16
+        | PrimitiveType::U32
+        | PrimitiveType::U64
+        | PrimitiveType::U128
+        | PrimitiveType::Usize) => json
+            .as_i64()
+            .filter(|value| integer_fits_primitive(primitive, *value))
+            .map(Value::Int)
+            .ok_or_else(|| {
+                InterpError::type_mismatch(format!(
+                    "expected integer JSON value for {primitive:?} within runtime range"
+                ))
+            }),
+        PrimitiveType::F32 | PrimitiveType::F64 => json
+            .as_f64()
+            .map(Value::Float)
+            .ok_or_else(|| InterpError::type_mismatch("expected float JSON value")),
+        PrimitiveType::Bool => json
+            .as_bool()
+            .map(Value::Bool)
+            .ok_or_else(|| InterpError::type_mismatch("expected bool JSON value")),
+        PrimitiveType::String => json
+            .as_str()
+            .map(|value| Value::String(value.to_string()))
+            .ok_or_else(|| InterpError::type_mismatch("expected string JSON value")),
+        PrimitiveType::Char => json
+            .as_str()
+            .filter(|value| value.chars().count() == 1)
+            .map(|value| Value::String(value.to_string()))
+            .ok_or_else(|| InterpError::type_mismatch("expected one-character JSON string")),
+        PrimitiveType::Unit if json.is_null() => Ok(Value::Unit),
+        PrimitiveType::Unit => Err(InterpError::type_mismatch("expected null JSON value")),
+    }
+}
+
+fn integer_fits_primitive(primitive: PrimitiveType, value: i64) -> bool {
+    match primitive {
+        PrimitiveType::I8 => i8::try_from(value).is_ok(),
+        PrimitiveType::I16 => i16::try_from(value).is_ok(),
+        PrimitiveType::I32 => i32::try_from(value).is_ok(),
+        PrimitiveType::I64 | PrimitiveType::I128 | PrimitiveType::Isize => true,
+        PrimitiveType::U8 => u8::try_from(value).is_ok(),
+        PrimitiveType::U16 => u16::try_from(value).is_ok(),
+        PrimitiveType::U32 => u32::try_from(value).is_ok(),
+        PrimitiveType::U64 | PrimitiveType::U128 | PrimitiveType::Usize => value >= 0,
+        PrimitiveType::F32
+        | PrimitiveType::F64
+        | PrimitiveType::Bool
+        | PrimitiveType::Char
+        | PrimitiveType::String
+        | PrimitiveType::Unit => false,
+    }
+}
+
+fn decode_json_nominal(
+    program: &CheckedProgram,
+    node: &NodeId,
+    item: &str,
+    arguments: &[ResolvedTypeId],
+    json: &serde_json::Value,
+    depth: usize,
+) -> Result<Value, InterpError> {
+    match item {
+        "builtin:type:List" if arguments.len() == 1 => {
+            let serde_json::Value::Array(values) = json else {
+                return Err(InterpError::type_mismatch("expected JSON list"));
+            };
+            values
+                .iter()
+                .map(|value| decode_checked_json(program, node, value, &arguments[0], depth + 1))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::List)
+        }
+        "builtin:type:Set" if arguments.len() == 1 => {
+            let serde_json::Value::Array(values) = json else {
+                return Err(InterpError::type_mismatch("expected JSON list for Set"));
+            };
+            let mut result = Vec::new();
+            for value in values {
+                let value = decode_checked_json(program, node, value, &arguments[0], depth + 1)?;
+                if !result.iter().any(|existing| values_equal(existing, &value)) {
+                    result.push(value);
+                }
+            }
+            Ok(Value::Set(result))
+        }
+        "builtin:type:Map" if arguments.len() == 2 => {
+            require_json_string_key(program, node, &arguments[0])?;
+            let serde_json::Value::Object(object) = json else {
+                return Err(InterpError::type_mismatch("expected JSON object for Map"));
+            };
+            let mut result = HashMap::new();
+            for (key, value) in object {
+                result.insert(
+                    key.clone(),
+                    decode_checked_json(program, node, value, &arguments[1], depth + 1)?,
+                );
+            }
+            Ok(Value::Record(None, result))
+        }
+        "builtin:type:Record" if arguments.is_empty() => match decode_dynamic_json(json) {
+            value @ Value::Record(_, _) => Ok(value),
+            _ => Err(InterpError::type_mismatch(
+                "expected JSON object for Record",
+            )),
+        },
+        "builtin:type:Option" if arguments.len() == 1 => {
+            decode_json_option(program, node, json, &arguments[0], depth + 1)
+        }
+        "builtin:type:Result" if arguments.len() == 2 => {
+            decode_json_result(program, node, json, &arguments[0], &arguments[1], depth + 1)
+        }
+        _ => decode_user_json_type(program, node, item, json, depth + 1),
+    }
+}
+
+fn decode_json_option(
+    program: &CheckedProgram,
+    node: &NodeId,
+    json: &serde_json::Value,
+    inner: &ResolvedTypeId,
+    depth: usize,
+) -> Result<Value, InterpError> {
+    if json.is_null() || json.as_str() == Some("None") {
+        return Ok(Value::Variant("None".into(), Vec::new()));
+    }
+    let payload = json
+        .as_object()
+        .and_then(|object| (object.len() == 1).then(|| object.get("Some")).flatten())
+        .unwrap_or(json);
+    decode_tagged_json_payload(program, node, payload, inner, depth + 1)
+        .map(|value| Value::Variant("Some".into(), vec![value]))
+}
+
+fn decode_json_result(
+    program: &CheckedProgram,
+    node: &NodeId,
+    json: &serde_json::Value,
+    ok: &ResolvedTypeId,
+    error: &ResolvedTypeId,
+    depth: usize,
+) -> Result<Value, InterpError> {
+    if let Some(object) = json.as_object().filter(|object| object.len() == 1) {
+        if let Some(payload) = object.get("Ok") {
+            return decode_tagged_json_payload(program, node, payload, ok, depth + 1)
+                .map(|value| Value::Variant("Ok".into(), vec![value]));
+        }
+        if let Some(payload) = object.get("Err") {
+            return decode_tagged_json_payload(program, node, payload, error, depth + 1)
+                .map(|value| Value::Variant("Err".into(), vec![value]));
+        }
+    }
+    decode_checked_json(program, node, json, ok, depth + 1)
+        .map(|value| Value::Variant("Ok".into(), vec![value]))
+}
+
+fn decode_tagged_json_payload(
+    program: &CheckedProgram,
+    node: &NodeId,
+    payload: &serde_json::Value,
+    target: &ResolvedTypeId,
+    depth: usize,
+) -> Result<Value, InterpError> {
+    match decode_checked_json(program, node, payload, target, depth + 1) {
+        Ok(value) => Ok(value),
+        Err(direct_error) => match payload {
+            serde_json::Value::Array(values) if values.len() == 1 => {
+                decode_checked_json(program, node, &values[0], target, depth + 1)
+            }
+            _ => Err(direct_error),
+        },
+    }
+}
+
+fn decode_user_json_type(
+    program: &CheckedProgram,
+    node: &NodeId,
+    item: &str,
+    json: &serde_json::Value,
+    depth: usize,
+) -> Result<Value, InterpError> {
+    let identity = NodeId(item.to_string());
+    let definition = program
+        .type_defs()
+        .get(&identity)
+        .ok_or_else(|| unsupported(node, "nominal JSON target has no resolved declaration"))?;
+    match definition.kind {
+        ResolvedTypeKind::Alias => {
+            let target = program
+                .resolved_type_target(&definition.node_id)
+                .ok_or_else(|| unsupported(node, "alias JSON target has no canonical type"))?;
+            decode_checked_json(program, node, json, target, depth + 1)
+        }
+        ResolvedTypeKind::Newtype => {
+            let target = program
+                .resolved_type_target(&definition.node_id)
+                .ok_or_else(|| unsupported(node, "newtype JSON target has no canonical type"))?;
+            decode_checked_json(program, node, json, target, depth + 1)
+                .map(|value| Value::Newtype(definition.node_id.0.clone(), Box::new(value)))
+        }
+        ResolvedTypeKind::Record | ResolvedTypeKind::Union => {
+            let serde_json::Value::Object(object) = json else {
+                return Err(InterpError::type_mismatch(format!(
+                    "expected JSON object for '{}'",
+                    definition.qualified_name
+                )));
+            };
+            let mut fields = HashMap::new();
+            for (field, _) in &definition.fields {
+                let field_id = definition.field_ids.get(field).ok_or_else(|| {
+                    unsupported(node, "record JSON target field has no stable identity")
+                })?;
+                let field_type = program.resolved_field_type(field_id).ok_or_else(|| {
+                    unsupported(node, "record JSON target field has no canonical type")
+                })?;
+                let value = object.get(field).ok_or_else(|| {
+                    InterpError::builtin_error(format!(
+                        "missing field '{field}' in JSON for type '{}'",
+                        definition.qualified_name
+                    ))
+                })?;
+                fields.insert(
+                    field.clone(),
+                    decode_checked_json(program, node, value, field_type, depth + 1)?,
+                );
+            }
+            Ok(Value::Record(
+                Some(definition.qualified_name.clone()),
+                fields,
+            ))
+        }
+        ResolvedTypeKind::Enum => match json {
+            serde_json::Value::String(variant) if definition.variant_ids.contains_key(variant) => {
+                Ok(Value::Variant(variant.clone(), Vec::new()))
+            }
+            serde_json::Value::String(variant) => Err(InterpError::builtin_error(format!(
+                "unknown enum variant '{variant}' for '{}'",
+                definition.qualified_name
+            ))),
+            _ => Err(unsupported(
+                node,
+                "payload-bearing user enum JSON requires canonical variant payload schema",
+            )),
+        },
+    }
+}
+
+fn encode_json_elements(
+    program: &CheckedProgram,
+    node: &NodeId,
+    values: &[Value],
+    types: &[ResolvedTypeId],
+    depth: usize,
+) -> Result<Vec<serde_json::Value>, InterpError> {
+    if values.len() != types.len() {
+        return Err(InterpError::type_mismatch(format!(
+            "typed JSON tuple expects {} elements, got {}",
+            types.len(),
+            values.len()
+        )));
+    }
+    values
+        .iter()
+        .zip(types)
+        .map(|(value, ty)| encode_checked_json(program, node, value, ty, depth + 1))
+        .collect()
+}
+
+fn decode_json_elements(
+    program: &CheckedProgram,
+    node: &NodeId,
+    values: &[serde_json::Value],
+    types: &[ResolvedTypeId],
+    depth: usize,
+) -> Result<Vec<Value>, InterpError> {
+    if values.len() != types.len() {
+        return Err(InterpError::type_mismatch(format!(
+            "typed JSON tuple expects {} elements, got {}",
+            types.len(),
+            values.len()
+        )));
+    }
+    values
+        .iter()
+        .zip(types)
+        .map(|(value, ty)| decode_checked_json(program, node, value, ty, depth + 1))
+        .collect()
+}
+
+fn require_json_string_key(
+    program: &CheckedProgram,
+    node: &NodeId,
+    key: &ResolvedTypeId,
+) -> Result<(), InterpError> {
+    if matches!(
+        program.resolved_types().get(key),
+        Some(ResolvedType::Primitive(PrimitiveType::String))
+    ) {
+        Ok(())
+    } else {
+        Err(unsupported(
+            node,
+            "JSON Map keys must have canonical string type",
+        ))
+    }
+}
+
+fn encode_dynamic_json(
+    node: &NodeId,
+    value: &Value,
+    depth: usize,
+) -> Result<serde_json::Value, InterpError> {
+    check_json_depth(node, depth)?;
+    match value {
+        Value::Int(value) => Ok(serde_json::Value::Number((*value).into())),
+        Value::Float(value) => serde_json::Number::from_f64(*value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| InterpError::builtin_error("non-finite dynamic JSON float")),
+        Value::Bool(value) => Ok(serde_json::Value::Bool(*value)),
+        Value::String(value) => Ok(serde_json::Value::String(value.clone())),
+        Value::Unit => Ok(serde_json::Value::Null),
+        Value::List(values) | Value::Array(values) | Value::Tuple(values) => values
+            .iter()
+            .map(|value| encode_dynamic_json(node, value, depth + 1))
+            .collect::<Result<Vec<_>, _>>()
+            .map(serde_json::Value::Array),
+        Value::Set(values) => {
+            let mut values = values
+                .iter()
+                .map(|value| encode_dynamic_json(node, value, depth + 1))
+                .collect::<Result<Vec<_>, _>>()?;
+            values.sort_by_key(serde_json::Value::to_string);
+            Ok(serde_json::Value::Array(values))
+        }
+        Value::Record(_, fields) => {
+            let mut object = serde_json::Map::new();
+            for (key, value) in fields {
+                object.insert(key.clone(), encode_dynamic_json(node, value, depth + 1)?);
+            }
+            Ok(serde_json::Value::Object(object))
+        }
+        Value::Variant(variant, payload) if payload.is_empty() => {
+            Ok(serde_json::Value::String(variant.clone()))
+        }
+        Value::Variant(variant, payload) => {
+            let payload = payload
+                .iter()
+                .map(|value| encode_dynamic_json(node, value, depth + 1))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut object = serde_json::Map::new();
+            object.insert(variant.clone(), serde_json::Value::Array(payload));
+            Ok(serde_json::Value::Object(object))
+        }
+        Value::Newtype(_, value) => encode_dynamic_json(node, value, depth + 1),
+        Value::Slice { source, start, end } => source
+            .get(*start..*end)
+            .ok_or_else(|| unsupported(node, "dynamic JSON slice bounds are invalid"))?
+            .iter()
+            .map(|value| encode_dynamic_json(node, value, depth + 1))
+            .collect::<Result<Vec<_>, _>>()
+            .map(serde_json::Value::Array),
+        _ => Err(unsupported(
+            node,
+            "runtime value is outside the dynamic JSON capability subset",
+        )),
+    }
+}
+
+fn decode_dynamic_json(json: &serde_json::Value) -> Value {
+    match json {
+        serde_json::Value::Null => Value::Unit,
+        serde_json::Value::Bool(value) => Value::Bool(*value),
+        serde_json::Value::Number(value) => value
+            .as_i64()
+            .map(Value::Int)
+            .or_else(|| value.as_f64().map(Value::Float))
+            .unwrap_or(Value::Unit),
+        serde_json::Value::String(value) => Value::String(value.clone()),
+        serde_json::Value::Array(values) => {
+            Value::List(values.iter().map(decode_dynamic_json).collect())
+        }
+        serde_json::Value::Object(object) => Value::Record(
+            None,
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), decode_dynamic_json(value)))
+                .collect(),
+        ),
+    }
+}
+
+fn sequence_values(value: &Value) -> Option<&[Value]> {
+    match value {
+        Value::List(values) | Value::Array(values) => Some(values),
+        Value::Slice { source, start, end } => source.get(*start..*end),
+        _ => None,
+    }
+}
+
+fn check_json_depth(node: &NodeId, depth: usize) -> Result<(), InterpError> {
+    if depth <= MAX_TYPED_JSON_DEPTH {
+        Ok(())
+    } else {
+        Err(unsupported(node, "typed JSON nesting limit exceeded"))
+    }
+}
+
+fn json_type_error(
+    node: &NodeId,
+    type_id: &ResolvedTypeId,
+    expected: &str,
+    value: &Value,
+) -> InterpError {
+    unsupported(
+        node,
+        &format!(
+            "canonical JSON type '{}' expects {expected}, found '{value}'",
+            type_id.as_str()
+        ),
+    )
+}
+
 fn eval_runtime_builtin(
     program: &CheckedProgram,
     state: &mut ExecutionState,
@@ -1546,6 +2504,8 @@ fn eval_builtin(
         "sum" => sum_values(name, &arguments),
         "keys" | "values" | "has_key" | "map_new" | "map_get" | "map_set" | "map_remove"
         | "map_size" | "map_from_list" => map_value_builtin(name, &arguments),
+        "json_is_valid" | "json_get_string" | "json_get_int" | "json_array_length"
+        | "json_get_element" | "json_has_key" => json_query_builtin(name, &arguments),
         _ => Err(unsupported(
             node,
             &format!("builtin '{name}' is outside the typed execution subset"),
@@ -1948,6 +2908,57 @@ fn map_value_builtin(name: &str, arguments: &[Value]) -> Result<Value, InterpErr
         _ => Err(InterpError::builtin_error(format!(
             "unknown map builtin '{name}'"
         ))),
+    }
+}
+
+fn json_query_builtin(name: &str, arguments: &[Value]) -> Result<Value, InterpError> {
+    let parse = |source: &str| {
+        serde_json::from_str::<serde_json::Value>(source)
+            .map_err(|error| InterpError::builtin_error(format!("{name} parse error: {error}")))
+    };
+    match (name, arguments) {
+        ("json_is_valid", [Value::String(source)]) => Ok(Value::Bool(
+            serde_json::from_str::<serde_json::Value>(source).is_ok(),
+        )),
+        ("json_get_string", [Value::String(source), Value::String(key)]) => {
+            let json = parse(source)?;
+            Ok(Value::String(match json.get(key) {
+                Some(serde_json::Value::String(value)) => value.clone(),
+                Some(value) => value.to_string(),
+                None => String::new(),
+            }))
+        }
+        ("json_get_int", [Value::String(source), Value::String(key)]) => {
+            let json = parse(source)?;
+            json.get(key)
+                .and_then(serde_json::Value::as_i64)
+                .map(Value::Int)
+                .ok_or_else(|| {
+                    InterpError::builtin_error(format!(
+                        "json_get_int: key '{key}' is missing or not an integer"
+                    ))
+                })
+        }
+        ("json_array_length", [Value::String(source)]) => parse(source)?
+            .as_array()
+            .map(|values| Value::Int(values.len() as i64))
+            .ok_or_else(|| InterpError::builtin_error("json_array_length expects an array")),
+        ("json_get_element", [Value::String(source), Value::Int(index)]) => {
+            let json = parse(source)?;
+            Ok(Value::String(
+                json.get(*index as usize)
+                    .map(serde_json::Value::to_string)
+                    .unwrap_or_default(),
+            ))
+        }
+        ("json_has_key", [Value::String(source), Value::String(key)]) => {
+            let json = parse(source)?;
+            Ok(Value::Bool(
+                json.as_object()
+                    .is_some_and(|object| object.contains_key(key)),
+            ))
+        }
+        _ => Err(builtin_type_error(name, "valid JSON query arguments")),
     }
 }
 
@@ -2548,7 +3559,7 @@ mod tests {
 
     #[test]
     fn typed_executor_fails_closed_without_raw_ast_builtin_fallback() {
-        let program = checked("func main() -> string { to_json(1) }");
+        let program = checked("func main() -> bool { regex_match(\"a\", \"a\") }");
         let main = program.function("main").expect("resolved main");
         let call_node = program
             .resolved_body(&main.node_id)
@@ -2559,7 +3570,7 @@ mod tests {
             .run_main()
             .expect_err("unsupported typed builtin must fail closed");
         assert!(error.message().contains(&call_node));
-        assert!(error.message().contains("builtin 'to_json'"));
+        assert!(error.message().contains("builtin 'regex_match'"));
     }
 
     #[test]
@@ -2739,6 +3750,7 @@ mod tests {
         for name in [
             "std_collections.mimi",
             "std_csv.mimi",
+            "std_json.mimi",
             "std_maps.mimi",
             "std_mymath.mimi",
             "std_prelude.mimi",
@@ -2797,6 +3809,98 @@ mod tests {
             ResolvedInterpreter::new(&program).run_main().unwrap(),
             Value::Int(0)
         );
+    }
+
+    #[test]
+    fn typed_json_uses_canonical_nested_type_arguments() {
+        let program = checked(
+            r#"
+            type Point { x: i32, labels: List<string> }
+            func main() -> i32 {
+                let point = from_json::<Point>("{\"x\":7,\"labels\":[\"a\",\"b\"]}")
+                let map = from_json::<Map<string, List<i32>>>("{\"a\":[1,2]}")
+                let option = from_json::<Option<(i32, string)>>("[7,\"x\"]")
+                let result = from_json::<Result<Set<i32>, string>>("[2,1,2]")
+                let pair = option.unwrap()
+                let values = result.unwrap()
+                if point.x == 7
+                    && point.labels[1] == "b"
+                    && pair.0 == 7
+                    && pair.1 == "x"
+                    && values.size() == 2
+                    && to_json(point) == "{\"labels\":[\"a\",\"b\"],\"x\":7}"
+                    && to_json(map) == "{\"a\":[1,2]}"
+                    && to_json(option) == "{\"Some\":[[7,\"x\"]]}"
+                    && to_json(result) == "{\"Ok\":[[1,2]]}"
+                    && json_is_valid("{\"n\":4,\"ok\":true}")
+                    && json_get_int("{\"n\":4}", "n") == 4
+                    && json_get_string("{\"ok\":true}", "ok") == "true"
+                    && json_array_length("[1,2]") == 2
+                    && json_get_element("[1,2]", 1) == "2"
+                    && json_has_key("{\"n\":4}", "n")
+                { 0 } else { 1 }
+            }
+            "#,
+        );
+        assert_eq!(
+            ResolvedInterpreter::new(&program).run_main().unwrap(),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn typed_json_type_mismatch_retains_checked_call_node() {
+        let program =
+            checked("func main() -> List<i32> { from_json::<List<i32>>(\"[1,\\\"bad\\\"]\") }");
+        let main = program.function("main").expect("resolved main");
+        let call_node = program
+            .resolved_body(&main.node_id)
+            .and_then(|body| body.root.result.as_deref())
+            .map(|expression| expression.node_id.0.clone())
+            .expect("typed JSON call node");
+        let error = ResolvedInterpreter::new(&program)
+            .run_main()
+            .expect_err("typed JSON mismatch must fail closed");
+        assert!(error.message().contains("expected integer"));
+        assert_eq!(error.ctx().operation.as_deref(), Some(call_node.as_str()));
+
+        let narrow = checked("func main() -> i32 { from_json::<i32>(\"2147483648\") }");
+        let error = ResolvedInterpreter::new(&narrow)
+            .run_main()
+            .expect_err("typed JSON integer narrowing must be checked");
+        assert!(error.message().contains("for I32"));
+    }
+
+    #[test]
+    fn typed_json_decodes_newtypes_and_unit_enums_without_surface_schema() {
+        let program = checked(
+            r#"
+            newtype UserId = i32
+            type Color { Red, Green }
+            func main() -> i32 {
+                let id = from_json::<UserId>("7")
+                let color = from_json::<Color>("\"Red\"")
+                if to_json(id) == "7" && to_json(color) == "\"Red\""
+                { 0 } else { 1 }
+            }
+            "#,
+        );
+        assert_eq!(
+            ResolvedInterpreter::new(&program).run_main().unwrap(),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn typed_json_payload_enum_fails_closed_at_canonical_schema_boundary() {
+        let program = checked(
+            "type Shape { Circle(f64) }\nfunc main() -> Shape { from_json::<Shape>(\"{\\\"Circle\\\":2.5}\") }",
+        );
+        let error = ResolvedInterpreter::new(&program)
+            .run_main()
+            .expect_err("payload enum needs canonical member types");
+        assert!(error.message().contains("canonical variant payload schema"));
+        assert!(error.ctx().operation.is_some());
     }
 
     #[test]
