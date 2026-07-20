@@ -642,8 +642,6 @@ impl CheckedProgram {
             zonked_func_types,
             zonked_nested_func_types,
             zonked_expr_types,
-            callable_cfgs,
-            resource_analyses,
             ..
         } = acc;
         let mut program = Self::from_checked_file_with_ownership(file, ownership_ledgers)?;
@@ -680,24 +678,6 @@ impl CheckedProgram {
                     func.node_id.clone(),
                     (resolved_params.clone(), resolved_ret.clone()),
                 );
-            }
-        }
-        if !errors.is_empty() {
-            return Err(errors);
-        }
-        for owner in callable_cfgs.keys() {
-            if !program.node_meta.contains_key(owner) {
-                errors.push(Diagnostic::error(
-                    format!(
-                        "TOOL-RESOLUTION-001: CFG owner '{}' is not a callable NodeId",
-                        owner.0
-                    ),
-                    callable_cfgs
-                        .get(owner)
-                        .and_then(|cfg| cfg.block(&cfg.entry))
-                        .map(|block| block.source.span)
-                        .unwrap_or(Span::UNKNOWN),
-                ));
             }
         }
         if !errors.is_empty() {
@@ -746,8 +726,9 @@ impl CheckedProgram {
                         .collect())
                 }
             };
-        program.callable_cfgs = callable_cfgs;
-        program.resource_analyses = resource_analyses;
+        program.callable_cfgs = crate::core::cfg::lower_resolved_bodies(&program.resolved_bodies)?;
+        program.resource_analyses =
+            crate::core::cfg::analyze_cfgs(&program.callable_cfgs, &program.ownership_ledgers)?;
         Ok(program)
     }
 

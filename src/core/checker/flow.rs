@@ -34,10 +34,6 @@ pub struct FlowAcc {
     /// a stable NodeId before returning the owned artifact.
     pub(crate) zonked_expr_types:
         BTreeMap<crate::core::NodeId, BTreeMap<crate::core::resolved::ExpressionTypeKey, ZonkedTy>>,
-    /// v0.31.3: Stable CFGs for every callable body.
-    pub callable_cfgs: BTreeMap<crate::core::NodeId, crate::core::cfg::CallableCfg>,
-    /// v0.31.3: Canonical fixed-point resource and loan facts.
-    pub resource_analyses: BTreeMap<crate::core::NodeId, crate::core::ResourceAnalysis>,
 }
 
 /// Checker state machine — 宽松 Flow.
@@ -129,21 +125,6 @@ impl<'a> CheckerState<'a> {
 fn extract_acc(checker: &mut Checker) -> FlowAcc {
     // v0.31.2: Finalize zonked function types before extraction.
     checker.finalize_zonked_func_types();
-    let callable_cfgs = match crate::core::cfg::lower_file(checker.file) {
-        Ok(cfgs) => cfgs,
-        Err(errors) => {
-            checker.errors.extend(errors);
-            BTreeMap::new()
-        }
-    };
-    let resource_analyses =
-        match crate::core::cfg::analyze_cfgs(&callable_cfgs, &checker.ownership_ledgers) {
-            Ok(analyses) => analyses,
-            Err(errors) => {
-                checker.errors.extend(errors);
-                BTreeMap::new()
-            }
-        };
     let mut seen: HashSet<super::DiagnosticDedupKey> = HashSet::new();
     let mut deduped: Vec<Diagnostic> = Vec::with_capacity(checker.errors.len());
     for e in std::mem::take(&mut checker.errors) {
@@ -160,8 +141,6 @@ fn extract_acc(checker: &mut Checker) -> FlowAcc {
         zonked_func_types: std::mem::take(&mut checker.zonked_func_types),
         zonked_nested_func_types: std::mem::take(&mut checker.zonked_nested_func_types),
         zonked_expr_types: std::mem::take(&mut checker.zonked_expr_types),
-        callable_cfgs,
-        resource_analyses,
     }
 }
 
