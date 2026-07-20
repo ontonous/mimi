@@ -30,6 +30,7 @@ struct ExecutionState {
     frames: Vec<Frame>,
     call_depth: usize,
     output: String,
+    cli_args: Vec<String>,
 }
 
 struct Frame {
@@ -80,6 +81,12 @@ impl<'a> ResolvedInterpreter<'a> {
             program,
             state: ExecutionState::default(),
         }
+    }
+
+    pub(crate) fn with_cli_args(program: &'a CheckedProgram, cli_args: Vec<String>) -> Self {
+        let mut interpreter = Self::new(program);
+        interpreter.state.cli_args = cli_args;
+        interpreter
     }
 
     pub(crate) fn run_main(&mut self) -> Result<Value, InterpError> {
@@ -2506,6 +2513,10 @@ fn eval_builtin(
         | "map_size" | "map_from_list" => map_value_builtin(name, &arguments),
         "json_is_valid" | "json_get_string" | "json_get_int" | "json_array_length"
         | "json_get_element" | "json_has_key" => json_query_builtin(name, &arguments),
+        "now" | "timestamp" | "now_ms" | "timestamp_ms" | "sleep" | "getenv" | "args"
+        | "read_file" | "write_file" | "file_exists" => {
+            external_value_builtin(state, name, &arguments)
+        }
         _ => Err(unsupported(
             node,
             &format!("builtin '{name}' is outside the typed execution subset"),
@@ -2960,6 +2971,86 @@ fn json_query_builtin(name: &str, arguments: &[Value]) -> Result<Value, InterpEr
         }
         _ => Err(builtin_type_error(name, "valid JSON query arguments")),
     }
+}
+
+fn external_value_builtin(
+    state: &ExecutionState,
+    name: &str,
+    arguments: &[Value],
+) -> Result<Value, InterpError> {
+    match (name, arguments) {
+        ("now" | "timestamp", []) => unix_timestamp(false),
+        ("now_ms" | "timestamp_ms", []) => unix_timestamp(true),
+        ("sleep", [Value::Int(milliseconds)]) if *milliseconds >= 0 => {
+            const MAX_SLEEP_MS: u64 = 24 * 60 * 60 * 1000;
+            std::thread::sleep(std::time::Duration::from_millis(
+                (*milliseconds as u64).min(MAX_SLEEP_MS),
+            ));
+            Ok(Value::Unit)
+        }
+        ("sleep", [Value::Int(_)]) => Err(InterpError::builtin_error(
+            "sleep expects non-negative milliseconds",
+        )),
+        ("getenv", [Value::String(variable)]) => match std::env::var(variable) {
+            Ok(value) => Ok(Value::Variant("Ok".into(), vec![Value::String(value)])),
+            Err(_) => Ok(Value::Variant(
+                "Err".into(),
+                vec![Value::String(format!("env var '{variable}' not set"))],
+            )),
+        },
+        ("args", []) => Ok(Value::List(
+            state.cli_args.iter().cloned().map(Value::String).collect(),
+        )),
+        ("read_file", [Value::String(path)]) => read_text_file(path),
+        ("write_file", [Value::String(path), Value::String(contents)]) => {
+            Ok(match std::fs::write(path, contents) {
+                Ok(()) => Value::Variant("Ok".into(), vec![Value::Unit]),
+                Err(error) => Value::Variant(
+                    "Err".into(),
+                    vec![Value::String(format!("write_file error: {error}"))],
+                ),
+            })
+        }
+        ("file_exists", [Value::String(path)]) => {
+            Ok(Value::Bool(std::path::Path::new(path).exists()))
+        }
+        _ => Err(builtin_type_error(name, "valid external builtin arguments")),
+    }
+}
+
+fn unix_timestamp(milliseconds: bool) -> Result<Value, InterpError> {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| InterpError::builtin_error(format!("time error: {error}")))?;
+    let value = if milliseconds {
+        i64::try_from(duration.as_millis())
+    } else {
+        i64::try_from(duration.as_secs())
+    }
+    .map_err(|_| InterpError::integer_overflow("Unix timestamp exceeds i64 range"))?;
+    Ok(Value::Int(value))
+}
+
+fn read_text_file(path: &str) -> Result<Value, InterpError> {
+    if let Ok(metadata) = std::fs::metadata(path) {
+        if metadata.len() > crate::path_safety::MAX_SOURCE_BYTES {
+            return Ok(Value::Variant(
+                "Err".into(),
+                vec![Value::String(format!(
+                    "read_file error: file too large ({} bytes, max {})",
+                    metadata.len(),
+                    crate::path_safety::MAX_SOURCE_BYTES
+                ))],
+            ));
+        }
+    }
+    Ok(match std::fs::read_to_string(path) {
+        Ok(contents) => Value::Variant("Ok".into(), vec![Value::String(contents)]),
+        Err(error) => Value::Variant(
+            "Err".into(),
+            vec![Value::String(format!("read_file error: {error}"))],
+        ),
+    })
 }
 
 fn contains_value(name: &str, arguments: &[Value]) -> Result<Value, InterpError> {
@@ -3750,6 +3841,9 @@ mod tests {
         for name in [
             "std_collections.mimi",
             "std_csv.mimi",
+            "std_datetime.mimi",
+            "std_env.mimi",
+            "std_io.mimi",
             "std_json.mimi",
             "std_maps.mimi",
             "std_mymath.mimi",
@@ -3757,12 +3851,17 @@ mod tests {
             "std_set.mimi",
             "std_strings.mimi",
             "std_template.mimi",
+            "std_time.mimi",
         ] {
             let program = checked_real_world(name);
-            let value = ResolvedInterpreter::new(&program)
+            let mut interpreter = ResolvedInterpreter::new(&program);
+            let value = interpreter
                 .run_main()
                 .unwrap_or_else(|error| panic!("typed fixture '{name}' failed: {error}"));
             assert_eq!(value, Value::Int(0), "typed fixture '{name}'");
+            if name == "std_io.mimi" {
+                assert_eq!(interpreter.output(), "io test ok\n");
+            }
         }
     }
 
@@ -3901,6 +4000,38 @@ mod tests {
             .expect_err("payload enum needs canonical member types");
         assert!(error.message().contains("canonical variant payload schema"));
         assert!(error.ctx().operation.is_some());
+    }
+
+    #[test]
+    fn typed_external_value_builtins_use_explicit_runtime_configuration() {
+        let path = format!(
+            "/tmp/mimi_typed_resolved_{}_external.txt",
+            std::process::id()
+        );
+        let source = format!(
+            r#"
+            func main() -> i32 {{
+                let configured = args()
+                let written = write_file("{path}", "typed body")
+                if written.is_err() {{ return 1 }}
+                match read_file("{path}") {{
+                    Ok(contents) => if len(configured) == 2
+                        && configured[0] == "alpha"
+                        && configured[1] == "beta"
+                        && file_exists("{path}")
+                        && contents == "typed body"
+                    {{ 0 }} else {{ 2 }},
+                    Err(_) => 3
+                }}
+            }}
+            "#
+        );
+        let program = checked(&source);
+        let mut interpreter =
+            ResolvedInterpreter::with_cli_args(&program, vec!["alpha".into(), "beta".into()]);
+        let result = interpreter.run_main();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(result.unwrap(), Value::Int(0));
     }
 
     #[test]
