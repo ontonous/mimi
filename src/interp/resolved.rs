@@ -524,13 +524,32 @@ fn eval_expr(
                         Ok(Value::Variant(name, arguments))
                     }
                 }
-                ResolvedCallee::Builtin(builtin) => eval_runtime_builtin(
-                    program,
-                    state,
-                    &expression.node_id,
-                    builtin.as_str(),
-                    arguments,
-                ),
+                ResolvedCallee::Builtin(builtin) => {
+                    let name = builtin.as_str();
+                    let result =
+                        eval_runtime_builtin(program, state, &expression.node_id, name, arguments)?;
+                    if name == "push" {
+                        let target = call
+                            .arguments
+                            .first()
+                            .and_then(|argument| match &argument.value.kind {
+                                ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                                    Some(place)
+                                }
+                                _ => None,
+                            })
+                            .ok_or_else(|| {
+                                unsupported(
+                                    &expression.node_id,
+                                    "push requires a direct resolved local place",
+                                )
+                            })?;
+                        write_place(program, state, body, target, result)?;
+                        Ok(Value::Unit)
+                    } else {
+                        Ok(result)
+                    }
+                }
                 ResolvedCallee::LocalClosure(local) => {
                     let callable = state
                         .frames
@@ -1391,6 +1410,142 @@ fn eval_builtin(
                 .map(|values| Value::String(values.join(separator))),
             _ => Err(builtin_type_error(name, "a string list and separator")),
         },
+        "str_char_at" => match arguments.as_slice() {
+            [Value::String(value), Value::Int(index)] => value
+                .chars()
+                .nth(*index as usize)
+                .map(|character| Value::String(character.to_string()))
+                .ok_or_else(|| {
+                    InterpError::index_out_of_bounds(format!(
+                        "str_char_at index {index} exceeds character length {}",
+                        value.chars().count()
+                    ))
+                }),
+            _ => Err(builtin_type_error(name, "a string and integer index")),
+        },
+        "str_substring" => match arguments.as_slice() {
+            [Value::String(value), Value::Int(start), Value::Int(end)] => {
+                let characters = value.chars().collect::<Vec<_>>();
+                let start = (*start as usize).min(characters.len());
+                let end = (*end as usize).min(characters.len());
+                if start > end {
+                    Err(InterpError::index_out_of_bounds(
+                        "str_substring start exceeds end",
+                    ))
+                } else {
+                    Ok(Value::String(characters[start..end].iter().collect()))
+                }
+            }
+            _ => Err(builtin_type_error(name, "a string and two integer indices")),
+        },
+        "str_replace" => match arguments.as_slice() {
+            [Value::String(value), Value::String(from), Value::String(to)] => {
+                Ok(Value::String(value.replace(from, to)))
+            }
+            _ => Err(builtin_type_error(name, "three strings")),
+        },
+        "str_repeat" => match arguments.as_slice() {
+            [Value::String(value), Value::Int(count)] if *count >= 0 => {
+                Ok(Value::String(value.repeat(*count as usize)))
+            }
+            _ => Err(builtin_type_error(
+                name,
+                "a string and non-negative integer",
+            )),
+        },
+        "str_index_of" => match arguments.as_slice() {
+            [Value::String(value), Value::String(needle)] => Ok(value
+                .find(needle)
+                .map(|byte_index| {
+                    Value::Variant(
+                        "Some".into(),
+                        vec![Value::Int(value[..byte_index].chars().count() as i64)],
+                    )
+                })
+                .unwrap_or_else(|| Value::Variant("None".into(), Vec::new()))),
+            _ => Err(builtin_type_error(name, "two strings")),
+        },
+        "char_code" => match arguments.as_slice() {
+            [Value::String(value), Value::Int(index)] => value
+                .chars()
+                .nth(*index as usize)
+                .map(|character| Value::Int(character as i64))
+                .ok_or_else(|| {
+                    InterpError::index_out_of_bounds(format!(
+                        "char_code index {index} exceeds character length {}",
+                        value.chars().count()
+                    ))
+                }),
+            _ => Err(builtin_type_error(name, "a string and integer index")),
+        },
+        "chr" => match arguments.as_slice() {
+            [Value::Int(code)] => u32::try_from(*code)
+                .ok()
+                .and_then(char::from_u32)
+                .map(|character| Value::String(character.to_string()))
+                .ok_or_else(|| InterpError::builtin_error(format!("invalid code point {code}"))),
+            _ => Err(builtin_type_error(name, "one integer code point")),
+        },
+        "push" => match arguments.as_slice() {
+            [Value::List(values), value] => {
+                let mut result = values.clone();
+                result.push(value.clone());
+                Ok(Value::List(result))
+            }
+            _ => Err(builtin_type_error(name, "a list and compatible value")),
+        },
+        "pop" => match arguments.as_slice() {
+            [Value::List(values)] => values
+                .last()
+                .cloned()
+                .ok_or_else(|| InterpError::builtin_error("pop from empty list")),
+            _ => Err(builtin_type_error(name, "one list")),
+        },
+        "sort" | "sort_f64" | "sort_str" => sort_values(name, &arguments),
+        "reverse" => match arguments.as_slice() {
+            [Value::List(values)] => {
+                let mut result = values.clone();
+                result.reverse();
+                Ok(Value::List(result))
+            }
+            _ => Err(builtin_type_error(name, "one list")),
+        },
+        "flatten" => match arguments.as_slice() {
+            [Value::List(values)] => Ok(Value::List(
+                values
+                    .iter()
+                    .flat_map(|value| match value {
+                        Value::List(inner) => inner.clone(),
+                        value => vec![value.clone()],
+                    })
+                    .collect(),
+            )),
+            _ => Err(builtin_type_error(name, "one list")),
+        },
+        "zip" => match arguments.as_slice() {
+            [Value::List(left), Value::List(right)] => Ok(Value::List(
+                left.iter()
+                    .zip(right)
+                    .map(|(left, right)| Value::Tuple(vec![left.clone(), right.clone()]))
+                    .collect(),
+            )),
+            _ => Err(builtin_type_error(name, "two lists")),
+        },
+        "enumerate" => match arguments.as_slice() {
+            [Value::List(values)] => Ok(Value::List(
+                values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        Value::Tuple(vec![Value::Int(index as i64), value.clone()])
+                    })
+                    .collect(),
+            )),
+            _ => Err(builtin_type_error(name, "one list")),
+        },
+        "sum" => sum_values(name, &arguments),
+        "keys" | "values" | "has_key" | "map_new" | "map_get" | "map_set" | "map_remove"
+        | "map_size" | "map_from_list" => map_value_builtin(name, &arguments),
         _ => Err(unsupported(
             node,
             &format!("builtin '{name}' is outside the typed execution subset"),
@@ -1653,6 +1808,146 @@ fn numeric_min_max(name: &str, arguments: &[Value]) -> Result<Value, InterpError
         }
         [Value::Float(left), Value::Float(right)] => Ok(Value::Float(left.max(*right))),
         _ => Err(builtin_type_error(name, "two numbers of the same type")),
+    }
+}
+
+fn sort_values(name: &str, arguments: &[Value]) -> Result<Value, InterpError> {
+    let [Value::List(values)] = arguments else {
+        return Err(builtin_type_error(name, "one list"));
+    };
+    let mut result = values.clone();
+    result.sort_by(|left, right| match (left, right) {
+        (Value::Int(left), Value::Int(right)) => left.cmp(right),
+        (Value::Float(left), Value::Float(right)) => {
+            left.partial_cmp(right)
+                .unwrap_or_else(|| match (left.is_nan(), right.is_nan()) {
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    _ => std::cmp::Ordering::Equal,
+                })
+        }
+        (Value::String(left), Value::String(right)) => left.cmp(right),
+        _ => std::cmp::Ordering::Equal,
+    });
+    Ok(Value::List(result))
+}
+
+fn sum_values(name: &str, arguments: &[Value]) -> Result<Value, InterpError> {
+    let [Value::List(values)] = arguments else {
+        return Err(builtin_type_error(name, "one numeric list"));
+    };
+    let mut integer = 0i64;
+    let mut float = 0.0;
+    let mut has_float = false;
+    for value in values {
+        match value {
+            Value::Int(value) => {
+                integer = integer
+                    .checked_add(*value)
+                    .ok_or_else(|| InterpError::integer_overflow("sum result exceeds i64 range"))?;
+            }
+            Value::Float(value) => {
+                float += value;
+                has_float = true;
+            }
+            _ => return Err(builtin_type_error(name, "one numeric list")),
+        }
+    }
+    if has_float {
+        Ok(Value::Float(float + integer as f64))
+    } else {
+        Ok(Value::Int(integer))
+    }
+}
+
+fn map_value_builtin(name: &str, arguments: &[Value]) -> Result<Value, InterpError> {
+    match name {
+        "map_new" => {
+            expect_arity(name, arguments, 0)?;
+            Ok(Value::Record(None, HashMap::new()))
+        }
+        "map_get" => match arguments {
+            [Value::Record(_, fields), Value::String(key)] => Ok(fields
+                .get(key)
+                .cloned()
+                .map(|value| Value::Tuple(vec![Value::Bool(true), value]))
+                .unwrap_or_else(|| Value::Tuple(vec![Value::Bool(false), Value::Int(0)]))),
+            _ => Err(builtin_type_error(name, "a record and string key")),
+        },
+        "map_set" => match arguments {
+            [Value::Record(nominal, fields), Value::String(key), value] => {
+                let mut result = fields.clone();
+                result.insert(key.clone(), value.clone());
+                Ok(Value::Record(nominal.clone(), result))
+            }
+            _ => Err(builtin_type_error(name, "a record, string key, and value")),
+        },
+        "map_remove" => match arguments {
+            [Value::Record(nominal, fields), Value::String(key)] => {
+                let mut result = fields.clone();
+                result.remove(key);
+                Ok(Value::Record(nominal.clone(), result))
+            }
+            _ => Err(builtin_type_error(name, "a record and string key")),
+        },
+        "map_size" => match arguments {
+            [Value::Record(_, fields)] => Ok(Value::Int(fields.len() as i64)),
+            _ => Err(builtin_type_error(name, "one record")),
+        },
+        "map_from_list" => match arguments {
+            [Value::List(pairs)] => {
+                let mut result = HashMap::new();
+                for pair in pairs {
+                    match pair {
+                        Value::Tuple(values) if values.len() == 2 => {
+                            let Value::String(key) = &values[0] else {
+                                return Err(builtin_type_error(
+                                    name,
+                                    "a list of (string, value) tuples",
+                                ));
+                            };
+                            result.insert(key.clone(), values[1].clone());
+                        }
+                        _ => {
+                            return Err(builtin_type_error(
+                                name,
+                                "a list of (string, value) tuples",
+                            ));
+                        }
+                    }
+                }
+                Ok(Value::Record(None, result))
+            }
+            _ => Err(builtin_type_error(name, "a list of (string, value) tuples")),
+        },
+        "has_key" => match arguments {
+            [Value::Record(_, fields), Value::String(key)] => {
+                Ok(Value::Bool(fields.contains_key(key)))
+            }
+            _ => Err(builtin_type_error(name, "a record and string key")),
+        },
+        "keys" | "values" => match arguments {
+            [Value::Record(_, fields)] => {
+                let mut entries = fields.iter().collect::<Vec<_>>();
+                entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+                Ok(Value::List(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| {
+                            if name == "keys" {
+                                Value::String(key.clone())
+                            } else {
+                                value.clone()
+                            }
+                        })
+                        .collect(),
+                ))
+            }
+            _ => Err(builtin_type_error(name, "one record")),
+        },
+        _ => Err(InterpError::builtin_error(format!(
+            "unknown map builtin '{name}'"
+        ))),
     }
 }
 
@@ -2178,6 +2473,7 @@ fn unsupported(node: &NodeId, detail: &str) -> InterpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn checked(source: &str) -> CheckedProgram {
         let tokens = crate::lexer::Lexer::new(source)
@@ -2187,6 +2483,26 @@ mod tests {
             .parse_file()
             .expect("parse typed interpreter fixture");
         crate::core::check_program(&file).expect("check typed interpreter fixture")
+    }
+
+    fn checked_real_world(name: &str) -> CheckedProgram {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let entry = root.join("tests/real_world").join(name);
+        let mut loader = crate::loader::ModuleLoader::new(
+            entry
+                .parent()
+                .expect("real-world fixture parent")
+                .to_path_buf(),
+        );
+        loader
+            .load_main(&entry)
+            .unwrap_or_else(|error| panic!("load typed fixture '{name}': {error}"));
+        let mut file = loader
+            .merge_all()
+            .unwrap_or_else(|error| panic!("merge typed fixture '{name}': {error}"));
+        crate::loader::merge_prelude_into(&mut file);
+        crate::core::check_program(&file)
+            .unwrap_or_else(|diagnostics| panic!("check typed fixture '{name}': {diagnostics:#?}"))
     }
 
     #[test]
@@ -2414,6 +2730,73 @@ mod tests {
                 .unwrap_or_else(|error| panic!("typed fixture '{name}' failed: {error}"));
             assert_eq!(value, Value::Int(0), "typed fixture '{name}'");
         }
+    }
+
+    #[test]
+    fn typed_real_world_pure_stdlib_suite_runs_from_merged_modules() {
+        // TOOL-RESOLUTION-001: imported stdlib bodies execute only from the
+        // checker-owned call, type, local, and place identities.
+        for name in [
+            "std_collections.mimi",
+            "std_csv.mimi",
+            "std_maps.mimi",
+            "std_mymath.mimi",
+            "std_prelude.mimi",
+            "std_set.mimi",
+            "std_strings.mimi",
+            "std_template.mimi",
+        ] {
+            let program = checked_real_world(name);
+            let value = ResolvedInterpreter::new(&program)
+                .run_main()
+                .unwrap_or_else(|error| panic!("typed fixture '{name}' failed: {error}"));
+            assert_eq!(value, Value::Int(0), "typed fixture '{name}'");
+        }
+    }
+
+    #[test]
+    fn typed_value_builtins_preserve_container_and_unicode_semantics() {
+        let program = checked(
+            r#"
+            func main() -> i32 {
+                let mut items = [3, 1]
+                push(items, 2)
+                let sorted = sort(items)
+                let reversed = reverse(sorted)
+                let flat = flatten([[1, 2], [3]])
+                let pairs = zip(sorted, [4, 5, 6])
+                let indexed = enumerate(sorted)
+                let map = map_from_list([("a", 1), ("b", 2)])
+                let map2 = map_remove(map_set(map, "c", 3), "a")
+                let lookup = map_get(map2, "c")
+                let position = str_index_of("aéz", "é")
+                if len(items) == 3
+                    && sorted[0] == 1
+                    && reversed[0] == 3
+                    && len(flat) == 3
+                    && pairs[0].0 == 1
+                    && indexed[2].0 == 2
+                    && sum(sorted) == 6
+                    && lookup.0
+                    && map_size(map2) == 2
+                    && has_key(map2, "b")
+                    && len(keys(map2)) == 2
+                    && len(values(map2)) == 2
+                    && str_char_at("aéz", 1) == "é"
+                    && str_substring("aéz", 1, 3) == "éz"
+                    && str_replace("aba", "a", "x") == "xbx"
+                    && str_repeat("é", 2) == "éé"
+                    && position.unwrap_or(-1) == 1
+                    && chr(char_code("é", 0)) == "é"
+                    && pop(items) == 2
+                { 0 } else { 1 }
+            }
+            "#,
+        );
+        assert_eq!(
+            ResolvedInterpreter::new(&program).run_main().unwrap(),
+            Value::Int(0)
+        );
     }
 
     #[test]
