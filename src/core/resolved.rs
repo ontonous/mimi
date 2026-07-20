@@ -561,8 +561,12 @@ pub struct ResolvedTypeDef {
     pub alias_of: Option<String>,
     /// Record/union fields: (name, type display).
     pub fields: Vec<(String, String)>,
+    /// Stable record/union field identities keyed by their display names.
+    pub field_ids: BTreeMap<String, NodeId>,
     /// Enum variants: (name, optional payload display).
     pub variants: Vec<(String, Option<String>)>,
+    /// Stable enum variant identities keyed by their display names.
+    pub variant_ids: BTreeMap<String, NodeId>,
     /// Complete checked declaration snapshot for declaration-only consumers.
     pub declaration: crate::ast::TypeDef,
     pub origin: Origin,
@@ -1198,6 +1202,65 @@ impl CheckedProgram {
         self.resolved_field_types.get(field)
     }
 
+    /// Return the checker-owned display name for a declaration member without
+    /// consulting its retained surface declaration. Consumers dispatch by the
+    /// `NodeId`; the name is only runtime/debug presentation metadata.
+    pub fn resolved_member_name<'a>(&'a self, member: &NodeId) -> Option<&'a str> {
+        for definition in self.type_defs.values() {
+            if let Some((name, _)) = definition
+                .field_ids
+                .iter()
+                .find(|(_, identity)| *identity == member)
+                .or_else(|| {
+                    definition
+                        .variant_ids
+                        .iter()
+                        .find(|(_, identity)| *identity == member)
+                })
+            {
+                return Some(name.as_str());
+            }
+        }
+        for actor in self.actors.values() {
+            if let Some((name, _)) = actor
+                .field_ids
+                .iter()
+                .find(|(_, identity)| *identity == member)
+            {
+                return Some(name.as_str());
+            }
+        }
+        for flow in self.flows.values() {
+            for state in flow.states.values() {
+                if let Some((name, _)) = state
+                    .field_ids
+                    .iter()
+                    .find(|(_, identity)| *identity == member)
+                {
+                    return Some(name.as_str());
+                }
+            }
+        }
+        match member.0.as_str() {
+            "builtin:variant:Option::Some" => Some("Some"),
+            "builtin:variant:Option::None" => Some("None"),
+            "builtin:variant:Result::Ok" => Some("Ok"),
+            "builtin:variant:Result::Err" => Some("Err"),
+            identity => builtin_record_schema(
+                identity
+                    .split_once("/field:")
+                    .map(|(owner, _)| owner)
+                    .unwrap_or_default(),
+            )
+            .and_then(|schema| {
+                schema
+                    .iter()
+                    .find(|(name, _)| identity.ends_with(&format!("/field:{name}")))
+                    .map(|(name, _)| *name)
+            }),
+        }
+    }
+
     pub fn resolved_type_targets(&self) -> &BTreeMap<NodeId, crate::core::ResolvedTypeId> {
         &self.resolved_type_targets
     }
@@ -1539,6 +1602,7 @@ fn collect_items(
             }
             Item::Type(type_def) => {
                 let qualified = qualify(module, &type_def.name);
+                let node_id = NodeId(format!("type:{}", qualified));
                 let fallback = type_def.meta.span;
                 let span = declaration_span(type_def.meta, fallback);
                 insert_item(
@@ -1558,7 +1622,9 @@ fn collect_items(
                 };
                 let mut alias_of = None;
                 let mut fields = Vec::new();
+                let mut field_ids = BTreeMap::new();
                 let mut variants = Vec::new();
+                let mut variant_ids = BTreeMap::new();
                 match &type_def.kind {
                     crate::ast::TypeDefKind::Alias(ty) | crate::ast::TypeDefKind::Newtype(ty) => {
                         if contains_unresolved_type(ty) {
@@ -1586,10 +1652,32 @@ fn collect_items(
                                 ));
                             }
                             fields.push((field.name.clone(), crate::core::fmt_type(&field.ty)));
+                            field_ids.insert(
+                                field.name.clone(),
+                                ids.anonymous(
+                                    &node_id,
+                                    "decl.field",
+                                    &format!("field.{}", stable_id_fragment(&field.name)),
+                                    usable_span(field.meta.span),
+                                    field.meta.origin,
+                                    errors,
+                                ),
+                            );
                         }
                     }
                     crate::ast::TypeDefKind::Enum(enum_variants) => {
                         for variant in enum_variants {
+                            variant_ids.insert(
+                                variant.name.clone(),
+                                ids.anonymous(
+                                    &node_id,
+                                    "decl.variant",
+                                    &format!("variant.{}", stable_id_fragment(&variant.name)),
+                                    usable_span(variant.meta.span),
+                                    variant.meta.origin,
+                                    errors,
+                                ),
+                            );
                             let payload = match &variant.payload {
                                 Some(crate::ast::VariantPayload::Tuple(types)) => {
                                     for ty in types {
@@ -1640,7 +1728,6 @@ fn collect_items(
                         }
                     }
                 }
-                let node_id = NodeId(format!("type:{}", qualified));
                 type_defs.insert(
                     node_id.clone(),
                     ResolvedTypeDef {
@@ -1649,7 +1736,9 @@ fn collect_items(
                         kind,
                         alias_of,
                         fields,
+                        field_ids,
                         variants,
+                        variant_ids,
                         declaration: type_def.clone(),
                         origin: resolve_named_origin(
                             ResolvedItemKind::Type,
@@ -9846,6 +9935,15 @@ func main() -> i32 { 0 }
         assert!(variants.iter().any(|(n, p)| n == "Red" && p.is_none()));
         assert!(variants.iter().any(|(n, _)| n == "Green"));
         assert!(variants.iter().any(|(n, _)| n == "Blue"));
+        let point = program.type_def("Point").expect("resolved Point");
+        let x = point.field_ids.get("x").expect("stable Point.x identity");
+        assert_eq!(program.resolved_member_name(x), Some("x"));
+        let color = program.type_def("Color").expect("resolved Color");
+        let blue = color
+            .variant_ids
+            .get("Blue")
+            .expect("stable Color::Blue identity");
+        assert_eq!(program.resolved_member_name(blue), Some("Blue"));
         let interp = crate::interp::Interpreter::from_checked(&program);
         assert!(interp
             .resolved_type_fields("Point")
