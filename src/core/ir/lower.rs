@@ -18,12 +18,12 @@ use crate::ast::{
 use crate::core::resolved::{
     expr_kind, expr_sibling_role, impl_method_owner, interpolation_role, map_entry_role,
     match_arm_role, nested_function_owner, pattern_kind, pattern_sibling_role, stable_id_fragment,
-    stmt_anchor, stmt_kind, stmt_sibling_role, type_kind, type_sibling_role, NodeIdBuilder,
+    stmt_anchor, stmt_kind, stmt_sibling_role, type_kind, NodeIdBuilder,
 };
 use crate::core::{
     CheckedProgram, NodeId, NodeMeta, Origin, ResolvedActor, ResolvedCallKind, ResolvedCallSite,
     ResolvedConstant, ResolvedExternBlock, ResolvedFunction, ResolvedImpl, ResolvedTrait,
-    ResolvedTypeDef, ResolvedTypeKind,
+    ResolvedTypeDef, ResolvedTypeKind, ResolvedVariantSchema, ResolvedVariantShape,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
@@ -49,6 +49,7 @@ pub struct FunctionBodyInput<'a> {
     pub signatures: &'a BTreeMap<NodeId, ResolvedSignature>,
     pub functions: &'a HashMap<NodeId, ResolvedFunction>,
     pub type_defs: &'a HashMap<NodeId, ResolvedTypeDef>,
+    pub variants: &'a BTreeMap<NodeId, ResolvedVariantSchema>,
     pub actors: &'a HashMap<NodeId, ResolvedActor>,
     pub flows: &'a HashMap<crate::core::FlowId, crate::core::ResolvedFlow>,
     pub traits: &'a HashMap<NodeId, ResolvedTrait>,
@@ -115,6 +116,7 @@ fn lower_function_body_with_captures(
         signatures: input.signatures,
         functions: input.functions,
         type_defs: input.type_defs,
+        variants: input.variants,
         actors: input.actors,
         flows: input.flows,
         traits: input.traits,
@@ -201,6 +203,7 @@ pub fn lower_checked_function_bodies(
                 signatures: program.resolved_signatures(),
                 functions: program.functions(),
                 type_defs: program.type_defs(),
+                variants: program.resolved_variants(),
                 actors: program.actors(),
                 flows: program.flows(),
                 traits: program.traits(),
@@ -293,6 +296,7 @@ pub fn lower_checked_transition_bodies(
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            variants: program.resolved_variants(),
             actors: program.actors(),
             flows: program.flows(),
             traits: program.traits(),
@@ -489,6 +493,9 @@ struct IfControlInput<'a> {
     has_tail_result: bool,
 }
 
+type InstantiatedVariantField = (String, NodeId, ResolvedTypeId);
+type InstantiatedVariant = (NodeId, Vec<InstantiatedVariantField>);
+
 struct BodyLowerer<'a> {
     owner: NodeId,
     fallback: Span,
@@ -497,6 +504,7 @@ struct BodyLowerer<'a> {
     signatures: &'a BTreeMap<NodeId, ResolvedSignature>,
     functions: &'a HashMap<NodeId, ResolvedFunction>,
     type_defs: &'a HashMap<NodeId, ResolvedTypeDef>,
+    variants: &'a BTreeMap<NodeId, ResolvedVariantSchema>,
     actors: &'a HashMap<NodeId, ResolvedActor>,
     flows: &'a HashMap<crate::core::FlowId, crate::core::ResolvedFlow>,
     traits: &'a HashMap<NodeId, ResolvedTrait>,
@@ -1248,40 +1256,19 @@ impl BodyLowerer<'_> {
                                 Some(ResolvedType::Nominal { item, .. }) => {
                                     let owner = NodeId(item.as_str().to_string());
                                     self.type_defs.get(&owner).and_then(|definition| {
-                                        match &definition.declaration.kind {
-                                            crate::ast::TypeDefKind::Enum(variants) => variants
-                                                .iter()
-                                                .find(|variant| {
-                                                    variant.name == *name
-                                                        && variant.payload.is_none()
-                                                })
-                                                .map(|variant| (owner, variant)),
-                                            _ => None,
-                                        }
+                                        (definition.kind == ResolvedTypeKind::Enum)
+                                            .then(|| definition.variant_ids.get(name))
+                                            .flatten()
+                                            .and_then(|variant| self.variants.get(variant))
+                                            .filter(|variant| {
+                                                variant.shape == ResolvedVariantShape::Unit
+                                            })
+                                            .map(|variant| variant.node_id.clone())
                                     })
                                 }
                                 _ => None,
                             };
-                            if let Some((owner, variant)) = unit_variants {
-                                let mut diagnostics = Vec::new();
-                                let variant_id = self.ids.anonymous(
-                                    &owner,
-                                    "decl.variant",
-                                    &format!("variant.{}", stable_id_fragment(name)),
-                                    usable_span(variant.meta.span),
-                                    variant.meta.origin,
-                                    &mut diagnostics,
-                                );
-                                if !diagnostics.is_empty()
-                                    || !self.node_meta.contains_key(&variant_id)
-                                {
-                                    return Err(vec![ResolvedBodyError::new(
-                                        node_id.clone(),
-                                        format!(
-                                            "unit variant '{name}' has no stable declaration identity"
-                                        ),
-                                    )]);
-                                }
+                            if let Some(variant_id) = unit_variants {
                                 ResolvedExprKind::Constant(variant_id)
                             } else {
                                 let candidates = self
@@ -1717,12 +1704,14 @@ impl BodyLowerer<'_> {
         };
         let owner = NodeId(nominal.as_str().to_string());
         let declared: Vec<String> = if let Some(definition) = self.type_defs.get(&owner) {
-            match &definition.declaration.kind {
-                crate::ast::TypeDefKind::Record(fields) => {
-                    fields.iter().map(|field| field.name.clone()).collect()
-                }
-                _ => return self.unsupported(node_id, "non-record nominal construction"),
+            if definition.kind != ResolvedTypeKind::Record {
+                return self.unsupported(node_id, "non-record nominal construction");
             }
+            definition
+                .fields
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect()
         } else if let Some(schema) = crate::core::resolved::builtin_record_schema(&owner.0) {
             schema.iter().map(|(name, _)| (*name).to_string()).collect()
         } else {
@@ -2792,81 +2781,11 @@ impl BodyLowerer<'_> {
         let Some(definition) = self.type_defs.get(&owner) else {
             return Ok(None);
         };
-        let crate::ast::TypeDefKind::Enum(variants) = &definition.declaration.kind else {
+        let Some((variant_id, declared)) =
+            self.instantiated_variant_fields(node_id, &result, definition, name)?
+        else {
             return Ok(None);
         };
-        let Some(variant) = variants.iter().find(|variant| variant.name == name) else {
-            return Ok(None);
-        };
-        let mut diagnostics = Vec::new();
-        let variant_id = self.ids.anonymous(
-            &owner,
-            "decl.variant",
-            &format!("variant.{}", stable_id_fragment(name)),
-            usable_span(variant.meta.span),
-            variant.meta.origin,
-            &mut diagnostics,
-        );
-        if !diagnostics.is_empty() || !self.node_meta.contains_key(&variant_id) {
-            return Err(vec![ResolvedBodyError::new(
-                node_id.clone(),
-                format!("variant '{name}' has no stable declaration identity"),
-            )]);
-        }
-        let declared = match &variant.payload {
-            Some(crate::ast::VariantPayload::Tuple(payload)) => {
-                let mut declared = Vec::with_capacity(payload.len());
-                for index in 0..payload.len() {
-                    let meta = payload[index].meta();
-                    let field = self.ids.anonymous(
-                        &variant_id,
-                        type_kind(&payload[index]),
-                        &type_sibling_role("payload.element", payload, index),
-                        meta.and_then(|meta| usable_span(meta.span)),
-                        meta.map(|meta| meta.origin).unwrap_or(AstOrigin::User),
-                        &mut diagnostics,
-                    );
-                    let declaration_ty = self.field_types.get(&field).ok_or_else(|| {
-                        vec![ResolvedBodyError::new(
-                            field.clone(),
-                            "enum tuple payload has no canonical declaration type",
-                        )]
-                    })?;
-                    let ty = self.instantiate_member_type(node_id, &result, declaration_ty)?;
-                    declared.push((format!("_{index}"), field, ty));
-                }
-                declared
-            }
-            Some(crate::ast::VariantPayload::Record(payload)) => {
-                let mut declared = Vec::with_capacity(payload.len());
-                for field in payload {
-                    let field_id = self.ids.anonymous(
-                        &variant_id,
-                        "decl.field",
-                        &format!("payload.field.{}", stable_id_fragment(&field.name)),
-                        usable_span(field.meta.span),
-                        field.meta.origin,
-                        &mut diagnostics,
-                    );
-                    let declaration_ty = self.field_types.get(&field_id).ok_or_else(|| {
-                        vec![ResolvedBodyError::new(
-                            field_id.clone(),
-                            "enum record payload has no canonical declaration type",
-                        )]
-                    })?;
-                    let ty = self.instantiate_member_type(node_id, &result, declaration_ty)?;
-                    declared.push((field.name.clone(), field_id, ty));
-                }
-                declared
-            }
-            None => Vec::new(),
-        };
-        if !diagnostics.is_empty() {
-            return Err(vec![ResolvedBodyError::new(
-                node_id.clone(),
-                format!("variant '{name}' payload identities are not stable"),
-            )]);
-        }
         if arguments.len() != declared.len() {
             return Err(vec![ResolvedBodyError::new(
                 node_id.clone(),
@@ -3493,83 +3412,9 @@ impl BodyLowerer<'_> {
         if let Some(ResolvedType::Nominal { item, .. }) = self.types.get(ty) {
             let owner = NodeId(item.as_str().to_string());
             if let Some(definition) = self.type_defs.get(&owner) {
-                if let crate::ast::TypeDefKind::Enum(variants) = &definition.declaration.kind {
-                    let Some(variant) = variants.iter().find(|variant| variant.name == name) else {
-                        return Ok(None);
-                    };
-                    let mut diagnostics = Vec::new();
-                    let variant_id = self.ids.anonymous(
-                        &owner,
-                        "decl.variant",
-                        &format!("variant.{}", stable_id_fragment(name)),
-                        usable_span(variant.meta.span),
-                        variant.meta.origin,
-                        &mut diagnostics,
-                    );
-                    if !diagnostics.is_empty() || !self.node_meta.contains_key(&variant_id) {
-                        return Err(vec![ResolvedBodyError::new(
-                            node_id.clone(),
-                            format!("variant '{name}' has no stable declaration identity"),
-                        )]);
-                    }
-                    let declared = match &variant.payload {
-                        Some(crate::ast::VariantPayload::Tuple(payload)) => {
-                            let mut declared = Vec::with_capacity(payload.len());
-                            for index in 0..payload.len() {
-                                let meta = payload[index].meta();
-                                let field = self.ids.anonymous(
-                                    &variant_id,
-                                    type_kind(&payload[index]),
-                                    &type_sibling_role("payload.element", payload, index),
-                                    meta.and_then(|meta| usable_span(meta.span)),
-                                    meta.map(|meta| meta.origin).unwrap_or(AstOrigin::User),
-                                    &mut diagnostics,
-                                );
-                                let declaration_ty =
-                                    self.field_types.get(&field).cloned().ok_or_else(|| {
-                                        vec![ResolvedBodyError::new(
-                                            field.clone(),
-                                            "enum tuple payload has no canonical declaration type",
-                                        )]
-                                    })?;
-                                let field_ty =
-                                    self.instantiate_member_type(node_id, ty, &declaration_ty)?;
-                                declared.push((format!("_{index}"), field, field_ty));
-                            }
-                            declared
-                        }
-                        Some(crate::ast::VariantPayload::Record(payload)) => {
-                            let mut declared = Vec::with_capacity(payload.len());
-                            for field in payload {
-                                let field_id = self.ids.anonymous(
-                                    &variant_id,
-                                    "decl.field",
-                                    &format!("payload.field.{}", stable_id_fragment(&field.name)),
-                                    usable_span(field.meta.span),
-                                    field.meta.origin,
-                                    &mut diagnostics,
-                                );
-                                let declaration_ty =
-                                    self.field_types.get(&field_id).cloned().ok_or_else(|| {
-                                        vec![ResolvedBodyError::new(
-                                            field_id.clone(),
-                                            "enum record payload has no canonical declaration type",
-                                        )]
-                                    })?;
-                                let field_ty =
-                                    self.instantiate_member_type(node_id, ty, &declaration_ty)?;
-                                declared.push((field.name.clone(), field_id, field_ty));
-                            }
-                            declared
-                        }
-                        None => Vec::new(),
-                    };
-                    if !diagnostics.is_empty() {
-                        return Err(vec![ResolvedBodyError::new(
-                            node_id.clone(),
-                            format!("variant '{name}' payload identities are not stable"),
-                        )]);
-                    }
+                if let Some((variant_id, declared)) =
+                    self.instantiated_variant_fields(node_id, ty, definition, name)?
+                {
                     let lowered =
                         self.lower_constructor_fields(node_id, fields, role, &declared, mutable)?;
                     return Ok(Some(ResolvedPatternKind::Constructor {
@@ -3851,38 +3696,18 @@ impl BodyLowerer<'_> {
         };
         let owner = NodeId(nominal.as_str().to_string());
         let field_id = if let Some(definition) = self.type_defs.get(&owner) {
-            let fields = match &definition.declaration.kind {
-                crate::ast::TypeDefKind::Record(fields)
-                | crate::ast::TypeDefKind::Union(fields) => fields,
-                _ => {
-                    return self.unsupported(node_id, "field projection on non-record nominal type")
-                }
-            };
-            let field = fields
-                .iter()
-                .find(|field| field.name == name)
-                .ok_or_else(|| {
-                    vec![ResolvedBodyError::new(
-                        node_id.clone(),
-                        format!("field '{name}' is absent from nominal owner '{}'", owner.0),
-                    )]
-                })?;
-            let mut diagnostics = Vec::new();
-            let field_id = self.ids.anonymous(
-                &owner,
-                "decl.field",
-                &format!("field.{}", stable_id_fragment(name)),
-                usable_span(field.meta.span),
-                field.meta.origin,
-                &mut diagnostics,
-            );
-            if !diagnostics.is_empty() {
-                return Err(vec![ResolvedBodyError::new(
-                    node_id.clone(),
-                    format!("field '{name}' has no stable declaration identity"),
-                )]);
+            if !matches!(
+                definition.kind,
+                ResolvedTypeKind::Record | ResolvedTypeKind::Union
+            ) {
+                return self.unsupported(node_id, "field projection on non-record nominal type");
             }
-            field_id
+            definition.field_ids.get(name).cloned().ok_or_else(|| {
+                vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("field '{name}' is absent from nominal owner '{}'", owner.0),
+                )]
+            })?
         } else if crate::core::resolved::builtin_record_schema(&owner.0)
             .is_some_and(|schema| schema.iter().any(|(field, _)| *field == name))
         {
@@ -3936,41 +3761,53 @@ impl BodyLowerer<'_> {
         if let Some(ResolvedType::Nominal { item, arguments }) = self.types.get(owner_ty) {
             let owner = NodeId(item.as_str().to_string());
             if let Some(definition) = self.type_defs.get(&owner) {
-                if definition.declaration.generics.len() != arguments.len() {
+                if definition.generic_parameters.len() != arguments.len() {
                     return Err(vec![ResolvedBodyError::new(
                         node_id.clone(),
                         format!(
                             "nominal owner '{}' has {} canonical arguments for {} generic binders",
                             owner.0,
                             arguments.len(),
-                            definition.declaration.generics.len()
+                            definition.generic_parameters.len()
                         ),
                     )]);
                 }
-                for (generic, argument) in definition.declaration.generics.iter().zip(arguments) {
-                    let mut diagnostics = Vec::new();
-                    let binder = self.ids.anonymous(
-                        &owner,
-                        "decl.generic_parameter",
-                        &format!("generic.{}", stable_id_fragment(&generic.name)),
-                        usable_span(generic.meta.span),
-                        generic.meta.origin,
-                        &mut diagnostics,
-                    );
-                    if !diagnostics.is_empty() || !self.node_meta.contains_key(&binder) {
-                        return Err(vec![ResolvedBodyError::new(
-                            node_id.clone(),
-                            format!(
-                                "generic binder '{}' has no stable declaration identity",
-                                generic.name
-                            ),
-                        )]);
-                    }
-                    substitutions.insert(binder, argument.clone());
+                for ((_, binder), argument) in definition.generic_parameters.iter().zip(arguments) {
+                    substitutions.insert(binder.clone(), argument.clone());
                 }
             }
         }
         self.substitute_member_type(node_id, declaration_ty, &substitutions)
+    }
+
+    fn instantiated_variant_fields(
+        &self,
+        node_id: &NodeId,
+        owner_ty: &ResolvedTypeId,
+        definition: &ResolvedTypeDef,
+        name: &str,
+    ) -> Result<Option<InstantiatedVariant>, Vec<ResolvedBodyError>> {
+        if definition.kind != ResolvedTypeKind::Enum {
+            return Ok(None);
+        }
+        let Some(variant_id) = definition.variant_ids.get(name) else {
+            return Ok(None);
+        };
+        let schema = self.variants.get(variant_id).ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                variant_id.clone(),
+                format!("enum variant '{name}' has no canonical payload schema"),
+            )]
+        })?;
+        let mut fields = Vec::with_capacity(schema.members.len());
+        for member in &schema.members {
+            fields.push((
+                member.name.clone(),
+                member.node_id.clone(),
+                self.instantiate_member_type(node_id, owner_ty, &member.ty)?,
+            ));
+        }
+        Ok(Some((variant_id.clone(), fields)))
     }
 
     fn substitute_member_type(
@@ -4945,6 +4782,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            variants: program.resolved_variants(),
             actors: program.actors(),
             flows: program.flows(),
             traits: program.traits(),
@@ -4988,6 +4826,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            variants: program.resolved_variants(),
             actors: program.actors(),
             flows: program.flows(),
             traits: program.traits(),
@@ -5023,6 +4862,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            variants: program.resolved_variants(),
             actors: program.actors(),
             flows: program.flows(),
             traits: program.traits(),
@@ -5072,6 +4912,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            variants: program.resolved_variants(),
             actors: program.actors(),
             flows: program.flows(),
             traits: program.traits(),
@@ -5117,6 +4958,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            variants: program.resolved_variants(),
             actors: program.actors(),
             flows: program.flows(),
             traits: program.traits(),
@@ -5256,6 +5098,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            variants: program.resolved_variants(),
             actors: program.actors(),
             flows: program.flows(),
             traits: program.traits(),
@@ -5296,6 +5139,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            variants: program.resolved_variants(),
             actors: program.actors(),
             flows: program.flows(),
             traits: program.traits(),
@@ -5342,6 +5186,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            variants: program.resolved_variants(),
             actors: program.actors(),
             flows: program.flows(),
             traits: program.traits(),
@@ -5445,6 +5290,7 @@ mod tests {
             signatures: program.resolved_signatures(),
             functions: program.functions(),
             type_defs: program.type_defs(),
+            variants: program.resolved_variants(),
             actors: program.actors(),
             flows: program.flows(),
             traits: program.traits(),

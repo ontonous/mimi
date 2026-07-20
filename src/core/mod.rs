@@ -45,8 +45,9 @@ pub use resolved::{
     ResolvedConstValue, ResolvedConstant, ResolvedExternBlock, ResolvedExternFunc, ResolvedFlow,
     ResolvedFunction, ResolvedImpl, ResolvedItem, ResolvedItemKind, ResolvedMethodSig,
     ResolvedProtocol, ResolvedProtocolState, ResolvedProtocolTransition, ResolvedSession,
-    ResolvedState, ResolvedTrait, ResolvedTypeDef, ResolvedTypeKind, SpanPrecision, StateId,
-    TransitionId, RESOLVED_IR_VERSION,
+    ResolvedState, ResolvedTrait, ResolvedTypeDef, ResolvedTypeKind, ResolvedVariantMember,
+    ResolvedVariantSchema, ResolvedVariantShape, SpanPrecision, StateId, TransitionId,
+    RESOLVED_IR_VERSION,
 };
 
 pub fn check(file: &File) -> Result<(), Vec<Diagnostic>> {
