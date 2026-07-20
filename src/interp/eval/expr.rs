@@ -188,250 +188,303 @@ impl<'a> Interpreter<'a> {
         let left = self.eval_expr(l)?;
         let right = self.eval_expr(r)?;
 
-        // Helper for mixed numeric arithmetic: any float operand promotes the
-        // whole operation to float, matching the typechecker's widening rules.
-        let float_binop = |a: f64, b: f64, op: &str| -> Result<Value, InterpError> {
-            let r = match op {
-                "+" => a + b,
-                "-" => a - b,
-                "*" => a * b,
-                "/" => {
-                    if b == 0.0 {
-                        return Err(InterpError::div_by_zero());
+        #[cfg(not(test))]
+        {
+            let resolved = match op {
+                BinOp::Add => crate::core::ir::ResolvedBinaryOp::Add,
+                BinOp::Sub => crate::core::ir::ResolvedBinaryOp::Subtract,
+                BinOp::Mul => crate::core::ir::ResolvedBinaryOp::Multiply,
+                BinOp::Div => crate::core::ir::ResolvedBinaryOp::Divide,
+                BinOp::Mod => crate::core::ir::ResolvedBinaryOp::Remainder,
+                BinOp::Pow => crate::core::ir::ResolvedBinaryOp::Power,
+                BinOp::EqCmp => crate::core::ir::ResolvedBinaryOp::Equal,
+                BinOp::NeCmp => crate::core::ir::ResolvedBinaryOp::NotEqual,
+                BinOp::Lt => crate::core::ir::ResolvedBinaryOp::Less,
+                BinOp::Gt => crate::core::ir::ResolvedBinaryOp::Greater,
+                BinOp::Le => crate::core::ir::ResolvedBinaryOp::LessEqual,
+                BinOp::Ge => crate::core::ir::ResolvedBinaryOp::GreaterEqual,
+                BinOp::And => crate::core::ir::ResolvedBinaryOp::LogicalAnd,
+                BinOp::Or => crate::core::ir::ResolvedBinaryOp::LogicalOr,
+                BinOp::BitAnd => crate::core::ir::ResolvedBinaryOp::BitAnd,
+                BinOp::BitOr => crate::core::ir::ResolvedBinaryOp::BitOr,
+                BinOp::BitXor => crate::core::ir::ResolvedBinaryOp::BitXor,
+                BinOp::Shl => crate::core::ir::ResolvedBinaryOp::ShiftLeft,
+                BinOp::Shr => crate::core::ir::ResolvedBinaryOp::ShiftRight,
+                BinOp::Range => match (left, right) {
+                    (Value::Int(start), Value::Int(end)) => return Ok(Value::Range { start, end }),
+                    (left, right) => {
+                        return Err(InterpError::new(format!(
+                            "cannot apply '..' to {} and {}",
+                            type_name(&left),
+                            type_name(&right)
+                        )))
                     }
-                    let v = a / b;
-                    if v.is_nan() {
-                        return Err(InterpError::float_error(format!("NaN from {} / {}", a, b)));
-                    }
-                    if v.is_infinite() {
-                        return Err(InterpError::float_error(format!(
-                            "infinity from {} / {}",
-                            a, b
-                        )));
-                    }
-                    v
-                }
-                "^" => {
-                    let v = a.powf(b);
-                    if v.is_nan() {
-                        return Err(InterpError::float_error(format!(
-                            "NaN from pow({}, {})",
-                            a, b
-                        )));
-                    }
-                    v
-                }
-                _ => {
-                    // The caller in `eval_binary` (below) routes only the
-                    // arithmetic operators through `float_binop`. If we reach
-                    // here it means a new op was added to the type checker
-                    // without being routed here — a compiler bug. In debug
-                    // the assertion fires; in release we surface it as a
-                    // runtime error instead of ICE.
-                    mimi_debug_assert!(false, "unsupported float binop {} reached float_binop", op);
-                    return Err(InterpError::float_error(format!(
-                        "unsupported float operator: {}",
-                        op
-                    )));
+                },
+                BinOp::Assign => {
+                    return Err(InterpError::new("assignment as expression not supported"))
                 }
             };
-            Ok(Value::Float(r))
-        };
+            crate::interp::ops::apply_binary(resolved, left, right)
+        }
 
-        match op {
-            BinOp::Add => match (&left, &right) {
-                (Value::String(a), Value::String(b)) => Ok(Value::String(format!("{}{}", a, b))),
-                (Value::Int(a), Value::Int(b)) => a
-                    .checked_add(*b)
-                    .ok_or_else(|| {
-                        InterpError::integer_overflow(format!(
-                            "integer overflow in addition: {} + {}",
-                            a, b
-                        ))
-                    })
-                    .map(Value::Int),
-                (Value::Float(a), Value::Float(b)) => float_binop(*a, *b, "+"),
-                (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => {
-                    float_binop(*a as f64, *b, "+")
-                }
-                _ => Err(InterpError::new(format!(
-                    "cannot apply '+' to {} and {}",
-                    type_name(&left),
-                    type_name(&right)
-                ))),
-            },
-            BinOp::Sub => match (&left, &right) {
-                (Value::Int(a), Value::Int(b)) => a
-                    .checked_sub(*b)
-                    .ok_or_else(|| {
-                        InterpError::integer_overflow(format!(
-                            "integer overflow in subtraction: {} - {}",
-                            a, b
-                        ))
-                    })
-                    .map(Value::Int),
-                (Value::Float(a), Value::Float(b)) => float_binop(*a, *b, "-"),
-                (Value::Int(a), Value::Float(b)) => float_binop(*a as f64, *b, "-"),
-                (Value::Float(a), Value::Int(b)) => float_binop(*a, *b as f64, "-"),
-                _ => Err(InterpError::new(format!(
-                    "cannot apply '-' to {} and {}",
-                    type_name(&left),
-                    type_name(&right)
-                ))),
-            },
-            BinOp::Mul => match (&left, &right) {
-                (Value::Int(a), Value::Int(b)) => a
-                    .checked_mul(*b)
-                    .ok_or_else(|| {
-                        InterpError::integer_overflow(format!(
-                            "integer overflow in multiplication: {} * {}",
-                            a, b
-                        ))
-                    })
-                    .map(Value::Int),
-                (Value::Float(a), Value::Float(b)) => float_binop(*a, *b, "*"),
-                (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => {
-                    float_binop(*a as f64, *b, "*")
-                }
-                _ => Err(InterpError::new(format!(
-                    "cannot apply '*' to {} and {}",
-                    type_name(&left),
-                    type_name(&right)
-                ))),
-            },
-            BinOp::Div => match (&left, &right) {
-                (Value::Int(_), Value::Int(0)) => Err(InterpError::div_by_zero()),
-                (Value::Int(a), Value::Int(b)) => a
-                    .checked_div(*b)
-                    .ok_or_else(|| {
-                        InterpError::integer_overflow(format!(
-                            "integer overflow in division: {} / {}",
-                            a, b
-                        ))
-                    })
-                    .map(Value::Int),
-                (Value::Float(a), Value::Float(b)) => float_binop(*a, *b, "/"),
-                (Value::Int(a), Value::Float(b)) => float_binop(*a as f64, *b, "/"),
-                (Value::Float(a), Value::Int(b)) => float_binop(*a, *b as f64, "/"),
-                _ => Err(InterpError::new(format!(
-                    "cannot apply '/' to {} and {}",
-                    type_name(&left),
-                    type_name(&right)
-                ))),
-            },
-            BinOp::Mod => match (&left, &right) {
-                (Value::Int(_), Value::Int(0)) => Err(InterpError::div_by_zero()),
-                (Value::Int(a), Value::Int(b)) => a
-                    .checked_rem(*b)
-                    .ok_or_else(|| {
-                        InterpError::integer_overflow(format!(
-                            "integer overflow in modulo: {} % {}",
-                            a, b
-                        ))
-                    })
-                    .map(Value::Int),
-                _ => Err(InterpError::new(format!(
-                    "cannot apply '%' to {} and {}",
-                    type_name(&left),
-                    type_name(&right)
-                ))),
-            },
-            BinOp::Pow => match (&left, &right) {
-                (Value::Int(_), Value::Int(b)) if *b < 0 => Err(InterpError::new(
-                    "negative exponent not supported for integers",
+        // The pre-ResolvedBody value operator remains only as a unit-test
+        // differential oracle while production execution uses `interp::ops`.
+        #[cfg(test)]
+        {
+            // Helper for mixed numeric arithmetic: any float operand promotes the
+            // whole operation to float, matching the typechecker's widening rules.
+            let float_binop = |a: f64, b: f64, op: &str| -> Result<Value, InterpError> {
+                let r = match op {
+                    "+" => a + b,
+                    "-" => a - b,
+                    "*" => a * b,
+                    "/" => {
+                        if b == 0.0 {
+                            return Err(InterpError::div_by_zero());
+                        }
+                        let v = a / b;
+                        if v.is_nan() {
+                            return Err(InterpError::float_error(format!(
+                                "NaN from {} / {}",
+                                a, b
+                            )));
+                        }
+                        if v.is_infinite() {
+                            return Err(InterpError::float_error(format!(
+                                "infinity from {} / {}",
+                                a, b
+                            )));
+                        }
+                        v
+                    }
+                    "^" => {
+                        let v = a.powf(b);
+                        if v.is_nan() {
+                            return Err(InterpError::float_error(format!(
+                                "NaN from pow({}, {})",
+                                a, b
+                            )));
+                        }
+                        v
+                    }
+                    _ => {
+                        // The caller in `eval_binary` (below) routes only the
+                        // arithmetic operators through `float_binop`. If we reach
+                        // here it means a new op was added to the type checker
+                        // without being routed here — a compiler bug. In debug
+                        // the assertion fires; in release we surface it as a
+                        // runtime error instead of ICE.
+                        mimi_debug_assert!(
+                            false,
+                            "unsupported float binop {} reached float_binop",
+                            op
+                        );
+                        return Err(InterpError::float_error(format!(
+                            "unsupported float operator: {}",
+                            op
+                        )));
+                    }
+                };
+                Ok(Value::Float(r))
+            };
+
+            match op {
+                BinOp::Add => match (&left, &right) {
+                    (Value::String(a), Value::String(b)) => {
+                        Ok(Value::String(format!("{}{}", a, b)))
+                    }
+                    (Value::Int(a), Value::Int(b)) => a
+                        .checked_add(*b)
+                        .ok_or_else(|| {
+                            InterpError::integer_overflow(format!(
+                                "integer overflow in addition: {} + {}",
+                                a, b
+                            ))
+                        })
+                        .map(Value::Int),
+                    (Value::Float(a), Value::Float(b)) => float_binop(*a, *b, "+"),
+                    (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => {
+                        float_binop(*a as f64, *b, "+")
+                    }
+                    _ => Err(InterpError::new(format!(
+                        "cannot apply '+' to {} and {}",
+                        type_name(&left),
+                        type_name(&right)
+                    ))),
+                },
+                BinOp::Sub => match (&left, &right) {
+                    (Value::Int(a), Value::Int(b)) => a
+                        .checked_sub(*b)
+                        .ok_or_else(|| {
+                            InterpError::integer_overflow(format!(
+                                "integer overflow in subtraction: {} - {}",
+                                a, b
+                            ))
+                        })
+                        .map(Value::Int),
+                    (Value::Float(a), Value::Float(b)) => float_binop(*a, *b, "-"),
+                    (Value::Int(a), Value::Float(b)) => float_binop(*a as f64, *b, "-"),
+                    (Value::Float(a), Value::Int(b)) => float_binop(*a, *b as f64, "-"),
+                    _ => Err(InterpError::new(format!(
+                        "cannot apply '-' to {} and {}",
+                        type_name(&left),
+                        type_name(&right)
+                    ))),
+                },
+                BinOp::Mul => match (&left, &right) {
+                    (Value::Int(a), Value::Int(b)) => a
+                        .checked_mul(*b)
+                        .ok_or_else(|| {
+                            InterpError::integer_overflow(format!(
+                                "integer overflow in multiplication: {} * {}",
+                                a, b
+                            ))
+                        })
+                        .map(Value::Int),
+                    (Value::Float(a), Value::Float(b)) => float_binop(*a, *b, "*"),
+                    (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => {
+                        float_binop(*a as f64, *b, "*")
+                    }
+                    _ => Err(InterpError::new(format!(
+                        "cannot apply '*' to {} and {}",
+                        type_name(&left),
+                        type_name(&right)
+                    ))),
+                },
+                BinOp::Div => match (&left, &right) {
+                    (Value::Int(_), Value::Int(0)) => Err(InterpError::div_by_zero()),
+                    (Value::Int(a), Value::Int(b)) => a
+                        .checked_div(*b)
+                        .ok_or_else(|| {
+                            InterpError::integer_overflow(format!(
+                                "integer overflow in division: {} / {}",
+                                a, b
+                            ))
+                        })
+                        .map(Value::Int),
+                    (Value::Float(a), Value::Float(b)) => float_binop(*a, *b, "/"),
+                    (Value::Int(a), Value::Float(b)) => float_binop(*a as f64, *b, "/"),
+                    (Value::Float(a), Value::Int(b)) => float_binop(*a, *b as f64, "/"),
+                    _ => Err(InterpError::new(format!(
+                        "cannot apply '/' to {} and {}",
+                        type_name(&left),
+                        type_name(&right)
+                    ))),
+                },
+                BinOp::Mod => match (&left, &right) {
+                    (Value::Int(_), Value::Int(0)) => Err(InterpError::div_by_zero()),
+                    (Value::Int(a), Value::Int(b)) => a
+                        .checked_rem(*b)
+                        .ok_or_else(|| {
+                            InterpError::integer_overflow(format!(
+                                "integer overflow in modulo: {} % {}",
+                                a, b
+                            ))
+                        })
+                        .map(Value::Int),
+                    _ => Err(InterpError::new(format!(
+                        "cannot apply '%' to {} and {}",
+                        type_name(&left),
+                        type_name(&right)
+                    ))),
+                },
+                BinOp::Pow => match (&left, &right) {
+                    (Value::Int(_), Value::Int(b)) if *b < 0 => Err(InterpError::new(
+                        "negative exponent not supported for integers",
+                    )),
+                    (Value::Int(a), Value::Int(b)) => a
+                        .checked_pow(*b as u32)
+                        .ok_or_else(|| {
+                            InterpError::integer_overflow(format!(
+                                "integer overflow in power: {} ^ {}",
+                                a, b
+                            ))
+                        })
+                        .map(Value::Int),
+                    (Value::Float(a), Value::Float(b)) => float_binop(*a, *b, "^"),
+                    (Value::Int(a), Value::Float(b)) => float_binop(*a as f64, *b, "^"),
+                    (Value::Float(a), Value::Int(b)) => float_binop(*a, *b as f64, "^"),
+                    _ => Err(InterpError::new(format!(
+                        "cannot apply '^' to {} and {}",
+                        type_name(&left),
+                        type_name(&right)
+                    ))),
+                },
+                BinOp::EqCmp => Ok(Value::Bool(values_equal(&left, &right))),
+                BinOp::NeCmp => Ok(Value::Bool(!values_equal(&left, &right))),
+                BinOp::Lt => compare_op(left, right, |o| o == std::cmp::Ordering::Less),
+                BinOp::Gt => compare_op(left, right, |o| o == std::cmp::Ordering::Greater),
+                BinOp::Le => compare_op(left, right, |o| o != std::cmp::Ordering::Greater),
+                BinOp::Ge => compare_op(left, right, |o| o != std::cmp::Ordering::Less),
+                BinOp::BitAnd => match (&left, &right) {
+                    (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a & b)),
+                    _ => Err(InterpError::new(format!(
+                        "cannot apply '&' to {} and {}",
+                        type_name(&left),
+                        type_name(&right)
+                    ))),
+                },
+                BinOp::BitOr => match (&left, &right) {
+                    (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a | b)),
+                    _ => Err(InterpError::new(format!(
+                        "cannot apply '|' to {} and {}",
+                        type_name(&left),
+                        type_name(&right)
+                    ))),
+                },
+                BinOp::BitXor => match (&left, &right) {
+                    (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a ^ b)),
+                    _ => Err(InterpError::new(format!(
+                        "cannot apply '^' to {} and {}",
+                        type_name(&left),
+                        type_name(&right)
+                    ))),
+                },
+                BinOp::Shl => match (&left, &right) {
+                    (Value::Int(a), Value::Int(b)) => a
+                        .checked_shl(*b as u32)
+                        .ok_or_else(|| {
+                            InterpError::integer_overflow(format!(
+                                "shift left overflow: {} << {}",
+                                a, b
+                            ))
+                        })
+                        .map(Value::Int),
+                    _ => Err(InterpError::new(format!(
+                        "cannot apply '<<' to {} and {}",
+                        type_name(&left),
+                        type_name(&right)
+                    ))),
+                },
+                BinOp::Shr => match (&left, &right) {
+                    (Value::Int(a), Value::Int(b)) => a
+                        .checked_shr(*b as u32)
+                        .ok_or_else(|| {
+                            InterpError::integer_overflow(format!(
+                                "shift right overflow: {} >> {}",
+                                a, b
+                            ))
+                        })
+                        .map(Value::Int),
+                    _ => Err(InterpError::new(format!(
+                        "cannot apply '>>' to {} and {}",
+                        type_name(&left),
+                        type_name(&right)
+                    ))),
+                },
+                BinOp::Range => match (&left, &right) {
+                    (Value::Int(a), Value::Int(b)) => Ok(Value::Range { start: *a, end: *b }),
+                    _ => Err(InterpError::new(format!(
+                        "cannot apply '..' to {} and {}",
+                        type_name(&left),
+                        type_name(&right)
+                    ))),
+                },
+                BinOp::Assign => Err(InterpError::new("assignment as expression not supported")),
+                BinOp::And | BinOp::Or => Err(InterpError::new(
+                    "logical and/or not supported in expression context",
                 )),
-                (Value::Int(a), Value::Int(b)) => a
-                    .checked_pow(*b as u32)
-                    .ok_or_else(|| {
-                        InterpError::integer_overflow(format!(
-                            "integer overflow in power: {} ^ {}",
-                            a, b
-                        ))
-                    })
-                    .map(Value::Int),
-                (Value::Float(a), Value::Float(b)) => float_binop(*a, *b, "^"),
-                (Value::Int(a), Value::Float(b)) => float_binop(*a as f64, *b, "^"),
-                (Value::Float(a), Value::Int(b)) => float_binop(*a, *b as f64, "^"),
-                _ => Err(InterpError::new(format!(
-                    "cannot apply '^' to {} and {}",
-                    type_name(&left),
-                    type_name(&right)
-                ))),
-            },
-            BinOp::EqCmp => Ok(Value::Bool(values_equal(&left, &right))),
-            BinOp::NeCmp => Ok(Value::Bool(!values_equal(&left, &right))),
-            BinOp::Lt => compare_op(left, right, |o| o == std::cmp::Ordering::Less),
-            BinOp::Gt => compare_op(left, right, |o| o == std::cmp::Ordering::Greater),
-            BinOp::Le => compare_op(left, right, |o| o != std::cmp::Ordering::Greater),
-            BinOp::Ge => compare_op(left, right, |o| o != std::cmp::Ordering::Less),
-            BinOp::BitAnd => match (&left, &right) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a & b)),
-                _ => Err(InterpError::new(format!(
-                    "cannot apply '&' to {} and {}",
-                    type_name(&left),
-                    type_name(&right)
-                ))),
-            },
-            BinOp::BitOr => match (&left, &right) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a | b)),
-                _ => Err(InterpError::new(format!(
-                    "cannot apply '|' to {} and {}",
-                    type_name(&left),
-                    type_name(&right)
-                ))),
-            },
-            BinOp::BitXor => match (&left, &right) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a ^ b)),
-                _ => Err(InterpError::new(format!(
-                    "cannot apply '^' to {} and {}",
-                    type_name(&left),
-                    type_name(&right)
-                ))),
-            },
-            BinOp::Shl => match (&left, &right) {
-                (Value::Int(a), Value::Int(b)) => a
-                    .checked_shl(*b as u32)
-                    .ok_or_else(|| {
-                        InterpError::integer_overflow(format!(
-                            "shift left overflow: {} << {}",
-                            a, b
-                        ))
-                    })
-                    .map(Value::Int),
-                _ => Err(InterpError::new(format!(
-                    "cannot apply '<<' to {} and {}",
-                    type_name(&left),
-                    type_name(&right)
-                ))),
-            },
-            BinOp::Shr => match (&left, &right) {
-                (Value::Int(a), Value::Int(b)) => a
-                    .checked_shr(*b as u32)
-                    .ok_or_else(|| {
-                        InterpError::integer_overflow(format!(
-                            "shift right overflow: {} >> {}",
-                            a, b
-                        ))
-                    })
-                    .map(Value::Int),
-                _ => Err(InterpError::new(format!(
-                    "cannot apply '>>' to {} and {}",
-                    type_name(&left),
-                    type_name(&right)
-                ))),
-            },
-            BinOp::Range => match (&left, &right) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Range { start: *a, end: *b }),
-                _ => Err(InterpError::new(format!(
-                    "cannot apply '..' to {} and {}",
-                    type_name(&left),
-                    type_name(&right)
-                ))),
-            },
-            BinOp::Assign => Err(InterpError::new("assignment as expression not supported")),
-            BinOp::And | BinOp::Or => Err(InterpError::new(
-                "logical and/or not supported in expression context",
-            )),
+            }
         }
     }
 
