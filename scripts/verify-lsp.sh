@@ -6,7 +6,7 @@ set -e
 MIMI_BIN="${1:-target/debug/mimi}"
 if [ ! -f "$MIMI_BIN" ]; then
   echo "Building mimi..."
-  LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo build --bin mimi 2>/dev/null
+  LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo build --bin mimi 2>/dev/null
 fi
 
 # Write a JSON-RPC message with Content-Length header to a file

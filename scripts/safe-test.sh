@@ -13,7 +13,7 @@ if [ ! -f /tmp/llvm-wrapper/bin/llvm-config ]; then
     bash "$SCRIPT_DIR/setup-llvm-wrapper.sh"
 fi
 
-export LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper
+export LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper
 
 # Memory limit: 80% of available RAM (leave headroom for OS)
 TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')

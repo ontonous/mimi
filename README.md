@@ -88,7 +88,7 @@ The compiler auto-completes the transition matrix — every undefined (state, ev
 git clone https://github.com/ontonous/mimi
 cd mimi
 bash scripts/setup-llvm-wrapper.sh
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo build --release
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo build --release
 ```
 
 ### Hello, Flow
@@ -129,7 +129,7 @@ func main() -> i32 {
 ### Run Tests
 
 ```bash
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
 ```
 
 ---
@@ -282,22 +282,22 @@ The compiler itself is built on the same Flow paradigm it compiles — each modu
 
 ```bash
 # Full test suite
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
 
 # Dual-backend equivalence (L1)
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test dual_
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test dual_
 
 # Type system soundness (L2)
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test "typecheck::"
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test "typecheck::"
 
 # Real-world MCDD test suite
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test real_world
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test real_world
 
 # Clippy (zero-warnings gate)
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
 
 # Format
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo fmt
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 ```
 
 > **Memory note**: `cargo test` in debug mode can use ~12 GB RAM. Use `ulimit -v 20000000` and `--test-threads=1` on memory-constrained systems. See [AGENTS.md](AGENTS.md) for details.

@@ -6,7 +6,7 @@ import subprocess, json, os, sys
 MIMI = sys.argv[1] if len(sys.argv) > 1 else "target/debug/mimi"
 if not os.path.exists(MIMI):
     subprocess.run(["cargo", "build", "--bin", "mimi"], check=True,
-                   env={**os.environ, "LLVM_SYS_180_PREFIX": "/tmp/llvm-wrapper"})
+                   env={**os.environ, "LLVM_SYS_181_PREFIX": "/tmp/llvm-wrapper"})
 
 def encode_msg(obj):
     body = json.dumps(obj, ensure_ascii=False)

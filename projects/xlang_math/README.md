@@ -10,7 +10,7 @@ make
 
 需要：
 - `mimi` 已构建在 `../../target/debug/mimi`
-- LLVM wrapper 已按 `AGENTS.md` 设置（`LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper`）
+- LLVM wrapper 已按 `AGENTS.md` 设置（`LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper`）
 - `rustc`、`gcc`、`g++`、`python3` + `pybind11`
 
 ## 运行

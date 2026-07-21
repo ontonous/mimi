@@ -88,7 +88,7 @@ flow Door {
 git clone https://github.com/ontonous/mimi
 cd mimi
 bash scripts/setup-llvm-wrapper.sh
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo build --release
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo build --release
 ```
 
 ### Hello, Flow
@@ -129,7 +129,7 @@ func main() -> i32 {
 ### 运行测试
 
 ```bash
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
 ```
 
 ---
@@ -282,22 +282,22 @@ mimi/
 
 ```bash
 # 全量测试
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
 
 # 双后端等价性（L1）
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test dual_
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test dual_
 
 # 类型系统健全性（L2）
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test "typecheck::"
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test "typecheck::"
 
 # 真实世界 MCDD 测试套件
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test real_world
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test real_world
 
 # Clippy（零警告门禁）
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
 
 # 格式化
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo fmt
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 ```
 
 > **内存注意**：`cargo test` debug 模式可能使用 ~12 GB 内存。内存受限环境请使用 `ulimit -v 20000000` 和 `--test-threads=1`。详见 [AGENTS.md](AGENTS.md)。

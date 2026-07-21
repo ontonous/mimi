@@ -4,12 +4,12 @@
 
 ```bash
 # Run all benchmarks
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo bench
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo bench
 
 # Run specific benchmark group
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo bench --bench parser
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo bench --bench codegen
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo bench --bench interp
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo bench --bench parser
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo bench --bench codegen
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo bench --bench interp
 
 # HTML report available at target/criterion/report/index.html
 ```

@@ -1943,6 +1943,7 @@ impl BodyLowerer<'_> {
             }
             let result = self.expression_type(node_id)?;
             if site.callee == "from_json"
+                && !type_arguments.is_empty()
                 && (type_arguments.len() != 1 || type_arguments.first() != Some(&result))
             {
                 return Err(vec![ResolvedBodyError::new(

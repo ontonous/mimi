@@ -14,10 +14,10 @@
 ## 基线门禁顺序
 
 ```bash
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test --no-run
-ulimit -v 20000000 && LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test -- --test-threads=1
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test v1_2_verification -- --test-threads=1
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test --no-run
+ulimit -v 20000000 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test -- --test-threads=1
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test v1_2_verification -- --test-threads=1
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
 cargo fmt -- --check
 python3 scripts/check_language_docs.py
 python3 scripts/check_v031_roadmap.py
