@@ -184,7 +184,14 @@ impl<'a> Checker<'a> {
             }
             Expr::Literal(l) => self.infer_literal(l),
             Expr::Ident(name) => self.lookup_var(name, scopes),
-            Expr::Call(callee, args) => self.infer_call_expr(callee, args, scopes),
+            Expr::Call(callee, args) => {
+                let previous = self
+                    .current_call_expression
+                    .replace(super::resolved::expression_type_key(expr));
+                let result = self.infer_call_expr(callee, args, scopes);
+                self.current_call_expression = previous;
+                result
+            }
             Expr::Field(obj, field) => self.infer_field_access(obj, field, scopes),
             Expr::Record { ty, fields } => self.infer_record_expr(ty, fields, scopes),
             Expr::Match(target, arms) => self.infer_match_expr(target, arms, scopes),

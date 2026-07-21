@@ -1,5 +1,8 @@
-use super::{EffectId, Permission, ResolvedParameterId, ResolvedTypeId, ResolvedTypeTable};
-use crate::core::NodeId;
+use super::{
+    ContractKind, EffectId, Permission, ResolvedBlock, ResolvedBody, ResolvedExpr,
+    ResolvedExprKind, ResolvedParameterId, ResolvedStmtKind, ResolvedTypeId, ResolvedTypeTable,
+};
+use crate::core::{cfg::CallableCfg, NodeId, Origin, ResourceAnalysis};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +24,149 @@ pub struct ResolvedSignature {
     pub parameters: Vec<ResolvedParameter>,
     pub result: ResolvedTypeId,
     pub effects: Vec<EffectId>,
+}
+
+/// A checker-owned contract attached to one callable body.
+#[derive(Debug, Clone)]
+pub struct ResolvedContract {
+    pub node_id: NodeId,
+    pub kind: ContractKind,
+    pub condition: ResolvedExpr,
+    pub origin: Origin,
+}
+
+/// Atomic semantic unit consumed by every executable backend.
+#[derive(Debug, Clone)]
+pub struct ResolvedCallable {
+    pub owner: NodeId,
+    pub signature: ResolvedSignature,
+    pub body: ResolvedBody,
+    pub contracts: Vec<ResolvedContract>,
+    pub cfg: CallableCfg,
+    pub resources: ResourceAnalysis,
+}
+
+impl ResolvedCallable {
+    pub(crate) fn assemble(
+        signature: ResolvedSignature,
+        body: ResolvedBody,
+        cfg: CallableCfg,
+        resources: ResourceAnalysis,
+    ) -> Result<Self, ResolvedSignatureError> {
+        let owner = signature.owner.clone();
+        if body.owner != owner || cfg.owner != owner || resources.owner != owner {
+            return Err(ResolvedSignatureError::new(
+                &owner,
+                "signature, body, CFG, and resource analysis owners disagree",
+            ));
+        }
+        let mut contracts = Vec::new();
+        collect_contracts(&body.root, &mut contracts);
+        Ok(Self {
+            owner,
+            signature,
+            body,
+            contracts,
+            cfg,
+            resources,
+        })
+    }
+}
+
+fn collect_contracts(block: &ResolvedBlock, out: &mut Vec<ResolvedContract>) {
+    for statement in &block.statements {
+        match &statement.kind {
+            ResolvedStmtKind::Contract { kind, condition } => out.push(ResolvedContract {
+                node_id: statement.node_id.clone(),
+                kind: *kind,
+                condition: condition.clone(),
+                origin: statement.origin.clone(),
+            }),
+            ResolvedStmtKind::While { condition, body } => {
+                collect_expr_contracts(condition, out);
+                collect_contracts(body, out);
+            }
+            ResolvedStmtKind::WhileLet {
+                initializer, body, ..
+            }
+            | ResolvedStmtKind::For {
+                iterable: initializer,
+                body,
+                ..
+            } => {
+                collect_expr_contracts(initializer, out);
+                collect_contracts(body, out);
+            }
+            ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
+                collect_contracts(body, out);
+            }
+            ResolvedStmtKind::Pinned {
+                value,
+                timeout,
+                body,
+                ..
+            } => {
+                collect_expr_contracts(value, out);
+                if let Some(timeout) = timeout {
+                    collect_expr_contracts(timeout, out);
+                }
+                collect_contracts(body, out);
+            }
+            ResolvedStmtKind::Bind { initializer, .. } => {
+                if let Some(initializer) = initializer {
+                    collect_expr_contracts(initializer, out);
+                }
+            }
+            ResolvedStmtKind::Assign { value, .. }
+            | ResolvedStmtKind::Expr(value)
+            | ResolvedStmtKind::Return {
+                value: Some(value), ..
+            }
+            | ResolvedStmtKind::Break(Some(value)) => collect_expr_contracts(value, out),
+            ResolvedStmtKind::Math(expressions) => {
+                for expression in expressions {
+                    collect_expr_contracts(expression, out);
+                }
+            }
+            ResolvedStmtKind::Return { value: None, .. }
+            | ResolvedStmtKind::Break(None)
+            | ResolvedStmtKind::Continue
+            | ResolvedStmtKind::Drop(_)
+            | ResolvedStmtKind::Delegate { .. }
+            | ResolvedStmtKind::NestedCallable(_) => {}
+        }
+    }
+    if let Some(result) = &block.result {
+        collect_expr_contracts(result, out);
+    }
+}
+
+fn collect_expr_contracts(expression: &ResolvedExpr, out: &mut Vec<ResolvedContract>) {
+    match &expression.kind {
+        ResolvedExprKind::Block(block)
+        | ResolvedExprKind::Scope { body: block, .. }
+        | ResolvedExprKind::Comptime(block)
+        | ResolvedExprKind::Quote(block) => collect_contracts(block, out),
+        ResolvedExprKind::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_expr_contracts(condition, out);
+            collect_contracts(then_block, out);
+            collect_contracts(else_block, out);
+        }
+        ResolvedExprKind::Match { scrutinee, arms } => {
+            collect_expr_contracts(scrutinee, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_expr_contracts(guard, out);
+                }
+                collect_expr_contracts(&arm.body, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

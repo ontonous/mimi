@@ -2251,6 +2251,7 @@ impl<'a> Checker<'a> {
             return Type::Name("unit".into(), vec![]);
         }
         if let Some((var, residual)) = self.residual_of_expr(&args[0], scopes) {
+            let before = residual.clone();
             match crate::session::apply_action(&residual, crate::session::SessionAction::Send) {
                 Ok((next, expected_ty)) => {
                     if let Some(et) = expected_ty {
@@ -2270,6 +2271,7 @@ impl<'a> Checker<'a> {
                         self.infer_expr(&args[1], scopes);
                     }
                     if let Some(v) = var {
+                        self.record_session_action(&v, before, next.clone(), false);
                         self.set_residual(&v, next);
                     }
                 }
@@ -2302,9 +2304,11 @@ impl<'a> Checker<'a> {
             return Type::Name("unknown".into(), vec![]);
         }
         if let Some((var, residual)) = self.residual_of_expr(&args[0], scopes) {
+            let before = residual.clone();
             match crate::session::apply_action(&residual, crate::session::SessionAction::Recv) {
                 Ok((next, payload_ty)) => {
                     if let Some(v) = var {
+                        self.record_session_action(&v, before, next.clone(), false);
                         self.set_residual(&v, next);
                     }
                     return payload_ty.unwrap_or_else(|| Type::Name("i64".into(), vec![]));
@@ -2340,9 +2344,11 @@ impl<'a> Checker<'a> {
             return Type::Name("unit".into(), vec![]);
         }
         if let Some((var, residual)) = self.residual_of_expr(&args[0], scopes) {
+            let before = residual.clone();
             match crate::session::apply_action(&residual, crate::session::SessionAction::Close) {
                 Ok((next, _)) => {
                     if let Some(v) = var {
+                        self.record_session_action(&v, before, next.clone(), true);
                         self.set_residual(&v, next);
                     }
                 }
@@ -2357,5 +2363,42 @@ impl<'a> Checker<'a> {
             self.infer_expr(&args[0], scopes);
         }
         Type::Name("unit".into(), vec![])
+    }
+
+    fn record_session_action(
+        &mut self,
+        endpoint: &str,
+        before: crate::ast::SessionType,
+        after: crate::ast::SessionType,
+        terminal: bool,
+    ) {
+        let (Some(owner), Some(call)) = (
+            self.current_callable_owner.clone(),
+            self.current_call_expression.clone(),
+        ) else {
+            self.errors.push(Diagnostic::error(
+                "TOOL-RESOLUTION-001: checked session action has no callable/call identity",
+                self.diagnostic_span(),
+            ));
+            return;
+        };
+        let action = crate::core::checker::flow::CheckedSessionAction {
+            endpoint: endpoint.to_string(),
+            before,
+            after,
+            terminal,
+        };
+        if self
+            .session_actions
+            .entry(owner)
+            .or_default()
+            .insert(call, action)
+            .is_some()
+        {
+            self.errors.push(Diagnostic::error(
+                "TOOL-RESOLUTION-001: one call advances a session more than once",
+                self.diagnostic_span(),
+            ));
+        }
     }
 }

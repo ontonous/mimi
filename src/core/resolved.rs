@@ -662,9 +662,11 @@ pub struct CheckedProgram {
     resolved_field_types: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     resolved_variants: BTreeMap<NodeId, ResolvedVariantSchema>,
     resolved_type_targets: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    resolved_session_actions: BTreeMap<NodeId, crate::core::ResolvedSessionAction>,
     resolved_bodies: BTreeMap<NodeId, crate::core::ResolvedBody>,
     callable_cfgs: BTreeMap<NodeId, crate::core::cfg::CallableCfg>,
     resource_analyses: BTreeMap<NodeId, crate::core::ResourceAnalysis>,
+    callables: BTreeMap<NodeId, crate::core::ResolvedCallable>,
 }
 
 impl CheckedProgram {
@@ -683,6 +685,7 @@ impl CheckedProgram {
             zonked_func_types,
             zonked_nested_func_types,
             zonked_expr_types,
+            session_actions,
             ..
         } = acc;
         let mut program = Self::from_checked_file_base(file)?;
@@ -725,6 +728,7 @@ impl CheckedProgram {
             return Err(errors);
         }
         let stable_expression_types = stabilize_expression_types(&program, &zonked_expr_types)?;
+        program.resolved_session_actions = stabilize_session_actions(&program, &session_actions)?;
         program.type_schemes = schemes;
         program.zonked_function_types = zonked_by_node;
         let (
@@ -777,6 +781,49 @@ impl CheckedProgram {
             &program.resolved_signatures,
             &program.resolved_types,
         )?;
+        let mut callables = BTreeMap::new();
+        for (owner, body) in &program.resolved_bodies {
+            let Some(signature) = program.resolved_signatures.get(owner).cloned() else {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: callable '{}' has no canonical signature",
+                        owner.0
+                    ),
+                    body.root.origin.user_span(),
+                ));
+                continue;
+            };
+            let Some(cfg) = program.callable_cfgs.get(owner).cloned() else {
+                errors.push(Diagnostic::error(
+                    format!("TOOL-RESOLUTION-001: callable '{}' has no CFG", owner.0),
+                    body.root.origin.user_span(),
+                ));
+                continue;
+            };
+            let Some(resources) = program.resource_analyses.get(owner).cloned() else {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: callable '{}' has no resource analysis",
+                        owner.0
+                    ),
+                    body.root.origin.user_span(),
+                ));
+                continue;
+            };
+            match crate::core::ResolvedCallable::assemble(signature, body.clone(), cfg, resources) {
+                Ok(callable) => {
+                    callables.insert(owner.clone(), callable);
+                }
+                Err(error) => errors.push(Diagnostic::error(
+                    format!("TOOL-RESOLUTION-001: {error}"),
+                    body.root.origin.user_span(),
+                )),
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        program.callables = callables;
         program.ownership_ledgers = program
             .resource_analyses
             .iter()
@@ -948,9 +995,11 @@ impl CheckedProgram {
             resolved_field_types: BTreeMap::new(),
             resolved_variants: BTreeMap::new(),
             resolved_type_targets: BTreeMap::new(),
+            resolved_session_actions: BTreeMap::new(),
             resolved_bodies: BTreeMap::new(),
             callable_cfgs: BTreeMap::new(),
             resource_analyses: BTreeMap::new(),
+            callables: BTreeMap::new(),
         })
     }
 
@@ -1324,6 +1373,19 @@ impl CheckedProgram {
         self.resolved_type_targets.get(definition)
     }
 
+    pub fn resolved_session_actions(
+        &self,
+    ) -> &BTreeMap<NodeId, crate::core::ResolvedSessionAction> {
+        &self.resolved_session_actions
+    }
+
+    pub fn resolved_session_action(
+        &self,
+        call: &NodeId,
+    ) -> Option<&crate::core::ResolvedSessionAction> {
+        self.resolved_session_actions.get(call)
+    }
+
     pub fn resolved_bodies(&self) -> &BTreeMap<NodeId, crate::core::ResolvedBody> {
         &self.resolved_bodies
     }
@@ -1346,6 +1408,14 @@ impl CheckedProgram {
 
     pub fn resource_analysis(&self, owner: &NodeId) -> Option<&crate::core::ResourceAnalysis> {
         self.resource_analyses.get(owner)
+    }
+
+    pub fn callables(&self) -> &BTreeMap<NodeId, crate::core::ResolvedCallable> {
+        &self.callables
+    }
+
+    pub fn callable(&self, owner: &NodeId) -> Option<&crate::core::ResolvedCallable> {
+        self.callables.get(owner)
     }
 
     pub fn entry_span(&self) -> Option<Span> {
@@ -7054,6 +7124,92 @@ fn stabilize_expression_types(
     }
 }
 
+fn stabilize_session_actions(
+    program: &CheckedProgram,
+    ephemeral: &BTreeMap<
+        NodeId,
+        BTreeMap<ExpressionTypeKey, crate::core::checker::flow::CheckedSessionAction>,
+    >,
+) -> Result<BTreeMap<NodeId, crate::core::ResolvedSessionAction>, Vec<Diagnostic>> {
+    let mut stable = BTreeMap::new();
+    let mut errors = Vec::new();
+    for (owner, actions) in ephemeral {
+        let owner_prefix = format!("{}/", owner.0);
+        let keys = program
+            .node_meta
+            .values()
+            .filter(|meta| meta.node_id.0.starts_with(&owner_prefix))
+            .filter_map(|meta| {
+                meta.expression_key
+                    .as_ref()
+                    .map(|key| (key.clone(), meta.node_id.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (key, action) in actions {
+            let Some(call) = keys.get(key) else {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: session action in '{}' has no stable call NodeId",
+                        owner.0
+                    ),
+                    program
+                        .node_meta
+                        .get(owner)
+                        .map(|meta| meta.origin.user_span())
+                        .unwrap_or(Span::UNKNOWN),
+                ));
+                continue;
+            };
+            let before =
+                match crate::core::SessionResidualId::new(format_session_type(&action.before)) {
+                    Ok(before) => before,
+                    Err(error) => {
+                        errors.push(Diagnostic::error(
+                            format!("TOOL-RESOLUTION-001: {error}"),
+                            program.node_meta[call].origin.user_span(),
+                        ));
+                        continue;
+                    }
+                };
+            let after_text = if action.terminal {
+                "closed".to_string()
+            } else {
+                format_session_type(&action.after)
+            };
+            let after = match crate::core::SessionResidualId::new(after_text) {
+                Ok(after) => after,
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!("TOOL-RESOLUTION-001: {error}"),
+                        program.node_meta[call].origin.user_span(),
+                    ));
+                    continue;
+                }
+            };
+            let fact = crate::core::ResolvedSessionAction {
+                endpoint: action.endpoint.clone(),
+                before,
+                after,
+                terminal: action.terminal,
+            };
+            if stable.insert(call.clone(), fact).is_some() {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: call '{}' has duplicate session actions",
+                        call.0
+                    ),
+                    program.node_meta[call].origin.user_span(),
+                ));
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(stable)
+    } else {
+        Err(errors)
+    }
+}
+
 fn build_canonical_function_signatures(
     program: &CheckedProgram,
     expression_types: &StableExpressionTypes,
@@ -7070,6 +7226,23 @@ fn build_canonical_function_signatures(
         for key in keys {
             catalog.entry(key).or_default().insert(identity.0.clone());
         }
+    }
+
+    /// Resolve a name only when the checker-owned catalog contains one exact
+    /// type-bearing declaration. Flow containers are excluded below; their
+    /// concrete states, rather than the container name, are value types.
+    fn resolve_nominal(
+        catalog: &BTreeMap<String, std::collections::BTreeSet<String>>,
+        name: &str,
+    ) -> Option<crate::core::ResolvedTypeName> {
+        let candidates = catalog.get(name)?;
+        if candidates.len() == 1 {
+            let identity = candidates.iter().next()?.clone();
+            return crate::core::NominalTypeId::new(identity)
+                .ok()
+                .map(crate::core::ResolvedTypeName::Nominal);
+        }
+        None
     }
 
     fn builtin_nominal(name: &str) -> Option<crate::core::NominalTypeId> {
@@ -7116,7 +7289,6 @@ fn build_canonical_function_signatures(
         register_nominal(&mut nominal_catalog, &actor.qualified_name, &actor.node_id);
     }
     for flow in program.flows.values() {
-        register_nominal(&mut nominal_catalog, &flow.id.0, &flow.node_id);
         for state in flow.states.values() {
             register_nominal(
                 &mut nominal_catalog,
@@ -7245,13 +7417,8 @@ fn build_canonical_function_signatures(
                     }
                 }
             }
-            if let Some(candidates) = nominal_catalog.get(name) {
-                if candidates.len() == 1 {
-                    let identity = candidates.iter().next()?.clone();
-                    return crate::core::NominalTypeId::new(identity)
-                        .ok()
-                        .map(crate::core::ResolvedTypeName::Nominal);
-                }
+            if let Some(resolved) = resolve_nominal(&nominal_catalog, name) {
+                return Some(resolved);
             }
             builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal)
         };
@@ -7625,12 +7792,8 @@ fn build_canonical_function_signatures(
                     }
                 }
             }
-            if let Some(candidates) = nominal_catalog.get(name) {
-                if candidates.len() == 1 {
-                    return crate::core::NominalTypeId::new(candidates.iter().next()?.clone())
-                        .ok()
-                        .map(crate::core::ResolvedTypeName::Nominal);
-                }
+            if let Some(resolved) = resolve_nominal(&nominal_catalog, name) {
+                return Some(resolved);
             }
             builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal)
         };
@@ -7709,34 +7872,76 @@ fn build_canonical_function_signatures(
         if failed {
             continue;
         }
-        let result_type = transition
-            .targets
-            .first()
-            .map(|target| Type::Name(format!("{}::{}", target.flow.0, target.name), Vec::new()))
-            .unwrap_or_else(|| Type::Name("unit".into(), Vec::new()));
-        let result = match ZonkedTy::from_resolved(result_type) {
-            Ok(ty) => match types.intern_zonked(&ty, &capabilities, &mut resolve_name) {
-                Ok(ty) => ty,
+        let result = if transition.targets.len() > 1 {
+            let flow = match crate::core::NominalTypeId::new(format!(
+                "flow:{}",
+                transition.id.flow.0
+            )) {
+                Ok(flow) => flow,
                 Err(error) => {
                     errors.push(Diagnostic::error(
                         format!(
-                            "TOOL-RESOLUTION-001: transition '{}' result type is not canonical: {error}",
+                            "TOOL-RESOLUTION-001: transition '{}' Flow identity is invalid: {error}",
                             transition.node_id.0
                         ),
                         transition.span,
                     ));
                     continue;
                 }
-            },
-            Err(error) => {
-                errors.push(Diagnostic::error(
-                    format!(
-                        "TOOL-RESOLUTION-001: transition '{}' result type is not zonked: {error}",
-                        transition.node_id.0
-                    ),
-                    transition.span,
-                ));
-                continue;
+            };
+            let states = transition
+                .targets
+                .iter()
+                .map(|target| {
+                    crate::core::NominalTypeId::new(format!(
+                        "state:{}::{}",
+                        target.flow.0, target.name
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>();
+            match states.and_then(|states| types.intern_flow_state_set(flow, states)) {
+                Ok(result) => result,
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: transition '{}' target set is not canonical: {error}",
+                            transition.node_id.0
+                        ),
+                        transition.span,
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            let result_type = transition
+                .targets
+                .first()
+                .map(|target| Type::Name(format!("{}::{}", target.flow.0, target.name), Vec::new()))
+                .unwrap_or_else(|| Type::Name("unit".into(), Vec::new()));
+            match ZonkedTy::from_resolved(result_type) {
+                Ok(ty) => match types.intern_zonked(&ty, &capabilities, &mut resolve_name) {
+                    Ok(ty) => ty,
+                    Err(error) => {
+                        errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: transition '{}' result type is not canonical: {error}",
+                                transition.node_id.0
+                            ),
+                            transition.span,
+                        ));
+                        continue;
+                    }
+                },
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: transition '{}' result type is not zonked: {error}",
+                            transition.node_id.0
+                        ),
+                        transition.span,
+                    ));
+                    continue;
+                }
             }
         };
         if let Some(expressions) = expression_types.get(&transition.node_id) {
@@ -7878,12 +8083,8 @@ fn build_canonical_function_signatures(
                     }
                 }
             }
-            if let Some(candidates) = nominal_catalog.get(name) {
-                if candidates.len() == 1 {
-                    return crate::core::NominalTypeId::new(candidates.iter().next()?.clone())
-                        .ok()
-                        .map(crate::core::ResolvedTypeName::Nominal);
-                }
+            if let Some(resolved) = resolve_nominal(&nominal_catalog, name) {
+                return Some(resolved);
             }
             builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal)
         };
@@ -8067,12 +8268,8 @@ fn build_canonical_function_signatures(
                     }
                 }
             }
-            if let Some(candidates) = nominal_catalog.get(name) {
-                if candidates.len() == 1 {
-                    return crate::core::NominalTypeId::new(candidates.iter().next()?.clone())
-                        .ok()
-                        .map(crate::core::ResolvedTypeName::Nominal);
-                }
+            if let Some(resolved) = resolve_nominal(&nominal_catalog, name) {
+                return Some(resolved);
             }
             builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal)
         };
@@ -8143,12 +8340,8 @@ fn build_canonical_function_signatures(
                     }
                 }
             }
-            if let Some(candidates) = nominal_catalog.get(name) {
-                if candidates.len() == 1 {
-                    return crate::core::NominalTypeId::new(candidates.iter().next()?.clone())
-                        .ok()
-                        .map(crate::core::ResolvedTypeName::Nominal);
-                }
+            if let Some(resolved) = resolve_nominal(&nominal_catalog, name) {
+                return Some(resolved);
             }
             builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal)
         };
@@ -8752,6 +8945,109 @@ func main() -> i32 { 0 }
             session.body.unlocated(),
             crate::ast::SessionType::Send(_, _)
         ));
+    }
+
+    #[test]
+    fn session_calls_materialize_residuals_and_resource_transfers() {
+        let file = parse(
+            r#"
+session S = !i32 . ?i32 . end
+func client(ch: SessionChan<S>) -> i64 {
+    session_send(ch, 1)
+    let value = session_recv(ch)
+    session_close(ch)
+    value
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let mut actions = program
+            .resolved_session_actions()
+            .values()
+            .collect::<Vec<_>>();
+        actions.sort_by(|left, right| left.before.as_str().cmp(right.before.as_str()));
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions.iter().filter(|action| action.terminal).count(), 1);
+        assert!(actions
+            .iter()
+            .any(|action| action.before.as_str().starts_with("!i32.")));
+        assert!(actions
+            .iter()
+            .any(|action| action.before.as_str().starts_with("?i32.")));
+        assert!(actions
+            .iter()
+            .any(|action| action.terminal && action.after.as_str() == "closed"));
+
+        let client = program.function("client").expect("client");
+        let analysis = program
+            .resource_analysis(&client.node_id)
+            .expect("client resource analysis");
+        assert_eq!(
+            analysis
+                .actions
+                .iter()
+                .filter(|action| {
+                    action.kind == crate::core::CanonicalActionKind::TransferSession
+                })
+                .count(),
+            2
+        );
+        assert!(analysis.actions.iter().any(|action| {
+            action.kind == crate::core::CanonicalActionKind::Drop
+                && action
+                    .source
+                    .as_ref()
+                    .is_some_and(|place| place.display() == "ch")
+        }));
+    }
+
+    #[test]
+    fn multi_target_transition_signature_uses_closed_state_set() {
+        let file = parse(
+            r#"
+flow Choice {
+    state Start
+    state Left
+    state Right
+    transition choose(Start) -> Left | Right {
+        return Left
+    }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check");
+        let transition = program
+            .transitions()
+            .values()
+            .find(|transition| {
+                transition.id.event == "choose"
+                    && transition.id.source.name == "Start"
+                    && !transition.is_fallback
+            })
+            .expect("choose transition");
+        let signature = program
+            .resolved_signature(&transition.node_id)
+            .expect("transition signature");
+        assert!(matches!(
+            program.resolved_types().get(&signature.result),
+            Some(crate::core::ResolvedType::FlowStateSet { states, .. }) if states.len() == 2
+        ));
+    }
+
+    #[test]
+    fn callable_catalog_atomically_owns_body_cfg_and_resources() {
+        let file = parse("func add(x: i32) -> i32 { x + 1 }\nfunc main() -> i32 { add(1) }");
+        let program = crate::core::check_program(&file).expect("check");
+        assert_eq!(program.callables().len(), program.resolved_bodies().len());
+        for (owner, callable) in program.callables() {
+            assert_eq!(owner, &callable.owner);
+            assert_eq!(owner, &callable.signature.owner);
+            assert_eq!(owner, &callable.body.owner);
+            assert_eq!(owner, &callable.cfg.owner);
+            assert_eq!(owner, &callable.resources.owner);
+        }
     }
 
     #[test]

@@ -33,6 +33,21 @@ pub struct FlowAcc {
     /// a stable NodeId before returning the owned artifact.
     pub(crate) zonked_expr_types:
         BTreeMap<crate::core::NodeId, BTreeMap<crate::core::resolved::ExpressionTypeKey, ZonkedTy>>,
+    /// Session residual changes captured while the checker still owns the
+    /// surface session algebra. `CheckedProgram` replaces the temporary keys
+    /// and AST residuals before crossing its owned boundary.
+    pub(crate) session_actions: BTreeMap<
+        crate::core::NodeId,
+        BTreeMap<crate::core::resolved::ExpressionTypeKey, CheckedSessionAction>,
+    >,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CheckedSessionAction {
+    pub endpoint: String,
+    pub before: SessionType,
+    pub after: SessionType,
+    pub terminal: bool,
 }
 
 /// Checker state machine — 宽松 Flow.
@@ -139,6 +154,7 @@ fn extract_acc(checker: &mut Checker) -> FlowAcc {
         zonked_func_types: std::mem::take(&mut checker.zonked_func_types),
         zonked_nested_func_types: std::mem::take(&mut checker.zonked_nested_func_types),
         zonked_expr_types: std::mem::take(&mut checker.zonked_expr_types),
+        session_actions: std::mem::take(&mut checker.session_actions),
     }
 }
 

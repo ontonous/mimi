@@ -88,6 +88,12 @@ pub(crate) struct Checker<'a> {
     /// Residual protocol for variables typed as `SessionChan<S>` within the
     /// current function body (order checking for session_send/recv/close).
     pub(crate) session_residuals: HashMap<String, crate::ast::SessionType>,
+    /// Per-call session residual facts keyed by the clone-stable call node.
+    pub(crate) session_actions: std::collections::BTreeMap<
+        super::NodeId,
+        std::collections::BTreeMap<super::resolved::ExpressionTypeKey, flow::CheckedSessionAction>,
+    >,
+    pub(crate) current_call_expression: Option<super::resolved::ExpressionTypeKey>,
     /// v0.29.23: names of `view`-borrowed params in the current function.
     pub(crate) view_params: std::collections::HashSet<String>,
     /// v0.29.23: names of `mutate`-borrowed params in the current function.
@@ -218,6 +224,8 @@ impl<'a> Checker<'a> {
             multi_target_vars: HashMap::new(),
             session_types: HashMap::new(),
             session_residuals: HashMap::new(),
+            session_actions: std::collections::BTreeMap::new(),
+            current_call_expression: None,
             view_params: std::collections::HashSet::new(),
             mutate_params: std::collections::HashSet::new(),
             in_pinned_depth: 0,

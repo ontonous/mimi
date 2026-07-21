@@ -543,6 +543,16 @@ impl<'a> ActionEmitter<'a> {
                 }
                 if !matches!(call.permission, Some(Permission::View | Permission::Mutate)) {
                     for argument in &call.arguments {
+                        let transferred_endpoint = match &argument.value.kind {
+                            ResolvedExprKind::Load(place) if place.projections.is_empty() => call
+                                .session
+                                .iter()
+                                .any(|transition| transition.endpoint == place.base),
+                            _ => false,
+                        };
+                        if transferred_endpoint {
+                            continue;
+                        }
                         self.emit_consumes(
                             CanonicalActionKind::Move,
                             self.capability_places(&argument.value),
@@ -557,10 +567,14 @@ impl<'a> ActionEmitter<'a> {
                         &expression.node_id,
                         &expression.origin,
                         ActionDraft {
-                            kind: CanonicalActionKind::TransferSession,
+                            kind: if transition.terminal {
+                                CanonicalActionKind::Drop
+                            } else {
+                                CanonicalActionKind::TransferSession
+                            },
                             resource: self.resource_for_local(&transition.endpoint),
                             source: Some(place.clone()),
-                            target: Some(place),
+                            target: (!transition.terminal).then_some(place),
                             loan: None,
                         },
                     );

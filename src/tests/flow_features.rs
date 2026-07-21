@@ -437,10 +437,10 @@ flow SafeFFI {
             {
                 assert!(timeout.is_some());
                 assert_eq!(var.as_deref(), Some("ptr"));
-                match expr {
+                match expr.unlocated() {
                     Expr::Field(obj, name) => {
                         assert_eq!(name, "buffer");
-                        assert!(matches!(obj.as_ref(), Expr::Ident(s) if s == "self"));
+                        assert!(matches!(obj.unlocated(), Expr::Ident(s) if s == "self"));
                     }
                     _ => panic!("expected self.buffer field access"),
                 }
@@ -2849,7 +2849,10 @@ flow Parent { state Working { child: CIdle } }
                     assert_eq!(ct, "CIdle");
                     assert_eq!(cfields.len(), 1);
                     assert_eq!(cfields[0].name, "n");
-                    assert!(matches!(cfields[0].value, Expr::Literal(Lit::Int(0))));
+                    assert!(matches!(
+                        cfields[0].value.unlocated(),
+                        Expr::Literal(Lit::Int(0))
+                    ));
                 }
                 other => panic!("expected nested CIdle record default, got {:?}", other),
             }
@@ -3095,13 +3098,13 @@ session T = dual(S)
     match &file.items[0] {
         Item::Session(s) => {
             assert_eq!(s.name, "S");
-            match &s.body {
+            match s.body.unlocated() {
                 SessionType::Send(t, cont) => {
                     assert!(matches!(t.unlocated(), Type::Name(n, _) if n == "i32"));
-                    match cont.as_ref() {
+                    match cont.unlocated() {
                         SessionType::Recv(t2, cont2) => {
                             assert!(matches!(t2.unlocated(), Type::Name(n, _) if n == "string"));
-                            assert_eq!(cont2.as_ref(), &SessionType::End);
+                            assert_eq!(cont2.unlocated(), &SessionType::End);
                         }
                         other => panic!("expected Recv, got {:?}", other),
                     }
