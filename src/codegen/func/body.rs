@@ -364,7 +364,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         place: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<Option<PointerValue<'ctx>>> {
-        match place {
+        // v0.31.6: match on `place.unlocated()`. Span/Origin (v0.31.1) wraps
+        // place expressions in `Expr::Located`; without unlocating, a nested
+        // place like `o.inner` (Located(Field(..))) fell through to `_ => None`
+        // and `o.inner.x = v` lost the write to a temporary copy (I-H7).
+        match place.unlocated() {
             Expr::Ident(name) => {
                 if self.shared_var_names.contains(name.as_str()) {
                     return Ok(None);

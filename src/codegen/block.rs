@@ -1608,68 +1608,73 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                 }
-                Stmt::Assign {
-                    target: Expr::Ident(name),
-                    value,
-                } => {
-                    let val = self.compile_expr(value, vars)?;
-                    // Normalize string values for consistent alloca types
-                    let val = self.normalize_string_value(val, value)?;
-                    // Inflate narrow variant structs (from Err/None) to match the
-                    // variable's declared struct layout (e.g. {i1,i64,i64} → {i1,{ptr,i64},i64}).
-                    let val = if let Some(decl_ty) = self.var_types.get(name) {
-                        self.inflate_variant_struct(val, decl_ty)?
-                    } else {
-                        val
-                    };
-                    if let Some(&(alloca, ty)) = vars.get(name) {
-                        // Transfer ownership: for string concat/fstring results,
-                        // pop the heap registration and register the variable
-                        // slot so the data is not freed at end of scope.
-                        let is_string_val = self
-                            .var_type_names
-                            .get(name)
-                            .map(|t| t == "string")
-                            .unwrap_or(false);
-                        let is_temp = matches!(
-                            value,
-                            Expr::Binary(BinOp::Add, _, _) | Expr::Literal(Lit::FString(_))
-                        );
-                        if is_string_val && is_temp {
-                            self.pop_last_heap_ptr();
-                            if let BasicTypeEnum::StructType(st) = ty {
-                                if st.get_field_types().len() == 2 {
-                                    self.register_heap_slot_root(alloca, st, 0);
+                Stmt::Assign { target, value } => {
+                    // v0.31.6: match on `target.unlocated()`. Span/Origin (v0.31.1)
+                    // wraps the assignment target in `Expr::Located`, so the previous
+                    // per-shape patterns (`target: Expr::Ident(..)` / `Field` / `Index`
+                    // / `Unary(Deref)`) missed Located-wrapped targets and silently
+                    // dropped the store into the `_ => {}` arm — e.g. `if true { x = 5 }`
+                    // compiled to an empty then-block. Mirrors `compile_assign_stmt`,
+                    // which already unlocates the target.
+                    match target.unlocated() {
+                        Expr::Ident(name) => {
+                            let val = self.compile_expr(value, vars)?;
+                            // Normalize string values for consistent alloca types
+                            let val = self.normalize_string_value(val, value)?;
+                            // Inflate narrow variant structs (from Err/None) to match the
+                            // variable's declared struct layout (e.g. {i1,i64,i64} → {i1,{ptr,i64},i64}).
+                            let val = if let Some(decl_ty) = self.var_types.get(name) {
+                                self.inflate_variant_struct(val, decl_ty)?
+                            } else {
+                                val
+                            };
+                            if let Some(&(alloca, ty)) = vars.get(name) {
+                                // Transfer ownership: for string concat/fstring results,
+                                // pop the heap registration and register the variable
+                                // slot so the data is not freed at end of scope.
+                                let is_string_val = self
+                                    .var_type_names
+                                    .get(name)
+                                    .map(|t| t == "string")
+                                    .unwrap_or(false);
+                                let is_temp = matches!(
+                                    value.unlocated(),
+                                    Expr::Binary(BinOp::Add, _, _) | Expr::Literal(Lit::FString(_))
+                                );
+                                if is_string_val && is_temp {
+                                    self.pop_last_heap_ptr();
+                                    if let BasicTypeEnum::StructType(st) = ty {
+                                        if st.get_field_types().len() == 2 {
+                                            self.register_heap_slot_root(alloca, st, 0);
+                                        }
+                                    }
                                 }
+                                self.assign_to_var(name, val, alloca, ty)?;
+                                last_val = val;
                             }
                         }
-                        self.assign_to_var(name, val, alloca, ty)?;
-                        last_val = val;
+                        Expr::Field(obj, field_name) => {
+                            let val = self.compile_expr(value, vars)?;
+                            self.compile_field_assign(obj, field_name, val, vars)?;
+                            last_val = val;
+                        }
+                        Expr::Index(obj, idx) => {
+                            let val = self.compile_expr(value, vars)?;
+                            self.compile_index_assign(obj, idx, val, vars)?;
+                            last_val = val;
+                        }
+                        Expr::Unary(crate::ast::UnOp::Deref, inner) => {
+                            let val = self.compile_expr(value, vars)?;
+                            self.compile_deref_assign(inner, val, vars)?;
+                            last_val = val;
+                        }
+                        other => {
+                            return Err(CompileError::LlvmError(format!(
+                                "unsupported assignment target in value position: {:?}",
+                                other
+                            )));
+                        }
                     }
-                }
-                Stmt::Assign {
-                    target: Expr::Field(obj, field_name),
-                    value,
-                } => {
-                    let val = self.compile_expr(value, vars)?;
-                    self.compile_field_assign(obj, field_name, val, vars)?;
-                    last_val = val;
-                }
-                Stmt::Assign {
-                    target: Expr::Index(obj, idx),
-                    value,
-                } => {
-                    let val = self.compile_expr(value, vars)?;
-                    self.compile_index_assign(obj, idx, val, vars)?;
-                    last_val = val;
-                }
-                Stmt::Assign {
-                    target: Expr::Unary(crate::ast::UnOp::Deref, inner),
-                    value,
-                } => {
-                    let val = self.compile_expr(value, vars)?;
-                    self.compile_deref_assign(inner, val, vars)?;
-                    last_val = val;
                 }
                 Stmt::If { cond, then_, else_ } => {
                     if let Some(v) = self.compile_if_stmt(cond, then_, else_, vars, false)? {
