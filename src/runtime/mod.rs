@@ -17554,7 +17554,11 @@ impl RegexEngine {
         if pi < plen && pattern[pi] == b'^' {
             pi += 1;
         }
-        loop {
+        // v0.31.6: this was a `loop` that never iterated (clippy::never_loop).
+        // Every branch returns; pattern advancement is handled by the recursive
+        // `match_with_captures(&pattern[after..], ..)` calls, not by looping.
+        // A plain block preserves the exact single-pass control flow.
+        {
             if pi >= plen {
                 return Some(ti);
             }
