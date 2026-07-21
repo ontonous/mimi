@@ -61,19 +61,22 @@ impl<'a> Checker<'a> {
                     };
                     if name == "Some" && args.len() == 1 {
                         if let Some(inner) = option_inner {
-                            self.check_expr(inner, &args[0], scopes);
+                            let actual = self.check_expr(inner, &args[0], scopes);
+                            self.freeze_variant_payload(inner, &actual);
                             return expected.clone();
                         }
                     } else if name == "None" && args.is_empty() && option_inner.is_some() {
                         return expected.clone();
                     } else if name == "Ok" && args.len() == 1 {
                         if let Some((ok, _)) = result_parts {
-                            self.check_expr(ok, &args[0], scopes);
+                            let actual = self.check_expr(ok, &args[0], scopes);
+                            self.freeze_variant_payload(ok, &actual);
                             return expected.clone();
                         }
                     } else if name == "Err" && args.len() == 1 {
                         if let Some((_, error)) = result_parts {
-                            self.check_expr(error, &args[0], scopes);
+                            let actual = self.check_expr(error, &args[0], scopes);
+                            self.freeze_variant_payload(error, &actual);
                             return expected.clone();
                         }
                     }
@@ -152,6 +155,48 @@ impl<'a> Checker<'a> {
             }
             // For all other expressions, fall back to inference
             _ => self.infer_expr(expr, scopes),
+        }
+    }
+
+    /// IF-C2: freeze a variant payload type against its actual value.
+    ///
+    /// `let mut a = None` binds `a` to `Option<?T>` with a *monomorphic*
+    /// inference variable (mut bindings are not generalized — value
+    /// restriction). Before this fix, `a = Some(1)` echoed the expected
+    /// `Option<?T>` back without binding `?T`, so the variable escaped
+    /// unfrozen and a later `a = Some("x")` was wrongly accepted.
+    ///
+    /// Unifying the expected payload (`?T`) with the actual payload (`i32`)
+    /// binds the variable on first construction; a subsequent construction
+    /// with a different payload then fails unification. Numeric/trait
+    /// coercions and unresolved placeholders (Infer/unknown) are exempt so
+    /// `Some(1)` into `Option<i64>` and not-yet-resolved generics still work.
+    fn freeze_variant_payload(&mut self, expected_inner: &Type, actual: &Type) {
+        match actual.unlocated() {
+            Type::Infer => return,
+            Type::Name(n, _) if n == "unknown" => return,
+            _ => {}
+        }
+        if self.unification.unify(expected_inner, actual).is_err() {
+            // Mimi implicitly coerces between numeric widths in *both*
+            // directions (e.g. std::env::get_int returns `Ok(parsed.1)` where
+            // the parser yields i64 into a `Result<i32, string>`). Preserve
+            // that leniency: only reject genuine category mismatches
+            // (string into i32) and non-coercible trait payloads.
+            let both_numeric = crate::core::helpers::is_numeric(expected_inner)
+                && crate::core::helpers::is_numeric(actual);
+            if !both_numeric
+                && !crate::core::helpers::is_trait_coercion(expected_inner, actual, &self.impls)
+            {
+                self.emit_code(
+                    crate::diagnostic::codes::E0209,
+                    format!(
+                        "variant payload of type {} does not match expected {}",
+                        crate::core::helpers::fmt_type(actual),
+                        crate::core::helpers::fmt_type(expected_inner),
+                    ),
+                );
+            }
         }
     }
 
