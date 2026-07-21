@@ -11,6 +11,7 @@
 - 修复 codegen 值位置赋值与嵌套 place 写回被静默丢弃（同为 v0.31.1 `Expr::Located` 包裹未 `unlocated()` 的漏网）：
   - `compile_block_last_val` 的 `Stmt::Assign` 分支改为对 `target.unlocated()` 匹配。此前 `target: Expr::Ident/Field/Index/Unary(Deref)` 直接匹配原始 target，`Located(..)` 包裹的赋值目标全部落入 `_ => {}` 空分支，导致 `if true { x = 5 }` 等 if/match 体赋值编译为空 then 块。恢复 `dual_if_assign` / `dual_block_match_arm_side_effects` / `e2e_if_no_else` / `e2e_nested_if_else_statements`。
   - `place_struct_ptr` 改为对 `place.unlocated()` 匹配。此前嵌套 place `o.inner`（`Located(Field(..))`）落入 `_ => None`，`o.inner.x = v` 退化为临时副本写回而丢失（I-H7）。恢复 `dual_nested_record_field_assign`。
+- 修复 codegen `from_json::<Map>`/`from_json::<Set>` 标量值类型识别：`val_is_int`/`elem_is_int` 改为对 `t.unlocated()` 匹配（此前匹配原始 `t`，而 `val_is_float`/`val_is_string` 已 unlocated，整数标量被误判为不支持，落入 "only Map<string, scalar|...> is supported in codegen" 错误）。v0.31.1 Span/Origin 将 turbofish 类型实参包裹进 `Type::Located`。一次性恢复 ~42 个 dual_backend JSON/集合序列化测试（Map/Set/List/Option/Result 标量及嵌套形状）。
 
 ### v0.31.0-dev — Pre-1.0 语义中枢启动
 

@@ -4380,8 +4380,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let val_is_int = val_ty
                     .map(|t| {
+                        // v0.31.6: unlocate — the Map value type arg may be wrapped
+                        // in `Type::Located` (Span/Origin v0.31.1); matching raw `t`
+                        // made integer-valued Maps fall through to the unsupported
+                        // error. Consistent with val_is_float/val_is_string below.
                         matches!(
-                            t,
+                            t.unlocated(),
                             Type::Name(tn, _) if tn == "i32" || tn == "i64" || tn == "bool"
                         )
                     })
@@ -4924,8 +4928,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let elem_is_int = elem_ty
                     .map(|t| {
+                        // v0.31.6: unlocate — the Set element type arg may be wrapped
+                        // in `Type::Located` (Span/Origin v0.31.1); matching raw `t`
+                        // made integer-valued Sets fall through to the unsupported
+                        // error. Consistent with elem_is_float/elem_is_string below.
                         matches!(
-                            t,
+                            t.unlocated(),
                             Type::Name(tn, _) if tn == "i32" || tn == "i64" || tn == "bool"
                         )
                     })
