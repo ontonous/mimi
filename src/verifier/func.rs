@@ -651,6 +651,18 @@ impl VerifierCtx {
             }
         }
 
+        // v0.31.6: assert callee ensures for the return expression BEFORE the
+        // i32 definedness (overflow) check below. A return such as
+        // `(await t1) + (await t2)` — expanded from `let t1 = spawn id(x)` —
+        // needs the callee's ensures (e.g. id: result == a) in the solver
+        // context so the awaited operands are bounded and the no-overflow
+        // obligation can be discharged. The old order asserted ensures only
+        // after this check, leaving await results in arithmetic position
+        // unconstrained → spurious "integer overflow is not excluded".
+        if let Some(ref return_expr) = body_return {
+            self.assert_callee_ensures_in_expr(session, return_expr, &mut vars);
+        }
+
         if let Some(ref return_expr) = body_return {
             if returns_real {
                 if let Some(body_z3) = expr::expr_to_z3_real(return_expr, &mut vars) {
@@ -763,9 +775,8 @@ impl VerifierCtx {
         // `let y = double(x); y` expands to `double(x)` before ensures propagation,
         // ensuring callee ensures are propagated even when the call result is
         // stored in a let-bound variable.
-        if let Some(ref return_expr) = body_return {
-            self.assert_callee_ensures_in_expr(session, return_expr, &mut vars);
-        }
+        // v0.31.6: return-expression callee ensures are asserted earlier —
+        // before the i32 definedness check — so overflow obligations see them.
         let expanded_body: Vec<Stmt> = func
             .body
             .iter()
@@ -1588,6 +1599,14 @@ impl VerifierCtx {
                     if callee_ok {
                         if let Some(callee_func) = self.func_defs.get(name) {
                             let call_key = expr::call_var_key(name, call_args);
+                            // v0.31.6: pre-create the call-result variable so the
+                            // substituted ensures (`result` -> Ident(call_key))
+                            // encodes via vars.get_int regardless of whether the
+                            // call expression has been lowered yet. Without this,
+                            // asserting callee ensures *before* the body/definedness
+                            // encoding (needed so overflow obligations can use them)
+                            // found no call_key var and silently dropped the axiom.
+                            vars.get_or_create_int(&call_key);
                             // Clone callee data to avoid borrow conflict with
                             // expr::expr_to_z3_bool (which needs &mut Z3VarMap).
                             let callee_params = callee_func.params.clone();
