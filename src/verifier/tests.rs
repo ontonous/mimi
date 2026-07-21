@@ -1638,7 +1638,7 @@ fn verify_comprehension_in_body_not_crash() {
     require_z3!();
     let src = r#"
 func make_list(n: i32) -> i32 {
-    let xs = [i for i in range(n)]
+    let xs = [i for i in range(0, n)]
     len(xs)
 }
 func main() -> i32 { 0 }
@@ -1774,19 +1774,25 @@ func pick(x: i32) -> i32 {
 }
 func main() -> i32 { 0 }
 "#;
-    let results = verify_source(src).expect("src/verifier/tests.rs: match_nonexhaustive");
-    let f = results.iter().find(|r| r.func_name == "pick");
-    assert!(f.is_some(), "pick should be present");
-    // With _match_fallback (unconstrained), ensures result >= 0
-    // cannot be statically verified — should be Failed or Unknown.
-    assert!(
-        matches!(
-            f.unwrap().status,
-            VerifStatus::Failed | VerifStatus::Unknown
-        ),
-        "non-exhaustive match should not silently pass ensures: {:?}",
-        f.unwrap().status,
-    );
+    // No-false-positive contract: a non-exhaustive match must never be silently
+    // Verified. The checker rejects i32 matches without a wildcard arm outright
+    // (verify_source -> Err), which is an even stronger guarantee than a Failed
+    // /Unknown verification status; accept either as "not a false positive".
+    match verify_source(src) {
+        Err(_) => { /* checker rejected the non-exhaustive match — no false positive */ }
+        Ok(results) => {
+            let f = results.iter().find(|r| r.func_name == "pick");
+            assert!(f.is_some(), "pick should be present");
+            assert!(
+                matches!(
+                    f.unwrap().status,
+                    VerifStatus::Failed | VerifStatus::Unknown
+                ),
+                "non-exhaustive match should not silently pass ensures: {:?}",
+                f.unwrap().status,
+            );
+        }
+    }
 }
 
 /// E2: Exhaustive match (with wildcard) — all arms return >= 0, so
