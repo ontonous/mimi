@@ -173,7 +173,7 @@ fn verify_body_violates_ensures() {
     require_z3!();
     let src = r#"
 func wrong(x: i32) -> i32 {
-    requires: x >= 0
+    requires: x >= 0 && x <= 100000
     ensures: result == x * 2
     x * 3
 }
@@ -468,7 +468,7 @@ fn verify_if_else_body_all_paths_verified() {
     require_z3!();
     let src = r#"
 func abs(x: i32) -> i32 {
-    requires: true
+    requires: x >= -2147483647
     ensures: result >= 0
     if x >= 0 { x } else { -x }
 }
@@ -527,7 +527,7 @@ fn verify_if_else_body_with_requires() {
     require_z3!();
     let src = r#"
 func add_or_mul(x: i32, y: i32) -> i32 {
-    requires: x >= 0 && y >= 0
+    requires: x >= 0 && y >= 0 && x <= 40000 && y <= 40000
     ensures: result >= 0
     if x > y { x + y } else { x * y }
 }
@@ -775,7 +775,7 @@ fn verify_invariant_with_ensures() {
     require_z3!();
     let src = r#"
 func add_one(x: i32) -> i32 {
-    requires: x > 0
+    requires: x > 0 && x < 2147483647
     ensures: result > x
     invariant: x > 0
     x + 1
@@ -881,12 +881,12 @@ fn verify_multi_func_no_calls() {
     // Multiple functions with contracts, no function calls in bodies.
     let src = r#"
 func add(x: i32) -> i32 {
-    requires: x > 0
+    requires: x > 0 && x < 2147483647
     ensures: result > x
     x + 1
 }
 func double(y: i32) -> i32 {
-    requires: y > 5
+    requires: y > 5 && y <= 1000000000
     ensures: result > 5
     y * 2
 }
@@ -907,6 +907,7 @@ fn verify_func_call_passes() {
     // This verifies that the result variable for the call exists.
     let src = r#"
 func double(x: i32) -> i32 {
+    requires: x >= -1000000000 && x <= 1000000000
     ensures: result == x * 2
     x * 2
 }
@@ -959,11 +960,12 @@ fn verify_func_call_let_binding_propagation() {
     // the tail expression; `let y = double(x); y` would not propagate.
     let src = r#"
 func double(x: i32) -> i32 {
+    requires: x >= 0 && x <= 1000000000
     ensures: result == x * 2
     x * 2
 }
 func wrap(x: i32) -> i32 {
-    requires: x > 0
+    requires: x > 0 && x <= 1000000000
     ensures: result > 0
     let y = double(x)
     y
@@ -989,11 +991,12 @@ fn verify_func_call_wrap_pass() {
     // wrap's ensures result > 0 should be Verified when x > 0.
     let src = r#"
 func double(x: i32) -> i32 {
+    requires: x >= 0 && x <= 1000000000
     ensures: result == x * 2
     x * 2
 }
 func wrap(x: i32) -> i32 {
-    requires: x > 0
+    requires: x > 0 && x <= 1000000000
     ensures: result > 0
     double(x)
 }
@@ -1038,6 +1041,7 @@ fn verify_z3_fallback_returns_unknown() {
     // with all results as Unknown.
     let src = r#"
 func add(x: i32) -> i32 {
+    requires: x < 2147483647
     ensures: result > x
     x + 1
 }
@@ -1095,10 +1099,12 @@ fn verify_cross_module_ensures_propagation() {
     // ensures to be verified.
     let src = r#"
 func double(x: i32) -> i32 {
+    requires: x >= -1000000000 && x <= 1000000000
     ensures: result == x * 2
     x * 2
 }
 func caller(y: i32) -> i32 {
+    requires: y >= -1000000000 && y <= 1000000000
     ensures: result == y * 2
     double(y)
 }
@@ -1390,11 +1396,13 @@ fn verify_spawn_await_body_verified() {
     require_z3!();
     let src = r#"
 func add_pair(x: i32, y: i32) -> i32 {
+    requires: x >= -1000000000 && x <= 1000000000 && y >= -1000000000 && y <= 1000000000
     ensures: result == x + y
     let task = spawn add(x, y)
     await task
 }
 func add(a: i32, b: i32) -> i32 {
+    requires: a >= -1000000000 && a <= 1000000000 && b >= -1000000000 && b <= 1000000000
     ensures: result == a + b
     a + b
 }
@@ -1651,6 +1659,7 @@ fn verify_multiple_spawn_await() {
     require_z3!();
     let src = r#"
 func sum_pair(x: i32, y: i32) -> i32 {
+    requires: x >= -1000000000 && x <= 1000000000 && y >= -1000000000 && y <= 1000000000
     ensures: result == x + y
     let t1 = spawn id(x)
     let t2 = spawn id(y)
@@ -1878,6 +1887,7 @@ fn verify_if_else_body_return() {
     require_z3!();
     let src = r#"
 func abs_val(x: i32) -> i32 {
+    requires: x >= -2147483647
     ensures: result >= 0
     if x < 0 { -x } else { x }
 }
@@ -1931,13 +1941,13 @@ fn verify_let_bound_call_ensures_propagated() {
     require_z3!();
     let src = r#"
 func double(x: i32) -> i32 {
-    requires: x >= 0
+    requires: x >= 0 && x <= 1000000000
     ensures: result >= 0
     x * 2
 }
 
 func caller(y: i32) -> i32 {
-    requires: y >= 0
+    requires: y >= 0 && y <= 1000000000
     ensures: result >= 0
     let d = double(y);
     let _unused = d + 1;  // d used here, not just in tail position

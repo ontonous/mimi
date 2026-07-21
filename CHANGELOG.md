@@ -14,6 +14,7 @@
 - 修复 codegen `from_json::<Map>`/`from_json::<Set>` 标量值类型识别：`val_is_int`/`elem_is_int` 改为对 `t.unlocated()` 匹配（此前匹配原始 `t`，而 `val_is_float`/`val_is_string` 已 unlocated，整数标量被误判为不支持，落入 "only Map<string, scalar|...> is supported in codegen" 错误）。v0.31.1 Span/Origin 将 turbofish 类型实参包裹进 `Type::Located`。一次性恢复 ~42 个 dual_backend JSON/集合序列化测试（Map/Set/List/Option/Result 标量及嵌套形状）。
 - 恢复 E0402（重复参数名）用户级诊断码：v0.31 迁移将参数唯一性校验下沉到 `ResolvedSignature::validate`（IR 层 fail-closed 安全网，仅产生无码 TOOL-RESOLUTION-001 错误）。在 `check_func` 重新发出带精确 span 与 E0402 码的检查器诊断，IR 层校验保留为安全网。恢复 `error_e0402_duplicate_param`。
 - 修复 codegen `type_fields`/`type_variants` 内建：参数匹配改为 `args[0].unlocated()`。此前 `match &args[0]` 直接匹配 `Expr::Literal`，`Located(Literal(String))` 包裹的字符串字面量（如 `type_fields("Point")`）落入错误分支。恢复 `codegen_type_fields_record`。
+- verifier 测试合约对齐 checked-int-v1 整数语义（`docs/language-spec.md` §integer model: checked-int-v1，i32/i64 运算生成 no-overflow definedness obligation，commit 161e3404 引入）：为 ~13 个 Z3 合约测试的 `requires` 补充操作数上界（含 abs 的 `x >= -2147483647` 排除 i32::MIN 取负溢出），放电正确的 no-overflow 义务；call/spawn 传播类测试同时为被调函数补上界使其先验证、ensures 得以在调用点传播（验证了「被调函数验证 → ensures 可用」的级联）。恢复 verify_func_call_passes / verify_multi_func_no_calls / verify_if_else_body_* / verify_invariant_with_ensures / verify_cross_module_ensures_propagation / verify_spawn_await_body_verified / verify_let_bound_call_ensures_propagated 等 13 项。
 
 ### v0.31.0-dev — Pre-1.0 语义中枢启动
 
