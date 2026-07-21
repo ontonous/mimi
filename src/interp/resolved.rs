@@ -4276,4 +4276,70 @@ mod tests {
             "#,
         );
     }
+
+    #[test]
+    fn typed_parity_generics_adt() {
+        assert_typed_surface_parity(
+            r#"
+            type Box<T> { value: T }
+            type Pair<T> { first: T, second: T }
+            func main() -> i32 {
+                let b = Box { value: 42 }
+                let p = Pair { first: 1, second: 2 }
+                println(to_string(b.value))
+                println(to_string(p.first + p.second))
+                b.value + p.first + p.second
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn typed_parity_try_operator() {
+        assert_typed_surface_parity(
+            r#"
+            type Res { Ok(i64) | Err(string) }
+            func checked_div(a: i64, b: i64) -> Res {
+                if b == 0 { Err("div by zero") } else { Ok(a / b) }
+            }
+            func compute(a: i64, b: i64) -> Res {
+                let q = checked_div(a, b)?
+                Ok(q + 1)
+            }
+            func main() -> i32 {
+                let good = compute(10, 2)
+                let bad = compute(10, 0)
+                match good {
+                    Ok(n) => println(to_string(n)),
+                    Err(_) => println("err")
+                }
+                match bad {
+                    Ok(_) => println("unexpected"),
+                    Err(_) => println("caught")
+                }
+                0
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn typed_parity_runtime_contracts() {
+        assert_typed_surface_parity(
+            r#"
+            func abs(x: i32) -> i32 {
+                requires: x >= 0
+                ensures: result >= 0
+                if x < 0 { -x } else { x }
+            }
+            func main() -> i32 {
+                let a = abs(5)
+                let b = abs(0)
+                println(to_string(a))
+                println(to_string(b))
+                a + b
+            }
+            "#,
+        );
+    }
 }
