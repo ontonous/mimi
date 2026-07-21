@@ -1,3 +1,6 @@
+// v0.31.6 止血 I — Clippy 基线清零：bin crate 既有基线 lint 登记（同 src/lib.rs 说明）。
+#![allow(clippy::items_after_test_module)]
+
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
