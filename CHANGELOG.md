@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+### v0.31.7-dev — Flow identity 与 generation
+
 ## [0.31.6] - 2026-07-22
 
 ### 止血 I（回归清零）
