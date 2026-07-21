@@ -1276,6 +1276,7 @@ fn encode_checked_json(
         }
         ResolvedType::DynamicAny { .. } => encode_dynamic_json(node, value, depth + 1),
         ResolvedType::GenericParameter(_)
+        | ResolvedType::FlowStateSet { .. }
         | ResolvedType::Reference { .. }
         | ResolvedType::Function { .. }
         | ResolvedType::CBuffer(_)
@@ -1628,6 +1629,7 @@ fn decode_checked_json(
         }
         ResolvedType::DynamicAny { .. } => Ok(decode_dynamic_json(json)),
         ResolvedType::GenericParameter(_)
+        | ResolvedType::FlowStateSet { .. }
         | ResolvedType::Reference { .. }
         | ResolvedType::Function { .. }
         | ResolvedType::CBuffer(_)
@@ -3417,6 +3419,7 @@ fn apply_conversion(
 ) -> Result<Value, InterpError> {
     match conversion.kind {
         CheckedConversionKind::Identity
+        | CheckedConversionKind::FlowStateInject
         | CheckedConversionKind::AliasWrap
         | CheckedConversionKind::AliasUnwrap
         | CheckedConversionKind::TraitUpcast

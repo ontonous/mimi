@@ -5267,7 +5267,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // json_get_string returns unquoted string content (not a JSON token).
         // For string Err, wrap C string as Mimi string; do not call mimi_from_json.
         let err_is_string = matches!(
-            &err_ty_owned,
+            err_ty_owned.unlocated(),
             Type::Name(n, _) if n == "string"
         );
         {

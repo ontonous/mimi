@@ -62,6 +62,7 @@ pub struct FunctionBodyInput<'a> {
     pub node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     pub type_operands: &'a BTreeMap<NodeId, ResolvedTypeId>,
     pub type_arguments: &'a BTreeMap<NodeId, Vec<ResolvedTypeId>>,
+    pub session_actions: &'a BTreeMap<NodeId, super::ResolvedSessionAction>,
     pub types: &'a ResolvedTypeTable,
     pub node_meta: &'a HashMap<NodeId, NodeMeta>,
     pub sources: &'a SourceRegistry,
@@ -129,6 +130,7 @@ fn lower_function_body_with_captures(
         node_types: input.node_types,
         type_operands: input.type_operands,
         type_arguments: input.type_arguments,
+        session_actions: input.session_actions,
         types: input.types,
         node_meta: input.node_meta,
         ids: NodeIdBuilder::new(input.sources),
@@ -216,6 +218,7 @@ pub fn lower_checked_function_bodies(
                 node_types: program.resolved_node_types(),
                 type_operands: program.resolved_type_operands(),
                 type_arguments: program.resolved_type_arguments(),
+                session_actions: program.resolved_session_actions(),
                 types: program.resolved_types(),
                 node_meta: program.node_meta(),
                 sources: &file.sources,
@@ -309,6 +312,7 @@ pub fn lower_checked_transition_bodies(
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
             type_arguments: program.resolved_type_arguments(),
+            session_actions: program.resolved_session_actions(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -517,6 +521,7 @@ struct BodyLowerer<'a> {
     node_types: &'a BTreeMap<NodeId, ResolvedTypeId>,
     type_operands: &'a BTreeMap<NodeId, ResolvedTypeId>,
     type_arguments: &'a BTreeMap<NodeId, Vec<ResolvedTypeId>>,
+    session_actions: &'a BTreeMap<NodeId, super::ResolvedSessionAction>,
     types: &'a ResolvedTypeTable,
     node_meta: &'a HashMap<NodeId, NodeMeta>,
     ids: NodeIdBuilder<'a>,
@@ -1561,7 +1566,9 @@ impl BodyLowerer<'_> {
         }
         if let ResolvedExprKind::Call(call) = &kind {
             if call.result != ty {
-                if self.is_system_fault_refinement(&call.result, &ty) {
+                if self.is_system_fault_refinement(&call.result, &ty)
+                    || self.is_flow_state_set_refinement(&call.result, &ty)
+                {
                     ty = call.result.clone();
                 } else {
                     return Err(vec![ResolvedBodyError::new(
@@ -1966,6 +1973,38 @@ impl BodyLowerer<'_> {
                     value,
                 });
             }
+            let session = if let Some(action) = self.session_actions.get(node_id).cloned() {
+                let endpoint = self.lookup_local(&action.endpoint).ok_or_else(|| {
+                    vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        format!(
+                            "session endpoint '{}' has no resolved local",
+                            action.endpoint
+                        ),
+                    )]
+                })?;
+                let is_argument = lowered.iter().any(|argument| {
+                    matches!(
+                        &argument.value.kind,
+                        ResolvedExprKind::Load(place)
+                            if place.base == endpoint && place.projections.is_empty()
+                    )
+                });
+                if !is_argument {
+                    return Err(vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        "session residual fact does not identify a direct endpoint argument",
+                    )]);
+                }
+                vec![super::SessionTransition {
+                    endpoint,
+                    before: action.before,
+                    after: action.after,
+                    terminal: action.terminal,
+                }]
+            } else {
+                Vec::new()
+            };
             return Ok(ResolvedCall {
                 callee: ResolvedCallee::Builtin(builtin),
                 result,
@@ -1973,7 +2012,7 @@ impl BodyLowerer<'_> {
                 arguments: lowered,
                 permission: None,
                 effects: Vec::new(),
-                session: Vec::new(),
+                session,
             });
         }
         if site.kind == ResolvedCallKind::Extern {
@@ -2426,6 +2465,7 @@ impl BodyLowerer<'_> {
         })?;
         if signature.result != *call_result
             && !self.is_system_fault_refinement(&signature.result, call_result)
+            && !self.is_flow_state_set_refinement(&signature.result, call_result)
         {
             self.identity_conversion(node_id, &signature.result, call_result)?;
         }
@@ -3903,6 +3943,7 @@ impl BodyLowerer<'_> {
             },
             ResolvedType::Primitive(_)
             | ResolvedType::Capability(_)
+            | ResolvedType::FlowStateSet { .. }
             | ResolvedType::Nothing
             | ResolvedType::Allocator
             | ResolvedType::Trait { .. }
@@ -4327,6 +4368,20 @@ impl BodyLowerer<'_> {
         )
     }
 
+    fn is_flow_state_set_refinement(
+        &self,
+        expected: &ResolvedTypeId,
+        observed: &ResolvedTypeId,
+    ) -> bool {
+        matches!(
+            (self.types.get(expected), self.types.get(observed)),
+            (
+                Some(ResolvedType::FlowStateSet { states, .. }),
+                Some(ResolvedType::Nominal { item, arguments }),
+            ) if arguments.is_empty() && states.contains(item)
+        )
+    }
+
     fn implicit_conversion(
         &self,
         node_id: &NodeId,
@@ -4335,6 +4390,19 @@ impl BodyLowerer<'_> {
     ) -> Result<CheckedConversion, Vec<ResolvedBodyError>> {
         if from == to {
             return self.identity_conversion(node_id, from, to);
+        }
+        if matches!(
+            (self.types.get(from), self.types.get(to)),
+            (
+                Some(ResolvedType::Nominal { item, arguments }),
+                Some(ResolvedType::FlowStateSet { states, .. }),
+            ) if arguments.is_empty() && states.contains(item)
+        ) {
+            return Ok(CheckedConversion {
+                kind: CheckedConversionKind::FlowStateInject,
+                from: from.clone(),
+                to: to.clone(),
+            });
         }
         if let Some((kind, target)) = self.instantiated_type_target(node_id, to)? {
             if &target == from {
@@ -4795,6 +4863,7 @@ mod tests {
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
             type_arguments: program.resolved_type_arguments(),
+            session_actions: program.resolved_session_actions(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -4839,6 +4908,7 @@ mod tests {
             node_types: &empty,
             type_operands: program.resolved_type_operands(),
             type_arguments: program.resolved_type_arguments(),
+            session_actions: program.resolved_session_actions(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -4875,6 +4945,7 @@ mod tests {
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
             type_arguments: program.resolved_type_arguments(),
+            session_actions: program.resolved_session_actions(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -4925,6 +4996,7 @@ mod tests {
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
             type_arguments: program.resolved_type_arguments(),
+            session_actions: program.resolved_session_actions(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -4971,6 +5043,7 @@ mod tests {
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
             type_arguments: program.resolved_type_arguments(),
+            session_actions: program.resolved_session_actions(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -5111,6 +5184,7 @@ mod tests {
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
             type_arguments: program.resolved_type_arguments(),
+            session_actions: program.resolved_session_actions(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -5152,6 +5226,7 @@ mod tests {
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
             type_arguments: program.resolved_type_arguments(),
+            session_actions: program.resolved_session_actions(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -5199,6 +5274,7 @@ mod tests {
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
             type_arguments: program.resolved_type_arguments(),
+            session_actions: program.resolved_session_actions(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
@@ -5303,6 +5379,7 @@ mod tests {
             node_types: program.resolved_node_types(),
             type_operands: program.resolved_type_operands(),
             type_arguments: program.resolved_type_arguments(),
+            session_actions: program.resolved_session_actions(),
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,

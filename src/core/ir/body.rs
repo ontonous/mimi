@@ -108,6 +108,8 @@ impl ResolvedPlace {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckedConversionKind {
     Identity,
+    /// Inject a concrete state into a checker-closed transition target set.
+    FlowStateInject,
     NumericWiden,
     NumericNarrowChecked,
     TraitUpcast,
@@ -165,6 +167,17 @@ pub struct SessionTransition {
     pub endpoint: ResolvedLocalId,
     pub before: SessionResidualId,
     pub after: SessionResidualId,
+    pub terminal: bool,
+}
+
+/// Stable checker fact attached to a call node before body-local identity is
+/// installed by structured lowering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSessionAction {
+    pub endpoint: String,
+    pub before: SessionResidualId,
+    pub after: SessionResidualId,
+    pub terminal: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1145,6 +1158,9 @@ impl BodyValidator<'_> {
             if session.before == session.after {
                 self.error(owner, "session action does not advance its residual state");
             }
+            if session.terminal && session.after.as_str() != "closed" {
+                self.error(owner, "terminal session action does not end in 'closed'");
+            }
         }
     }
 
@@ -1202,6 +1218,21 @@ impl BodyValidator<'_> {
         }
         if conversion.kind == CheckedConversionKind::Identity && conversion.from != conversion.to {
             self.error(owner, "identity conversion changes the canonical type");
+        }
+        if conversion.kind == CheckedConversionKind::FlowStateInject {
+            let valid = matches!(
+                (self.types.get(&conversion.from), self.types.get(&conversion.to)),
+                (
+                    Some(ResolvedType::Nominal { item, arguments }),
+                    Some(ResolvedType::FlowStateSet { states, .. }),
+                ) if arguments.is_empty() && states.contains(item)
+            );
+            if !valid {
+                self.error(
+                    owner,
+                    "Flow state injection source is not a member of its target set",
+                );
+            }
         }
     }
 

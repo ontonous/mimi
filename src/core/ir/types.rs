@@ -183,6 +183,11 @@ pub enum ResolvedType {
         item: NominalTypeId,
         arguments: Vec<ResolvedTypeId>,
     },
+    /// Closed result type of a Flow transition with multiple targets.
+    FlowStateSet {
+        flow: NominalTypeId,
+        states: Vec<NominalTypeId>,
+    },
     Reference {
         lifetime: Option<String>,
         mutable: bool,
@@ -256,6 +261,7 @@ impl ResolvedType {
             Self::Primitive(_)
             | Self::GenericParameter(_)
             | Self::Capability(_)
+            | Self::FlowStateSet { .. }
             | Self::Nothing
             | Self::Allocator
             | Self::Trait { .. }
@@ -274,6 +280,13 @@ impl ResolvedType {
             Self::Nominal { item, arguments } => {
                 atom(&mut output, "nominal", item.as_str());
                 ids(&mut output, arguments);
+            }
+            Self::FlowStateSet { flow, states } => {
+                atom(&mut output, "flow-state-set", flow.as_str());
+                let _ = write!(output, "{};", states.len());
+                for state in states {
+                    atom(&mut output, "state-id", state.as_str());
+                }
             }
             Self::Reference {
                 lifetime,
@@ -486,6 +499,33 @@ impl ResolvedTypeTable {
         self.entries.iter()
     }
 
+    /// Intern a checker-closed multi-target Flow result directly from stable
+    /// identities. Surface `Type` has no representation for this sum.
+    pub fn intern_flow_state_set(
+        &mut self,
+        flow: NominalTypeId,
+        mut states: Vec<NominalTypeId>,
+    ) -> Result<ResolvedTypeId, ResolvedTypeError> {
+        states.sort();
+        states.dedup();
+        let expected_prefix = format!("state:{}::", flow.as_str().trim_start_matches("flow:"));
+        if states.len() < 2
+            || states
+                .iter()
+                .any(|state| !state.as_str().starts_with(&expected_prefix))
+        {
+            return Err(ResolvedTypeError::InvalidIdentity {
+                kind: "flow state set",
+                identity: states
+                    .iter()
+                    .map(|state| state.as_str())
+                    .collect::<Vec<_>>()
+                    .join("|"),
+            });
+        }
+        self.intern_resolved(ResolvedType::FlowStateSet { flow, states })
+    }
+
     /// Convert a fully-zonked AST type into canonical IR.
     ///
     /// `resolve_name` must return the checker-selected identity. Bare spelling
@@ -510,6 +550,25 @@ impl ResolvedTypeTable {
                     errors.push(ResolvedTypeError::InvalidIdentity {
                         kind: "generic parameter",
                         identity: parameter.0.clone(),
+                    });
+                }
+            }
+            if let ResolvedType::FlowStateSet { flow, states } = ty {
+                let expected_prefix =
+                    format!("state:{}::", flow.as_str().trim_start_matches("flow:"));
+                if states.len() < 2
+                    || states.windows(2).any(|pair| pair[0] >= pair[1])
+                    || states
+                        .iter()
+                        .any(|state| !state.as_str().starts_with(&expected_prefix))
+                {
+                    errors.push(ResolvedTypeError::InvalidIdentity {
+                        kind: "flow state set",
+                        identity: states
+                            .iter()
+                            .map(|state| state.as_str())
+                            .collect::<Vec<_>>()
+                            .join("|"),
                     });
                 }
             }

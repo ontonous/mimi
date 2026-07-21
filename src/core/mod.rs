@@ -26,12 +26,13 @@ pub(crate) use helpers::{is_int, is_numeric, is_string, same_type};
 pub use ir::{
     BackendRequirement, BuiltinId, CheckedConversion, CheckedConversionKind, EffectId,
     FunctionTypeAbi, MethodId, NominalTypeId, OwnershipTypeKind, Permission, PrimitiveType,
-    ResolvedArgument, ResolvedBlock, ResolvedBody, ResolvedBodyError, ResolvedCall, ResolvedCallee,
-    ResolvedExpr, ResolvedExprKind, ResolvedIndex, ResolvedLiteral, ResolvedLocal, ResolvedLocalId,
-    ResolvedParameter, ResolvedParameterId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace,
-    ResolvedProjection, ResolvedSignature, ResolvedSignatureError, ResolvedStmt, ResolvedStmtKind,
-    ResolvedType, ResolvedTypeCapabilities, ResolvedTypeError, ResolvedTypeId, ResolvedTypeName,
-    ResolvedTypeTable, SessionResidualId, SessionTransition, TraitTypeKind,
+    ResolvedArgument, ResolvedBlock, ResolvedBody, ResolvedBodyError, ResolvedCall,
+    ResolvedCallable, ResolvedCallee, ResolvedContract, ResolvedExpr, ResolvedExprKind,
+    ResolvedIndex, ResolvedLiteral, ResolvedLocal, ResolvedLocalId, ResolvedParameter,
+    ResolvedParameterId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedProjection,
+    ResolvedSessionAction, ResolvedSignature, ResolvedSignatureError, ResolvedStmt,
+    ResolvedStmtKind, ResolvedType, ResolvedTypeCapabilities, ResolvedTypeError, ResolvedTypeId,
+    ResolvedTypeName, ResolvedTypeTable, SessionResidualId, SessionTransition, TraitTypeKind,
     RESOLVED_TYPE_SCHEMA_VERSION,
 };
 pub use ownership::{
