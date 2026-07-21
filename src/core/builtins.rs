@@ -121,6 +121,15 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "str_split"
             | "str_join"
             | "str_replace"
+            // v0.31.6: bare contract-language spellings of the string builtins.
+            // The verifier's Z3 layer special-cases `char_at(s,i)` /
+            // `starts_with(s,p)` / `ends_with(s,p)` (expr.rs); without these the
+            // call-site catalog classified them Unknown and typed-body lowering
+            // fail-closed ("closed Unknown call target"). `contains` is already
+            // listed above.
+            | "char_at"
+            | "starts_with"
+            | "ends_with"
             | "has_key"
             | "keys"
             | "values"
