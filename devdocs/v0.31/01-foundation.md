@@ -21,6 +21,9 @@
 - **0.31.2 已收口**：canonical unification、binder-aware traversal、mandatory zonk、泛型 fresh instantiate 与 zonked function artifacts 已通过聚焦门禁；raw-body consumer 迁移按路线留给 0.31.4–0.31.5。
 - **0.31.3 实现完成、门禁待清零**：所有 callable 均持久化 stable-ID CFG；ownership 使用 reachable-predecessor fixed point，borrow 使用独立 LoanId、CFG liveness end edge 与结构化 Place overlap。nested field/tuple/constant/dynamic-index 引用已通过 interpreter/native ABI 回归，`ownership_cfg.mimi` 覆盖 branch、terminal、nested place 与循环内 loan。legacy `OwnershipLedger` 仍作为 canonical action extraction 的兼容投影，完整 typed-body consumer 迁移按边界留给 0.31.4–0.31.5。当前 real-world/Z3/focused 门禁已绿，但全量仍有独立 codegen/JSON/verifier 失败且 Clippy 1.93 基线未清，因此暂不升版 0.31.4-dev。
 - **0.31.4-dev 当前集中迁移**：冻结 Flow/Component/自举新功能，先将 CheckedProgram 改为 owned typed-body artifact，再依次迁移 consumer。`-dev` 只表示正在实施，不表示门禁完成。允许版本总改动超过 3,000 LOC，但每个 commit 的 diff 必须小于 3,000 行且保持可编译、可定向验证。
+  - **已收口（IR schema）**：`ResolvedCallable` 在 `CheckedProgram` 边界按稳定 `NodeId` 组装 signature + body + CFG + resource analysis（owner 不一致 fail-closed），并从 resolved body 收集合约；session 残差稳定为 `ResolvedSessionAction` 并 lowering 为 body-local `SessionTransition`（终态 `session_close` 发 `Drop` 消耗 endpoint）；多目标 Flow transition 解析为闭合 `ResolvedType::FlowStateSet` + 显式 `FlowStateInject` conversion（validator 强制 membership、拒绝伪 Identity）；nominal 消歧排除 Flow 容器。
+  - **已收口（typed 差分 parity）**：`ResolvedInterpreter` 与 surface interpreter 在标量子集逐项比对返回值 + stdout（9 个 differential 测试）；语料扫描 30/69 real_world 程序通过 typed executor。全量门禁 3975 passed / 75 failed / 10 ignored（单线程），失败集与基线逐条一致，零回归。
+  - **未收口（consumer 迁移主体）**：interpreter 生产路径仍经 `legacy_body_file()` 执行 surface AST；`ResolvedInterpreter` 尚未补齐 Flow transition / actor / 并发 / session / FFI / delegate-pinned / TypeValue 执行（39 个语料失败的根因），native structured emitter、verifier typed-contract lowering、component `BindingModule` 投影与 `legacy_body_file()` 删除均待这些能力补齐后才能安全切换。break/continue 循环出口的 resource-analysis 边界与上述缺口一并留给 0.31.6 止血。
 
 ## 不变量
 

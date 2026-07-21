@@ -136,6 +136,11 @@
 - interpreter 对 CheckedProgram 声明但运行时 FFI 索引缺失的 extern 调用 fail-closed。
 - verifier `verify_checked` 记录 CheckedProgram 函数/transition/session/cap/ownership/protocol/trait/actor/type/extern/mailbox/max_children 目录，供后续 VC 消费。
 - 新增 resolved transition exact-key、函数/session/protocol/actor 目录与 verifier capability 回归测试。
+- `ResolvedCallable` 在 `CheckedProgram` 边界按稳定 `NodeId` 组装 signature + body + CFG + resource analysis，owner 不一致即 fail-closed，并从 resolved body 收集 checker 合约。
+- session 残差由 checker 捕获为 `CheckedSessionAction`，在 `CheckedProgram` 边界按 clone-stable call node 稳定为 `ResolvedSessionAction`，再 lowering 为 body-local `SessionTransition`；`session_close` 为终态，resource lowering 发出 `Drop`（消耗 endpoint）而非 `TransferSession`，被转移的 endpoint 实参不再被重复 `Move`。
+- 多目标 Flow transition 解析为闭合 `ResolvedType::FlowStateSet`，配以显式 `FlowStateInject` conversion；body validator 强制 state-set membership 并拒绝 `from != to` 的伪 `Identity` conversion。
+- nominal 消歧将 Flow 容器排除出 nominal catalog（只有具体 state 是值类型），删除后端按名字猜测；actor/flow 同名解析改由 checker 写入 canonical nominal identity。
+- 新增 typed differential parity 测试套件：`ResolvedInterpreter`（typed ResolvedBody 执行）与 surface-AST interpreter 在标量子集上逐项比对返回值与捕获 stdout（控制流、while、闭包捕获、default/named args、record/enum/match、Option/Result、list/map/string、JSON round-trip、递归与 comptime）。语料扫描显示 30/69 real_world 程序已可通过 typed executor 正确执行；其余 39 个为 Flow transition/actor/并发/session 特性，须在生产路径切换前补齐（留给 v0.31.6 止血）。
 
 ### 审计修复（CG-H16 / CG-H9 / M2 / MEM-C8）
 
