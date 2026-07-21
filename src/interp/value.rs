@@ -26,6 +26,9 @@ pub enum PollFuture {
         globals: std::collections::HashMap<String, Value>,
         cli_args: Vec<String>,
         verify_contracts: bool,
+        /// TC-C1: parent stdout capture buffer so deferred/async spawn output
+        /// is captured (explicit Arc; the process-wide global slot was removed).
+        stdout_capture: Option<std::sync::Arc<std::sync::Mutex<String>>>,
     },
     Pending(std::sync::mpsc::Receiver<Result<Value, InterpError>>),
     Ready(Result<Value, InterpError>),
@@ -55,6 +58,7 @@ pub fn poll_deferred(state: &mut PollFuture) {
         globals,
         cli_args,
         verify_contracts,
+        stdout_capture,
     } = state
     {
         let mut interp = super::Interpreter::new(&*file);
@@ -62,6 +66,10 @@ pub fn poll_deferred(state: &mut PollFuture) {
         interp.globals = std::mem::take(globals);
         interp.cli_args = std::mem::take(cli_args);
         interp.verify_contracts = *verify_contracts;
+        // TC-C1: propagate parent stdout capture (explicit Arc, no global slot).
+        if let Some(buf) = stdout_capture.clone() {
+            interp.set_stdout_buf(buf);
+        }
         interp.push_scope();
         let mut result = Ok(Value::Unit);
         for (p, a) in func.params.iter().zip(std::mem::take(args)) {

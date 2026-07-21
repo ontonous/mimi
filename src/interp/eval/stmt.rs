@@ -891,8 +891,12 @@ impl<'a> Interpreter<'a> {
                             captures.push((name, v));
                         }
                     }
+                    let stdout_buf = self.stdout_capture.clone();
                     super::super::pool::get_pool().execute(move || {
                         let mut interp = Interpreter::new(&file);
+                        if let Some(buf) = stdout_buf {
+                            interp.set_stdout_buf(buf);
+                        }
                         interp.push_scope();
                         for (n, v) in captures {
                             let _ = interp.bind(&n, v);
@@ -937,8 +941,12 @@ impl<'a> Interpreter<'a> {
                                     captures.push((name, v));
                                 }
                             }
+                            let stdout_buf = self.stdout_capture.clone();
                             super::super::pool::get_pool().execute(move || {
                                 let mut interp = Interpreter::new(&file);
+                                if let Some(buf) = stdout_buf {
+                                    interp.set_stdout_buf(buf);
+                                }
                                 interp.push_scope();
                                 for (n, v) in captures {
                                     let _ = interp.bind(&n, v);

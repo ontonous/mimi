@@ -1491,6 +1491,7 @@ impl<'a> Interpreter<'a> {
                             globals: self.globals.clone(),
                             cli_args: self.cli_args.clone(),
                             verify_contracts: self.verify_contracts,
+                            stdout_capture: self.stdout_capture.clone(),
                         },
                     ));
                     crate::interp::value::executor_submit(fut.clone());

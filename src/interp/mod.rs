@@ -309,19 +309,10 @@ pub struct Interpreter<'a> {
     cstring_registry: std::cell::RefCell<Vec<std::ffi::CString>>,
     /// TC-C1: optional stdout capture for dual-backend tests.
     /// When `Some`, `print`/`println` append here instead of writing the process stdout.
-    /// Also installs a process-wide sink so actor worker threads (fresh Interpreters)
-    /// write into the same buffer.
+    /// Actor workers and parasteps receive this buffer explicitly via `set_stdout_buf`
+    /// (there is deliberately no process-wide sink — a global slot raced under
+    /// parallel test scheduling, letting one test's output leak into another's buffer).
     stdout_capture: Option<std::sync::Arc<std::sync::Mutex<String>>>,
-}
-
-/// Process-wide stdout sink for dual-backend / actor-worker capture (TC-C1).
-static GLOBAL_STDOUT_CAPTURE: std::sync::OnceLock<
-    std::sync::Mutex<Option<std::sync::Arc<std::sync::Mutex<String>>>>,
-> = std::sync::OnceLock::new();
-
-fn global_stdout_slot(
-) -> &'static std::sync::Mutex<Option<std::sync::Arc<std::sync::Mutex<String>>>> {
-    GLOBAL_STDOUT_CAPTURE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 impl<'a> Interpreter<'a> {
@@ -1633,42 +1624,21 @@ impl<'a> Interpreter<'a> {
     }
 
     /// TC-C1: redirect `print`/`println` into an in-memory buffer (no process stdout).
-    /// Installs a process-wide sink so actor workers share the same buffer.
+    /// Actor workers share the buffer via `set_stdout_buf` (explicit `Arc`, no global sink).
     pub fn enable_stdout_capture(&mut self) {
         let buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        if let Ok(mut slot) = global_stdout_slot().lock() {
-            *slot = Some(std::sync::Arc::clone(&buf));
-        }
         self.stdout_capture = Some(buf);
     }
 
-    /// Inherit the process-wide stdout capture buffer into this interpreter's
-    /// local field. Used by actor workers and parasteps so they share the
-    /// same buffer as the spawning interpreter without relying on the global
-    /// slot (which is cleared by `take_stdout` and races in parallel tests).
-    pub fn inherit_stdout_capture(&mut self) {
-        if self.stdout_capture.is_some() {
-            return;
-        }
-        if let Ok(slot) = global_stdout_slot().lock() {
-            if let Some(buf) = slot.as_ref() {
-                self.stdout_capture = Some(std::sync::Arc::clone(buf));
-            }
-        }
-    }
-
-    /// Set the stdout capture buffer directly (bypassed from the spawning
-    /// interpreter). This avoids the global slot entirely — the worker owns
-    /// its own reference to the same Arc.
+    /// Set the stdout capture buffer directly. Actor workers and parasteps
+    /// receive the spawning interpreter's buffer this way — the worker owns
+    /// its own reference to the same `Arc` (there is no process-wide sink).
     pub fn set_stdout_buf(&mut self, buf: std::sync::Arc<std::sync::Mutex<String>>) {
         self.stdout_capture = Some(buf);
     }
 
-    /// Take captured stdout and clear the process-wide sink.
+    /// Take captured stdout and disable further capture.
     pub fn take_stdout(&mut self) -> String {
-        if let Ok(mut slot) = global_stdout_slot().lock() {
-            *slot = None;
-        }
         self.stdout_capture
             .take()
             .map(|b| b.lock().map(|g| g.clone()).unwrap_or_default())
@@ -1704,13 +1674,7 @@ impl<'a> Interpreter<'a> {
     }
 
     fn resolve_stdout_buf(&self) -> Option<std::sync::Arc<std::sync::Mutex<String>>> {
-        if let Some(buf) = &self.stdout_capture {
-            return Some(std::sync::Arc::clone(buf));
-        }
-        global_stdout_slot()
-            .lock()
-            .ok()
-            .and_then(|slot| slot.as_ref().map(std::sync::Arc::clone))
+        self.stdout_capture.clone()
     }
 
     // Default Rust thread stack is 2MB; each interpreter frame is ~2KB.
