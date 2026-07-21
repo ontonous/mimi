@@ -882,8 +882,9 @@ func read_shared(x: shared i32) -> i32 {
         Ok(results) => {
             // If a future verifier supports shared scalars, it must at least
             // not claim Verified without modeling the shared read.
-            let silently_verified =
-                results.first().is_some_and(|r| r.status == VerifStatus::Verified);
+            let silently_verified = results
+                .first()
+                .is_some_and(|r| r.status == VerifStatus::Verified);
             assert!(
                 !silently_verified,
                 "shared-param contract must not silently verify: {:?}",
