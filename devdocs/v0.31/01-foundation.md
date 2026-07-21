@@ -25,6 +25,7 @@
   - **已收口（typed 差分 parity）**：`ResolvedInterpreter` 与 surface interpreter 在标量子集逐项比对返回值 + stdout（9 个 differential 测试）；语料扫描 30/69 real_world 程序通过 typed executor。全量门禁 3975 passed / 75 failed / 10 ignored（单线程），失败集与基线逐条一致，零回归。
   - **未收口（consumer 迁移主体）**：interpreter 生产路径仍经 `legacy_body_file()` 执行 surface AST；`ResolvedInterpreter` 尚未补齐 Flow transition / actor / 并发 / session / FFI / delegate-pinned / TypeValue 执行（39 个语料失败的根因），native structured emitter、verifier typed-contract lowering、component `BindingModule` 投影与 `legacy_body_file()` 删除均待这些能力补齐后才能安全切换。
   - **范围裁定（0.31.6 vs 0.31.7+）**：上述 consumer 迁移主体（Flow/actor/并发/session/FFI 执行补齐、native structured emitter、verifier typed-contract lowering、component `BindingModule` 投影、`legacy_body_file()` 删除）属于 0.31.7–0.31.15 Flow 核心阶段（FLOW-IDENTITY-001 / ACTOR-FLOW-001 / SESSION-LINEAR-001 等），**不**在 0.31.6 范围。0.31.6「止血 I」（`kind=stabilization, requirements=[]`）仅交付：(1) 清零 0.31.4 迁移引入的 75 个回归失败（dual_backend JSON/集合 codegen ~45、named-args desugar 2、verifier 溢出 VC + builtin 解析 ~20、杂项 6）；(2) 修 break/continue 循环出口 resource-analysis 边界（ICE 类）；(3) Clippy 基线清零；(4) 全量/Clippy/Z3/real-world/文档门禁连续两次全绿。
+- **0.31.6 已发布**：75 个回归全部清零（4053/0/10）；Clippy 基线以 crate-level allow 登记归零；break/continue ICE 在 0.31.3 修复后无复发；全量/Clippy/Z3/real-world/文档门禁连续两次全绿。Located wrapper 脆弱性（8 站点）已逐点修复，结构性 normalization pass 排入 0.31.7。额外修复 `from_json` 无显式类型参数时 TOOL-RESOLUTION-001 验证失败（隐式推断路径 type_arguments 为空，验证条件放宽为非空时才检查一致性）。`LLVM_SYS_180_PREFIX` 全局修正为 `LLVM_SYS_181_PREFIX`（inkwell llvm18-1 → llvm-sys 181.x）。
 
 ## 不变量
 

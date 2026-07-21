@@ -70,7 +70,19 @@
 | ASan | ✅ | ✅ | `e2e_asan_*` 已取消 #[ignore]，在可用工具链下通过 |
 | 网络 HTTP 失败 | ✅ | ✅ | `e2e_net_fetch_*` 已取消 #[ignore]，连接不可达端口时行为正确 |
 | cc-linker fuzz/property | ✅ | ✅ | 已取消 #[ignore]，默认运行并自动跳过 |
-| `#[ignore]` 工具链测试 | — | — | 剩余 0 个：所有工具链相关 `#[ignore]` 已解除或改为运行时自动跳过 |
+| `#[ignore]` 工具链测试 | — | — | 剩余 10 个（见下方登记表） |
+
+### 已知 `#[ignore]` 登记表（v0.31.6）
+
+| 测试 | 原因 | 跟踪 |
+|------|------|------|
+| `e2e_valgrind_*` (×3) | 需要 Valgrind 已安装 | 工具链门禁 |
+| `e2e_asan_*` (×2) | 需要 ASan 工具链 | 工具链门禁 |
+| `asan_toolchain_gate` | 需要 ASan/UBSan instrumented pipeline | 工具链门禁 |
+| `tricky_record_generic_closure` | 泛型 record 单态化仍为 i64 | v0.31.7+ type engine |
+| `tricky_record_generic_pair_field` | 同上 | v0.31.7+ type engine |
+| `tricky_push_empty_list_infer` | `push()` 无法向空 list 传播元素类型 | v0.31.7+ inference |
+| `verify_unsatisfiable_requires` | `mms{}` 块不再提取合约（AGENTS.md §10 语义） | 设计决策，永久 |
 
 ---
 
@@ -92,7 +104,7 @@
 ## 6. CI 门禁顺序（执行与修复优先级）
 
 ```
-1.  cargo test                          # 全量测试（当前 2,850+ 个，0 failed，6 ignored）
+1.  cargo test                          # 全量测试（当前 4,053 个，0 failed，10 ignored）
 2.  cargo test dual_                    # L1 双后端等价性
 3.  cargo test "typecheck::"            # L2 类型系统健全性
 4.  cargo test ffi_                     # FFI 契约等价性
@@ -111,7 +123,7 @@
 
 注意：
 - Valgrind/Miri 测试需要外部工具链；在可用环境中单独运行。
-- 当前全量测试通过数：2859+，0 failed，6 ignored。
+- 当前全量测试通过数：4053，0 failed，10 ignored。
 - `cargo test -- --ignored` 允许失败，但所有被忽略测试必须能编译。
 
 ---
