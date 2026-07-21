@@ -2,15 +2,26 @@
 
 ## [Unreleased]
 
-### v0.31.7-dev — Flow identity 与 generation
+### v0.31.7-dev — 止血 II（审计修复）
+
+> 范围裁定：0.31.7 是纯止血版本（`kind=stabilization, requirements=[]`，0 新 stable feature），交付 2026-07-22 两轮独立深度审计的修复项。原 0.31.7「Flow identity 与 generation」整体顺延为 0.31.8，Flow 核心块及之后所有版本 +1（原 0.31.36 RC2 → 0.31.37）；`roadmap.toml` `last` 36 → 37。详见 `devdocs/fix-plan-2026-07-22.md`。
+
+- **版本顺延**：插入止血 II 为 0.31.7。`requirements-matrix.md` / `roadmap.toml` / `devdocs/v0.31/` 分册 / `AGENTS.md` §13 已同步：FLOW-IDENTITY-001 → 0.31.8，FLOW-TURN-001/ERROR-PROP-001 → 0.31.9，…… RESOURCE-LINEAR-001 强制 → 0.31.13，攻击审查 I → 0.31.16，RC2 → 0.31.37。
+- 计划修复项（按信任链排序，逐项完成后登记）：
+  - **F1 测试 oracle**：删除进程级 `GLOBAL_STDOUT_CAPTURE` 全局槽与 `resolve_stdout_buf` fallback，消除并行测试 stdout 串扰（L1 门禁非确定根因；`v0.31/README.md` §5「目标测试连续两次通过」前置）。
+  - **silent error 止血**：codegen 12 处 `let _ = build_store/build_call` 改传播（含与 CRITICAL #11 同类 `build_store`×2）；`test_sandbox` spawn 失败如实报告（`pre-1.0/02-errors:32` 禁止不可区分失败）。
+  - **文档真值**：`AGENTS.md` §13.20/§0 重新对齐 `pre-1.0/` + `v0.31/`（函数体层仍经 `legacy_body_file()`、线性能力 0.31.13 前零强制）；`resolved.rs:636` 注释与 CHANGELOG 对齐。
+  - **CI 门禁**：`LLVM_SYS_180_PREFIX` → 181（ci.yml 漏改）、clippy `--all-targets`、`dual_`/`typecheck::`/`ffi_`/`codegen_e2e` 分级门禁、unsafe SAFETY grep（baseline 锁定）。
+  - **测试质量**：清零走过场测试（`flow_features.rs:4227`）、`v1_4` 家族强制 L1、real_world golden（增量）。
+  - **F7 空 arm 危险类**：接入已排期的结构性 normalization pass（241 codegen + 39 interp 空 arm triage）。
 
 ## [0.31.6] - 2026-07-22
 
 ### 止血 I（回归清零）
 
-> 范围裁定：0.31.6 是纯止血版本（`kind=stabilization, requirements=[]`），只修 0.31.4 迁移引入的回归、ICE、Clippy 与基础 ignored。consumer 迁移主体（Flow/actor/并发/session/FFI 执行补齐、native structured emitter、verifier typed-contract lowering、component `BindingModule` 投影、`legacy_body_file()` 删除）顺延至 0.31.7–0.31.15 Flow 核心阶段。
+> 范围裁定：0.31.6 是纯止血版本（`kind=stabilization, requirements=[]`），只修 0.31.4 迁移引入的回归、ICE、Clippy 与基础 ignored。consumer 迁移主体（Flow/actor/并发/session/FFI 执行补齐、native structured emitter、verifier typed-contract lowering、component `BindingModule` 投影、`legacy_body_file()` 删除）顺延至 0.31.8–0.31.16 Flow 核心阶段。
 
-- 范围锚定：修订 `devdocs/v0.31/01-foundation.md`，明确 0.31.6 与 0.31.7+ 的边界，纠正「consumer 迁移缺口留给 0.31.6」的乐观笔误。
+- 范围锚定：修订 `devdocs/v0.31/01-foundation.md`，明确 0.31.6 与 0.31.8+ 的边界，纠正「consumer 迁移缺口留给 0.31.6」的乐观笔误。
 - 修复 codegen named/default 参数消解：`reorder_named_args` 与 `compile_arg_values` 改为对 `Expr::unlocated()` 匹配。v0.31.1 Span/Origin 将调用实参包裹进 `Expr::Located`，导致 `Located(NamedArg)` 落入位置参数分支、未消解的 `NamedArg` 泄漏到 `compile_expr` 而报错；与 inference/interpreter 既有的 `unlocated()` 处理对齐。恢复 `dual_named_args_function` / `dual_named_args_with_defaults` 双后端等价。
 - 修复 codegen 值位置赋值与嵌套 place 写回被静默丢弃（同为 v0.31.1 `Expr::Located` 包裹未 `unlocated()` 的漏网）：
   - `compile_block_last_val` 的 `Stmt::Assign` 分支改为对 `target.unlocated()` 匹配。此前 `target: Expr::Ident/Field/Index/Unary(Deref)` 直接匹配原始 target，`Located(..)` 包裹的赋值目标全部落入 `_ => {}` 空分支，导致 `if true { x = 5 }` 等 if/match 体赋值编译为空 then 块。恢复 `dual_if_assign` / `dual_block_match_arm_side_effects` / `e2e_if_no_else` / `e2e_nested_if_else_statements`。
@@ -29,7 +40,7 @@
 - 修复 IF-C2 Option/Result payload 类型变量逃逸（L2 类型系统健全性）：`let mut a = None` 将 `a` 绑定到 `Option<?T>`（mut 绑定不泛化，值限制）。此前 `check_expr` 的 `Some/Ok/Err` 分支回显期望类型而不绑定 payload 类型变量，`a = Some(1)` 不冻结 `?T`，后续 `a = Some("x")` 被错误接受。新增 `freeze_variant_payload`：变体构造时将期望 payload 类型变量与实际 payload 统一（`?T := i32`），后续不同 payload 构造即报 E0209。数值宽度差异（i32/i64/f64 双向）与 trait 协变、未解析占位（Infer/unknown）豁免，保留 `std::env::get_int` 等 `Ok(i64)` 入 `Result<i32>` 的既有隐式协变。恢复 `if_c2_none_option_infer_does_not_escape`，`if_c2_none_in_option_context_still_ok` 保持绿。
 - 修复 verifier await-in-arithmetic 溢出误报（L2 验证器健全性，消除假阳性 Failed）：`sum_pair` 返回 `(await t1) + (await t2)`、`ensures result == x + y`、`requires` 限定 x,y ∈ ±1e9，但 verifier 报「integer overflow is not excluded」。两处耦合缺陷：（1）i32 definedness（checked-int 溢出）检查在 callee ensures 传播之前运行，return 中 `+` 的 no-overflow 义务看不到 `id` 的 ensures（`result == a` 约束 `await t1 == x`）；（2）`assert_callee_ensures_in_expr` 经 `expr_to_z3_int(Ident)`（`vars.get_int`，非 get_or_create）编码替换后的 ensures（`result -> Ident(call_key)`），而 call-result 变量此前由 `expr_to_z3_int(Call)` 惰性创建——ensures 先于 body lowering 断言时 call_key 尚不存在，`get_int` 返回 None，公理被静默丢弃。修复：将 return 表达式的 callee ensures 断言前移至 definedness 检查之前；并在 `assert_callee_ensures_in_expr` 预创建 call-result 变量使 ensures 编码与顺序无关。恢复 `verify_multiple_spawn_await`（103 个 verifier 测试全绿）。
 - 修复 Clippy `never_loop` 硬错误（`-D warnings` 下编译失败）：`runtime/mod.rs` `match_with_captures` 尾部 `loop` 从不迭代——每个分支均 return，模式推进由递归 `match_with_captures(&pattern[after..], ..)` 承担而非循环。改为普通块，单遍控制流完全等价，无行为变化（26 个 regex 测试 + 全量绿）。
-- **Clippy 基线清零**（0.31.6 交付项 3，门禁 `cargo clippy --all-targets -- -D warnings`）：v0.31.4 typed-IR 迁移继承 177 个既有基线 lint（27 类，集中于 codegen `useless_conversion`×65 / `type_complexity`×39 / `needless_range_loop`×15 / `too_many_arguments`×11 等）。止血版（0 新 feature、变更预算预留 25% 回归容量）不以大规模重构清零，而在 `src/lib.rs` 与 `src/main.rs` 以带注释的 crate-level `#![allow]` 将其登记为已接受债务，使门禁归零并从此锁定「不得新增」；`if_same_then_else`×3 已逐处核查为对称分支良性冗余（非缺陷）。增量清理排入 0.31.7+ 实现版。全量 4053 passed / 0 failed / 10 ignored（均为既有：6 个 ASan/UBSan/Valgrind 工具门禁 + 4 个 v0.31 类型引擎已知限制），无新增 ignored。
+- **Clippy 基线清零**（0.31.6 交付项 3，门禁 `cargo clippy --all-targets -- -D warnings`）：v0.31.4 typed-IR 迁移继承 177 个既有基线 lint（27 类，集中于 codegen `useless_conversion`×65 / `type_complexity`×39 / `needless_range_loop`×15 / `too_many_arguments`×11 等）。止血版（0 新 feature、变更预算预留 25% 回归容量）不以大规模重构清零，而在 `src/lib.rs` 与 `src/main.rs` 以带注释的 crate-level `#![allow]` 将其登记为已接受债务，使门禁归零并从此锁定「不得新增」；`if_same_then_else`×3 已逐处核查为对称分支良性冗余（非缺陷）。增量清理排入 0.31.8+ 实现版。全量 4053 passed / 0 failed / 10 ignored（均为既有：6 个 ASan/UBSan/Valgrind 工具门禁 + 4 个 v0.31 类型引擎已知限制），无新增 ignored。
 
 ### v0.31.0-dev — Pre-1.0 语义中枢启动
 
@@ -92,7 +103,7 @@
 - ownership 使用确定性 worklist fixed point；join 仅合并 reachable predecessor，terminal arm 不污染 successor，路径 Available/Consumed 分歧给出稳定诊断，回边上仍活跃的 loan fail-closed。
 - borrow 开始使用独立 LoanId，反向 CFG liveness 产生 point/edge-specific BorrowEnd；支持多 shared loan、reborrow parent、overlap read/write/move/drop 冲突与 sibling place 分离。
 - interpreter/native 将 nested field、tuple、constant/dynamic list index place 递归 lowering 为真实地址，去除临时副本 write-back；`ownership_cfg.mimi` 双后端实测一致。
-- 收口边界：`OwnershipLedger` 暂作 canonical action extraction 与 consumer 兼容投影；完整 typed body consumer 迁移属于 0.31.4–0.31.5，跨 turn exactly-once 闭环属于 0.31.12。
+- 收口边界：`OwnershipLedger` 暂作 canonical action extraction 与 consumer 兼容投影；完整 typed body consumer 迁移属于 0.31.4–0.31.5，跨 turn exactly-once 闭环属于 0.31.13。
 
 ### v0.31.4-dev — CheckedProgram consumer 硬化（transition 表 + 目录扩展）
 
