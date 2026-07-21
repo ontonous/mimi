@@ -280,6 +280,35 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("bool".into(), vec![]);
             }
+            // v0.31.6: function-call forms of the string builtins. These were
+            // only recognized in method-call position (s.char_at(i)); the
+            // verifier's contract language uses function syntax char_at(s, i) /
+            // starts_with(s, p), which previously fell through to "undefined
+            // function" and left a residual `unknown` type (TOOL-RESOLUTION-001).
+            "char_at" => {
+                if args.len() != 2 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "char_at expects 2 arguments (string, index)",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("string".into(), vec![]);
+            }
+            "starts_with" | "ends_with" => {
+                if args.len() != 2 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        format!("{} expects 2 arguments (string, string)", name),
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
             "assert_eq" | "assert_ne" => {
                 if args.len() != 2 {
                     self.emit_code(
