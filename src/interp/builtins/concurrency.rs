@@ -718,8 +718,13 @@ impl<'a> Interpreter<'a> {
             if let Some(Value::List(actor_names)) = fields.get("actors") {
                 for actor_val in actor_names {
                     if let Value::String(name) = actor_val {
-                        let _ = self.spawn_actor(name);
-                        results.push(Value::String(format!("spawned:{}", name)));
+                        // Report spawn outcome truthfully — a failed spawn must
+                        // not be recorded as "spawned" (pre-1.0 02-errors §2:
+                        // actor runtime errors must not hide behind a sentinel).
+                        match self.spawn_actor(name) {
+                            Ok(_) => results.push(Value::String(format!("spawned:{}", name))),
+                            Err(e) => results.push(Value::String(format!("failed:{}:{}", name, e))),
+                        }
                     }
                 }
             }
