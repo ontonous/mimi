@@ -1,8 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [0.31.6] - 2026-07-22
 
-### v0.31.6-dev — 止血 I（回归清零）
+### 止血 I（回归清零）
 
 > 范围裁定：0.31.6 是纯止血版本（`kind=stabilization, requirements=[]`），只修 0.31.4 迁移引入的回归、ICE、Clippy 与基础 ignored。consumer 迁移主体（Flow/actor/并发/session/FFI 执行补齐、native structured emitter、verifier typed-contract lowering、component `BindingModule` 投影、`legacy_body_file()` 删除）顺延至 0.31.7–0.31.15 Flow 核心阶段。
 
