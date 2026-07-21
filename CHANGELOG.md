@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### v0.31.6-dev — 止血 I（回归清零）
+
+> 范围裁定：0.31.6 是纯止血版本（`kind=stabilization, requirements=[]`），只修 0.31.4 迁移引入的回归、ICE、Clippy 与基础 ignored。consumer 迁移主体（Flow/actor/并发/session/FFI 执行补齐、native structured emitter、verifier typed-contract lowering、component `BindingModule` 投影、`legacy_body_file()` 删除）顺延至 0.31.7–0.31.15 Flow 核心阶段。
+
+- 范围锚定：修订 `devdocs/v0.31/01-foundation.md`，明确 0.31.6 与 0.31.7+ 的边界，纠正「consumer 迁移缺口留给 0.31.6」的乐观笔误。
+- 修复 codegen named/default 参数消解：`reorder_named_args` 与 `compile_arg_values` 改为对 `Expr::unlocated()` 匹配。v0.31.1 Span/Origin 将调用实参包裹进 `Expr::Located`，导致 `Located(NamedArg)` 落入位置参数分支、未消解的 `NamedArg` 泄漏到 `compile_expr` 而报错；与 inference/interpreter 既有的 `unlocated()` 处理对齐。恢复 `dual_named_args_function` / `dual_named_args_with_defaults` 双后端等价。
+
 ### v0.31.0-dev — Pre-1.0 语义中枢启动
 
 - 建立 `devdocs/v0.31/` 权威路线：37 个可独立验收的小版本、31 项 requirement 全覆盖、止血/DEBUG/攻击审查/双 RC 周期。
