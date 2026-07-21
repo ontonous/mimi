@@ -7127,7 +7127,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<Vec<BasicValueEnum<'ctx>>, CompileError> {
         args.iter()
-            .map(|arg| match arg {
+            .map(|arg| match arg.unlocated() {
                 Expr::NamedArg(_, value) => self.compile_expr(value, vars),
                 other => self.compile_expr(other, vars),
             })
@@ -7144,9 +7144,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let Some(fdef) = self.func_defs.get(name) else {
             // Unknown function (builtin/method): strip NamedArg wrappers only.
+            // Match on `unlocated()` — Span/Origin (v0.31.1) wraps args in
+            // `Expr::Located`, so a raw `Expr::NamedArg` match would miss them
+            // and leak an unresolved NamedArg into compile_expr.
             return Ok(args
                 .iter()
-                .map(|a| match a {
+                .map(|a| match a.unlocated() {
                     Expr::NamedArg(_, v) => *v.clone(),
                     other => other.clone(),
                 })
@@ -7155,7 +7158,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut ordered: Vec<Option<Expr>> = vec![None; fdef.params.len()];
         let mut next_pos = 0usize;
         for arg in args {
-            match arg {
+            // Match on `unlocated()` for the same reason as above: a Located
+            // wrapper around a NamedArg must still be recognized and reordered.
+            match arg.unlocated() {
                 Expr::NamedArg(n, val) => {
                     let Some(pos) = fdef.params.iter().position(|p| p.name == *n) else {
                         return Err(CompileError::Generic(format!(
