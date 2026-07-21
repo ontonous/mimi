@@ -20,7 +20,7 @@ tests/real_world/
 
 ```bash
 # 1. 确保 release 版 mimi CLI 已构建
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo build --release
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo build --release
 
 # 2. 重新生成测试文件（修改 generate_suite.py 后执行）
 cd tests/real_world

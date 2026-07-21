@@ -94,16 +94,16 @@ _This project adheres to the [Contributor Covenant 2.1](CODE_OF_CONDUCT.md). All
 ```bash
 # 首次构建
 bash scripts/setup-llvm-wrapper.sh
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo build
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo build
 
 # 运行测试
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
 
 # Clippy（零通过门禁）
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo clippy --deny warnings
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo clippy --deny warnings
 
 # 格式化
-LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo fmt -- --check
+LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt -- --check
 ```
 
 ---

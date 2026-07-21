@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent.parent
 MIMI = REPO_ROOT / "target" / "release" / "mimi"
 ENV = os.environ.copy()
-ENV["LLVM_SYS_180_PREFIX"] = "/tmp/llvm-wrapper"
+ENV["LLVM_SYS_181_PREFIX"] = "/tmp/llvm-wrapper"
 
 # Paths are relative to tests/real_world. Add entries only for complete
 # programs intentionally unsupported by codegen, not individual weak features.
@@ -92,7 +92,7 @@ def run_one(path: Path):
 def main():
     if not MIMI.exists():
         print(f"mimi binary not found: {MIMI}", file=sys.stderr)
-        print("Run: LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo build --release", file=sys.stderr)
+        print("Run: LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo build --release", file=sys.stderr)
         sys.exit(1)
 
     files = sorted(p for p in ROOT.glob("*.mimi") if p.is_file())

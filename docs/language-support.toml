@@ -21,7 +21,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test flow_features -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test flow_features -- --test-threads=1"
 evidence = "State values exist, but generations are not linear or unforgeable."
 
 [[support]]
@@ -36,7 +36,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "partial"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test flow_features -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test flow_features -- --test-threads=1"
 evidence = "No complete become/stay/fault/rejected atomic terminal model."
 
 [[support]]
@@ -51,7 +51,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test flow_matrix -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test flow_matrix -- --test-threads=1"
 evidence = "Current normalization still injects N-by-M Fault fallback edges."
 
 [[support]]
@@ -66,7 +66,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test flow_features -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test flow_features -- --test-threads=1"
 evidence = "Interpreter support remains partial; native codegen now rejects multi-target transitions before lowering instead of selecting the first target."
 
 [[support]]
@@ -81,7 +81,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "partial"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test actor_ -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test actor_ -- --test-threads=1"
 evidence = "Actors still expose an independent mutable field model."
 
 [[support]]
@@ -96,7 +96,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test protocol_ -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test protocol_ -- --test-threads=1"
 evidence = "Static topology exists; resolved projection and component handshake do not."
 
 [[support]]
@@ -111,7 +111,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "partial"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test protocol_ -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test protocol_ -- --test-threads=1"
 evidence = "String reflection exists without the required typed VTable ABI."
 
 [[support]]
@@ -126,7 +126,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test session_ -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test session_ -- --test-threads=1"
 evidence = "Untracked residuals can be skipped and runtime endpoints can degrade to integers."
 
 [[support]]
@@ -141,7 +141,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "partial"
 lsp = "unsupported"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test core::cfg -- --test-threads=1 && LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test ownership_ -- --test-threads=1 && LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test borrow_boundary -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test core::cfg -- --test-threads=1 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test ownership_ -- --test-threads=1 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test borrow_boundary -- --test-threads=1"
 evidence = "CheckedProgram persists a validated CallableCfg and ResourceAnalysis for every function, nested function, actor/impl method, and transition. Stable semantic block/edge/local/resource/loan IDs do not depend on Vec position; every block has one terminator and reachable predecessors alone participate in deterministic fixed-point joins. Canonical actions are emitted directly from typed ResolvedBody places and CFG locations; capability/session/delegate transfers share ResourceId, compound capability return/drop is deterministic, terminal paths do not pollute joins, and loop back-edges reject live loans or inconsistent resource states. OwnershipLedger is now a compatibility projection rather than a production analysis input; unsupported partial-move patterns and cross-turn exactly-once remain incomplete, so the requirement stays partial."
 
 [[support]]
@@ -156,7 +156,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "partial"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test error_ -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test error_ -- --test-threads=1"
 evidence = "Typed channels exist but Fault and runtime sentinel boundaries are not closed."
 
 [[support]]
@@ -171,7 +171,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "partial"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test fault_ -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test fault_ -- --test-threads=1"
 evidence = "Fault is not yet a complete per-Flow typed set and recovery verbs are still injected."
 
 [[support]]
@@ -186,7 +186,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "partial"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test progressive -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test progressive -- --test-threads=1"
 evidence = "An implicit shell Flow is injected, but Main is not fully lowered into its startup turn."
 
 [[support]]
@@ -201,7 +201,7 @@ runtime = "not_applicable"
 verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test try_ -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test try_ -- --test-threads=1"
 evidence = "Transition rollback propagation does not return a declared error and source generation."
 
 [[support]]
@@ -216,7 +216,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test core::cfg::dataflow -- --test-threads=1 && LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test borrow_boundary -- --test-threads=1 && LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test e2e_projected_ -- --test-threads=1 && LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test e2e_index_reference -- --test-threads=1 && LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test e2e_dynamic_index_reference -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test core::cfg::dataflow -- --test-threads=1 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test borrow_boundary -- --test-threads=1 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test e2e_projected_ -- --test-threads=1 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test e2e_index_reference -- --test-threads=1 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test e2e_dynamic_index_reference -- --test-threads=1"
 evidence = "Each shared/mutable borrow has a stable LoanId; backwards CFG use-def liveness installs point/edge-specific BorrowEnd actions. Multiple shared loans are accepted, mutable overlap conflicts with reads/writes/moves/drops, reborrows record their parent, and a loan live across a back-edge fails closed. Structured Place overlap separates sibling fields, tuple members, and distinct constant indexes; dynamic indexes and dereferences conflict conservatively. Interpreter and native recursively address nested fields, tuples, and constant/dynamic list indexes without temporary write-back, while existing view/mutate realloc checks remain active. Production checker borrow-state tables and textual NLL scanning are removed; only the test-only raw-AST CFG oracle and incomplete local-reference escape/reallocation proof remain, so the requirement stays partial."
 
 [[support]]
@@ -231,7 +231,7 @@ runtime = "partial"
 verify = "unsupported"
 fmt = "partial"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test capability -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test capability -- --test-threads=1"
 evidence = "Raw string effects and capability flags do not implement the experimental target model."
 
 [[support]]
@@ -246,7 +246,7 @@ runtime = "not_applicable"
 verify = "partial"
 fmt = "not_applicable"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test v1_2_verification -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test v1_2_verification -- --test-threads=1"
 evidence = "Verifier still accepts raw AST and lacks the fail-closed result algebra."
 
 [[support]]
@@ -261,7 +261,7 @@ runtime = "unsupported"
 verify = "not_applicable"
 fmt = "unsupported"
 lsp = "unsupported"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test ffi_ -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test ffi_ -- --test-threads=1"
 evidence = "No Component IR or .mimiabi single source exists."
 
 [[support]]
@@ -276,7 +276,7 @@ runtime = "not_applicable"
 verify = "unsupported"
 fmt = "partial"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test comptime -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test comptime -- --test-threads=1"
 evidence = "Comptime exists, but the target pure/effect gate and generated-code recheck are incomplete."
 
 [[support]]
@@ -291,7 +291,7 @@ runtime = "not_applicable"
 verify = "partial"
 fmt = "partial"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test parser_ -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test parser_ -- --test-threads=1"
 evidence = "Several removed statements and wrappers remain accepted in the execution AST."
 
 [[support]]
@@ -306,7 +306,7 @@ runtime = "not_applicable"
 verify = "partial"
 fmt = "partial"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test function -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test function -- --test-threads=1"
 evidence = "Both function forms exist, but removed type spellings and migration are not closed."
 
 [[support]]
@@ -321,7 +321,7 @@ runtime = "partial"
 verify = "partial"
 fmt = "partial"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test contract -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test contract -- --test-threads=1"
 evidence = "Contracts remain body statements and runtime/proof timing is not fully unified."
 
 [[support]]
@@ -336,7 +336,7 @@ runtime = "not_applicable"
 verify = "not_applicable"
 fmt = "partial"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test core::resolved::tests -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test core::resolved::tests -- --test-threads=1"
 evidence = "All top-level declarations and Flow lowering nodes have canonical NodeId/Origin; function Stmt/Expr/Pattern paths are indexed with explicit Exact versus DeclarationFallback precision. Exact expression spans and unknown-attribute closure remain incomplete."
 
 [[support]]
@@ -351,7 +351,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "not_applicable"
 lsp = "not_applicable"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test ffi_handle -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test ffi_handle -- --test-threads=1"
 evidence = "Current handles lack complete kind, generation, runtime owner, and lease semantics."
 
 [[support]]
@@ -366,7 +366,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "unsupported"
 lsp = "unsupported"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test ffi_ -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test ffi_ -- --test-threads=1"
 evidence = "Callback quiescence, subscription generation, and late-delivery rejection are not closed."
 
 [[support]]
@@ -381,7 +381,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "unsupported"
 lsp = "unsupported"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test ffi_ -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test ffi_ -- --test-threads=1"
 evidence = "Exactly-once cancellation and terminal resource acknowledgement are not closed."
 
 [[support]]
@@ -396,7 +396,7 @@ runtime = "unsupported"
 verify = "not_applicable"
 fmt = "unsupported"
 lsp = "unsupported"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test manifest -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test manifest -- --test-threads=1"
 evidence = "No canonical wire schema, revision envelope, or schema handshake exists."
 
 [[support]]
@@ -411,7 +411,7 @@ runtime = "not_applicable"
 verify = "partial"
 fmt = "not_applicable"
 lsp = "unsupported"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test core:: -- --test-threads=1 && LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test v1_2_generics -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test core:: -- --test-threads=1 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test v1_2_generics -- --test-threads=1"
 evidence = "Production consumers require CheckedProgram; canonical item/Flow/state/transition tables, per-function signatures (params/ret/effects/comptime), session type bodies, protocol topology, and actor field/method directories, capabilities, constants, traits, impls, type defs, and extern blocks, and function-body NodeMeta exist. Interpreter::from_checked and CodeGenerator::compile_checked install the exact (flow,event,source) transition table plus function/session/protocol/actor/cap/const/trait/impl/ownership/type/extern directories and Flow annotation quotas/persistent/transactional/metadata-shadow field sets; missing overloads/arity fail closed. Backend capability requirements are queryable on CheckedProgram. Flow impl Protocol lists are materialised for consumers. Transition targets and fallback/pinned flags are queryable from interp/codegen consumers. Transition event parameter arity is enforced from CheckedProgram. Ownership action summaries are installed into consumers. Function effects directories are installed into codegen/verifier. Comptime function names are installed into consumers. Function return types are installed into codegen/verifier. Extern function ABI maps are installed into consumers. Constant type/value materialization is installed into consumers. Typed call-site tables (callee/argc/kind) are materialised and installed into consumers. Call-site expected arity is bound when the callee function is known. Call-site callee effects are bound from function directories when known. Call-site callee return types are bound from function directories when known. Extern function signatures (arity/ret) are materialised and bound into call sites/consumers. Actor method signatures are materialised and installed into consumers. Trait/impl method signatures are materialised and installed into consumers. Protocol state payloads and transition records are materialised and installed into consumers. Session residual type displays are materialised and installed into consumers. TypeDef fields/variants/aliases are materialised and installed into consumers. Function parameter directories are installed into consumers. Capability combined_with maps are installed into consumers. Transition event parameter name/type directories are installed into consumers. Flow state payload field directories are installed into consumers. Actor field directories (name/type/mut) are installed into consumers. Backend capability requirements and NodeMeta counts are installed into consumers. Ownership ledger resource-name directories are installed into consumers. Extern no_panic/unsafe flags are installed into consumers. NodeMeta path sets are installed into consumers. NodeMeta precision maps are installed into consumers. Flow state name directories are installed into consumers. Flow event name directories and ResolvedItem kind maps are installed into consumers. Call-site by-owner indexes are installed into consumers. Ownership action detail directories are installed into consumers. Ownership branch-merge detail directories are installed into consumers. Flow transitions-by-flow detail directories are installed into consumers. Call-site by-callee indexes are installed into consumers. Flow transitions-by-event detail directories are installed into consumers. NodeMeta span directories are installed into consumers. Trait/impl method parameter and effect directories are installed into consumers. Protocol state-name and named-payload directories are installed into consumers. Actor method parameter and effect directories are installed into consumers. Extern function parameter name/type directories are installed into consumers. emit/bindgen entrypoints require CheckedProgram and Component backend validation before generation. Extern discovery for emit/bindgen consumes structured ResolvedExternFunc data and rejects duplicate projected symbols. Exported-function discovery consumes ResolvedFunction ABI metadata and rejects unsupported async/generic exports. Type discovery consumes complete ResolvedTypeDef declaration snapshots and rejects projected-name collisions. Raw File access is crate-private and explicitly limited to legacy body consumers. build --verify-ffi uses a checked API and validates resolved extern call identity/arity before the legacy contract-expression adapter. Checked FFI verification injects extern contracts from ResolvedExternFunc; raw AST remains only for caller bodies/argument expressions. Module-qualified flow mailbox depths resolve by bare actor/flow name. Verifier backend no longer blocks unrelated contract verification solely because a multi-target Flow is present. HM constraints use nested undo transactions, generic calls instantiate fresh variables through the canonical unifier, and CheckedProgram persists fail-closed zonked function signatures. ResolvedBody closes Option, Result, ownership-wrapper, string, List, and Set language methods to stable BuiltinId values using only canonical receiver types; receiver permission and parameter order are explicit, so backends do not repeat method-name/type guessing. Full raw-AST elimination and the remaining arena/constructor/shared-generic body gaps remain incomplete. ResolvedCallable is assembled at the CheckedProgram boundary under one stable NodeId from signature + body + CFG + resource analysis (owner disagreement fails closed) and collects checker contracts from the resolved body. Session residuals are captured as CheckedSessionAction, stabilized into ResolvedSessionAction keyed by clone-stable call nodes, and lowered into body-local SessionTransition facts; terminal session_close emits a Drop that consumes the endpoint instead of a TransferSession, and the transferred endpoint argument is no longer double-consumed as a Move. Multi-target Flow transitions resolve to a closed ResolvedType::FlowStateSet with an explicit FlowStateInject conversion; the body validator enforces state-set membership and rejects pseudo-Identity conversions whose from != to. Nominal disambiguation excludes Flow containers from the nominal catalog so only concrete states are value types, removing backend name guessing. A typed differential parity suite asserts the ResolvedInterpreter produces the same return value and captured stdout as the surface interpreter across the scalar subset (control flow, while loops, closure capture, default/named arguments, records/enums/match, Option/Result, lists/maps/strings, JSON round-trip, recursion and comptime); a corpus sweep shows 30/69 real_world programs execute correctly through the typed executor, with the remaining 39 blocked on Flow transition, actor, concurrency, session, and FFI execution that must be completed before the production path can switch."
 
 [[support]]
@@ -426,7 +426,7 @@ runtime = "partial"
 verify = "not_applicable"
 fmt = "partial"
 lsp = "partial"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test ffi_ -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test ffi_ -- --test-threads=1"
 evidence = "Raw extern is currently exposed without a complete unsafe/experimental profile boundary."
 
 [[support]]
@@ -456,7 +456,7 @@ runtime = "not_applicable"
 verify = "not_applicable"
 fmt = "unsupported"
 lsp = "unsupported"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test migrate -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test migrate -- --test-threads=1"
 evidence = "The bounded pre-1.0 migration command and fix-it suite do not exist."
 
 [[support]]
@@ -471,5 +471,5 @@ runtime = "unsupported"
 verify = "not_applicable"
 fmt = "unsupported"
 lsp = "unsupported"
-probe = "LLVM_SYS_180_PREFIX=/tmp/llvm-wrapper cargo test component -- --test-threads=1"
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test component -- --test-threads=1"
 evidence = "Generated component contracts and revision/conflict authority enforcement do not exist."
