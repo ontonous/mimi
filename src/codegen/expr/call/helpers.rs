@@ -438,7 +438,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[Expr],
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let type_name_str = match &args[0] {
+        // v0.31.6: unlocate — the argument may be wrapped in `Expr::Located`
+        // (Span/Origin v0.31.1), so a raw `Expr::Literal` match missed string
+        // literals like `type_fields("Point")`.
+        let type_name_str = match args[0].unlocated() {
             Expr::Literal(Lit::String(s)) => s.clone(),
             Expr::Ident(var) => self
                 .var_type_names
@@ -465,7 +468,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[Expr],
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let type_name_str = match &args[0] {
+        // v0.31.6: unlocate — same Located-wrapper reasoning as type_fields.
+        let type_name_str = match args[0].unlocated() {
             Expr::Literal(Lit::String(s)) => s.clone(),
             Expr::Ident(var) => self
                 .var_type_names

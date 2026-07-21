@@ -42,6 +42,26 @@ impl<'a> Checker<'a> {
                 None => {}
             }
         }
+        // E0402: duplicate parameter names are a user-facing checker diagnostic
+        // with a precise span. The IR-level `ResolvedSignature::validate`
+        // uniqueness check remains a fail-closed safety net, but it surfaces as
+        // a code-less TOOL-RESOLUTION-001 error; the canonical error code must
+        // originate here.
+        let mut seen_param_names: Vec<&str> = Vec::new();
+        for p in &func.params {
+            if seen_param_names.contains(&p.name.as_str()) {
+                self.errors.push(Diagnostic::error_code(
+                    codes::E0402,
+                    format!(
+                        "duplicate parameter name '{}' in function '{}'",
+                        p.name, func.name
+                    ),
+                    p.meta.span,
+                ));
+            } else {
+                seen_param_names.push(p.name.as_str());
+            }
+        }
         let ret = func
             .ret
             .as_ref()
