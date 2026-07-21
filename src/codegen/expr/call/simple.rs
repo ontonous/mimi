@@ -294,7 +294,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         // `require_list_pointer` returns as-is, which is the correct LLVM
         // pointer for gep against the list struct).
         if matches!(name, "push" | "pop") && !args.is_empty() {
-            match &args[0] {
+            // v0.31.6: unlocate args[0] — the v0.31.1 Span/Origin pass wraps
+            // call arguments in Expr::Located, so matching `&args[0]` against
+            // `Expr::Ident`/`Expr::Field` silently missed and the alloca-swap
+            // below never fired, letting push/pop mutate a discarded temporary
+            // (double free / stale buffer). Match the unwrapped node instead.
+            match args[0].unlocated() {
                 Expr::Ident(var_name) => {
                     if self.is_list_type_name(&self.infer_object_type(&args[0], vars)) {
                         if let Some(&(alloca, var_ty)) = vars.get(var_name) {
@@ -7226,7 +7231,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             if param.borrow.is_none() || index >= args.len() || index >= arg_exprs.len() {
                 continue;
             }
-            match &arg_exprs[index] {
+            // v0.31.6: unlocate the argument — v0.31.1 wraps call args in
+            // Expr::Located, so matching `&arg_exprs[index]` missed the
+            // Ident/Field arms and fell through to the rvalue arm, which
+            // materialized a temporary. A `mutate List` param then received a
+            // pointer to a throwaway copy, so in-callee push/pop never reached
+            // the caller's list (stale len → FFI index OOB).
+            match arg_exprs[index].unlocated() {
                 Expr::Ident(var_name) => {
                     let Some(&(slot, stored_ty)) = vars.get(var_name) else {
                         return Err(CompileError::Generic(format!(
@@ -7234,8 +7245,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                             var_name
                         )));
                     };
+                    // v0.31.6: unlocate param.ty — v0.31.1 wraps parameter types
+                    // in Type::Located, so matching `&param.ty` against
+                    // `Type::Name("List", _)` missed, list_is_already_indirect
+                    // stayed false, and the else branch passed the var *slot*
+                    // (a pointer-to-pointer) instead of loading the authoritative
+                    // list pointer. push then realloc'd a garbage data field.
                     let list_is_already_indirect = matches!(
-                        (&param.ty, stored_ty),
+                        (param.ty.unlocated(), stored_ty),
                         (Type::Name(type_name, _), BasicTypeEnum::PointerType(_))
                             if type_name == "List"
                     );
