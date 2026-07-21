@@ -2,15 +2,15 @@
 
 ## 版本
 
-- **0.31.7**：nominal Flow identity、linear generation、state unforgeability。
-- **0.31.8**：draft + Become/Stay/Fault/Rejected 原子 turn，transition `?` 归还 source。
-- **0.31.9**：稀疏图、per-Flow typed Fault、显式 reset/recover、progressive Main 真 lowering。
-- **0.31.10**：Actor runs Flow，移除稳定 Actor mutable business field。
-- **0.31.11**：typed dual Session residual，覆盖 alias/field/return/branch/close。
-- **0.31.12**：transition/Fault/Session resource exactly-once 与闭包 ownership。
-- **0.31.13**：static Protocol stable；dynamic VTable 保持 experimental。
-- **0.31.14**：canonical semantic trace 和 happens-before DAG comparator。
-- **0.31.15**：攻击审查 I，0 新 feature。
+- **0.31.8**：nominal Flow identity、linear generation、state unforgeability。
+- **0.31.9**：draft + Become/Stay/Fault/Rejected 原子 turn，transition `?` 归还 source。
+- **0.31.10**：稀疏图、per-Flow typed Fault、显式 reset/recover、progressive Main 真 lowering。
+- **0.31.11**：Actor runs Flow，移除稳定 Actor mutable business field。
+- **0.31.12**：typed dual Session residual，覆盖 alias/field/return/branch/close。
+- **0.31.13**：transition/Fault/Session resource exactly-once 与闭包 ownership。
+- **0.31.14**：static Protocol stable；dynamic VTable 保持 experimental。
+- **0.31.15**：canonical semantic trace 和 happens-before DAG comparator。
+- **0.31.16**：攻击审查 I，0 新 feature。
 
 ## 核心门禁
 

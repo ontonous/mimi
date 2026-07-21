@@ -3,13 +3,13 @@
 ## 专用版本
 
 - **0.31.6 止血 I**：语义中枢回归。
-- **0.31.15 攻击审查 I**：Flow/Actor/Session/resource。
-- **0.31.20 止血/审查 II**：Verifier。
-- **0.31.27 Component 审查**：ABI/Wire/callback/async。
-- **0.31.33 DEBUG**：组合 fuzz、MCDD reference model、性能/内存、flake。
-- **0.31.34 最终敌对审查**：P0、逃生口、silent fallback、unsupported warning。
-- **0.31.35 RC1**：冻结全部 stable profile，只修阻断缺陷。
-- **0.31.36 RC2**：第二次干净环境、跨平台、迁移和 SDK E2E。
+- **0.31.16 攻击审查 I**：Flow/Actor/Session/resource。
+- **0.31.21 止血/审查 II**：Verifier。
+- **0.31.28 Component 审查**：ABI/Wire/callback/async。
+- **0.31.34 DEBUG**：组合 fuzz、MCDD reference model、性能/内存、flake。
+- **0.31.35 最终敌对审查**：P0、逃生口、silent fallback、unsupported warning。
+- **0.31.36 RC1**：冻结全部 stable profile，只修阻断缺陷。
+- **0.31.37 RC2**：第二次干净环境、跨平台、迁移和 SDK E2E。
 
 ## 基线门禁顺序
 

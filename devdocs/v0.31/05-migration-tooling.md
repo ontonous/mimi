@@ -2,10 +2,10 @@
 
 ## 版本
 
-- **0.31.16**：错误代数、func/fn、签名合约、pure comptime、attribute fail-closed、removed syntax 收敛。
-- **0.31.30**：`mimi migrate --from pre-1.0` 与 fix-it，仓库/stdlib 一次迁移。
-- **0.31.31**：token/CST formatter、LSP CheckedProgram/Origin、自动 support probes。
-- **0.31.32**：multi-target、dynamic Protocol、Effect/Capability、raw extern experimental 隔离。
+- **0.31.17**：错误代数、func/fn、签名合约、pure comptime、attribute fail-closed、removed syntax 收敛。
+- **0.31.31**：`mimi migrate --from pre-1.0` 与 fix-it，仓库/stdlib 一次迁移。
+- **0.31.32**：token/CST formatter、LSP CheckedProgram/Origin、自动 support probes。
+- **0.31.33**：multi-target、dynamic Protocol、Effect/Capability、raw extern experimental 隔离。
 
 ## 迁移原则
 

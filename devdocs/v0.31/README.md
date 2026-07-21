@@ -9,7 +9,7 @@
 
 v0.30.0 是已完成的止血基线。v0.31.x 不重做 v0.30 已关闭的架构债务，而是在其上建立唯一语义中枢，并完整实现 Pre-1.0 的 31 项 requirement。
 
-v0.31.x 的完成不由版本号决定。即使到达 v0.31.36，只要 stable requirement、P0、双后端轨迹、Verified Core、Component conformance、迁移或 RC 门禁有一项未满足，就继续增加 v0.31.x。
+v0.31.x 的完成不由版本号决定。即使到达 v0.31.37，只要 stable requirement、P0、双后端轨迹、Verified Core、Component conformance、迁移或 RC 门禁有一项未满足，就继续增加 v0.31.x。
 
 ## 2. 权威边界
 
@@ -35,12 +35,12 @@ Span/Origin -> HM -> CFG/ownership -> CheckedProgram/Resolved IR
 
 | 阶段 | 版本 | 主题 |
 |---|---|---|
-| 基础设施 | 0.31.0–0.31.6 | 基线、Span、HM、CFG、Resolved IR、consumer 迁移、止血 |
-| Flow 核心 | 0.31.7–0.31.15 | generation、atomic turn、Fault、Actor、Session、资源、Protocol、Trace、审查 |
-| 语言与验证 | 0.31.16–0.31.20 | 语法收敛、Verification IR、VC、artifact、攻击审查 |
-| Component | 0.31.21–0.31.27 | Component IR、ABI、callback/async、Wire、Rust/TS SDK、审查 |
-| 自举与工具 | 0.31.28–0.31.32 | MimiSpec/HM 自举、迁移、fmt/LSP/probes、experimental 隔离 |
-| 冻结 | 0.31.33–0.31.36 | DEBUG、最终敌对审查、RC1、RC2 |
+| 基础设施 | 0.31.0–0.31.7 | 基线、Span、HM、CFG、Resolved IR、consumer 迁移、止血 I/II |
+| Flow 核心 | 0.31.8–0.31.16 | generation、atomic turn、Fault、Actor、Session、资源、Protocol、Trace、审查 |
+| 语言与验证 | 0.31.17–0.31.21 | 语法收敛、Verification IR、VC、artifact、攻击审查 |
+| Component | 0.31.22–0.31.28 | Component IR、ABI、callback/async、Wire、Rust/TS SDK、审查 |
+| 自举与工具 | 0.31.29–0.31.33 | MimiSpec/HM 自举、迁移、fmt/LSP/probes、experimental 隔离 |
+| 冻结 | 0.31.34–0.31.37 | DEBUG、最终敌对审查、RC1、RC2 |
 
 详细版本及 requirement 分配见 `roadmap.toml` 和 `requirements-matrix.md`。
 
@@ -79,11 +79,11 @@ Span/Origin -> HM -> CFG/ownership -> CheckedProgram/Resolved IR
 
 ## 8. 分册
 
-- `01-foundation.md`：0.31.0–0.31.6、0.31.28–0.31.29
-- `02-flow-runtime.md`：0.31.7–0.31.15
-- `03-verified-core.md`：0.31.17–0.31.20
-- `04-component-boundary.md`：0.31.21–0.31.27
-- `05-migration-tooling.md`：0.31.16、0.31.30–0.31.32
+- `01-foundation.md`：0.31.0–0.31.7、0.31.29–0.31.30
+- `02-flow-runtime.md`：0.31.8–0.31.16
+- `03-verified-core.md`：0.31.18–0.31.21
+- `04-component-boundary.md`：0.31.22–0.31.28
+- `05-migration-tooling.md`：0.31.17、0.31.31–0.31.33
 - `06-audit-debug-rc.md`：止血、审查、DEBUG 和 RC 门禁
 
 ## 9. 最终退出

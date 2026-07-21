@@ -2,13 +2,13 @@
 
 ## 版本
 
-- **0.31.21**：Component IR / `.mimiabi`，所有 generator 只消费同一 IR。
-- **0.31.22**：Native ABI、allocator provenance、typed generational handle 和 concurrent lease。
-- **0.31.23**：Subscription quiescence、async cancel exactly-one terminal。
-- **0.31.24**：canonical Wire Schema、limits、handshake、revision/conflict、replay。
-- **0.31.25**：Rust Safe SDK。
-- **0.31.26**：TypeScript GUI SDK 与 authority/revision 模型。
-- **0.31.27**：Component 攻击审查，0 新 surface。
+- **0.31.22**：Component IR / `.mimiabi`，所有 generator 只消费同一 IR。
+- **0.31.23**：Native ABI、allocator provenance、typed generational handle 和 concurrent lease。
+- **0.31.24**：Subscription quiescence、async cancel exactly-one terminal。
+- **0.31.25**：canonical Wire Schema、limits、handshake、revision/conflict、replay。
+- **0.31.26**：Rust Safe SDK。
+- **0.31.27**：TypeScript GUI SDK 与 authority/revision 模型。
+- **0.31.28**：Component 攻击审查，0 新 surface。
 
 ## 不变量
 
