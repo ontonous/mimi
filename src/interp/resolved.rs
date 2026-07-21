@@ -4069,4 +4069,211 @@ mod tests {
         let surface = crate::interp::Interpreter::new(&file).run().unwrap();
         assert_eq!(typed, surface);
     }
+
+    /// Differential oracle: the typed executor must produce the same return
+    /// value AND the same captured stdout as the surface-AST interpreter for
+    /// every program in the typed scalar subset. This is the verification
+    /// foundation that makes the eventual production switch safe.
+    fn assert_typed_surface_parity(src: &str) {
+        let program = checked(src);
+        let mut typed = ResolvedInterpreter::new(&program);
+        let typed_value = typed
+            .run_main()
+            .unwrap_or_else(|error| panic!("typed interpreter failed: {error}\nsrc:{src}"));
+        let typed_stdout = typed.output().to_string();
+        let (surface_value, surface_stdout) = crate::tests::run_source_with_stdout(src);
+        assert_eq!(
+            typed_value, surface_value,
+            "return value diverged\nsrc:{src}"
+        );
+        assert_eq!(
+            typed_stdout.trim(),
+            surface_stdout.trim(),
+            "stdout diverged\nsrc:{src}"
+        );
+    }
+
+    #[test]
+    fn typed_parity_control_flow() {
+        assert_typed_surface_parity(
+            r#"
+            func main() -> i32 {
+                let mut total = 0
+                for i in range(0, 5) {
+                    total = total + i
+                }
+                let mut n = 0
+                let mut acc = 0
+                while n < 4 {
+                    acc = acc + n
+                    n = n + 1
+                }
+                println(to_string(total))
+                println(to_string(acc))
+                total + acc
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn typed_parity_closures_and_higher_order() {
+        assert_typed_surface_parity(
+            r#"
+            func main() -> i32 {
+                let base = 10
+                let adder = fn(x: i32) -> i32 { x + base }
+                let scaled = fn(x: i32) -> i32 { x * base }
+                let a = adder(5)
+                let b = scaled(3)
+                println(to_string(a))
+                println(to_string(b))
+                a + b
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn typed_parity_default_and_named_arguments() {
+        assert_typed_surface_parity(
+            r#"
+            func rect(width: i32, height: i32 = 3, scale: i32 = 1) -> i32 {
+                width * height * scale
+            }
+            func main() -> i32 {
+                let a = rect(4)
+                let b = rect(4, 5)
+                let c = rect(4, scale = 2)
+                println(to_string(a))
+                println(to_string(b))
+                println(to_string(c))
+                a + b + c
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn typed_parity_while_loop() {
+        assert_typed_surface_parity(
+            r#"
+            func main() -> i32 {
+                let mut n = 0
+                let mut acc = 0
+                while n < 4 {
+                    acc = acc + n
+                    n = n + 1
+                }
+                println(to_string(acc))
+                acc
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn typed_parity_records_and_enums_match() {
+        assert_typed_surface_parity(
+            r#"
+            type Point { x: i32, y: i32 }
+            type Shape { Circle(i32) | Square(i32) | Empty }
+            func area(shape: Shape) -> i32 {
+                match shape {
+                    Circle(r) => r * r * 3,
+                    Square(s) => s * s,
+                    Empty => 0
+                }
+            }
+            func main() -> i32 {
+                let p = Point { x: 2, y: 5 }
+                let total = area(Circle(2)) + area(Square(3)) + area(Empty)
+                println(to_string(p.x))
+                println(to_string(p.y))
+                println(to_string(total))
+                p.x + p.y + total
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn typed_parity_option_result() {
+        assert_typed_surface_parity(
+            r#"
+            func safe_div(a: i32, b: i32) -> Option<i32> {
+                if b == 0 { None } else { Some(a / b) }
+            }
+            func lookup(index: i32) -> Result<i32, string> {
+                if index < 0 { Err("negative") } else { Ok(index * 10) }
+            }
+            func main() -> i32 {
+                let good = safe_div(10, 2).unwrap_or(-1)
+                let bad = safe_div(10, 0).unwrap_or(-1)
+                let ok = lookup(3).unwrap_or(-1)
+                let err = lookup(-1).unwrap_or(-1)
+                println(to_string(good))
+                println(to_string(bad))
+                println(to_string(ok))
+                println(to_string(err))
+                good + bad + ok + err
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn typed_parity_lists_maps_and_strings() {
+        assert_typed_surface_parity(
+            r#"
+            func main() -> i32 {
+                let mut items = [3, 1, 2]
+                push(items, 4)
+                let sorted = sort(items)
+                let m = map_from_list([("a", 1), ("b", 2)])
+                let m2 = map_set(m, "c", 3)
+                let greeting = "hello" + " world"
+                println(to_string(sorted[0]))
+                println(to_string(len(sorted)))
+                println(to_string(map_size(m2)))
+                println(greeting)
+                sorted[0] + len(sorted) + map_size(m2)
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn typed_parity_json_roundtrip() {
+        assert_typed_surface_parity(
+            r#"
+            type User { name: string, age: i32 }
+            func main() -> i32 {
+                let user = User { name: "Ada", age: 36 }
+                let encoded = to_json(user)
+                let decoded = from_json::<User>(encoded)
+                println(decoded.name)
+                println(to_string(decoded.age))
+                decoded.age
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn typed_parity_recursion_and_comptime() {
+        assert_typed_surface_parity(
+            r#"
+            func fib(n: i32) -> i32 {
+                if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
+            }
+            comptime func limit() -> i32 { 8 }
+            func main() -> i32 {
+                let value = fib(limit())
+                println(to_string(value))
+                value
+            }
+            "#,
+        );
+    }
 }
