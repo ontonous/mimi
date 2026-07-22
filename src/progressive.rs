@@ -78,6 +78,7 @@ fn make_implicit_main_flow(parent_meta: AstNodeMeta) -> FlowDef {
             params: vec![],
             to_states: vec!["Single".to_string()],
             body: Some(run_body),
+            fails: None,
             is_fallback: false,
             is_ffi_pinned: false,
         }],

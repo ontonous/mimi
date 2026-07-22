@@ -240,6 +240,7 @@ fn flow_matrix_generated_transition_function_types_share_lowering_origin() {
         }],
         to_states: vec!["Fault".into()],
         body: None,
+        fails: None,
         is_fallback: true,
         is_ffi_pinned: false,
     };

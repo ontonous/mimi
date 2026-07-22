@@ -208,6 +208,7 @@ fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
                     .collect(),
                 to_states: vec!["Fault".to_string()],
                 body: Some(body),
+                fails: None,
                 is_fallback: true,
                 is_ffi_pinned: false,
             });
@@ -399,6 +400,7 @@ fn inject_peer_fault_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
             params: vec![],
             to_states: vec!["Fault".to_string()],
             body: Some(body),
+            fails: None,
             is_fallback: true,
             is_ffi_pinned: false,
         });
@@ -421,6 +423,7 @@ fn inject_peer_fault_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
             params: vec![],
             to_states: vec!["Fault".to_string()],
             body: Some(body),
+            fails: None,
             is_fallback: true,
             is_ffi_pinned: false,
         });
@@ -531,6 +534,7 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
                 "FFI_Pinned",
                 AstOrigin::RuntimeSystem("flow.ffi.enter"),
             )),
+            fails: None,
             is_fallback: false,
             is_ffi_pinned: true,
         });
@@ -553,6 +557,7 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
                 &active,
                 AstOrigin::RuntimeSystem("flow.ffi.exit"),
             )),
+            fails: None,
             is_fallback: false,
             is_ffi_pinned: true,
         });
@@ -579,6 +584,7 @@ fn inject_ffi_pinned_transitions(flow: &mut FlowDef, shapes: &HashMap<String, Ve
             params: vec![],
             to_states: vec!["Fault".to_string()],
             body: Some(body),
+            fails: None,
             is_fallback: true,
             is_ffi_pinned: true,
         });
@@ -614,6 +620,7 @@ fn inject_system_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>)
             params: vec![],
             to_states: vec![root.clone()],
             body: Some(body),
+            fails: None,
             is_fallback: true,
             is_ffi_pinned: false,
         });
@@ -641,6 +648,7 @@ fn inject_system_verbs(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Field>>)
             params: vec![],
             to_states: vec![root],
             body: Some(body),
+            fails: None,
             is_fallback: true,
             is_ffi_pinned: false,
         });
@@ -1118,6 +1126,7 @@ mod tests {
                         value: Expr::Literal(Lit::Int(1)),
                     }],
                 }))]),
+                fails: None,
                 is_fallback: false,
                 is_ffi_pinned: false,
             }],
@@ -1317,6 +1326,7 @@ mod tests {
                     value: Expr::Literal(Lit::String("user".into())),
                 }],
             }))]),
+            fails: None,
             is_fallback: false,
             is_ffi_pinned: false,
         });

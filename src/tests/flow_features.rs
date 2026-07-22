@@ -5409,3 +5409,125 @@ func main() -> i32 {
         result
     );
 }
+
+// ── FLOW-TURN-001: Atomic Turn — fails E + Rejected ──────────────────
+
+#[test]
+fn flow_turn_try_without_fails_rejected() {
+    // L2: `?` in a transition body without `fails E` is a static error (E0424).
+    let src = r#"
+flow Account {
+    state Active { balance: i32 }
+    transition withdraw(Active, amount: i32) -> Active {
+        do {
+            let result = safe_div(self.balance, amount)
+            let new_balance = result?
+            return Active { balance: new_balance }
+        }
+    }
+}
+func safe_div(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 { return Err("div0") }
+    return Ok(a / b)
+}
+func main() -> i32 { 0 }
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "? without fails E should be rejected");
+    let errors = result.unwrap_err();
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0424")),
+        "expected E0424, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn flow_turn_try_with_fails_accepted() {
+    // `?` in a transition body with `fails E` is accepted by the checker.
+    let src = r#"
+flow Account {
+    state Active { balance: i32 }
+    transition withdraw(Active, amount: i32) -> Active fails string {
+        do {
+            let result = safe_div(self.balance, amount)
+            let new_balance = result?
+            return Active { balance: new_balance }
+        }
+    }
+}
+func safe_div(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 { return Err("div0") }
+    return Ok(a / b)
+}
+func main() -> i32 {
+    let s0 = Active { balance: 100 }
+    let s1 = Account::withdraw(s0, 5)
+    s1.balance
+}
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_ok(),
+        "? with fails E should be accepted: {:?}",
+        result
+    );
+}
+
+#[test]
+fn flow_turn_rejected_returns_source() {
+    // Interpreter: `?` failure in a transition with `fails E` produces
+    // Err((source_payload, error)) — the source generation is returned.
+    let src = r#"
+flow Account {
+    state Active { balance: i32 }
+    transition withdraw(Active, amount: i32) -> Active fails string {
+        do {
+            let result = safe_div(self.balance, amount)
+            let new_balance = result?
+            return Active { balance: new_balance }
+        }
+    }
+}
+func safe_div(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 { return Err("div0") }
+    return Ok(a / b)
+}
+func main() -> i32 {
+    let s0 = Active { balance: 100 }
+    let r = Account::withdraw(s0, 0)
+    0
+}
+"#;
+    let result = run_source_result(src);
+    assert_eq!(result, Ok(interp::Value::Int(0)));
+}
+
+#[test]
+fn flow_turn_success_path_unaffected() {
+    // Happy path: transition with `fails E` that does NOT trigger `?`
+    // returns the target state normally.
+    let src = r#"
+flow Account {
+    state Active { balance: i32 }
+    transition withdraw(Active, amount: i32) -> Active fails string {
+        do {
+            let result = safe_div(self.balance, amount)
+            let new_balance = result?
+            return Active { balance: new_balance }
+        }
+    }
+}
+func safe_div(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 { return Err("div0") }
+    return Ok(a / b)
+}
+func main() -> i32 {
+    let s0 = Active { balance: 100 }
+    let s1 = Account::withdraw(s0, 5)
+    s1.balance
+}
+"#;
+    let result = run_source_result(src);
+    assert_eq!(result, Ok(interp::Value::Int(20)));
+}

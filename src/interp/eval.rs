@@ -602,11 +602,33 @@ impl<'a> Interpreter<'a> {
         let result = self.eval_block(body);
         let call_stack = self.scope_env.call_stack.clone();
         let draft = self.lookup("self").or_else(|| vals.first().cloned());
+        // FLOW-TURN-001: clear early_return set by `?` inside the body so it
+        // does not leak into the caller's eval_block. The transition result
+        // (including Rejected) is carried by `result`, not by early_return.
+        let body_early_return = self.early_return.take();
 
         self.pop_scope();
 
         let out = match result {
-            Ok(v) => v.unwrap_or(Value::Unit),
+            Ok(v) => {
+                let v = v.unwrap_or(Value::Unit);
+                // FLOW-TURN-001 Rejected: if `?` inside the body set
+                // early_return and the transition declares `fails E`,
+                // discard the draft and return source generation + error.
+                // Representation: Err((source_payload, error_variant)).
+                if t.fails.is_some() {
+                    if let Some(rejected_val) = body_early_return {
+                        self.abort_persistent_tx(&flow.name);
+                        self.current_flow_state = prev_flow_state;
+                        let source = vals.first().cloned().unwrap_or(Value::Unit);
+                        return Ok(Value::Variant(
+                            "Err".to_string(),
+                            vec![Value::Tuple(vec![source, rejected_val])],
+                        ));
+                    }
+                }
+                v
+            }
             Err(e) => {
                 // Already in Fault: do not re-wrap (avoid infinite absorption).
                 if t.from_state == "Fault" {

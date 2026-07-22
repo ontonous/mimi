@@ -1090,6 +1090,11 @@ pub struct TransitionDef {
     pub params: Vec<Param>,
     /// Target states listed in the transition signature (e.g., `-> Active | OverloadWarning`)
     pub to_states: Vec<String>,
+    /// FLOW-TURN-001: declared rollback error type (`fails E`).
+    /// When present, `?` in the transition body lowers to `Rejected` —
+    /// the draft is discarded and the source generation is returned
+    /// to the caller alongside the typed error.
+    pub fails: Option<Type>,
     /// Transition body — requires a `do { }` block
     pub body: Option<Block>,
     /// True when this transition was injected by transfer-matrix auto-completion

@@ -1264,6 +1264,15 @@ impl Parser {
                 break;
             }
         }
+        // FLOW-TURN-001: parse optional `fails ErrorType` after target states.
+        self.skip_newlines();
+        let fails = if self.at(&TokenKind::Fails) {
+            self.advance();
+            self.skip_newlines();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
         // Parse optional body: { do { ... } }
         let body = if self.at(&TokenKind::LBrace) {
             self.expect(TokenKind::LBrace, "`{`")?;
@@ -1281,6 +1290,7 @@ impl Parser {
             from_state,
             params,
             to_states,
+            fails,
             body,
             is_fallback: false,
             is_ffi_pinned: false,
