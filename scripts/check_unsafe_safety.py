@@ -11,10 +11,12 @@ baseline entries is always welcome; when you do, lower BASELINE_NON_RUNTIME.
 
 Detection heuristic (deterministic): a line that opens an unsafe context
 (`unsafe {`, `unsafe fn`, `unsafe extern`, `unsafe impl`, `unsafe trait`, or a
-bare `unsafe` token ending the line) with no comment containing `SAFETY` in the
-preceding LOOKBACK lines counts as a violation. Pure comment lines and text
-after `//` on a code line are ignored so doc prose mentioning "unsafe" does not
-false-match.
+bare `unsafe` token ending the line) with no `SAFETY` note in its attached
+comment block counts as a violation. The attached comment block is the run of
+contiguous comment lines immediately above the opener (any length, allowing up
+to two blank lines), so a multi-line `// SAFETY:` block is detected regardless
+of its height. Pure comment lines and text after `//` on a code line are
+ignored so doc prose mentioning "unsafe" does not false-match.
 
 Usage:
   scripts/check_unsafe_safety.py            # gate mode: exit 1 if over baseline
@@ -25,10 +27,9 @@ import re
 import sys
 
 # Locked baseline of unsafe blocks lacking a SAFETY comment in NON-runtime
-# code, measured 2026-07-22 (v0.31.7). Do not raise this number; lower it as
-# blocks are documented.
-BASELINE_NON_RUNTIME = 48
-LOOKBACK = 5
+# code, measured 2026-07-22 (v0.31.7) with the contiguous-comment-block
+# detector below. Do not raise this number; lower it as blocks are documented.
+BASELINE_NON_RUNTIME = 54
 
 OPENER = re.compile(r"\bunsafe\b\s*(\{|fn\b|extern\b|impl\b|trait\b|$)")
 SAFETY = re.compile(r"SAFETY", re.IGNORECASE)
@@ -43,6 +44,56 @@ def is_comment_line(s: str) -> bool:
     return t.startswith("//") or t.startswith("/*") or t.startswith("*")
 
 
+def is_attribute_line(s: str) -> bool:
+    t = s.lstrip()
+    return t.startswith("#[") or t.startswith("#![")
+
+
+def has_safety_above(lines, i):
+    """True if a `SAFETY` note appears in the comment block attached to line i
+    (the unsafe opener). Walks backwards through contiguous comment lines
+    (allowing up to 2 blank lines) and through adjacent unsafe-opener lines
+    (consecutive `unsafe impl Send`/`Sync` share one comment block), stopping
+    at the first other code line, so a multi-line `// SAFETY:` block is
+    detected regardless of its height. Also accepts an inline `// SAFETY` on
+    the opener line itself."""
+    if "//" in lines[i] and SAFETY.search(lines[i].split("//", 1)[1]):
+        return True
+    j = i - 1
+    blanks = 0
+    while j >= 0:
+        s = lines[j].strip()
+        if s == "":
+            blanks += 1
+            if blanks > 2:  # paragraph gap: comment block is not attached
+                break
+            j -= 1
+            continue
+        if is_comment_line(lines[j]):
+            if SAFETY.search(lines[j]):
+                return True
+            blanks = 0
+            j -= 1
+            continue
+        # Attributes (#[no_mangle], #[repr(C)], ...) commonly sit between a
+        # `/// # Safety` doc comment and the unsafe fn; walk past them.
+        if is_attribute_line(lines[j]):
+            j -= 1
+            continue
+        # A code line: if it is itself an unsafe opener, it belongs to the same
+        # unsafe group (e.g. paired `unsafe impl Send`/`Sync`), so keep walking
+        # back to the shared comment block. Any other code line ends the block.
+        code = STRING_LIT.sub('""', lines[j].split("//", 1)[0])
+        if OPENER.search(code):
+            if "//" in lines[j] and SAFETY.search(lines[j].split("//", 1)[1]):
+                return True
+            blanks = 0
+            j -= 1
+            continue
+        break
+    return False
+
+
 def scan_file(path: str):
     """Return list of (lineno, line) violations in this file."""
     with open(path, encoding="utf-8", errors="replace") as f:
@@ -55,8 +106,7 @@ def scan_file(path: str):
         code = STRING_LIT.sub('""', code)
         if not OPENER.search(code):
             continue
-        has_safety = any(SAFETY.search(lines[j]) for j in range(max(0, i - LOOKBACK), i + 1))
-        if not has_safety:
+        if not has_safety_above(lines, i):
             out.append((i + 1, line.rstrip()))
     return out
 
