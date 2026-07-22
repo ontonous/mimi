@@ -45,8 +45,11 @@ jobs:
       - name: Pre-build runtime (prime cache)
         run: rustc --edition 2021 --crate-type staticlib --cfg standalone --crate-name mimi_runtime -o /tmp/mimi_runtime_test.a src/runtime/standalone.rs
 
-      - name: Clippy
-        run: cargo clippy -- -D warnings
+      - name: Clippy (all targets)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: unsafe SAFETY gate (non-runtime baseline)
+        run: python3 scripts/check_unsafe_safety.py
 
   test:
     name: Build & Test
@@ -83,5 +86,17 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
-      - name: Test
+      - name: L1 dual-backend equivalence
+        run: cargo test dual_ -- --test-threads=2
+
+      - name: L2 type-system soundness
+        run: "cargo test typecheck:: -- --test-threads=2"
+
+      - name: FFI contract equivalence
+        run: cargo test ffi_ -- --test-threads=2
+
+      - name: Codegen E2E
+        run: cargo test codegen_e2e -- --test-threads=2
+
+      - name: Test (full suite)
         run: cargo test -- --test-threads=2
