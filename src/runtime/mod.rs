@@ -2475,8 +2475,6 @@ pub extern "C" fn mimi_sleep(ms: i64) {
     }
 }
 
-mod env;
-
 // ---------------------------------------------------------------------------
 // JSON parser (recursive descent, self-contained)
 // ---------------------------------------------------------------------------
@@ -17797,16 +17795,6 @@ mod ffi_test;
 // link, but they no longer install any signal handlers. Future codegen support
 // for #[no_panic] will use its own process isolation mechanism.
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-mod no_panic {
-    #[no_mangle]
-    pub extern "C" fn mimi_install_no_panic_handlers() {}
-
-    #[no_mangle]
-    pub extern "C" fn mimi_restore_no_panic_handlers() {}
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod no_panic {
     #[no_mangle]
     pub extern "C" fn mimi_install_no_panic_handlers() {}
@@ -18048,6 +18036,8 @@ pub use capability::*;
 mod future;
 
 mod fs;
+
+mod env;
 
 mod crypto;
 #[cfg(not(standalone))]
