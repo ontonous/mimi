@@ -5247,3 +5247,91 @@ func main() -> i32 {
         result
     );
 }
+
+// ── FLOW-IDENTITY-001: State Unforgeability (E0421) ──────────────────
+
+#[test]
+fn flow_state_forgery_non_root_outside_transition_rejected() {
+    // L2: constructing a non-root flow state outside a transition body is
+    // state forgery and must be rejected (E0421).
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+}
+func main() -> i32 {
+    let forged = Positive { count: 999 }
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_err(),
+        "non-root state construction outside transition should be rejected"
+    );
+    let errors = result.unwrap_err();
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0421")
+            || d.message.contains("cannot be constructed outside")),
+        "expected E0421 error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn flow_state_root_construction_outside_transition_allowed() {
+    // Constructing the root (first-declared) state outside a transition body
+    // is the legitimate Flow constructor and must be accepted.
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let s1 = Counter::inc(s0)
+    s1.count
+}
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_ok(),
+        "root state construction outside transition should be accepted: {:?}",
+        result
+    );
+}
+
+#[test]
+fn flow_state_non_root_inside_transition_allowed() {
+    // Constructing a non-root state inside a transition body is the normal
+    // state production path and must be accepted.
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+    transition reset(Positive) -> Zero {
+        do { return Zero { count: 0 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let s1 = Counter::inc(s0)
+    s1.count
+}
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_ok(),
+        "non-root state construction inside transition should be accepted: {:?}",
+        result
+    );
+}

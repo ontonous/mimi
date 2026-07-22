@@ -806,6 +806,14 @@ impl<'a> Checker<'a> {
             Item::Flow(f) => {
                 // Register states and transitions for type checking
                 let qualified = format!("flow::{}", f.name);
+                // FLOW-IDENTITY-001: register the root (first-declared) state for
+                // state-unforgeability checking. Only root states may be constructed
+                // via record literals outside transition bodies.
+                if let Some(root) = f.states.first() {
+                    self.flow_root_states
+                        .insert(format!("{}::{}", qualified, root.name));
+                    self.flow_root_states.insert(root.name.clone());
+                }
                 for state in &f.states {
                     let state_key = format!("{}::{}", qualified, state.name);
                     let payload_types = state

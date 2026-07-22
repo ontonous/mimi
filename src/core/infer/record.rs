@@ -113,6 +113,31 @@ impl<'a> Checker<'a> {
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
         let tdef = ty.as_ref().and_then(|n| self.types.get(n)).cloned();
+        // FLOW-IDENTITY-001: state unforgeability — reject construction of
+        // non-root flow states outside transition bodies. Root states may be
+        // constructed freely (they serve as the Flow constructor).
+        if let (Some(type_name), Some(td)) = (ty.as_ref(), &tdef) {
+            if matches!(
+                td.meta.origin,
+                crate::ast::AstOrigin::Desugared("checker.flow_state_type_projection")
+            ) {
+                let in_transition = self
+                    .current_callable_owner
+                    .as_ref()
+                    .is_some_and(|id| id.0.starts_with("transition:"));
+                let is_root = self.flow_root_states.contains(type_name.as_str());
+                if !in_transition && !is_root {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0421,
+                        format!(
+                            "flow state '{}' cannot be constructed outside a transition body; \
+                             only the root state of a flow may be directly instantiated",
+                            type_name
+                        ),
+                    );
+                }
+            }
+        }
         match tdef {
             Some(tdef) => match &tdef.kind {
                 TypeDefKind::Record(expected_fields) => {

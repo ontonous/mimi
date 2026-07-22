@@ -78,6 +78,10 @@ pub(crate) struct Checker<'a> {
     /// is not used for return validation — each return is checked against all
     /// allowed types.
     pub(crate) flow_return_targets: Vec<Type>,
+    /// FLOW-IDENTITY-001: root (first-declared) state names for each flow.
+    /// Used to distinguish legitimate initial-state construction from state forgery.
+    /// Qualified names: "FlowName::StateName".
+    pub(crate) flow_root_states: std::collections::HashSet<String>,
     /// v0.29.49: variables bound to multi-target transition results.
     /// Maps variable name -> list of possible target state types.
     /// Direct field access on these variables is rejected (E0420) —
@@ -221,6 +225,7 @@ impl<'a> Checker<'a> {
             const_types: HashMap::new(),
             current_ret: None,
             flow_return_targets: Vec::new(),
+            flow_root_states: std::collections::HashSet::new(),
             multi_target_vars: HashMap::new(),
             session_types: HashMap::new(),
             session_residuals: HashMap::new(),

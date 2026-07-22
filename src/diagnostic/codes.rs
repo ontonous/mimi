@@ -119,6 +119,7 @@ pub const E0417: &str = "E0417"; // mutate parameter reassign (not individual el
 pub const E0418: &str = "E0418"; // conservative projection failure (subflow → flat protocol)
 pub const E0419: &str = "E0419"; // incompatible payload layouts in a multi-target transition
 pub const E0420: &str = "E0420"; // multi-target transition result must be exhaustively matched
+pub const E0421: &str = "E0421"; // flow state forgery: non-root state constructed outside transition
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
@@ -332,6 +333,7 @@ pub fn describe(code: &str) -> &'static str {
         E0418 => "subflow cannot be conservatively projected to flat protocol",
         E0419 => "multi-target transition states have incompatible payload layouts",
         E0420 => "multi-target transition result must be exhaustively matched",
+        E0421 => "flow state forgery: non-root state constructed outside transition",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",
