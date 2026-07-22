@@ -144,7 +144,7 @@ pub type ValueHandle = usize;
 pub type MapHandle = usize;
 
 // ---------------------------------------------------------------------------
-// R-C11: live handle registries (Map / Set / Actor)
+// R-C11: live handle registries (Map / Set; Actor → actor.rs, Quote → quote.rs)
 // ---------------------------------------------------------------------------
 // Handles are still raw Box addresses for ABI compatibility, but every create
 // inserts into a process-wide set and every destroy removes under lock. Second

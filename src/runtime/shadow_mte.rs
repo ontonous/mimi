@@ -1,9 +1,12 @@
-// ---------------------------------------------------------------------------
-// v0.29.44: Software Shadow Memory Tagging (MTE simulation)
+// ===========================================================================
+// v0.29.44 — Software Shadow Memory Tagging (MTE simulation)
 // White-paper section 4.2: "软件层面的影子内存（Shadow Memory）"
-// ---------------------------------------------------------------------------
+//
+// This module owns the thread-local `SHADOW_MAP` and all `mimi_shadow_*`
+// extern "C" entry points (alloc / tag / check / free / dump).
+// ===========================================================================
 
-use std::collections::HashMap as StdHashMap;
+use std::collections::HashMap;
 
 struct ShadowTagInfo {
     tag: u8,
@@ -12,8 +15,8 @@ struct ShadowTagInfo {
 }
 
 thread_local! {
-    static SHADOW_MAP: std::cell::RefCell<StdHashMap<usize, ShadowTagInfo>> =
-        std::cell::RefCell::new(StdHashMap::new());
+    static SHADOW_MAP: std::cell::RefCell<HashMap<usize, ShadowTagInfo>> =
+        std::cell::RefCell::new(HashMap::new());
 }
 
 /// v0.29.44: Allocate memory with a shadow tag.

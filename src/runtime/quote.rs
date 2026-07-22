@@ -1,7 +1,16 @@
+// ===========================================================================
+// v0.28.21 — QuotedAst runtime representation (extracted from runtime/mod.rs)
+//
+// Runtime representation of `quote! { ... }` AST values for the codegen path:
+// a tagged-union `MimiQuotedAst` (repr(C)) plus `mimi_quote_*` constructors /
+// accessors and the live-quote registry that makes dropped-handle access safe.
+// This module owns `LIVE_QUOTES` and all `mimi_quote_*` extern "C" entry points.
+// ===========================================================================
+
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-// --- live-quote registry (moved from the handle-registry cluster) ---
+// --- live-quote registry ---
 
 static LIVE_QUOTES: std::sync::OnceLock<Mutex<HashSet<usize>>> = std::sync::OnceLock::new();
 
@@ -42,9 +51,6 @@ fn quote_take_live(node: *mut MimiQuotedAst) -> bool {
             .remove(&(node as usize))
 }
 
-// =========================================================================
-// v0.28.21 — QuotedAst runtime representation
-//
 // QuotedAst values produced by `quote! { ... }` are stored in the
 // interpreter as `Value::QuoteAst(Box<QuotedAst>)`. The codegen path
 // needs an equivalent runtime representation so that `ast_eval(q)` and
@@ -63,7 +69,6 @@ fn quote_take_live(node: *mut MimiQuotedAst) -> bool {
 // `data0 = children_array_ptr, data2 = children_count`. Children
 // themselves are `*mut MimiQuotedAst`, allocated individually via
 // `mimi_quote_new_*` helpers and freed recursively by `mimi_quote_drop`.
-// =========================================================================
 
 /// QuotedAst node tag. Values must stay in sync with the interp-side
 /// `QuotedAst` variant order (we re-derive the mapping at the call

@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-// --- live-actor registry (moved from the handle-registry cluster) ---
+// --- live-actor registry ---
 
 static LIVE_ACTORS: std::sync::OnceLock<Mutex<HashMap<usize, std::sync::Arc<MimiActorRepr>>>> =
     std::sync::OnceLock::new();
