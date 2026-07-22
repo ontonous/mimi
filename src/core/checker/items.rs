@@ -877,6 +877,20 @@ impl<'a> Checker<'a> {
                                             state.name, state.name
                                         ),
                                     );
+                                } else {
+                                    // FLOW-IDENTITY-001: nominal distinctness —
+                                    // same-named states in different flows are never
+                                    // the same type. The unqualified name is already
+                                    // taken; this flow's state is only accessible via
+                                    // the qualified name.
+                                    self.emit_warning_code(
+                                        crate::diagnostic::codes::E0422,
+                                        format!(
+                                            "flow state '{}' shares an unqualified name with another flow's state; \
+                                             use the qualified name 'flow::<flow_name>::{}' to refer to this flow's state",
+                                            state.name, state.name
+                                        ),
+                                    );
                                 }
                             }
                         } else {
