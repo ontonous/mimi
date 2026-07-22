@@ -4,9 +4,9 @@
 
 **面向类型状态（Typestate-Oriented）的系统编程语言 — Flow 状态机、合约验证与结构化并发**
 
-[![Version](https://img.shields.io/badge/version-0.30.0--dev-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-3100+%20passed-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-4063%20total-brightgreen.svg)](#)
 [![Flow](https://img.shields.io/badge/flow-v0.29%20complete-orange.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
@@ -308,6 +308,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 | 版本 | 亮点 |
 |------|------|
+| **0.1.0** | **基线稳定**：CheckedProgram 语义中枢、semver 切换、runtime/resolved 架构拆分、4063 测试绿、双后端等价 |
 | **v0.30.0** | **止血清零（Hemostasis）**：0 新 Feature — 架构债务修复（sprintf→snprintf、路径安全、malloc 检查、values_equal、build_unreachable、fmt tokenization） |
 | **v0.29.41** | 白皮书冻结：全部 38 项能力完成 ✅ |
 | **v0.29.37** | Actor 生命周期：SystemKill 级联 + `spawn detached` |
