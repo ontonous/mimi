@@ -602,7 +602,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         name: &str,
     ) -> MimiResult<()> {
         let memcpy_fn = self.get_runtime_fn("memcpy")?;
-        let _ = self.build_call(
+        self.build_call(
             memcpy_fn,
             &[
                 BasicMetadataValueEnum::PointerValue(dst),
