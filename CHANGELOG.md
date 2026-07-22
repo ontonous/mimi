@@ -2,9 +2,17 @@
 
 ## [Unreleased] — 0.1.1-dev
 
-### io.rs 格式化 dispatch 重构（Sprint A1–A4）
+### io.rs 格式化 dispatch 重构（Sprint A1–A2 完成）
 
-- 进行中：46 个 `emit_map_*` 近重复函数合并为参数化 emitter + 名称查找表。
+- 46 个 `emit_map_*` 近重复函数合并为参数化 `emit_map_container_product_to_json` + `product_tuple_arity` 辅助函数（-1544 行）。
+- `extract_print_arg` 的 Map/Set 分发树（1886 行手工展开 if-else）替换为 `resolve_container_product` 递归类型解析器（-1693 行）。
+- io.rs: 14658 → 11421 行（-22%），双后端 735/0 等价确认。
+
+### FLOW-IDENTITY-001 状态身份（0.31.8 进行中）
+
+- **E0421 状态不可伪造**：非根 flow state 在 transition 体外构造被拒绝。根状态（flow 第一个 state）构造不受影响（Flow 构造器语义）。3 个新测试。
+- **E0422 名义状态区分**（warning）：跨流同名义状态 payload 兼容时发出 warning，提示使用限定名 `flow::<flow_name>::<state_name>`。
+- 待实现：线性 generation（use-after-transition 拒绝）——涉及值系统 + 检查器 + 解释器 + codegen 多层变更。
 
 ## [0.1.0] — 基线稳定 - 2026-07-23
 
