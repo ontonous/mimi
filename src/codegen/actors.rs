@@ -569,8 +569,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicValueEnum::PointerValue(pv) => pv,
                     _ => i8_ptr.const_null(),
                 };
-                let _ =
-                    self.build_call(set_fn, &[hv.into(), depth_val.into()], "set_mailbox_depth");
+                self.build_call(set_fn, &[hv.into(), depth_val.into()], "set_mailbox_depth")?;
             }
         }
 

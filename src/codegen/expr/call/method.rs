@@ -489,7 +489,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 _ => return Ok(()),
             };
             let meta = self.values_to_metadata(&[BasicValueEnum::PointerValue(handle_ptr)]);
-            let _ = self.build_call(fault_fn, &meta, "flow_actor_fault");
+            self.build_call(fault_fn, &meta, "flow_actor_fault")?;
             return Ok(());
         }
 
@@ -498,7 +498,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Unknown type: try bare pointer short-circuit (legacy path).
             if let BasicValueEnum::PointerValue(pv) = payload {
                 let meta = self.values_to_metadata(&[BasicValueEnum::PointerValue(pv)]);
-                let _ = self.build_call(fault_fn, &meta, "flow_actor_fault");
+                self.build_call(fault_fn, &meta, "flow_actor_fault")?;
             }
             return Ok(());
         };
@@ -5045,11 +5045,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )?;
                         // Free temporary JSON fragment after scalar parse.
                         if let Ok(free_fn) = self.get_runtime_fn("free") {
-                            let _ = self.build_call(
+                            self.build_call(
                                 free_fn,
                                 &[BasicMetadataValueEnum::PointerValue(elem_json)],
                                 &format!("free_tuple_json_{}", i),
-                            );
+                            )?;
                         }
                         v
                     };
@@ -6278,7 +6278,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(*st));
                 let memset_fn = self.get_runtime_fn("memset").ok();
                 if let Ok(mf) = self.get_runtime_fn("memset") {
-                    let _ = self.build_call(
+                    self.build_call(
                         mf,
                         &[
                             BasicMetadataValueEnum::PointerValue(zalloca),
@@ -6288,7 +6288,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicMetadataValueEnum::IntValue(i64_ty.const_int(size, false)),
                         ],
                         "opt_none_memset",
-                    );
+                    )?;
                     let z = self.build_load(BasicTypeEnum::StructType(*st), zalloca, "opt_z")?;
                     self.build_store(none_pay, z)?;
                 } else {

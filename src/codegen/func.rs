@@ -924,7 +924,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 0,
                                 &format!("{}_ret_null", name),
                             ) {
-                                let _ = self.builder.build_store(data_gep, null_ptr);
+                                self.build_store(data_gep, null_ptr)?;
                             }
                         }
                         // CLOSE-GAP-5: heap-copy the loaded struct so the caller
@@ -2662,7 +2662,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.gep()
                                     .build_struct_gep(st, pv, fi as u32, "ret_data_null")
                             {
-                                let _ = self.builder.build_store(fp, null_ptr);
+                                self.build_store(fp, null_ptr)?;
                             }
                         }
                     }
@@ -2807,7 +2807,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let Some(max) = self.max_children {
                 if let Ok(set_fn) = self.get_runtime_fn("mimi_actor_set_max_children") {
                     let n = self.context.i64_type().const_int(max as u64, false);
-                    let _ = self.build_call(set_fn, &[n.into()], "set_max_children");
+                    self.build_call(set_fn, &[n.into()], "set_max_children")?;
                 }
             }
         }
