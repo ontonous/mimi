@@ -4236,7 +4236,11 @@ func main() -> i32 {
 }
 "#;
     // This should check OK (index assign is element-level, not realloc)
-    let _ = check_source(src); // may or may not pass depending on codegen gap
+    assert!(
+        check_source(src).is_ok(),
+        "mutate List index assign should be allowed: {:?}",
+        check_source(src).err()
+    );
 }
 
 #[test]
