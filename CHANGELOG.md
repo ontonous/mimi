@@ -20,6 +20,7 @@
 - **E0424**：transition 体内 `?` 无 `fails E` 声明时静态拒绝。
 - **Rejected 路径（解释器）**：`?` 失败时 transition 返回 `Err((source_payload, error))`，source generation 归还调用方。修复 `early_return` 泄漏 bug（transition 体内 `?` 的 `early_return` 不再穿透到调用方）。4 个新测试。
 - 待实现：codegen 镜像、draft isolation、`become`/`stay` 显式 terminal 关键字、返回类型 `Result<Target, (Source, E)>` 类型系统变更。
+- **已知双后端差距**：`fails E` transition 中 `?` 失败时，解释器返回 `Err((source, error))` 值（程序继续），codegen 将 error 作为进程级错误退出。Happy path 双后端一致。
 
 ## [0.1.0] — 基线稳定 - 2026-07-23
 
