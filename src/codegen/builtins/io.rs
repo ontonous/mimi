@@ -5805,11 +5805,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "res_err_str_sn",
             )?;
             if let Ok(free_fn) = self.get_runtime_fn("free") {
-                let _ = self.build_call(
+                self.build_call(
                     free_fn,
                     &[BasicMetadataValueEnum::PointerValue(escaped)],
                     "res_err_free_esc",
-                );
+                )?;
             }
             self.build_store(out_slot, wrap)?;
         }
