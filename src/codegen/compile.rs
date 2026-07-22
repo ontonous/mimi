@@ -975,7 +975,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .at(t.meta.span));
             }
             let func = Self::transition_to_func(flow, t);
-            self.compile_func(&func).map_err(|e| e.at(t.meta.span))?;
+            // FLOW-TURN-001: flag transition bodies with `fails E` so
+            // compile_try_expr can emit a fail-closed error (Rejected
+            // codegen not yet implemented) instead of mimi_try_exit.
+            self.in_fails_transition = t.fails.is_some();
+            let result = self.compile_func(&func).map_err(|e| e.at(t.meta.span));
+            self.in_fails_transition = false;
+            result?;
         }
         Ok(())
     }
