@@ -633,7 +633,9 @@ pub struct ResolvedExternBlock {
 #[derive(Debug)]
 pub struct CheckedProgram {
     /// Owned normalized source retained only while legacy consumers migrate.
-    /// This field is deleted with the final raw-AST consumer in v0.31.5.
+    /// This field is removed together with the final raw-AST consumer; that
+    /// migration is tracked in 0.31.8–0.31.16 (Flow core phase), NOT v0.31.5
+    /// — see CHANGELOG v0.31.6 and `devdocs/v0.31/01-foundation.md:27`.
     legacy_file: File,
     items: HashMap<NodeId, ResolvedItem>,
     node_meta: HashMap<NodeId, NodeMeta>,
