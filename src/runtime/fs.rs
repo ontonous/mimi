@@ -9,6 +9,8 @@
 
 use std::ffi::CStr;
 
+#[cfg(standalone)]
+use super::libc;
 use super::{alloc_c_string, cstr_to_string, MimiList};
 
 // ─── Directory & path operations ───────────────────────────────

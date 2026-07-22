@@ -19502,6 +19502,7 @@ pub extern "C" fn mimi_cap_consume(cap: i64, name: *const std::ffi::c_char) -> b
 mod fs;
 
 mod crypto;
+#[cfg(not(standalone))]
 pub use crypto::{base64_decode_str, base64_encode_bytes, sha256_bytes};
 
 // ─── Binary I/O & streaming line reading ──────────────────────
@@ -19677,6 +19678,7 @@ pub extern "C" fn mimi_read_lines_json(path: *const std::ffi::c_char) -> *mut st
 }
 
 mod lexer;
+#[cfg(not(standalone))]
 pub use lexer::{mimi_lexer_tokenize, mimi_parse_source};
 
 // ===========================================================================
