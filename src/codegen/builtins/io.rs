@@ -8993,2250 +8993,706 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Map of Map of product-tuple values.
+    /// Unified emitter for Map-of-container-of-product JSON serialization.
+    /// Replaces 46 near-identical `emit_map_*_product_to_json` functions that
+    /// differed only in the runtime function name string.
+    fn emit_map_container_product_to_json(
+        &self,
+        map_handle: inkwell::values::IntValue<'ctx>,
+        runtime_fn_name: &str,
+        product_type: &str,
+        display_style: i64,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let arity = Self::product_tuple_arity(product_type);
+        let i64_ty = self.context.i64_type();
+        let func = self.get_runtime_fn(runtime_fn_name)?;
+        Ok(self
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(map_handle),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
+                ],
+                "map_container_product_json",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("map container product to_json void")?
+            .into_pointer_value())
+    }
+
+    /// Count comma-separated fields at depth 0 inside `(…)` for product tuple arity.
+    fn product_tuple_arity(product_type: &str) -> i64 {
+        let inner = product_type
+            .strip_prefix('(')
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap_or(product_type);
+        let mut arity: i64 = 0;
+        let mut depth = 0i32;
+        let mut any = false;
+        for ch in inner.chars() {
+            match ch {
+                '<' | '(' => depth += 1,
+                '>' | ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    arity += 1;
+                    any = true;
+                }
+                c if !c.is_whitespace() => any = true,
+                _ => {}
+            }
+        }
+        if any {
+            arity += 1;
+        }
+        if arity <= 0 {
+            arity = 2;
+        }
+        arity
+    }
+
     pub(in crate::codegen) fn emit_map_map_product_to_json(
         &self,
         map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let i64_ty = self.context.i64_type();
-        let inner = product_type
-            .strip_prefix('(')
-            .and_then(|s| s.strip_suffix(')'))
-            .unwrap_or(product_type);
-        let mut arity: i64 = 0;
-        let mut depth = 0i32;
-        let mut any = false;
-        for ch in inner.chars() {
-            match ch {
-                '<' | '(' => depth += 1,
-                '>' | ')' => depth -= 1,
-                ',' if depth == 0 => {
-                    arity += 1;
-                    any = true;
-                }
-                c if !c.is_whitespace() => any = true,
-                _ => {}
-            }
-        }
-        if any {
-            arity += 1;
-        }
-        if arity <= 0 {
-            arity = 2;
-        }
-        let func = self.get_runtime_fn("mimi_map_to_json_map_product_i64")?;
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(map_handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_map_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map map product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_map_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Set of product-tuple values.
     pub(in crate::codegen) fn emit_map_set_product_to_json(
         &self,
         map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let i64_ty = self.context.i64_type();
-        let inner = product_type
-            .strip_prefix('(')
-            .and_then(|s| s.strip_suffix(')'))
-            .unwrap_or(product_type);
-        let mut arity: i64 = 0;
-        let mut depth = 0i32;
-        let mut any = false;
-        for ch in inner.chars() {
-            match ch {
-                '<' | '(' => depth += 1,
-                '>' | ')' => depth -= 1,
-                ',' if depth == 0 => {
-                    arity += 1;
-                    any = true;
-                }
-                c if !c.is_whitespace() => any = true,
-                _ => {}
-            }
-        }
-        if any {
-            arity += 1;
-        }
-        if arity <= 0 {
-            arity = 2;
-        }
-        let func = self.get_runtime_fn("mimi_map_to_json_set_product_i64")?;
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(map_handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_set_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map set product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_set_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of List of product-tuple values.
     pub(in crate::codegen) fn emit_map_list_product_to_json(
         &self,
         map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let i64_ty = self.context.i64_type();
-        let inner = product_type
-            .strip_prefix('(')
-            .and_then(|s| s.strip_suffix(')'))
-            .unwrap_or(product_type);
-        let mut arity: i64 = 0;
-        let mut depth = 0i32;
-        let mut any = false;
-        for ch in inner.chars() {
-            match ch {
-                '<' | '(' => depth += 1,
-                '>' | ')' => depth -= 1,
-                ',' if depth == 0 => {
-                    arity += 1;
-                    any = true;
-                }
-                c if !c.is_whitespace() => any = true,
-                _ => {}
-            }
-        }
-        if any {
-            arity += 1;
-        }
-        if arity <= 0 {
-            arity = 2;
-        }
-        let func = self.get_runtime_fn("mimi_map_to_json_list_product_i64")?;
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(map_handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_list_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map list product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_list_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Option of product-tuple values.
     pub(in crate::codegen) fn emit_map_option_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_option_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_option_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map option product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_option_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of List of Option of Set of product-tuple values.
     pub(in crate::codegen) fn emit_map_list_option_set_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_list_option_set_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_list_option_set_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map list option set product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_list_option_set_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of List of Option of product-tuple values.
     pub(in crate::codegen) fn emit_map_list_option_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_list_option_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_list_option_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map list option product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_list_option_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Set of Map of product-tuple values.
     pub(in crate::codegen) fn emit_map_set_list_map_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_set_list_map_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_set_list_map_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map set list map product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_set_list_map_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
     pub(in crate::codegen) fn emit_map_list_set_map_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_list_set_map_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_list_set_map_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map list set map product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_list_set_map_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
     pub(in crate::codegen) fn emit_map_map_result_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_map_result_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_map_result_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map map result product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_map_result_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
     pub(in crate::codegen) fn emit_map_map_list_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_map_list_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_map_list_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map map list product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_map_list_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
     pub(in crate::codegen) fn emit_map_map_option_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_map_option_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_map_option_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map map option product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_map_option_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
     pub(in crate::codegen) fn emit_map_map_set_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_map_set_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_map_set_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map map set product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_map_set_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
     pub(in crate::codegen) fn emit_map_set_map_list_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_set_map_list_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_set_map_list_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map set map list product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_set_map_list_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
     pub(in crate::codegen) fn emit_map_set_map_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_set_map_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_set_map_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map set map product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_set_map_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of List of Map of product-tuple values.
     pub(in crate::codegen) fn emit_map_list_map_list_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_list_map_list_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_list_map_list_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map list map list product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_list_map_list_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
     pub(in crate::codegen) fn emit_map_option_map_list_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_option_map_list_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_option_map_list_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map option map list product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_option_map_list_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
     pub(in crate::codegen) fn emit_map_list_map_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_list_map_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_list_map_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map list map product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_list_map_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Set of List of product-tuple values.
     pub(in crate::codegen) fn emit_map_set_list_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_set_list_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_set_list_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map set list product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_set_list_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Set of Option of product-tuple values.
     pub(in crate::codegen) fn emit_map_set_option_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_set_option_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_set_option_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map set option product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_set_option_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Set of Result of Option of product-tuple values.
     pub(in crate::codegen) fn emit_map_set_result_option_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_set_result_option_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_set_result_option_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map set result option product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_set_result_option_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Set of Result of product-tuple values.
     pub(in crate::codegen) fn emit_map_set_result_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_set_result_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_set_result_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map set result product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_set_result_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of List of Result of Option of product-tuple values.
     pub(in crate::codegen) fn emit_map_list_result_option_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_list_result_option_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_list_result_option_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map list result option product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_list_result_option_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of List of Set of Result of product-tuple values.
     pub(in crate::codegen) fn emit_map_list_set_result_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_list_set_result_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_list_set_result_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map list set result product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_list_set_result_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of List of Set of Option of product-tuple values.
     pub(in crate::codegen) fn emit_map_list_set_option_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_list_set_option_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_list_set_option_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map list set option product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_list_set_option_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of List of Set of product-tuple values.
     pub(in crate::codegen) fn emit_map_list_set_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_list_set_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_list_set_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map list set product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_list_set_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of List of Result of product-tuple values.
     pub(in crate::codegen) fn emit_map_list_result_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_list_result_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_list_result_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map list result product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_list_result_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Option of List of product-tuple values.
     pub(in crate::codegen) fn emit_map_option_list_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_option_list_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_option_list_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map option list product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_option_list_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Result of Option of List of product-tuple values.
     pub(in crate::codegen) fn emit_map_result_option_list_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_result_option_list_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_result_option_list_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map result option list product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_result_option_list_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Option of Result of List of product-tuple values.
     pub(in crate::codegen) fn emit_map_option_result_list_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_option_result_list_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_option_result_list_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map option result list product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_option_result_list_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Result of List of Option of product-tuple values.
     pub(in crate::codegen) fn emit_map_result_list_option_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_result_list_option_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_result_list_option_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map result list option product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_result_list_option_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Result of List of Set of product-tuple values.
     pub(in crate::codegen) fn emit_map_result_list_set_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_result_list_set_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_result_list_set_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map result list set product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_result_list_set_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Result of List of product-tuple values.
     pub(in crate::codegen) fn emit_map_result_list_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_result_list_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_result_list_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map result list product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_result_list_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Option of Result of product-tuple values.
     pub(in crate::codegen) fn emit_map_option_result_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_option_result_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_option_result_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map option result product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_option_result_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Result of Option of product-tuple values.
     pub(in crate::codegen) fn emit_map_result_option_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_result_option_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_result_option_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map result option product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_result_option_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Result of Set of List of product-tuple values.
-    /// Map of Result of Set of Map of product.
     pub(in crate::codegen) fn emit_map_result_set_map_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_result_set_map_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_result_set_map_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map result_set_map product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_result_set_map_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Option of Set of Map of product.
     pub(in crate::codegen) fn emit_map_option_set_map_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_option_set_map_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_option_set_map_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map option_set_map product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_option_set_map_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Result of List of Map of product.
     pub(in crate::codegen) fn emit_map_result_list_map_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_result_list_map_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_result_list_map_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map result_list_map product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_result_list_map_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Option of List of Map of product.
     pub(in crate::codegen) fn emit_map_option_list_map_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_option_list_map_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_option_list_map_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map option_list_map product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_option_list_map_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
     pub(in crate::codegen) fn emit_map_result_set_list_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_result_set_list_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_result_set_list_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map result set list product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_result_set_list_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Result of Set of product-tuple values.
     pub(in crate::codegen) fn emit_map_result_set_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_result_set_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_result_set_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map result set product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_result_set_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Option of Set of List of product-tuple values.
     pub(in crate::codegen) fn emit_map_option_set_list_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_option_set_list_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_option_set_list_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map option set list product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_option_set_list_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Option of Set of product-tuple values.
     pub(in crate::codegen) fn emit_map_option_set_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_option_set_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_option_set_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map option set product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_option_set_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Result of Map of product-tuple values.
     pub(in crate::codegen) fn emit_map_result_map_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_result_map_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_result_map_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map result map product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_result_map_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Option of Map of product-tuple values.
     pub(in crate::codegen) fn emit_map_option_map_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_option_map_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_option_map_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map option map product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_option_map_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of Result of product-tuple values.
     pub(in crate::codegen) fn emit_map_result_product_to_json(
         &self,
-        handle: inkwell::values::IntValue<'ctx>,
+        map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let arity = {
-            let body = product_type
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(product_type);
-            let mut arity = 0i64;
-            let mut depth = 0i32;
-            let mut any = false;
-            for ch in body.chars() {
-                match ch {
-                    '<' | '(' => depth += 1,
-                    '>' | ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        arity += 1;
-                        any = true;
-                    }
-                    c if !c.is_whitespace() => any = true,
-                    _ => {}
-                }
-            }
-            if any {
-                arity += 1;
-            }
-            arity.max(1)
-        };
-        let func = self.get_runtime_fn("mimi_map_to_json_result_product_i64")?;
-        let i64_ty = self.context.i64_type();
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_result_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map result product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_result_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
-    /// Map of product-tuple values: values are heap-packed i64 structs.
-    /// `display_style` 0 = JSON `[1,2]`, 1 = Display `(1, 2)`.
     pub(in crate::codegen) fn emit_map_product_to_json(
         &self,
         map_handle: inkwell::values::IntValue<'ctx>,
         product_type: &str,
         display_style: i64,
     ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
-        let i64_ty = self.context.i64_type();
-        // Count comma-separated fields at depth 0 inside `(…)`.
-        let inner = product_type
-            .strip_prefix('(')
-            .and_then(|s| s.strip_suffix(')'))
-            .unwrap_or(product_type);
-        let mut arity: i64 = 0;
-        let mut depth = 0i32;
-        let mut any = false;
-        for ch in inner.chars() {
-            match ch {
-                '<' | '(' => depth += 1,
-                '>' | ')' => depth -= 1,
-                ',' if depth == 0 => {
-                    arity += 1;
-                    any = true;
-                }
-                c if !c.is_whitespace() => any = true,
-                _ => {}
-            }
-        }
-        if any {
-            arity += 1;
-        }
-        if arity <= 0 {
-            arity = 2;
-        }
-        let func = self.get_runtime_fn("mimi_map_to_json_product_i64")?;
-        Ok(self
-            .build_call(
-                func,
-                &[
-                    BasicMetadataValueEnum::IntValue(map_handle),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(arity as u64, false)),
-                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(display_style as u64, false)),
-                ],
-                "map_product_json",
-            )?
-            .try_as_basic_value_opt()
-            .ok_or("map product to_json void")?
-            .into_pointer_value())
+        self.emit_map_container_product_to_json(
+            map_handle,
+            "mimi_map_to_json_product_i64",
+            product_type,
+            display_style,
+        )
     }
 
     /// JSON for a List payload given its type string `List<…>` (or bare inner).
