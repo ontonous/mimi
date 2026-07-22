@@ -2,15 +2,17 @@
 //! to-string / format functions.
 //!
 //! Extracted verbatim from `runtime/mod.rs` (the `Crypto operations` section)
-//! during the 0.1.0 mechanical split (behavior bit-exact). Pure `extern "C"`
-//! leaf: no crate-level Rust-path callers, only the parent module's
-//! `alloc_c_string` / `cstr_to_string` helpers.
+//! during the 0.1.0 mechanical split (behavior bit-exact).
+//!
+//! The `extern "C"` wrappers (`mimi_sha256*`, `mimi_base64*`, `mimi_format*`)
+//! are consumed by codegen via string-name lookup. Three `pub` non-extern
+//! helpers — `sha256_bytes`, `base64_encode_bytes`, `base64_decode_str` —
+//! have direct Rust-path callers (`pkg_registry.rs`, `interp/builtins/io.rs`)
+//! and are re-exported from `mod.rs`.
 
 use std::ffi::CStr;
 
 use super::{alloc_c_string, cstr_to_string};
-
-// ─── Crypto operations ─────────────────────────────────────────
 
 /// SHA-256 hash of a NUL-terminated C string — returns hex string (64 chars).
 /// Pure Rust implementation, no external dependencies.

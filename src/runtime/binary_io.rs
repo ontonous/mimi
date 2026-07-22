@@ -13,8 +13,6 @@ use std::ffi::CStr;
 use super::libc;
 use super::{alloc_c_string, alloc_c_string_from_bytes};
 
-// ─── Binary I/O & streaming line reading ──────────────────────
-
 /// Reads up to max_bytes from a file. Returns an allocated C string.
 /// Caller must free with mimi_string_free.
 #[no_mangle]

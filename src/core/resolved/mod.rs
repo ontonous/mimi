@@ -8539,9 +8539,6 @@ fn contains_unresolved_type(ty: &Type) -> bool {
     }
 }
 
-#[cfg(test)]
-mod tests;
-
 fn qualify(module: &str, name: &str) -> String {
     if module.is_empty() {
         name.to_string()
@@ -8549,3 +8546,6 @@ fn qualify(module: &str, name: &str) -> String {
         format!("{}::{}", module, name)
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -10,10 +10,6 @@ use std::ffi::CStr;
 
 use super::{alloc_c_string, cstr_to_string};
 
-// ---------------------------------------------------------------------------
-// FFI test helpers
-// ---------------------------------------------------------------------------
-
 #[repr(C)]
 pub struct __mimi_TestPoint {
     x: i32,

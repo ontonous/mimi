@@ -273,21 +273,13 @@ pub struct MimiExecResult {
 }
 
 /// Executes a shell command via `sh -c`. Returns a heap-allocated MimiExecResult.
-/// WARNING: shell metacharacters in the command string are interpreted by sh.
-/// For safer execution that avoids shell injection, use `mimi_exec_safe`.
-/// Execute a shell command via `sh -c`. Returns a `MimiExecResult` struct.
 /// Uses shell interpretation (pipelines, variables, redirections).
-/// ⚠️ Shell injection risk: if `cmd` comes from untrusted input, use
-/// `mimi_exec_safe` instead which runs a single program without shell.
-/// Caller must free with `mimi_exec_free`.
-/// Execute a shell command via `sh -c`. This is intentionally a shell
-/// execution function — callers are responsible for sanitizing input.
-/// For safe execution without shell injection, use `mimi_exec_safe`.
 ///
 /// Security note (HIGH): `cmd` is passed directly to `sh -c`. If `cmd`
 /// contains user-controlled input, shell injection is possible. Only
 /// use `mimi_exec` with trusted, hard-coded command strings. For
 /// untrusted input, use `mimi_exec_safe` which avoids the shell.
+/// Caller must free with `mimi_exec_free`.
 #[no_mangle]
 pub extern "C" fn mimi_exec(cmd: *const std::ffi::c_char) -> *mut MimiExecResult {
     // RT-H5: optional hard refuse under MIMI_EXEC_STRICT / MIMI_FFI_STRICT.

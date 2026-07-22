@@ -6,29 +6,27 @@
 //! primitives` section) during the 0.1.0 mechanical split (behavior
 //! bit-exact). Self-contained: `ConcurrencyHandleTable` / `ConcurrencyAtomic`
 //! / `ConcurrencyMutex` / `ConcurrencyChannel` / `HeldMutexGuard` and the
-//! `CONCURRENCY_HANDLES` static all defined within. Pure `extern "C"` leaf
-//! (no crate-level Rust-path callers, no top-level handle-registry deps).
+//! `CONCURRENCY_HANDLES` static all defined within.
+//!
+//! All primitives follow the handle-as-i64 convention used by Set/Map/Record
+//! so the interpreter (`Value::Int` handle) and codegen (i64 runtime fn) paths
+//! stay symmetric. Each primitive exposes:
+//!   * `_new` constructor returning an opaque i64 handle,
+//!   * methods that take the handle and return i64,
+//!   * `_drop` destructor that the codegen cleanup pass emits on scope exit.
+//!
+//! SAFETY invariants are identical to the actor mailbox (see `actor.rs`):
+//! handles are `Box`-allocated and recovered by handle id with a global
+//! mutex-protected table. All public functions are `#[no_mangle] pub
+//! extern "C"` and null-checked.
+//!
+//! The `extern "C"` entry points have direct Rust-path callers in
+//! `interp/builtins/concurrency.rs` and `interp/builtins/session.rs`,
+//! re-exported from `mod.rs` via `pub use concurrency::*`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-
-// =========================================================================
-// v0.28.20 — Concurrency primitives (Mutex / atomic / Channel)
-//
-// All three primitives are implemented entirely in Rust using std::sync.
-// They follow the existing handle-as-i64 convention used by Set/Map/Record
-// so the interpreter (Value::Int handle) and codegen (i64 runtime fn) paths
-// stay symmetric. Each primitive exposes:
-//   * `_new` constructor returning an opaque i64 handle,
-//   * methods that take the handle and return i64 (mimics Rust's ordering),
-//   * `_drop` destructor that the codegen cleanup pass emits on scope exit.
-//
-// SAFETY invariants are identical to the actor mailbox above: handles are
-// `Box`-allocated and recovered by handle id with a global mutex-protected
-// table. All public functions are `#[no_mangle] pub extern "C"` and
-// null-checked.
-// =========================================================================
 
 /// Global concurrency-primitive table. LazyLock because the table
 /// contains a non-`const` HashMap. The `incompatible_msrv` allow mirrors

@@ -8,8 +8,6 @@
 
 use super::{alloc_c_string, cstr_to_string};
 
-// ─── Regex (simple recursive backtracking engine, self-contained) ───
-
 struct RegexEngine;
 
 /// S17: Maximum recursion depth for regex backtracking to prevent ReDoS.

@@ -11,10 +11,6 @@ use super::libc;
 use super::{alloc_c_string, cstr_to_string, MimiList};
 use std::sync::Mutex;
 
-// ---------------------------------------------------------------------------
-// Environment / CLI
-// ---------------------------------------------------------------------------
-
 struct CliArgs {
     argc: i32,
     argv: Vec<usize>, // store raw pointers as usize (for Send safety)

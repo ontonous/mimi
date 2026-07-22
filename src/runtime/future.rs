@@ -13,8 +13,6 @@ use std::sync::atomic::Ordering;
 #[cfg(standalone)]
 use super::libc;
 
-// ─── MimiFuture + MimiExecutor (poll-based async runtime) ──────
-//
 // Future memory layout (managed by codegen):
 //   offset 0: i32 (completed flag: 0=pending, 1=ready, -1=freed intent)
 //   offset 4: i32 (refcount; starts at 1)
@@ -34,7 +32,6 @@ struct MimiFutureRepr {
 /// SAFETY: `fut` must be null or a pointer from `mimi_future_alloc` that has
 /// not yet been fully deallocated (refs may still be > 0 during free races).
 unsafe fn future_try_retain(fut: *mut MimiFutureRepr) -> bool {
-    use std::sync::atomic::Ordering;
     let rep = &*fut;
     let mut cur = rep.refs.load(Ordering::Acquire);
     loop {
@@ -54,7 +51,6 @@ unsafe fn future_try_retain(fut: *mut MimiFutureRepr) -> bool {
 /// Release one ref; drop allocation when last ref is gone.
 /// SAFETY: `fut` must have been successfully retained or be the owner ref.
 unsafe fn future_release(fut: *mut MimiFutureRepr) {
-    use std::sync::atomic::Ordering;
     let rep = &*fut;
     if rep.refs.fetch_sub(1, Ordering::Release) == 1 {
         // Ensure all prior accesses complete before deallocation.
@@ -93,7 +89,6 @@ pub extern "C" fn mimi_future_set_completed(fut: *mut std::ffi::c_void) {
     if fut.is_null() {
         return;
     }
-    use std::sync::atomic::Ordering;
     // R-C5: retain for the duration of the CAS so free cannot drop under us.
     unsafe {
         let fut = fut as *mut MimiFutureRepr;
@@ -113,7 +108,6 @@ pub extern "C" fn mimi_future_is_completed(fut: *mut std::ffi::c_void) -> i32 {
     if fut.is_null() {
         return 1;
     }
-    use std::sync::atomic::Ordering;
     // R-C5: retain before reading so concurrent free cannot UAF.
     unsafe {
         let fut = fut as *mut MimiFutureRepr;
@@ -213,7 +207,6 @@ pub extern "C" fn mimi_await_future(future: *mut std::ffi::c_void) {
     if future.is_null() {
         return;
     }
-    use std::sync::atomic::Ordering;
     // R-C5: retain for the spin so concurrent free cannot free under us.
     // SAFETY: non-null pointer from mimi_future_alloc.
     unsafe {

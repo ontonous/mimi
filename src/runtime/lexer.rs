@@ -9,8 +9,6 @@
 
 use super::{alloc_c_string, cstr_to_string};
 
-// ─── Mimi source parser for linting (mimi_parse_source / mimi_lexer_tokenize) ──
-//
 // These functions implement a minimal Mimi tokenizer + recursive-descent parser
 // that produces a JSON string. The Mimi-level `parse()` and `lexer()` builtins
 // call these at runtime. The JSON is consumed by Mimi code via `from_json()`.
