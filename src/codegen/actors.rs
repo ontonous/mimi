@@ -618,7 +618,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicValueEnum::PointerValue(pv) => pv,
                     _ => i8_ptr.const_null(),
                 };
-                let _ = self.build_call(
+                self.build_call(
                     set_names,
                     &[hptr.into(), names_ptr.into(), count.into()],
                     "set_method_names",

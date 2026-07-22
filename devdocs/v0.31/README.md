@@ -33,14 +33,17 @@ Span/Origin -> HM -> CFG/ownership -> CheckedProgram/Resolved IR
 
 ## 4. 版本阶段
 
-| 阶段 | 版本 | 主题 |
+> 外部版本使用纯 semver tag（`0.1.0`、`0.1.1`、...、`1.0.0`）。内部 sprint 对应原 `v0.31.X` 粒度，仅体现在 commit message 中，不打 tag。旧 `mimi-v*` tag 保留为开发历史。
+
+| 外部版本 | 内部 sprint | 阶段主题 |
 |---|---|---|
-| 基础设施 | 0.31.0–0.31.7 | 基线、Span、HM、CFG、Resolved IR、consumer 迁移、止血 I/II |
-| Flow 核心 | 0.31.8–0.31.16 | generation、atomic turn、Fault、Actor、Session、资源、Protocol、Trace、审查 |
-| 语言与验证 | 0.31.17–0.31.21 | 语法收敛、Verification IR、VC、artifact、攻击审查 |
-| Component | 0.31.22–0.31.28 | Component IR、ABI、callback/async、Wire、Rust/TS SDK、审查 |
-| 自举与工具 | 0.31.29–0.31.33 | MimiSpec/HM 自举、迁移、fmt/LSP/probes、experimental 隔离 |
-| 冻结 | 0.31.34–0.31.37 | DEBUG、最终敌对审查、RC1、RC2 |
+| **0.1.0** | 0.31.0–0.31.7 | 基线稳定：CheckedProgram、Span、HM、CFG、Resolved IR、consumer 迁移、止血 I/II |
+| **0.1.1** | 0.31.8–0.31.16 | Flow 核心闭环：generation、atomic turn、Fault、Actor、Session、资源、Protocol、Trace、审查 |
+| **0.1.2** | 0.31.17–0.31.21 | 语言冻结：语法收敛、Verification IR、VC、artifact、攻击审查 |
+| **0.1.3** | 0.31.22–0.31.28 | Component 边界：Component IR、ABI、callback/async、Wire、Rust/TS SDK、审查 |
+| **0.1.4** | 0.31.29–0.31.33 | 自举与工具：MimiSpec/HM 自举、迁移、fmt/LSP/probes、experimental 隔离 |
+| **0.1.5** | 0.31.34–0.31.37 | 冻结：DEBUG、最终敌对审查、RC1、RC2 |
+| **1.0.0** | — | 发布：API 冻结 + 迁移指南 + 生态基线 |
 
 详细版本及 requirement 分配见 `roadmap.toml` 和 `requirements-matrix.md`。
 

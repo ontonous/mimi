@@ -1062,7 +1062,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // B4: NULL-checked malloc.
         let heap_ptr = self.malloc_or_abort(aligned_len, "ret_str_malloc")?;
         let memcpy_fn = self.get_runtime_fn("memcpy")?;
-        let _ = self.build_call(
+        self.build_call(
             memcpy_fn,
             &[
                 BasicMetadataValueEnum::PointerValue(heap_ptr),
