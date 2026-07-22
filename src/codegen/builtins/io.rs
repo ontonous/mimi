@@ -2508,6 +2508,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_map_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_map_slot")
@@ -2829,6 +2832,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_set_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_set_slot")
@@ -3321,6 +3327,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_res_opt_prod_json_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_res_opt_prod_json_slot")
@@ -3673,6 +3682,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_res_prod_json_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_res_prod_json_slot")
@@ -3973,6 +3985,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_opt_tup_json_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_opt_tup_json_slot")
@@ -4308,6 +4323,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_tup_json_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_tup_json_slot")
@@ -4458,6 +4476,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_tup_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_tup_slot")
@@ -4602,6 +4623,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_enum_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_enum_slot")
@@ -4756,6 +4780,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_res_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_res_slot")
@@ -4937,6 +4964,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
         // Elements are pointers to Option structs (or ptrtoint of them).
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_opt_slot")
@@ -5103,6 +5133,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_rec_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_ptr = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_rec_elem_ptr")
@@ -7959,6 +7992,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_map_nest_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_map_nest_slot")
@@ -8141,6 +8177,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_map_prod_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_map_prod_slot")
@@ -8666,6 +8705,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_res_set_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_res_set_slot")
@@ -8859,6 +8901,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_opt_set_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_opt_set_slot")
@@ -12049,6 +12094,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_list_tup_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_list_tup_slot")
@@ -12204,6 +12252,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_load(i8_ptr, data_gep, "list_list_tup_json_data")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .into_pointer_value();
+        // SAFETY: data_ptr is the collection's data array (`len` i64 elements,
+        // loaded from the struct's data field). The loop guard `cont = idx ULT len`
+        // gates this block, so idx < len here and data_ptr[idx] is in-bounds.
         let elem_slot = unsafe {
             self.builder
                 .build_gep(i64_ty, data_ptr, &[idx], "list_list_tup_json_slot")

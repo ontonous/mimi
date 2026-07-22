@@ -29,7 +29,8 @@ import sys
 # Locked baseline of unsafe blocks lacking a SAFETY comment in NON-runtime
 # code, measured 2026-07-22 (v0.31.7) with the contiguous-comment-block
 # detector below. Do not raise this number; lower it as blocks are documented.
-BASELINE_NON_RUNTIME = 54
+# (54 -> 37 after documenting the 17 loop-bounded io.rs build_gep sites.)
+BASELINE_NON_RUNTIME = 37
 
 OPENER = re.compile(r"\bunsafe\b\s*(\{|fn\b|extern\b|impl\b|trait\b|$)")
 SAFETY = re.compile(r"SAFETY", re.IGNORECASE)
