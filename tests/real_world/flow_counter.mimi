@@ -37,6 +37,5 @@ func main() -> i32 {
     println(s4.count)
     let s5 = Counter::inc(s4)
     let _d = Counter::finish(s5)
-    println(s5.count)
     0
 }

@@ -31,6 +31,8 @@ impl<'a> Checker<'a> {
         // v0.29.23: view/mutate param borrow sets.
         self.view_params.clear();
         self.mutate_params.clear();
+        // FLOW-IDENTITY-001: linear generation — per-function consumption tracking.
+        self.consumed_flow_vars.clear();
         for p in &func.params {
             match p.borrow {
                 Some(crate::ast::ParamBorrow::View) => {

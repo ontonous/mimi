@@ -121,6 +121,7 @@ pub const E0419: &str = "E0419"; // incompatible payload layouts in a multi-targ
 pub const E0420: &str = "E0420"; // multi-target transition result must be exhaustively matched
 pub const E0421: &str = "E0421"; // flow state forgery: non-root state constructed outside transition
 pub const E0422: &str = "E0422"; // flow state nominal distinctness: unqualified name shadowed by another flow
+pub const E0423: &str = "E0423"; // flow state use-after-transition (linear generation)
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment

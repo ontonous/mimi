@@ -1777,8 +1777,8 @@ flow Counter {
 func main() -> i32 {
     let s = Zero { count: 0 }
     let a = Counter::inc(s, 7)
-    let _d = Counter::finish(a)
     println(a.count)
+    let _d = Counter::finish(a)
     0
 }
 "#;
@@ -5332,6 +5332,80 @@ func main() -> i32 {
     assert!(
         result.is_ok(),
         "non-root state construction inside transition should be accepted: {:?}",
+        result
+    );
+}
+
+// ── FLOW-IDENTITY-001: Linear Generation (E0423) ─────────────────────
+
+#[test]
+fn flow_state_use_after_transition_rejected() {
+    // L2: using a flow state variable after it has been consumed by a
+    // transition call must be rejected (E0423).
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    state Done
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+    transition finish(Positive) -> Done {
+        do { return Done { } }
+    }
+}
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let s1 = Counter::inc(s0)
+    let _d = Counter::finish(s1)
+    println(s1.count)
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "use-after-transition should be rejected");
+    let errors = result.unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code.as_deref() == Some("E0423")
+                || d.message.contains("consumed by transition")),
+        "expected E0423 error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn flow_state_sequential_transitions_accepted() {
+    // Valid sequential transitions: each state variable is used exactly once
+    // as a transition source, then the result is bound to a new variable.
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    state Done
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+    transition inc2(Positive) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+    transition finish(Positive) -> Done {
+        do { return Done { } }
+    }
+}
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let s1 = Counter::inc(s0)
+    let s2 = Counter::inc2(s1)
+    let _d = Counter::finish(s2)
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_ok(),
+        "sequential transitions should be accepted: {:?}",
         result
     );
 }

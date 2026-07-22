@@ -7,6 +7,25 @@ use super::Checker;
 
 impl<'a> Checker<'a> {
     pub(crate) fn lookup_var(&mut self, name: &str, scopes: &mut [HashMap<String, Type>]) -> Type {
+        // FLOW-IDENTITY-001 linear generation: reject use-after-transition.
+        // The variable's type is still returned so downstream type checking
+        // proceeds normally; the E0423 diagnostic is the user-facing signal.
+        if let Some(transition_desc) = self.consumed_flow_vars.get(name).cloned() {
+            self.errors.push(
+                Diagnostic::error_code(
+                    crate::diagnostic::codes::E0423,
+                    format!(
+                        "flow state variable '{}' was consumed by transition '{}' and cannot be used again",
+                        name, transition_desc
+                    ),
+                    self.diagnostic_span(),
+                )
+                .with_help(
+                    "flow states are linear resources: each state value can only be passed to one transition; bind the transition result to a new variable",
+                ),
+            );
+            // Fall through to normal lookup so the type is still available.
+        }
         for scope in scopes.iter().rev() {
             if let Some(t) = scope.get(name) {
                 // Arch-4: resolve TypeVars before returning so downstream unify calls
