@@ -12,6 +12,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         inner: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // FLOW-TURN-001: `?` inside a transition with `fails E` should lower
+        // to Rejected (return source + error), not process exit. The Rejected
+        // codegen path is not yet implemented — fail closed.
+        if self.in_fails_transition {
+            return Err(CompileError::Unsupported(
+                "`?` in a transition with `fails E` (Rejected path) is not yet implemented in codegen; \
+                 use the interpreter (`mimi run`) for this feature"
+                    .to_string(),
+            ));
+        }
         // ? operator: compile inner expr as Result/Option/enum,
         // check discriminant, extract T on Ok/Some, exit on Err/None
         let result_val = self.compile_expr(inner, vars)?;

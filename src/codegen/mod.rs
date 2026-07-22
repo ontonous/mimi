@@ -398,6 +398,11 @@ pub struct CodeGenerator<'ctx> {
     resolved_flow_protocols: Option<HashMap<String, Vec<String>>>,
     /// v0.29.24: process spawn quota from first @max_children(N) (None = unlimited).
     max_children: Option<usize>,
+    /// FLOW-TURN-001: true when compiling a transition body that declares
+    /// `fails E`. Used by `compile_try_expr` to emit a fail-closed error
+    /// (Rejected codegen not yet implemented) instead of silently calling
+    /// `mimi_try_exit` which would produce wrong dual-backend behavior.
+    in_fails_transition: bool,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -567,6 +572,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_metadata_shadow_fields: None,
             resolved_flow_protocols: None,
             max_children: None,
+            in_fails_transition: false,
         }
     }
 
