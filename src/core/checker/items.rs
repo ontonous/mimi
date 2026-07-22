@@ -1593,8 +1593,13 @@ impl<'a> Checker<'a> {
                         if capture_typed_body {
                             self.begin_expression_type_capture(transition_owner);
                         }
+                        // FLOW-TURN-001: set transition fails context for `?` validation.
+                        let prev_transition_fails = self
+                            .transition_fails
+                            .replace(t.fails.as_ref().map(|ty| self.resolve_type(ty)));
                         // Type-check the body as a block
                         self.check_block(body, &ret_type, &mut scopes);
+                        self.transition_fails = prev_transition_fails;
                         if capture_typed_body {
                             self.finish_expression_type_capture();
                         }

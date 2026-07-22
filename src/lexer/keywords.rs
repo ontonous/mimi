@@ -14,6 +14,7 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Func
             | TokenKind::Fn
             | TokenKind::Fault
+            | TokenKind::Fails
             | TokenKind::Reset
             | TokenKind::Recover
             | TokenKind::Actor
@@ -127,6 +128,7 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "else" => TokenKind::Else,
         "for" => TokenKind::For,
         "fault" => TokenKind::Fault,
+        "fails" => TokenKind::Fails,
         "in" => TokenKind::In,
         "while" => TokenKind::While,
         "return" => TokenKind::Return,

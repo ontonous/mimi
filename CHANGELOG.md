@@ -14,6 +14,13 @@
 - **E0422 名义状态区分**（warning）：跨流同名义状态 payload 兼容时发出 warning，提示使用限定名 `flow::<flow_name>::<state_name>`。
 - **E0423 线性 generation**：flow state 变量被 transition 消费后，后续使用被静态拒绝。Checker 层 `consumed_flow_vars` 追踪 + `lookup_var` 拦截；解释器 `mark_moved` safety net。2 个新测试。`flow_counter.mimi` 和 `flow_codegen_chain` 中的 use-after-transition 已修正。
 
+### FLOW-TURN-001 原子 Turn（0.31.9 进行中）
+
+- **`fails E` 语法**：transition 签名支持 `-> Target fails ErrorType`，声明可回滚失败路径。Lexer 新增 `fails` 关键字，Parser 解析 `fails E`，AST `TransitionDef.fails: Option<Type>`。
+- **E0424**：transition 体内 `?` 无 `fails E` 声明时静态拒绝。
+- **Rejected 路径（解释器）**：`?` 失败时 transition 返回 `Err((source_payload, error))`，source generation 归还调用方。修复 `early_return` 泄漏 bug（transition 体内 `?` 的 `early_return` 不再穿透到调用方）。4 个新测试。
+- 待实现：codegen 镜像、draft isolation、`become`/`stay` 显式 terminal 关键字、返回类型 `Result<Target, (Source, E)>` 类型系统变更。
+
 ## [0.1.0] — 基线稳定 - 2026-07-23
 
 ### 止血 II 收尾 + 版本管理切换 + 架构重构

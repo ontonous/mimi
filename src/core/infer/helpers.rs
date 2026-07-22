@@ -260,6 +260,13 @@ impl<'a> Checker<'a> {
         expr: &Expr,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
+        // FLOW-TURN-001: `?` in a transition body requires `fails E` declaration.
+        if let Some(None) = &self.transition_fails {
+            self.emit_code(
+                crate::diagnostic::codes::E0424,
+                "`?` operator in transition body requires a `fails E` declaration on the transition signature",
+            );
+        }
         let inner_ty = self.infer_expr(expr, scopes);
         match inner_ty.unlocated() {
             // Built-in Result<T, E> -> ? extracts T
