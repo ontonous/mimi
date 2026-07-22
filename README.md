@@ -4,9 +4,9 @@
 
 **A Typestate-Oriented system programming language — Flow state machines, contract verification, and structured concurrency**
 
-[![Version](https://img.shields.io/badge/version-0.30.0--dev-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-3100+%20passed-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-4063%20total-brightgreen.svg)](#)
 [![Flow](https://img.shields.io/badge/flow-v0.29%20complete-orange.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
@@ -308,6 +308,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 | Version | Highlight |
 |---------|-----------|
+| **0.1.0** | **Baseline stability**: CheckedProgram semantic hub, semver switch, runtime/resolved architecture split, 4063 tests green, dual-backend equivalence |
 | **v0.30.0** | **止血 (Hemostasis)**: Zero new features — architecture debt repair (sprintf→snprintf, path safety, malloc checks, values_equal, build_unreachable, fmt tokenization) |
 | **v0.29.41** | White paper freeze: all 38 capabilities complete ✅ |
 | **v0.29.37** | Actor lifecycle: SystemKill cascade + `spawn detached` |
