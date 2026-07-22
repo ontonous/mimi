@@ -8,11 +8,11 @@
 - `extract_print_arg` 的 Map/Set 分发树（1886 行手工展开 if-else）替换为 `resolve_container_product` 递归类型解析器（-1693 行）。
 - io.rs: 14658 → 11421 行（-22%），双后端 735/0 等价确认。
 
-### FLOW-IDENTITY-001 状态身份（0.31.8 进行中）
+### FLOW-IDENTITY-001 状态身份（0.31.8 完成）
 
 - **E0421 状态不可伪造**：非根 flow state 在 transition 体外构造被拒绝。根状态（flow 第一个 state）构造不受影响（Flow 构造器语义）。3 个新测试。
 - **E0422 名义状态区分**（warning）：跨流同名义状态 payload 兼容时发出 warning，提示使用限定名 `flow::<flow_name>::<state_name>`。
-- 待实现：线性 generation（use-after-transition 拒绝）——涉及值系统 + 检查器 + 解释器 + codegen 多层变更。
+- **E0423 线性 generation**：flow state 变量被 transition 消费后，后续使用被静态拒绝。Checker 层 `consumed_flow_vars` 追踪 + `lookup_var` 拦截；解释器 `mark_moved` safety net。2 个新测试。`flow_counter.mimi` 和 `flow_codegen_chain` 中的 use-after-transition 已修正。
 
 ## [0.1.0] — 基线稳定 - 2026-07-23
 

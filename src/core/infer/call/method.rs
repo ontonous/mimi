@@ -37,6 +37,15 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|arg| self.infer_expr(arg, scopes))
                     .collect();
+                // FLOW-IDENTITY-001 linear generation: the source state (first
+                // argument) is consumed by the transition. Mark the variable so
+                // subsequent uses are rejected with E0423.
+                if let Some(Expr::Ident(source_var)) = args.first().map(|a| a.unlocated()) {
+                    self.consumed_flow_vars.insert(
+                        source_var.clone(),
+                        format!("{}::{}", module_name, method_name),
+                    );
+                }
                 let from_ty = arg_types
                     .first()
                     .cloned()

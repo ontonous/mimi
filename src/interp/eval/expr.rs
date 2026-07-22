@@ -778,7 +778,19 @@ impl<'a> Interpreter<'a> {
                                 && from_name.map(|n| n == t.from_state).unwrap_or(false)
                         });
                         if let Some(t) = t {
-                            return self.eval_flow_transition(&flow, t, &vals);
+                            let result = self.eval_flow_transition(&flow, t, &vals);
+                            // FLOW-IDENTITY-001 linear generation: the source state
+                            // is consumed by the transition. Mark the variable as
+                            // moved so subsequent lookups return None (safety net;
+                            // the checker rejects use-after-transition statically).
+                            if result.is_ok() {
+                                if let Some(Expr::Ident(source_var)) =
+                                    args.first().map(|a| a.unlocated())
+                                {
+                                    self.mark_moved(source_var);
+                                }
+                            }
+                            return result;
                         }
                         return Err(InterpError::new(format!(
                             "flow transition '{}::{}' has no overload for source state {}",

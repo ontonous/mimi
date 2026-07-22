@@ -712,6 +712,9 @@ impl<'a> Checker<'a> {
                     if let Some(s) = self.mut_vars.last_mut() {
                         s.insert(name.clone(), *mut_);
                     }
+                    // FLOW-IDENTITY-001 linear generation: re-declaring a variable
+                    // (shadowing) produces a fresh binding — clear consumption.
+                    self.consumed_flow_vars.remove(name);
                 }
                 self.check_pattern(pat, &final_ty, scopes);
                 // v0.29.49: track multi-target transition results.

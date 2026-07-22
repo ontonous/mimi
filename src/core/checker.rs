@@ -82,6 +82,10 @@ pub(crate) struct Checker<'a> {
     /// Used to distinguish legitimate initial-state construction from state forgery.
     /// Qualified names: "FlowName::StateName".
     pub(crate) flow_root_states: std::collections::HashSet<String>,
+    /// FLOW-IDENTITY-001 linear generation: variables consumed by flow transition
+    /// calls. Maps variable name → transition description (e.g. "Counter::inc")
+    /// for diagnostic messages. Cleared at each callable boundary.
+    pub(crate) consumed_flow_vars: HashMap<String, String>,
     /// v0.29.49: variables bound to multi-target transition results.
     /// Maps variable name -> list of possible target state types.
     /// Direct field access on these variables is rejected (E0420) —
@@ -226,6 +230,7 @@ impl<'a> Checker<'a> {
             current_ret: None,
             flow_return_targets: Vec::new(),
             flow_root_states: std::collections::HashSet::new(),
+            consumed_flow_vars: HashMap::new(),
             multi_target_vars: HashMap::new(),
             session_types: HashMap::new(),
             session_residuals: HashMap::new(),
@@ -326,6 +331,7 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn begin_callable(&mut self, owner: super::NodeId) -> Option<super::NodeId> {
+        self.consumed_flow_vars.clear();
         self.current_callable_owner.replace(owner)
     }
 
