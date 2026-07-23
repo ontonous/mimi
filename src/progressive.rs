@@ -86,6 +86,7 @@ fn make_implicit_main_flow(parent_meta: AstNodeMeta) -> FlowDef {
         persistent_fields: vec![],
         transactional_fields: vec![],
         metadata_shadow_fields: vec![],
+        fault_type: None,
     }
 }
 
@@ -235,6 +236,7 @@ mod tests {
             persistent_fields: vec![],
             transactional_fields: vec![],
             metadata_shadow_fields: vec![],
+            fault_type: None,
         }));
         file.items.push(Item::Func(FuncDef {
             meta: user_meta(1),

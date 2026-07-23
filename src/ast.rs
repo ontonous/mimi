@@ -1049,6 +1049,9 @@ pub struct FlowDef {
     /// where deep clone is too expensive. On restore, metadata is reset
     /// but underlying data buffer is kept (white-paper §6.3).
     pub metadata_shadow_fields: Vec<String>,
+    /// v0.31.10: Per-Flow typed Fault — `fault ErrorType` declaration in flow body.
+    /// When set, the injected Fault state carries an additional `error: ErrorType` field.
+    pub fault_type: Option<Type>,
 }
 
 #[derive(Debug, Clone)]

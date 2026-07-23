@@ -673,31 +673,40 @@ fn ensure_fault_state(flow: &mut FlowDef) {
     if !flow.states.iter().any(|s| s.name == "Fault") {
         let origin = AstOrigin::RuntimeSystem("flow.fault_state");
         let meta = flow_generated_meta(flow, origin);
+        let mut fields = vec![
+            Field {
+                meta,
+                name: "last_state".to_string(),
+                ty: Type::Name("string".to_string(), vec![]).deep_reorigin(meta),
+            },
+            Field {
+                meta,
+                name: "unexpected_event".to_string(),
+                ty: Type::Name("string".to_string(), vec![]).deep_reorigin(meta),
+            },
+            Field {
+                meta,
+                name: "snapshot".to_string(),
+                ty: Type::Name("string".to_string(), vec![]).deep_reorigin(meta),
+            },
+            Field {
+                meta,
+                name: "trace".to_string(),
+                ty: Type::Name("SystemTrace".to_string(), vec![]).deep_reorigin(meta),
+            },
+        ];
+        // v0.31.10: per-Flow typed Fault — inject `error: ErrorType` field.
+        if let Some(fault_ty) = &flow.fault_type {
+            fields.push(Field {
+                meta,
+                name: "error".to_string(),
+                ty: fault_ty.clone().deep_reorigin(meta),
+            });
+        }
         flow.states.push(StateDef {
             meta,
             name: "Fault".to_string(),
-            payload: Some(vec![
-                Field {
-                    meta,
-                    name: "last_state".to_string(),
-                    ty: Type::Name("string".to_string(), vec![]).deep_reorigin(meta),
-                },
-                Field {
-                    meta,
-                    name: "unexpected_event".to_string(),
-                    ty: Type::Name("string".to_string(), vec![]).deep_reorigin(meta),
-                },
-                Field {
-                    meta,
-                    name: "snapshot".to_string(),
-                    ty: Type::Name("string".to_string(), vec![]).deep_reorigin(meta),
-                },
-                Field {
-                    meta,
-                    name: "trace".to_string(),
-                    ty: Type::Name("SystemTrace".to_string(), vec![]).deep_reorigin(meta),
-                },
-            ]),
+            payload: Some(fields),
         });
     }
     // Attach persistent-field shadows so recover can read them off Fault.
@@ -1134,6 +1143,7 @@ mod tests {
             persistent_fields: vec![],
             transactional_fields: vec![],
             metadata_shadow_fields: vec![],
+            fault_type: None,
         }
     }
 

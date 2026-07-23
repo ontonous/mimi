@@ -256,6 +256,7 @@ fn flow_matrix_generated_transition_function_types_share_lowering_origin() {
         persistent_fields: vec![],
         transactional_fields: vec![],
         metadata_shadow_fields: vec![],
+        fault_type: None,
     };
 
     let generated = CodeGenerator::<'static>::transition_to_func(&flow, &transition);

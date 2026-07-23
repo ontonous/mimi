@@ -5728,3 +5728,71 @@ func main() -> i32 {
     let native = compile_and_run(src).expect("codegen success path");
     assert_eq!(native.trim(), "1");
 }
+
+#[test]
+fn flow_typed_fault_parse_and_check() {
+    // v0.31.10: `fault ErrorType` declares a per-Flow typed Fault.
+    // The injected Fault state carries an additional `error: ErrorType` field.
+    let src = r#"
+type AccountError {
+    code: i32,
+    reason: string,
+}
+
+flow Account {
+    state Active { balance: i32 }
+    fault AccountError
+    transition deposit(Active, amount: i32) -> Active {
+        do { return Active { balance: self.balance + amount } }
+    }
+}
+func main() -> i32 {
+    let s0 = Active { balance: 100 }
+    let s1 = Account::deposit(s0, 50)
+    println(s1.balance)
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_ok(),
+        "per-flow typed fault should be accepted: {:?}",
+        result
+    );
+    // Interpreter: normal transition still works
+    let interp_result = run_source_result(src);
+    assert_eq!(interp_result, Ok(interp::Value::Int(0)));
+    // Codegen: normal transition still works
+    let native = compile_and_run(src).expect("codegen typed fault");
+    assert_eq!(native.trim(), "150");
+}
+
+#[test]
+fn flow_typed_fault_fallback_includes_error_field() {
+    // v0.31.10: When a fallback transition fires (calling a declared event
+    // from a state that doesn't handle it), the Fault state includes the
+    // typed error field with a default value.
+    let src = r#"
+type MyError {
+    code: i32,
+}
+
+flow Svc {
+    state Idle { n: i32 }
+    state Running { n: i32 }
+    fault MyError
+    transition start(Idle) -> Running {
+        do { return Running { n: self.n + 1 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Running { n: 5 }
+    let f = Svc::start(s0)
+    println(f.error.code)
+    0
+}
+"#;
+    // The fallback transition should produce a Fault with error.code = 0 (default)
+    let interp_result = run_source_result(src);
+    assert_eq!(interp_result, Ok(interp::Value::Int(0)));
+}
