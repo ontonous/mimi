@@ -191,6 +191,25 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        // v0.31.12: session scope exit check — non-end residuals must not
+        // silently leave scope. Every tracked endpoint must reach `end` before
+        // the function returns (or be explicitly returned/transferred).
+        let unfinished: Vec<(String, String)> = self
+            .session_residuals
+            .iter()
+            .filter(|(_, r)| !matches!(r.unlocated(), crate::ast::SessionType::End))
+            .map(|(v, r)| (v.clone(), crate::session::fmt_session(r)))
+            .collect();
+        for (var, residual_str) in unfinished {
+            self.emit_code(
+                crate::diagnostic::codes::E0425,
+                format!(
+                    "session endpoint '{}' leaves scope with unfinished protocol residual `{}`; \
+                     complete the protocol (send/recv/close) or return the endpoint",
+                    var, residual_str
+                ),
+            );
+        }
         self.available_effects.pop();
         self.var_scopes.pop();
         self.finish_expression_type_capture();

@@ -2253,6 +2253,17 @@ impl<'a> Checker<'a> {
             if let Some(r) = self.residual_for_var(v) {
                 return Some((Some(v.clone()), r));
             }
+            // v0.31.12: use-after-alias — the endpoint was consumed by `let b = a`.
+            if self.consumed_session_vars.contains(v) {
+                self.emit_code(
+                    crate::diagnostic::codes::E0426,
+                    format!(
+                        "session endpoint '{}' was consumed by aliasing and cannot be used again",
+                        v
+                    ),
+                );
+                return None;
+            }
             // Initialize residual from SessionChan<S> annotation if present.
             if let Some(sname) = Self::session_chan_name(&ty) {
                 if let Some(body) = self.session_types.get(&sname).cloned() {

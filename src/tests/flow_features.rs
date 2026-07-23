@@ -3207,6 +3207,93 @@ func main() -> i32 { 0 }
     assert!(check_source(src).is_ok(), "dual: {:?}", check_source(src));
 }
 
+// ── v0.31.12 Typed Session Residual ──────────────────────────────────
+
+#[test]
+fn session_alias_transfers_residual() {
+    // v0.31.12: `let b = a` transfers the residual from a to b.
+    // Using b to complete the protocol is valid.
+    let src = r#"
+session S = !i32 . ?i32 . end
+func client(ch: SessionChan<S>) -> i32 {
+    let ch2 = ch
+    session_send(ch2, 1)
+    let x = session_recv(ch2)
+    session_close(ch2)
+    x
+}
+func main() -> i32 { 0 }
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "alias transfer: {:?}",
+        check_source(src)
+    );
+}
+
+#[test]
+fn session_use_after_alias_rejected() {
+    // v0.31.12: using an endpoint after aliasing is E0426 (linear violation).
+    let src = r#"
+session S = !i32 . end
+func bad(ch: SessionChan<S>) -> i32 {
+    let ch2 = ch
+    session_send(ch, 1)
+    session_close(ch2)
+    0
+}
+func main() -> i32 { 0 }
+"#;
+    let err = check_source(src);
+    assert!(err.is_err(), "use-after-alias must fail");
+    let errors = err.unwrap_err();
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0426")),
+        "expected E0426, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn session_scope_exit_unfinished_rejected() {
+    // v0.31.12: non-end residual leaving scope is E0425.
+    let src = r#"
+session S = !i32 . ?i32 . end
+func bad(ch: SessionChan<S>) -> i32 {
+    session_send(ch, 1)
+    0
+}
+func main() -> i32 { 0 }
+"#;
+    let err = check_source(src);
+    assert!(err.is_err(), "scope exit with non-end residual must fail");
+    let errors = err.unwrap_err();
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0425")),
+        "expected E0425, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn session_scope_exit_complete_ok() {
+    // v0.31.12: completing the protocol (residual = end) allows scope exit.
+    let src = r#"
+session S = !i32 . end
+func ok(ch: SessionChan<S>) -> i32 {
+    session_send(ch, 1)
+    session_close(ch)
+    0
+}
+func main() -> i32 { 0 }
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "complete protocol scope exit: {:?}",
+        check_source(src)
+    );
+}
+
 // ── v0.29.20 PeerFault cross-Actor propagation ────────────────────────
 
 #[test]
