@@ -864,6 +864,15 @@ impl Parser {
             let annotation_start = self.pos;
             self.advance();
             let ann_name = self.expect_ident()?;
+            // v0.31.10: @sparse is a bare annotation (no parentheses).
+            if ann_name == "sparse" {
+                annotations.push(FlowAnnotation::new(
+                    self.consumed_meta(annotation_start, AstOrigin::User),
+                    FlowAnnotationKind::Sparse,
+                ));
+                self.skip_newlines();
+                continue;
+            }
             self.expect(TokenKind::LParen, "`(`")?;
             let kind = match ann_name.as_str() {
                 "mailbox" => {
@@ -1069,19 +1078,19 @@ impl Parser {
                                 tok.col,
                             ));
                         }
-                        _ => {
-                            // PR-H2: unknown @annotations must surface as parse errors
-                            // (not eprintln!) so LSP/check can report them with span.
-                            let tok = self.peek();
-                            return Err(ParseError::new(
-                                format!(
-                                    "unknown flow annotation '@{}' — expected @mailbox(...), @max_children(...), or bare @transactional",
-                                    ann_name
-                                ),
-                                tok.line,
-                                tok.col,
-                            ));
-                        }
+                _ => {
+                    // PR-H2: unknown @annotations must surface as parse errors
+                    // (not eprintln!) so LSP/check can report them with span.
+                    let tok = self.peek();
+                    return Err(ParseError::new(
+                        format!(
+                            "unknown flow annotation '@{}' — expected @mailbox(...), @max_children(...), or bare @sparse",
+                            ann_name
+                        ),
+                        tok.line,
+                        tok.col,
+                    ));
+                }
                     };
                     self.expect(TokenKind::RParen, "`)`")?;
                     annotations.push(FlowAnnotation::new(
