@@ -693,6 +693,12 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 self.current_flow_state = prev_flow_state;
+                // v0.31.15: record Fault entry in trace.
+                self.trace_collector.record_fault(
+                    &flow.name,
+                    &t.from_state,
+                    &event,
+                );
                 return Ok(fault);
             }
         };
@@ -754,6 +760,19 @@ impl<'a> Interpreter<'a> {
         }
 
         self.current_flow_state = prev_flow_state;
+        // v0.31.15: record canonical trace event for the transition.
+        let to_state_name = match &final_out {
+            Value::Record(Some(name), _) => name.clone(),
+            Value::Variant(name, _) => name.clone(),
+            _ => t.to_states.first().cloned().unwrap_or_default(),
+        };
+        self.trace_collector.record_transition(
+            &flow.name,
+            &t.name,
+            &t.from_state,
+            &to_state_name,
+            0, // generation tracking deferred
+        );
         Ok(final_out)
     }
 
