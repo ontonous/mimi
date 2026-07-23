@@ -754,6 +754,70 @@ impl ActorHandle {
                     // v0.29.21: full-actor mute — drain without dispatch while muted.
                     // (Producers are blocked at send; residual in-flight msgs complete.)
                     let result = {
+                        // v0.31.11: Actor runs Flow — route messages through
+                        // the Flow transition table instead of method lookup.
+                        let runs_flow_info = {
+                            let actor = worker_inner.read().unwrap_or_else(|e| e.into_inner());
+                            actor.runs_flow.as_ref().map(|f| (f.clone(), actor.flow_state.clone()))
+                        };
+                        if let Some((flow_name, current_state)) = runs_flow_info {
+                            // Find the flow definition in the program AST.
+                            let flow_def = worker_program.items.iter().find_map(|item| {
+                                if let crate::ast::Item::Flow(f) = item {
+                                    if f.name == flow_name { Some(f.clone()) } else { None }
+                                } else {
+                                    None
+                                }
+                            });
+                            let Some(flow_def) = flow_def else {
+                                let _ = msg.response.send(Err(InterpError::new(format!(
+                                    "actor runs flow '{}' but flow not found in program",
+                                    flow_name
+                                ))));
+                                continue;
+                            };
+                            // Determine current state name from the flow_state value.
+                            let state_name = match &current_state {
+                                Some(Value::Record(Some(name), _)) => name.clone(),
+                                Some(Value::Variant(name, _)) => name.clone(),
+                                _ => {
+                                    // Default to root state (first declared state).
+                                    flow_def.states.first()
+                                        .map(|s| s.name.clone())
+                                        .unwrap_or_else(|| "Unknown".to_string())
+                                }
+                            };
+                            // Find matching transition: (from_state == current, name == msg.method).
+                            let transition = flow_def.transitions.iter().find(|t| {
+                                t.from_state == state_name && t.name == msg.method
+                            }).cloned();
+                            let Some(transition) = transition else {
+                                let _ = msg.response.send(Err(InterpError::new(format!(
+                                    "no transition '{}' from state '{}' in flow '{}'",
+                                    msg.method, state_name, flow_name
+                                ))));
+                                continue;
+                            };
+                            // Execute the transition via a fresh interpreter.
+                            let mut interp = crate::interp::Interpreter::new(&worker_program);
+                            if let Some(ref buf) = worker_stdout {
+                                interp.set_stdout_buf(std::sync::Arc::clone(buf));
+                            }
+                            // Build vals: [current_state, ...msg.args]
+                            let mut vals = vec![current_state.unwrap_or(Value::Unit)];
+                            vals.extend(msg.args.iter().cloned());
+                            match interp.eval_flow_transition(&flow_def, &transition, &vals) {
+                                Ok(new_state) => {
+                                    // Update the actor's flow_state.
+                                    {
+                                        let mut actor = worker_inner.write().unwrap_or_else(|e| e.into_inner());
+                                        actor.flow_state = Some(new_state.clone());
+                                    }
+                                    Ok(new_state)
+                                }
+                                Err(e) => Err(e),
+                            }
+                        } else {
                         // Read method definition
                         let (func, _actor_name) = {
                             let actor = worker_inner.read().unwrap_or_else(|e| e.into_inner());
@@ -897,6 +961,7 @@ impl ActorHandle {
                         };
                         interp.pop_scope();
                         result
+                        }
                     };
                     let _ = msg.response.send(result);
                 }

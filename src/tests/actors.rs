@@ -319,3 +319,37 @@ func main() -> i32 {
         "actor runs missing flow should be rejected"
     );
 }
+
+#[test]
+fn actor_runs_flow_dispatch_through_transition() {
+    // v0.31.11: actor that `runs` a Flow dispatches messages through
+    // the Flow transition table. The actor's flow_state updates on each turn.
+    let src = r#"
+flow Counter {
+    state Zero { n: i32 }
+    state Positive { n: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { n: self.n + 1 } }
+    }
+    transition bump(Positive) -> Positive {
+        do { return Positive { n: self.n + 1 } }
+    }
+    transition get(Positive) -> Positive {
+        do { return Positive { n: self.n } }
+    }
+}
+
+actor CounterActor runs Counter {
+}
+
+func main() -> i32 {
+    let a = CounterActor.spawn();
+    let s1 = await a.inc();
+    let s2 = await a.bump();
+    let s3 = await a.get();
+    s3.n
+}
+"#;
+    let v = run_source(src);
+    assert_eq!(v, interp::Value::Int(2));
+}

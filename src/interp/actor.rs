@@ -54,12 +54,53 @@ impl<'a> Interpreter<'a> {
             fields.insert(field.name.clone(), value);
         }
 
+        // v0.31.11: initialize flow_state to the flow's root state when runs_flow is set.
+        let flow_state = if let Some(flow_name) = &actor_def.runs_flow {
+            // Find the flow and construct its root state (first declared state) with defaults.
+            let flow_def = self.file.items.iter().find_map(|item| {
+                if let crate::ast::Item::Flow(f) = item {
+                    if &f.name == flow_name { Some(f) } else { None }
+                } else {
+                    None
+                }
+            });
+            flow_def.and_then(|flow| {
+                flow.states.first().map(|root_state| {
+                    let fields: HashMap<String, Value> = root_state
+                        .payload
+                        .as_ref()
+                        .map(|payload| {
+                            payload
+                                .iter()
+                                .map(|f| {
+                                    let default_val = match f.ty.unlocated() {
+                                        Type::Name(n, _) if n == "i32" => Value::Int(0),
+                                        Type::Name(n, _) if n == "i64" => Value::Int(0),
+                                        Type::Name(n, _) if n == "f64" => Value::Float(0.0),
+                                        Type::Name(n, _) if n == "bool" => Value::Bool(false),
+                                        Type::Name(n, _) if n == "string" => {
+                                            Value::String(String::new())
+                                        }
+                                        _ => Value::Unit,
+                                    };
+                                    (f.name.clone(), default_val)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Value::Record(Some(root_state.name.clone()), fields)
+                })
+            })
+        } else {
+            None
+        };
+
         let instance = ActorInstance {
             actor_name: actor_name.to_string(),
             fields,
             methods: actor_def.methods.clone(),
             runs_flow: actor_def.runs_flow.clone(),
-            flow_state: None,
+            flow_state,
             faulted: false,
             peer_links: Vec::new(),
             parent_id: crate::interp::value::CURRENT_ACTOR_ID.with(|id| {
