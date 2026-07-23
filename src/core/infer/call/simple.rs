@@ -2146,6 +2146,11 @@ impl<'a> Checker<'a> {
             } else {
                 for (i, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
                     let at = self.infer_expr(arg, scopes);
+                    // v0.31.13: passing a session endpoint as a function argument
+                    // moves it — consume the residual so scope-exit doesn't fire.
+                    if let Some(key) = Self::place_key(arg) {
+                        self.session_residuals.remove(&key);
+                    }
                     // IF-C1: strict unify at call sites rejects Any/_/Infer escapes.
                     let coerced = is_numeric_coercion(param, &at);
                     if !coerced && self.unification.unify(param, &at).is_err() {
