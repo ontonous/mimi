@@ -9,7 +9,7 @@
 
 v0.30.0 是已完成的止血基线。v0.31.x 不重做 v0.30 已关闭的架构债务，而是在其上建立唯一语义中枢，并完整实现 Pre-1.0 的 31 项 requirement。
 
-v0.31.x 的完成不由版本号决定。即使到达 v0.31.37，只要 stable requirement、P0、双后端轨迹、Verified Core、Component conformance、迁移或 RC 门禁有一项未满足，就继续增加 v0.31.x。
+v0.31.x 的完成不由版本号决定。即使到达 v0.31.43，只要 stable requirement、P0、双后端轨迹、Verified Core、Component conformance、迁移或 RC 门禁有一项未满足，就继续增加 v0.31.x。
 
 ## 2. 权威边界
 
@@ -25,7 +25,7 @@ v0.31.x 的完成不由版本号决定。即使到达 v0.31.37，只要 stable r
 Span/Origin -> HM -> CFG/ownership -> CheckedProgram/Resolved IR
   -> Flow generation/turn -> Actor/Session/resource -> semantic trace
   -> Verified Core
-  -> Component IR -> Native ABI -> Wire -> Rust/TS SDK
+  -> Component IR -> Native ABI -> Wire -> Rust SDK / XPU FFI
   -> self-hosting/migration/tooling -> DEBUG/audit -> RC1 -> RC2
 ```
 
@@ -38,20 +38,23 @@ Span/Origin -> HM -> CFG/ownership -> CheckedProgram/Resolved IR
 | 外部版本 | 内部 sprint | 阶段主题 |
 |---|---|---|
 | **0.1.0** | 0.31.0–0.31.7 | 基线稳定：CheckedProgram、Span、HM、CFG、Resolved IR、consumer 迁移、止血 I/II |
-| **0.1.1** | 0.31.8–0.31.37（全部） | 内部路线图 0.31 彻底完成：Flow 核心闭环、语言冻结、Component 边界、自举与工具、冻结审查、RC |
+| **0.1.1** | 0.31.8–0.31.43（全部） | 内部路线图 0.31 彻底完成：Flow 核心闭环、地基深修、语言冻结、Component 边界、自举与工具、冻结审查、RC |
 | **1.0.0** | — | 发布：API 冻结 + 迁移指南 + 生态基线 |
 
-> **发布纪律**：0.1.1 是唯一一个覆盖完整内部路线图的长周期版本。内部 30 个 sprint（0.31.8–0.31.37）全部验收通过后才打 `0.1.1` tag。期间不打任何中间外部 tag。
+> **发布纪律**：0.1.1 是唯一一个覆盖完整内部路线图的长周期版本。内部 36 个 sprint（0.31.8–0.31.43）全部验收通过后才打 `0.1.1` tag。期间不打任何中间外部 tag。
 >
 > 内部按阶段划分里程碑（仅用于进度追踪，不打 tag）：
 >
 > | 阶段 | 内部 sprint | 主题 |
 > |------|------------|------|
-> | Phase A | 0.31.8–0.31.16 | Flow 核心闭环：原子 turn、Fault、Actor runs Flow、Session 线性、exactly-once、攻击审查 I |
-> | Phase B | 0.31.17–0.31.21 | 语言冻结：语法收敛、Verification IR fail-closed、VC artifact、攻击审查 II |
-> | Phase C | 0.31.22–0.31.28 | Component 边界：Component IR、Native ABI、Wire Schema、Rust/TS SDK conformance |
-> | Phase D | 0.31.29–0.31.33 | 自举与工具：MimiSpec/HM 自举、迁移、fmt/LSP/probes、experimental 隔离 |
-> | Phase E | 0.31.34–0.31.37 | 冻结：DEBUG、最终敌对审查、RC1、RC2 |
+> | Phase A | 0.31.8–0.31.19 | Flow 核心闭环 + 地基深修：原子 turn、Fault、Actor runs Flow、Session 线性、exactly-once、**Flow 类型级线性、高阶交互闭环、证据同步**、攻击审查 I |
+> | Phase B | 0.31.20–0.31.24 | 语言冻结：语法收敛、Verification IR fail-closed、VC artifact、攻击审查 II |
+> | Phase C | 0.31.25–0.31.33 | Component 边界：Component IR、Native ABI、**稳定检查点**、Wire Schema、Rust SDK conformance、**XPU FFI 验证**、**SDK 加固** |
+> | Phase D | 0.31.34–0.31.39 | 工具与隔离：~~自举（deferred to post-1.0）~~、迁移、fmt/LSP/probes、experimental 隔离 |
+> | Phase E | 0.31.40–0.31.43 | 冻结：DEBUG、最终敌对审查、RC1、RC2 |
+>
+> **加粗**为 v2 路线图新增 sprint（共 +6：0.31.16–18 地基深修、0.31.27 Component 稳定检查点、0.31.33 SDK 加固、0.31.34 自举 spike）。
+> **v3 变更**：0.31.34–36（自举）标记 `deferred`，移出必须完成路径；0.31.31 替换为 XPU FFI 验证；0.31.18 增加 CI 防护（gas limit）；0.31.19 增加 ABI 前置验证。
 
 详细版本及 requirement 分配见 `roadmap.toml` 和 `requirements-matrix.md`。
 
@@ -90,11 +93,12 @@ Span/Origin -> HM -> CFG/ownership -> CheckedProgram/Resolved IR
 
 ## 8. 分册
 
-- `01-foundation.md`：0.31.0–0.31.7、0.31.29–0.31.30
-- `02-flow-runtime.md`：0.31.8–0.31.16
-- `03-verified-core.md`：0.31.18–0.31.21
-- `04-component-boundary.md`：0.31.22–0.31.28
-- `05-migration-tooling.md`：0.31.17、0.31.31–0.31.33
+- `01-foundation.md`：0.31.0–0.31.7、0.31.35–0.31.36
+- `02-flow-runtime.md`：0.31.8–0.31.15（含版本内追加）
+- `02b-foundation-repair.md`：0.31.16–0.31.18（地基深修）+ 0.31.19（攻击审查 I）
+- `03-verified-core.md`：0.31.21–0.31.24
+- `04-component-boundary.md`：0.31.25–0.31.33
+- `05-migration-tooling.md`：0.31.20、0.31.34、0.31.37–0.31.39
 - `06-audit-debug-rc.md`：止血、审查、DEBUG 和 RC 门禁
 
 ## 9. 最终退出
@@ -104,6 +108,8 @@ Span/Origin -> HM -> CFG/ownership -> CheckedProgram/Resolved IR
 - Interpreter/native/verifier/component 只消费真实 Typed Resolved IR。
 - Flow generation、Actor runs Flow、typed Session、resource exactly-once 闭环。
 - Verified Core known-unsound 误证为 0。
-- Component IR、Native ABI 1、Wire Schema 1 和 Rust/TS SDK conformance 全绿。
-- MimiSpec parser 与 HM 自举差分为 0。
+- Component IR、Native ABI 1、Wire Schema 1 和 Rust SDK conformance 全绿。
+- **至少 1 个真实 C 库 FFI E2E 通过**（XPU First Blood：extern "C" + #[repr(C)] 调通真实 .so/.dll）。
 - P0=0，连续两个干净环境 RC 通过全部适用门禁。
+- ~~MimiSpec parser 与 HM 自举差分为 0~~（deferred to post-1.0，不作为 0.1.1 退出条件）。
+- ~~TypeScript GUI SDK conformance~~（deferred to post-1.0，MULTILANG-AUTHORITY-001 evidence 降级为设计文档 + Rust SDK 单侧验证）。

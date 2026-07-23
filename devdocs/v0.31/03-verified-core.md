@@ -2,10 +2,10 @@
 
 ## 版本
 
-- **0.31.18**：Resolved IR -> trusted subset -> Verification IR -> CFG/SSA。
-- **0.31.19**：checked i32/i64、definedness obligation、VC 与 counterexample。
-- **0.31.20**：八结果代数、proof artifact、solver/infrastructure fail-closed。
-- **0.31.21**：止血/攻击审查 II，0 新 proof feature。
+- **0.31.21**：Resolved IR -> trusted subset -> Verification IR -> CFG/SSA。
+- **0.31.22**：checked i32/i64、definedness obligation、VC 与 counterexample。
+- **0.31.23**：八结果代数、proof artifact、solver/infrastructure fail-closed。
+- **0.31.24**：止血/攻击审查 II，0 新 proof feature。
 
 ## 范围
 

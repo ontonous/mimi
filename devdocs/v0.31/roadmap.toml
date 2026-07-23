@@ -1,8 +1,10 @@
-schema_version = 1
+schema_version = 2
 series = "0.31"
 baseline = "0.30.0"
 first = 0
-last = 37
+last = 43
+
+# === Phase 0: 基线（已完成，0.1.0 发布）===
 
 [[milestone]]
 version = "0.31.0"
@@ -52,6 +54,8 @@ kind = "stabilization"
 title = "止血 II（审计修复：测试 oracle、silent error、文档真值、CI 门禁）"
 requirements = []
 
+# === Phase A: Flow 核心闭环（0.31.8–0.31.19）===
+
 [[milestone]]
 version = "0.31.8"
 kind = "implementation"
@@ -87,147 +91,303 @@ version = "0.31.13"
 kind = "implementation"
 title = "Resource 与 permission 闭环"
 requirements = ["RESOURCE-LINEAR-001", "OWN-PERMISSION-001"]
+# 追加（版本内补充，不修改已有交付）：
+# - Flow 状态纳入 is_linear() 分类（resource_lower.rs 谓词扩展）
+# - Flow 状态别名追踪（对标 session E0426 机制：let b = s0 转移消费）
+# - 删除 consumed_flow_vars.remove(name) 的 shadowing 清除逻辑
+# - 负测试：let b = s0; Flow::inc(s0); use(b) → 静态拒绝
+# - shared/local_shared/weak/&T 包装 Flow 状态 → 编译错误
 
 [[milestone]]
 version = "0.31.14"
 kind = "implementation"
 title = "Protocol 闭环"
 requirements = ["PROTOCOL-STATIC-001", "PROTOCOL-DYN-001"]
+# 追加（版本内补充）：
+# - Protocol conformance 通过 CheckedProgram 验证（非 raw AST）
+# - Protocol state payload 线性检查（conformance 验证时确认 payload 不被别名）
+# - 负测试：protocol impl 中通过别名绕过状态消费 → 拒绝
 
 [[milestone]]
 version = "0.31.15"
 kind = "evidence"
 title = "Canonical Semantic Trace"
 requirements = []
+# 追加（版本内补充）：
+# - Trace 记录线性违规事件（use-after-move 在 trace 中可见）
+# - Trace 记录 generation 转移（旧 generation 失效时刻）
+# - happens-before DAG 包含 Flow 状态所有权边
+
+# === Phase A 追加：地基深修（0.31.16–0.31.18）===
 
 [[milestone]]
 version = "0.31.16"
-kind = "audit"
-title = "攻击审查 I"
-requirements = []
+kind = "implementation"
+title = "地基深修 I：Flow generation 与类型级线性"
+requirements = ["FLOW-IDENTITY-001", "RESOURCE-LINEAR-001"]
+# 核心交付：
+# - Flow 状态类型从 plain Record 升级为带 generation 的线性 wrapper
+#   （ResolvedType 层面标记 non-copyable + generation counter）
+# - 自循环产生新 generation，旧别名在类型层面失效（非名字追踪）
+# - CFG dataflow 对 Flow 状态完整触发（move/drop/return/branch-merge）
+# - 删除 consumed_flow_vars: HashMap<String, String>，全部由 CFG 接管
+# - interp/codegen 适配新类型表示（0.31.9–12 路径可能需要调整）
+# - 【追加】Channel<T>/Mutex<T> guard token/AtomicI32/I64/Bool 纳入 is_linear()
+#   （与 Flow 状态同一个谓词修改，resource_lower.rs:695-707）
+# 门禁：
+# - let b = s0; Flow::inc(s0); use(b) → 编译错误（非 warning）
+# - Flow::tick(s0) 自循环后 use(s0) → 编译错误（generation 失效）
+# - shared s = flow_state → 编译错误
+# - let b = ch; channel_send(ch, v); channel_recv(b) → 编译错误（Channel 线性）
+# - 全量测试连续两次绿
 
 [[milestone]]
 version = "0.31.17"
 kind = "implementation"
-title = "语言语义收敛"
-requirements = ["ERROR-ALGEBRA-001", "LANG-FUNCTION-001", "LANG-CONTRACT-001", "COMPTIME-PURE-001", "LANG-ATTRIBUTE-001", "SYNTAX-REMOVED-001"]
+title = "地基深修 II：高阶交互闭环"
+requirements = ["RESOURCE-LINEAR-001", "FLOW-IDENTITY-001"]
+# 核心交付：
+# - Flow 状态通过泛型函数：线性在 TypeVar instantiate 后保留
+#   （identity(state) 返回后原变量已消费）
+# - 闭包捕获 Flow 状态：拒绝或转移（对标 cap 捕获语义）
+# - Flow 状态存入集合（List/Map/Set）：类型级拒绝
+# - Session 在集合/泛型中的线性保持验证
+# - Protocol × 泛型边界文档化（dyn Protocol 不可能，记录原因）
+# - ≥30 个负测试覆盖所有非法 Flow 状态操作
+# - 错误信息可理解（不是裸 E0423，带 help 文本）
+# - 【追加】双后端拒绝等价测试：≥5 个用例验证 interp 和 codegen
+#   在 checker 被绕过时独立拒绝线性违反（L1 不变量的错误路径）
+# 门禁：
+# - identity(s0) 后 use(s0) → 编译错误
+# - fn() { Flow::inc(s0) } 捕获 → 编译错误或转移语义
+# - [s0, s1] → 编译错误
+# - 双后端拒绝等价：绕过 checker 直接调 backend 时，interp/codegen 均拒绝
+# - 全量测试连续两次绿
 
 [[milestone]]
 version = "0.31.18"
+kind = "stabilization"
+title = "地基深修 III：证据同步与回归扫描"
+requirements = []
+# 核心交付：
+# - language-support.toml 更新至实际 0.31.17+ 状态（每个 partial 有具体缺失说明）
+# - 0.31.8–17 所有 deferred 项逐条清点，记录到 CHANGELOG
+# - consumer 迁移状态审计：哪些路径仍经 legacy_body_file()
+# - 全量回归扫描：cargo test + real_world + Z3 + clippy + fmt，连续两次
+# - 0.31.13–15 追加项完成度确认
+# - 不新增 feature，纯证据与回归
+# - 【CI 防护】解释器执行步数上限（gas limit），超限测试标记 #[slow] 不阻塞 CI
+# - 【CI 防护】tests/real_world/run_suite.py 加 per-test timeout（10s），超时跳过+记录
+# 门禁：
+# - language-support.toml implementation_version 与实际 HEAD 一致
+# - 全量/Clippy/Z3/real-world/文档门禁连续两次全绿
+# - 无新增 P0、silent fallback、warning-only
+# - gas limit 机制就位，无测试因超时无限挂起
+
+[[milestone]]
+version = "0.31.19"
+kind = "audit"
+title = "攻击审查 I（Flow/Actor/Session/resource 线性 + ABI 前置验证）"
+requirements = []
+# 审查范围（基于 0.31.16–18 闭环后的地基）：
+# - Flow 状态线性：所有别名/泛型/闭包/集合路径是否被拒绝
+# - Generation 失效：自循环/多目标转移后旧值是否不可用
+# - Actor runs Flow：Actor 边界外能否通过别名操作内部 Flow 状态
+# - Session × Flow 交互：session endpoint 在 Flow transition 中的线性
+# - exactly-once：Fault/kill/timeout 后资源是否恰好消费一次
+# - 【ABI 前置验证】extern "C" 调用返回 struct { char*; char* } 的 C 函数，
+#   验证 Mimi 侧字段偏移与 C 侧 _Static_assert(offsetof(...)) 一致
+# - 【ABI 前置验证】#[repr(C)] 在 x86_64 Linux 下 padding 正确（含嵌套/数组/对齐属性）
+# 门禁：
+# - 0 新增 P0
+# - 发现的 P1 有 owner 和 deadline
+# - 审查报告归档
+# - ABI 偏移验证通过（不通过则阻断 Phase C，插入 DataLayout 修复）
+
+# === Phase B: 语言冻结（0.31.20–0.31.24）===
+
+[[milestone]]
+version = "0.31.20"
+kind = "implementation"
+title = "语言语义收敛"
+requirements = ["ERROR-ALGEBRA-001", "LANG-FUNCTION-001", "LANG-CONTRACT-001", "COMPTIME-PURE-001", "LANG-ATTRIBUTE-001", "SYNTAX-REMOVED-001"]
+# 追加：
+# - @sparse 翻转为 stable 默认（FLOW-SPARSE-001 闭环）：
+#   无注解时 = 稀疏图（未声明对 → 编译错误），@dense 显式启用 N×M Fault 注入
+#   对齐 language-spec.md §3.5："Stable mode prohibits auto-completing undeclared combinations"
+
+[[milestone]]
+version = "0.31.21"
 kind = "implementation"
 title = "Verification IR"
 requirements = ["VERIFY-CORE-001"]
 
 [[milestone]]
-version = "0.31.19"
+version = "0.31.22"
 kind = "implementation"
 title = "VC 与 checked integer"
 requirements = ["VERIFY-CORE-001"]
 
 [[milestone]]
-version = "0.31.20"
+version = "0.31.23"
 kind = "implementation"
 title = "Verifier artifact 与 fail-closed"
 requirements = ["VERIFY-CORE-001"]
 
 [[milestone]]
-version = "0.31.21"
+version = "0.31.24"
 kind = "audit"
-title = "Verifier 止血与攻击审查"
+title = "Verifier 止血与攻击审查 II"
 requirements = []
 
+# === Phase C: Component 边界（0.31.25–0.31.33）===
+
 [[milestone]]
-version = "0.31.22"
+version = "0.31.25"
 kind = "implementation"
 title = "Component IR 与 mimiabi"
 requirements = ["COMPONENT-IR-001", "COMPONENT-RAW-001"]
 
 [[milestone]]
-version = "0.31.23"
+version = "0.31.26"
 kind = "implementation"
 title = "Native ABI 与 handle lease"
 requirements = ["COMPONENT-HANDLE-001"]
 
 [[milestone]]
-version = "0.31.24"
+version = "0.31.27"
+kind = "stabilization"
+title = "Component 稳定检查点"
+requirements = []
+# 核心交付：
+# - ABI fuzz：size/align/offset/tag probe 跨平台
+# - Handle lease race 测试（并发 acquire/release/expiry）
+# - Allocator mismatch 检测
+# - 0.31.25–26 回归扫描
+# - 不新增 Component surface
+# 门禁：
+# - C/Rust size/align/offset probe 全绿
+# - ABA、wrong-kind/runtime 检测通过
+# - 全量测试连续两次绿
+
+[[milestone]]
+version = "0.31.28"
 kind = "implementation"
 title = "Callback 与 async 生命周期"
 requirements = ["COMPONENT-CALLBACK-001", "COMPONENT-ASYNC-001"]
 
 [[milestone]]
-version = "0.31.25"
+version = "0.31.29"
 kind = "implementation"
 title = "Wire Schema 1"
 requirements = ["COMPONENT-WIRE-001"]
 
 [[milestone]]
-version = "0.31.26"
+version = "0.31.30"
 kind = "implementation"
 title = "Rust Safe SDK"
 requirements = []
 
 [[milestone]]
-version = "0.31.27"
+version = "0.31.31"
 kind = "implementation"
-title = "TypeScript GUI SDK 与 authority"
+title = "XPU FFI 验证（extern C 真实库调通）"
 requirements = ["MULTILANG-AUTHORITY-001"]
+# 核心交付：
+# - 用 Mimi extern "C" + #[repr(C)] 调通一个真实 C 库函数（OpenVINO/Level Zero/任意 .so）
+# - 验证：指针传递、结构体布局、错误码返回、字符串跨边界全链路
+# - Z3 验证指针不为空（requires: ptr != 0）
+# - MULTILANG-AUTHORITY-001 evidence 降级为 Rust SDK 单侧验证 + 设计文档
+# 门禁：
+# - 至少 1 个真实 C 库函数 E2E 通过（mimi build && ./output）
+# - 结构体偏移与 C 侧一致
+# - 双后端等价（interp 跳过 FFI，codegen 执行）
 
 [[milestone]]
-version = "0.31.28"
+version = "0.31.32"
 kind = "audit"
 title = "Component 攻击审查"
 requirements = []
 
 [[milestone]]
-version = "0.31.29"
-kind = "implementation"
-title = "MimiSpec parser 自举"
+version = "0.31.33"
+kind = "stabilization"
+title = "SDK conformance 加固"
+requirements = []
+# 核心交付：
+# - Rust SDK：cancel/complete race、late callback delivery、lease expiry E2E
+# - XPU FFI：真实 C 库调用的边界情况（null 返回、错误码、大结构体）
+# - Wire：schema bomb、unknown field/tag、replay、duplicate/out-of-order fuzz
+# - Rust adapter ↔ Mimi ↔ C 库 全链路 round-trip
+# - 不新增 SDK surface
+# 门禁：
+# - Rust SDK E2E 全绿
+# - XPU FFI E2E 全绿
+# - Wire fuzz 0 crash
+# - 全量测试连续两次绿
+
+# === Phase D: 工具与隔离（0.31.37–0.31.39）===
+# 注：0.31.34–36（自举）已标记 deferred，移出 0.1.1 必须完成路径。
+# 自举不产生用户价值，推迟到语言稳定后的 post-1.0 阶段。
+
+[[milestone]]
+version = "0.31.34"
+kind = "deferred"
+title = "自举可行性 spike（deferred to post-1.0）"
 requirements = []
 
 [[milestone]]
-version = "0.31.30"
-kind = "implementation"
-title = "HM 自举闭环"
+version = "0.31.35"
+kind = "deferred"
+title = "MimiSpec parser 自举（deferred to post-1.0）"
 requirements = []
 
 [[milestone]]
-version = "0.31.31"
+version = "0.31.36"
+kind = "deferred"
+title = "HM 自举闭环（deferred to post-1.0）"
+requirements = []
+
+[[milestone]]
+version = "0.31.37"
 kind = "implementation"
 title = "Pre-1.0 migration tool"
 requirements = ["MIGRATION-PRE1-001", "SYNTAX-REMOVED-001"]
 
 [[milestone]]
-version = "0.31.32"
+version = "0.31.38"
 kind = "implementation"
 title = "Tooling 全覆盖"
 requirements = ["TOOL-SUPPORT-001"]
 
 [[milestone]]
-version = "0.31.33"
+version = "0.31.39"
 kind = "implementation"
 title = "Experimental 隔离"
 requirements = ["FLOW-MULTI-001", "PROTOCOL-DYN-001", "EFFECT-CAP-001", "COMPONENT-RAW-001"]
 
+# === Phase E: 冻结与 RC（0.31.40–0.31.43）===
+
 [[milestone]]
-version = "0.31.34"
+version = "0.31.40"
 kind = "debug"
 title = "DEBUG 周期"
 requirements = []
 
 [[milestone]]
-version = "0.31.35"
+version = "0.31.41"
 kind = "audit"
 title = "最终敌对审查"
 requirements = []
 
 [[milestone]]
-version = "0.31.36"
+version = "0.31.42"
 kind = "rc"
 title = "RC1"
 requirements = []
 
 [[milestone]]
-version = "0.31.37"
+version = "0.31.43"
 kind = "rc"
 title = "RC2 与 Pre-1.0 退出"
 requirements = []

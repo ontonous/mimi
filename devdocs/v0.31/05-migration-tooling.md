@@ -2,10 +2,18 @@
 
 ## 版本
 
-- **0.31.17**：错误代数、func/fn、签名合约、pure comptime、attribute fail-closed、removed syntax 收敛。
-- **0.31.31**：`mimi migrate --from pre-1.0` 与 fix-it，仓库/stdlib 一次迁移。
-- **0.31.32**：token/CST formatter、LSP CheckedProgram/Origin、自动 support probes。
-- **0.31.33**：multi-target、dynamic Protocol、Effect/Capability、raw extern experimental 隔离。
+- **0.31.20**：错误代数、func/fn、签名合约、pure comptime、attribute fail-closed、removed syntax 收敛。
+- **0.31.34–36**（deferred to post-1.0）：~~自举可行性 spike / MimiSpec parser 自举 / HM 自举闭环~~。不阻塞 0.1.1。
+- **0.31.37**：`mimi migrate --from pre-1.0` 与 fix-it，仓库/stdlib 一次迁移。
+- **0.31.38**：token/CST formatter、LSP CheckedProgram/Origin、自动 support probes。
+- **0.31.39**：multi-target、dynamic Protocol、Effect/Capability、raw extern experimental 隔离。
+
+## 自举推迟理由
+
+> 自举不产生用户价值。没有用户因为"编译器是自举的"而选择语言。
+> 自举的调试地狱（Mimi 编译器 bug 导致 Mimi 写的 parser 报错，无法区分前端逻辑错误还是后端 codegen bug）
+> 在语言尚未完全冻结时风险极高。MCDD（真实程序驱动）已更 cheap 地提供语言稳定性验证。
+> 推迟到 post-1.0，语言完全稳定后再考虑。
 
 ## 迁移原则
 
