@@ -90,6 +90,10 @@ pub(crate) struct Checker<'a> {
     /// declared `fails E` type. `None` = not in transition; `Some(None)` =
     /// transition without `fails`; `Some(Some(E))` = transition with `fails E`.
     pub(crate) transition_fails: Option<Option<Type>>,
+    /// FLOW-TURN-001: maps transition key (e.g. "flow::Counter::inc::Zero")
+    /// to the declared `fails E` error type. Used by `infer_method_call`
+    /// to wrap the return type in `Result<Target, (Source, E)>`.
+    pub(crate) transition_fails_types: HashMap<String, Type>,
     /// v0.29.49: variables bound to multi-target transition results.
     /// Maps variable name -> list of possible target state types.
     /// Direct field access on these variables is rejected (E0420) —
@@ -236,6 +240,7 @@ impl<'a> Checker<'a> {
             flow_root_states: std::collections::HashSet::new(),
             consumed_flow_vars: HashMap::new(),
             transition_fails: None,
+            transition_fails_types: HashMap::new(),
             multi_target_vars: HashMap::new(),
             session_types: HashMap::new(),
             session_residuals: HashMap::new(),
