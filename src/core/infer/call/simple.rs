@@ -961,12 +961,6 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("List".into(), vec![Type::Name("i64".into(), vec![])]);
             }
-            "protocol_methods" => {
-                for a in args {
-                    self.infer_expr(a, scopes);
-                }
-                return Type::Name("List".into(), vec![Type::Name("string".into(), vec![])]);
-            }
 
             "print" => {
                 for a in args {

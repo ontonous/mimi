@@ -631,7 +631,6 @@ fn assert_codegen_unsupported(src: &str, feature: &str) {
 #[test]
 fn adv_codegen_rejects_fake_builtin_results() {
     for (feature, call) in [
-        ("protocol_methods", "protocol_methods(\"P\")"),
         ("test_sandbox", "test_sandbox([])"),
         ("session_open", "session_open()"),
     ] {

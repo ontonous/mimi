@@ -3468,9 +3468,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "session_open does not yet lower to a typed SessionChan endpoint".into(),
             )),
             "session_pair" => self.compile_session_open(args),
-            "protocol_methods" => Err(CompileError::Unsupported(
-                "protocol_methods requires runtime protocol metadata".into(),
-            )),
             "actor_mailbox_depth" => {
                 self.compile_actor_mailbox_query(args, "mimi_actor_mailbox_depth")
             }
