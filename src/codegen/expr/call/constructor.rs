@@ -92,7 +92,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    fn compile_ok_constructor(
+    pub(in crate::codegen) fn compile_ok_constructor(
         &mut self,
         compiled_args: Vec<BasicValueEnum<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {

@@ -37,6 +37,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Return(Some(expr)) => {
                     let mut val = self.compile_expr(expr, vars)?;
+                    if self.in_fails_transition {
+                        val = self.compile_ok_constructor(vec![val])?;
+                    }
                     let ret_type = self
                         .current_fn_ret_type()
                         .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
@@ -87,6 +90,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Become(expr) => {
                     // FLOW-TURN-001: `become Target { ... }` compiles as `return expr`.
                     let mut val = self.compile_expr(expr, vars)?;
+                    if self.in_fails_transition {
+                        val = self.compile_ok_constructor(vec![val])?;
+                    }
                     let ret_type = self
                         .current_fn_ret_type()
                         .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
@@ -111,6 +117,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             )
                         })?;
                     let mut val = self.build_load(self_ty, self_ptr, "stay_self")?;
+                    if self.in_fails_transition {
+                        val = self.compile_ok_constructor(vec![val])?;
+                    }
                     let ret_type = self
                         .current_fn_ret_type()
                         .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
