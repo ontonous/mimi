@@ -272,3 +272,50 @@ func main() -> string {
 "#;
     assert_eq!(run_source(src), interp::Value::String("user:alice".into()));
 }
+
+#[test]
+fn actor_runs_flow_parse_and_check() {
+    // v0.31.11: `actor Name runs FlowName` parses and checks when the flow exists.
+    let src = r#"
+flow Order {
+    state Pending { item: string }
+    state Shipped { item: string }
+    transition ship(Pending) -> Shipped {
+        do { return Shipped { item: self.item } }
+    }
+}
+
+actor OrderWorker runs Order {
+    func process() -> i32 {
+        return 1;
+    }
+}
+
+func main() -> i32 {
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_ok(), "actor runs flow should check: {:?}", result);
+}
+
+#[test]
+fn actor_runs_flow_missing_flow_rejected() {
+    // v0.31.11: `actor Name runs MissingFlow` is rejected when the flow doesn't exist.
+    let src = r#"
+actor OrderWorker runs MissingFlow {
+    func process() -> i32 {
+        return 1;
+    }
+}
+
+func main() -> i32 {
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_err(),
+        "actor runs missing flow should be rejected"
+    );
+}
