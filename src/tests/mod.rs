@@ -403,6 +403,17 @@ pub(crate) fn checked_compile_and_run(src: &str) -> Result<String, String> {
     compile_and_run(src)
 }
 
+/// v0.31.15: Run interpreter with trace collection enabled.
+/// Returns (main return value, collected trace events).
+pub(crate) fn run_source_with_trace(src: &str) -> (interp::Value, Vec<crate::trace::TraceEvent>) {
+    let file = parse(src);
+    let mut interp = interp::Interpreter::new(&file);
+    interp.trace_collector.enable();
+    let val = interp.run().expect("run_source_with_trace failed");
+    let events = interp.trace_collector.take_events();
+    (val, events)
+}
+
 /// End-to-end codegen test: compile Mimi source -> LLVM -> native binary -> execute -> return stdout
 /// Requires `cc` and `ld` on PATH. Skips test if linker is unavailable.
 static E2E_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
