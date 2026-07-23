@@ -795,10 +795,8 @@ impl<'a> Checker<'a> {
                             if self.is_flow_state_type(&final_ty)
                                 && !self.consumed_flow_vars.contains_key(src)
                             {
-                                self.consumed_flow_vars.insert(
-                                    src.clone(),
-                                    format!("alias to '{}'", name),
-                                );
+                                self.consumed_flow_vars
+                                    .insert(src.clone(), format!("alias to '{}'", name));
                             }
                         }
                     }
@@ -1704,7 +1702,7 @@ impl<'a> Checker<'a> {
                 // Skip type check for multi-target transitions where ret is unit
                 // (the actual target is determined at runtime by the become expression).
                 let is_multi_target = matches!(ret.unlocated(), Type::Name(n, _) if n == "unit");
-                if !is_multi_target && !self.unification.unify(&ty, ret).is_ok() {
+                if !is_multi_target && self.unification.unify(&ty, ret).is_err() {
                     self.emit_code(
                         crate::diagnostic::codes::E0209,
                         format!(
@@ -1719,7 +1717,7 @@ impl<'a> Checker<'a> {
                 // Validate that the source type (self) unifies with the return
                 // type — i.e., the transition declares the source as a valid target.
                 if let Some(self_ty) = scopes.last().and_then(|s| s.get("self")).cloned() {
-                    if !self.unification.unify(&self_ty, ret).is_ok() {
+                    if self.unification.unify(&self_ty, ret).is_err() {
                         self.emit_code(
                             crate::diagnostic::codes::E0209,
                             format!(

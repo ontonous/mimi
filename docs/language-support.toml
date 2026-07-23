@@ -1,7 +1,7 @@
 # Mimi implementation evidence for the normative requirements in
 # docs/language-requirements.toml.
 schema_version = 1
-implementation_version = "v0.31.4-dev"
+implementation_version = "0.1.1-dev (0.1.0-53-g536897e2, internal sprint 0.31.17)"
 
 # Every dimension uses:
 # unsupported | partial | complete | not_applicable
@@ -13,7 +13,7 @@ implementation_version = "v0.31.4-dev"
 requirement = "FLOW-IDENTITY-001"
 implementation = "partial"
 parse = "complete"
-check = "partial"
+check = "complete"
 resolved_ir = "partial"
 interp = "partial"
 codegen = "partial"
@@ -22,22 +22,22 @@ verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test flow_features -- --test-threads=1"
-evidence = "State values exist, but generations are not linear or unforgeable."
+evidence = "0.31.8: E0421 state unforgeability (non-root construction rejected), E0422 nominal distinctness warning, E0423 linear generation (use-after-transition rejected). 0.31.13 追加 A: alias tracking (let b = s0 consumes s0, E0423), shared/ref wrapping rejected (E0427), shadowing does not reset consumption. 0.31.16: CFG-level is_linear() for FlowStateSet + state: Nominal, auto-droppable at scope exit, transition self implicitly consumed. 0.31.17: closure capture rejected (E0427), list/map collection rejected (E0427). Remaining: generation counter is static (not runtime-tracked), consumed_flow_vars name tracking retained as diagnostic layer (CFG dataflow is enforcement layer)."
 
 [[support]]
 requirement = "FLOW-TURN-001"
 implementation = "partial"
-parse = "partial"
-check = "partial"
-resolved_ir = "unsupported"
-interp = "partial"
+parse = "complete"
+check = "complete"
+resolved_ir = "partial"
+interp = "complete"
 codegen = "partial"
 runtime = "partial"
 verify = "not_applicable"
-fmt = "partial"
+fmt = "complete"
 lsp = "partial"
-probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test flow_features -- --test-threads=1"
-evidence = "No complete become/stay/fault/rejected atomic terminal model."
+probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test flow_turn -- --test-threads=1"
+evidence = "0.31.9: fails E syntax, E0424 (? without fails), Rejected path (Err((source, error))), become/stay explicit terminals, codegen Rejected mirror, draft isolation (self immutable). Interpreter complete: atomic turn (Ok(target) or Err((source, error))), become/stay terminals, fails E rollback. Codegen: become/stay/fails E/Rejected all compile. Remaining: codegen match on Result with record payloads limited (Ok(_)/Err(_ patterns only)."
 
 [[support]]
 requirement = "FLOW-SPARSE-001"
@@ -52,7 +52,7 @@ verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test flow_matrix -- --test-threads=1"
-evidence = "Current normalization still injects N-by-M Fault fallback edges."
+evidence = "0.31.10: @sparse annotation skips N×M fallback injection, per-Flow typed Fault (fault ErrorType), explicit reset/recover override. Remaining: progressive Main true lowering deferred (broke 23 golden IR tests)."
 
 [[support]]
 requirement = "FLOW-MULTI-001"
@@ -82,7 +82,7 @@ verify = "not_applicable"
 fmt = "partial"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test actor_ -- --test-threads=1"
-evidence = "Actors still expose an independent mutable field model."
+evidence = "0.31.11: actor Name runs FlowName syntax, interpreter integration (spawn initializes flow_state root, worker dispatch routes messages through transition table), mut field prohibition (E0402). Remaining: codegen actor runs flow needs tagged-union state storage design."
 
 [[support]]
 requirement = "PROTOCOL-STATIC-001"
@@ -97,7 +97,7 @@ verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test protocol_ -- --test-threads=1"
-evidence = "Static topology exists; resolved projection and component handshake do not."
+evidence = "0.31.14: protocol_methods builtin removed (spec [removed]). 0.31.14 追加 A: protocol conformance × linearity — payload linear type downgrade rejected (E0427), alias bypass in protocol impl rejected (E0423). Conformance check: state coverage + payload compat, transition topology cover, mutate payload invariance, conservative subflow projection. Remaining: permission/effect constraints, fault exposure strategy, version handshake (needs Component IR, Phase C)."
 
 [[support]]
 requirement = "PROTOCOL-DYN-001"
@@ -127,7 +127,7 @@ verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test session_ -- --test-threads=1"
-evidence = "Untracked residuals can be skipped and runtime endpoints can degrade to integers."
+evidence = "0.31.12: typed session residual — E0425 scope exit check (non-end residual rejected), E0426 use-after-alias (let b = a consumes a), alias residual transfer, branch merge consistency. 0.31.13: session endpoint as function arg consumes residual, double-close (E0304), branch partial consume (E0425). 0.31.14 追加 A: protocol conformance × linearity (payload downgrade E0427). Remaining: cross-turn exactly-once, Fault path resource cleanup."
 
 [[support]]
 requirement = "RESOURCE-LINEAR-001"
@@ -142,7 +142,7 @@ verify = "not_applicable"
 fmt = "partial"
 lsp = "unsupported"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test core::cfg -- --test-threads=1 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test ownership_ -- --test-threads=1 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test borrow_boundary -- --test-threads=1"
-evidence = "CheckedProgram persists a validated CallableCfg and ResourceAnalysis for every function, nested function, actor/impl method, and transition. Stable semantic block/edge/local/resource/loan IDs do not depend on Vec position; every block has one terminator and reachable predecessors alone participate in deterministic fixed-point joins. Canonical actions are emitted directly from typed ResolvedBody places and CFG locations; capability/session/delegate transfers share ResourceId, compound capability return/drop is deterministic, terminal paths do not pollute joins, and loop back-edges reject live loans or inconsistent resource states. OwnershipLedger is now a compatibility projection rather than a production analysis input; unsupported partial-move patterns and cross-turn exactly-once remain incomplete, so the requirement stays partial."
+evidence = "CheckedProgram persists validated CallableCfg + ResourceAnalysis for every callable. 0.31.16: Flow states (FlowStateSet + state: Nominal) are linear in CFG dataflow — move/drop/return trigger, auto-droppable at scope exit (unlike Cap/SessionChan), transition self implicitly consumed. 0.31.17: closure capture rejected (E0427), list/map collection rejected (E0427). 0.31.13 追加 A: alias tracking (let b = s0 consumes s0), shared/ref wrapping rejected (E0427), shadowing does not reset consumption. consumed_flow_vars retained as diagnostic enhancement (E0423 with transition name); CFG dataflow (E0304) is enforcement layer. Channel/Mutex/Atomic are builtin functions (integer handles), not ResolvedType Nominal — is_linear() cannot cover them. Remaining: cross-turn exactly-once, partial-move patterns."
 
 [[support]]
 requirement = "ERROR-ALGEBRA-001"
@@ -202,7 +202,7 @@ verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test try_ -- --test-threads=1"
-evidence = "Transition rollback propagation does not return a declared error and source generation."
+evidence = "0.31.9: fails E syntax + Rejected path — transition ? failure returns Err((source, error)), source generation restored. become/stay explicit terminals. Codegen Rejected mirror complete. Remaining: multi-level error propagation chains."
 
 [[support]]
 requirement = "OWN-PERMISSION-001"
