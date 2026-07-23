@@ -161,6 +161,14 @@ fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
     // Always ensure Fault exists so recovery verbs have a source state.
     ensure_fault_state(flow);
 
+    // v0.31.10: @sparse flows skip N×M fallback injection.
+    // Undefined (state, event) pairs are compile-time errors instead of
+    // auto-routing to Fault.
+    let is_sparse = flow
+        .annotations
+        .iter()
+        .any(|a| matches!(a.kind, FlowAnnotationKind::Sparse));
+
     // Event name → params (first definition wins; overloads should share params).
     // Exclude system verbs from the N×M matrix:
     // - reset/recover only apply from Fault
@@ -184,37 +192,39 @@ fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
 
     let state_names: Vec<String> = flow.states.iter().map(|s| s.name.clone()).collect();
 
-    let mut fallbacks: Vec<TransitionDef> = Vec::new();
-    for state in &state_names {
-        for (event, params) in &events {
-            if defined.contains(&(state.clone(), event.clone())) {
-                continue;
+    if !is_sparse {
+        let mut fallbacks: Vec<TransitionDef> = Vec::new();
+        for state in &state_names {
+            for (event, params) in &events {
+                if defined.contains(&(state.clone(), event.clone())) {
+                    continue;
+                }
+                let body = fault_return_body(
+                    flow,
+                    state,
+                    event,
+                    shapes,
+                    AstOrigin::PrototypeFallback("flow.matrix.fallback"),
+                );
+                let origin = AstOrigin::PrototypeFallback("flow.matrix.fallback");
+                fallbacks.push(TransitionDef {
+                    meta: flow_generated_meta(flow, origin),
+                    name: event.clone(),
+                    from_state: state.clone(),
+                    params: params
+                        .iter()
+                        .map(|param| generated_param(param, flow.meta.span, origin))
+                        .collect(),
+                    to_states: vec!["Fault".to_string()],
+                    body: Some(body),
+                    fails: None,
+                    is_fallback: true,
+                    is_ffi_pinned: false,
+                });
             }
-            let body = fault_return_body(
-                flow,
-                state,
-                event,
-                shapes,
-                AstOrigin::PrototypeFallback("flow.matrix.fallback"),
-            );
-            let origin = AstOrigin::PrototypeFallback("flow.matrix.fallback");
-            fallbacks.push(TransitionDef {
-                meta: flow_generated_meta(flow, origin),
-                name: event.clone(),
-                from_state: state.clone(),
-                params: params
-                    .iter()
-                    .map(|param| generated_param(param, flow.meta.span, origin))
-                    .collect(),
-                to_states: vec!["Fault".to_string()],
-                body: Some(body),
-                fails: None,
-                is_fallback: true,
-                is_ffi_pinned: false,
-            });
         }
+        flow.transitions.extend(fallbacks);
     }
-    flow.transitions.extend(fallbacks);
 
     // v0.29.13: inject reset / recover from Fault → root state.
     inject_system_verbs(flow, shapes);

@@ -1082,6 +1082,10 @@ impl FlowAnnotation {
 pub enum FlowAnnotationKind {
     MailboxDepth(usize),
     MaxChildren(usize),
+    /// v0.31.10: Sparse transition graph — skip fallback injection for
+    /// missing (state, event) pairs. Undefined events are compile-time errors
+    /// instead of auto-routing to Fault.
+    Sparse,
 }
 
 #[derive(Debug, Clone)]

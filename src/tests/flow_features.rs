@@ -5796,3 +5796,58 @@ func main() -> i32 {
     let interp_result = run_source_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
 }
+
+#[test]
+fn flow_sparse_skips_fallback_injection() {
+    // v0.31.10: @sparse flows skip N×M fallback injection.
+    // Calling a declared event from a state that doesn't handle it is a
+    // compile-time error instead of auto-routing to Fault.
+    let src = r#"
+flow Gate @sparse {
+    state Idle { v: i32 }
+    state Open { v: i32 }
+    transition open(Idle) -> Open {
+        do { return Open { v: self.v } }
+    }
+}
+func main() -> i32 {
+    let s0 = Idle { v: 1 }
+    let s1 = Gate::open(s0)
+    println(s1.v)
+    0
+}
+"#;
+    // Normal transition still works
+    let result = check_source(src);
+    assert!(result.is_ok(), "sparse flow check: {:?}", result);
+    let interp_result = run_source_result(src);
+    assert_eq!(interp_result, Ok(interp::Value::Int(0)));
+    let native = compile_and_run(src).expect("codegen sparse");
+    assert_eq!(native.trim(), "1");
+}
+
+#[test]
+fn flow_sparse_undefined_event_rejected() {
+    // v0.31.10: In a @sparse flow, calling a declared event from a state
+    // that doesn't handle it is a compile-time error (no fallback to Fault).
+    let src = r#"
+flow Gate @sparse {
+    state Idle { v: i32 }
+    state Open { v: i32 }
+    transition open(Idle) -> Open {
+        do { return Open { v: self.v } }
+    }
+}
+func main() -> i32 {
+    let s0 = Open { v: 1 }
+    let s1 = Gate::open(s0)
+    0
+}
+"#;
+    // Calling open(Open) should fail — no fallback injected in sparse mode
+    let result = check_source(src);
+    assert!(
+        result.is_err(),
+        "sparse flow should reject undefined (state, event) pair"
+    );
+}
