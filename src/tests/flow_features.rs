@@ -2904,8 +2904,8 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(checked_run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = checked_compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "1\n42\n0");
 }
 
@@ -2943,8 +2943,8 @@ func main() -> i32 {
         "empty protocol: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(checked_run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = checked_compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "1");
 }
 
@@ -3028,8 +3028,8 @@ func main() -> i32 {
         "extra fields: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
+    assert_eq!(checked_run_source_result(src), Ok(interp::Value::Int(0)));
+    let out = checked_compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "2");
 }
 
