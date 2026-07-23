@@ -86,6 +86,9 @@ pub(crate) struct Checker<'a> {
     /// calls. Maps variable name → transition description (e.g. "Counter::inc")
     /// for diagnostic messages. Cleared at each callable boundary.
     pub(crate) consumed_flow_vars: HashMap<String, String>,
+    /// v0.31.12: session endpoints consumed by aliasing (`let b = a`).
+    /// Using a consumed endpoint is E0426 (linear violation).
+    pub(crate) consumed_session_vars: std::collections::HashSet<String>,
     /// FLOW-TURN-001: tracks whether we're inside a transition body and its
     /// declared `fails E` type. `None` = not in transition; `Some(None)` =
     /// transition without `fails`; `Some(Some(E))` = transition with `fails E`.
@@ -239,6 +242,7 @@ impl<'a> Checker<'a> {
             flow_return_targets: Vec::new(),
             flow_root_states: std::collections::HashSet::new(),
             consumed_flow_vars: HashMap::new(),
+            consumed_session_vars: std::collections::HashSet::new(),
             transition_fails: None,
             transition_fails_types: HashMap::new(),
             multi_target_vars: HashMap::new(),
@@ -342,6 +346,7 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn begin_callable(&mut self, owner: super::NodeId) -> Option<super::NodeId> {
         self.consumed_flow_vars.clear();
+        self.consumed_session_vars.clear();
         self.current_callable_owner.replace(owner)
     }
 

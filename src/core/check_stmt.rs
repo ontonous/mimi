@@ -758,6 +758,16 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                    // v0.31.12: alias tracking — `let b = a` where a is a session
+                    // endpoint transfers the residual from a to b (linear consumption).
+                    if let Some(init_expr) = init {
+                        if let Expr::Ident(src) = init_expr.unlocated() {
+                            if let Some(residual) = self.session_residuals.remove(src) {
+                                self.consumed_session_vars.insert(src.clone());
+                                self.session_residuals.insert(name.clone(), residual);
+                            }
+                        }
+                    }
                 }
                 // A capability binding makes its declared effect available.
                 // Move/consume semantics are validated from ResolvedBody + CFG.
