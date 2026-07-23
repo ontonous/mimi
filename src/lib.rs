@@ -90,6 +90,7 @@ pub mod codegen;
 pub mod flow_matrix;
 pub mod progressive;
 pub mod session;
+pub mod trace;
 
 pub mod diagnostic;
 pub mod error;
