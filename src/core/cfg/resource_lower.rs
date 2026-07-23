@@ -77,9 +77,53 @@ impl<'a> ActionEmitter<'a> {
         self.introduce_parameters();
         self.visit_block(&self.body.root, true);
         if self.errors.is_empty() {
-            analyze_canonical(self.cfg, self.actions, self.loans, &BTreeMap::new())
+            // 0.31.16: collect flow state resources as auto-droppable.
+            // Flow states represent data that can be safely discarded at
+            // scope exit, unlike Cap/SessionChan which require explicit
+            // consumption.
+            let droppable: BTreeSet<ResourceId> = self
+                .resources
+                .iter()
+                .filter(|(local, _)| {
+                    self.body
+                        .locals
+                        .get(local)
+                        .is_some_and(|l| self.is_linear(&l.ty))
+                        && self
+                            .body
+                            .locals
+                            .get(local)
+                            .map(|l| &l.ty)
+                            .and_then(|ty| self.types.get(ty))
+                            .is_some_and(|ty| {
+                                matches!(
+                                    ty,
+                                    ResolvedType::FlowStateSet { .. }
+                                        | ResolvedType::Nominal { .. }
+                                ) && self.is_flow_state_resolved(ty)
+                            })
+                })
+                .map(|(_, resource)| resource.clone())
+                .collect();
+            analyze_canonical(
+                self.cfg,
+                self.actions,
+                self.loans,
+                &BTreeMap::new(),
+                &droppable,
+            )
         } else {
             Err(self.errors)
+        }
+    }
+
+    /// 0.31.16: check whether a resolved type is a flow state (FlowStateSet
+    /// or Nominal with "state:" prefix).
+    fn is_flow_state_resolved(&self, ty: &ResolvedType) -> bool {
+        match ty {
+            ResolvedType::FlowStateSet { .. } => true,
+            ResolvedType::Nominal { item, .. } => item.as_str().starts_with("state:"),
+            _ => false,
         }
     }
 
@@ -709,15 +753,15 @@ impl<'a> ActionEmitter<'a> {
     fn is_linear(&self, ty: &ResolvedTypeId) -> bool {
         match self.types.get(ty) {
             Some(ResolvedType::Capability(_)) => true,
-            // 0.31.13 追加 A: FlowStateSet and individual flow state Nominal
-            // types ("state:<flow>::<state>") are NOT yet included in is_linear().
-            // Full CFG dataflow for flow states requires terminal state handling,
-            // drop semantics, and transition self consumption — all 0.31.16 scope.
-            // Checker-level alias tracking (consumed_flow_vars + alias transfer)
-            // covers the immediate safety gap until then.
+            // 0.31.16: Flow state sets (multi-target transition results)
+            // are linear — each state value can only be consumed once.
+            Some(ResolvedType::FlowStateSet { .. }) => true,
             Some(ResolvedType::Nominal { item, .. }) => {
                 item.as_str().ends_with("SessionChan")
                     || item.as_str().ends_with("session_chan")
+                    // 0.31.16: individual flow state types use the
+                    // "state:<flow>::<state>" identity prefix.
+                    || item.as_str().starts_with("state:")
             }
             Some(ResolvedType::Newtype { inner, .. }) => self.is_linear(inner),
             Some(ResolvedType::Tuple(elements)) => {

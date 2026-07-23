@@ -4619,13 +4619,15 @@ flow C {
 }
 func main() -> i32 {
     let s0 = A { v: 0 }
-    assert_state(s0, "A")
     let s1 = C::go(s0)
     assert_state(s1, "B")
     println(s1.v)
     0
 }
 "#;
+    // 0.31.16: flow states are linear — assert_state(s0, "A") before
+    // C::go(s0) would consume s0, making the transition a use-after-move.
+    // Pre-transition assertions must use a separate copy or be omitted.
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
     assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
 }
