@@ -248,6 +248,21 @@ impl<'a> Interpreter<'a> {
                     return Ok(Some(v));
                 }
             }
+            Stmt::Become(e) => {
+                // FLOW-TURN-001: `become Target { ... }` is an explicit terminal
+                // equivalent to `return Target { ... }`.
+                let v = self.eval_expr(e)?;
+                self.early_return = Some(v.clone());
+                return Ok(Some(v));
+            }
+            Stmt::Stay => {
+                // FLOW-TURN-001: `stay` returns the source state (self) unchanged.
+                let self_val = self.lookup("self").ok_or_else(|| {
+                    InterpError::new("stay used outside a transition body (no self in scope)")
+                })?;
+                self.early_return = Some(self_val.clone());
+                return Ok(Some(self_val));
+            }
             Stmt::Delegate { kind, expr, target } => {
                 // v0.29.15: three-tier delegate permissions.
                 // `delegate <kind>(<field>) to <target>`:
