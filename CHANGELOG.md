@@ -65,13 +65,36 @@
 - **Session 线性回归验证**：double-close (E0304)、branch partial consume (E0425)、move-to-function (E0304) 三个场景确认 CFG dataflow 覆盖。
 - **Cap 闭包 capture**：已有 TransferChild 分析 + E0304 强制（`ownership_checker_rejects_implicit_nested_capability_capture`），无需新增。
 - 3 个新测试：session_double_close_rejected、session_branch_partial_consume_rejected、session_endpoint_move_to_function_rejected。
+- **追加 A — Flow 状态别名追踪 + shared/ref 拒绝**：
+  - `let b = s0`（s0 是 flow state）消费 s0，后续使用 s0 触发 E0423（对标 session E0426 机制）。
+  - `shared`/`local_shared`/`weak`/`weak_local` 包装 flow state → E0427 拒绝（线性资源不允许多重引用）。
+  - `let ref r = flow_state` → E0427 拒绝（借用隐含原值仍可用，违反线性）。
+  - 删除 `consumed_flow_vars.remove(name)` shadowing 清除逻辑——shadowing 不重置线性消费（保守策略，0.31.16 CFG place 追踪修正）。
+  - `flow_state_type_names: HashSet<String>` 注册所有 flow state 类型名（qualified + unqualified）。
+  - CFG `is_linear()` 预留 transition `self` 跳过逻辑（0.31.16 启用 FlowStateSet + state: Nominal）。
+  - 5 个新负测试。4098 测试全绿。
 - 待实现：cross-turn exactly-once（Flow transition 间资源跟踪）、Fault path 资源清理。
 
 ### 0.31.14 Static Protocol Stable（进行中）
 
 - **移除 deprecated `protocol_methods`**：spec 标记 `[removed]`，从 builtins/inference/codegen/interpreter 全部清除。Protocol 是纯编译期拓扑检查，不需要运行时反射。
 - **Protocol 测试迁移**：4 个双后端测试迁移到 checked helper。
+- **追加 A — Protocol conformance × 线性检查**：
+  - Protocol state payload 线性匹配：protocol 声明线性 payload (Cap, SessionChan) 时，flow state 对应字段必须也是线性类型，降级 → E0427。
+  - 3 个新测试：alias bypass (E0423)、alias target valid、payload downgrade (E0427)。
 - 待实现：permission/effect 约束检查、fault 暴露策略、版本握手（需 Component IR，Phase C）。
+
+### 0.31.15 Canonical Semantic Trace（基础设施完成）
+
+- **TraceEvent / TraceCollector / compare_traces**：canonical 语义追踪基础设施（`src/trace.rs`），记录 Transition + Fault 事件，5 个单元测试。
+- **Interpreter 集成**：`trace_collector` 字段 + `eval_flow_transition` 中 transition/Fault 事件记录。
+- **`run_source_with_trace` 测试 helper**：trace 收集测试基础设施。
+- **追加 A — 所有权转移事件 + generation 失效记录**：
+  - `OwnershipTransfer` 事件：记录 flow state 所有权转移时刻（from_var → to_var，generation 失效精确位置）。
+  - `LinearViolation` 事件：记录运行时 use-after-move 安全网诊断路径。
+  - `compare_traces()` 扩展：generation_before/generation_after 参与比较（happens-before DAG generation 边）。
+  - 3 个新单元测试。4104 测试全绿。
+- 待实现：session/actor trace 记录、双后端 trace 比较测试。
 
 ## [0.1.0] — 基线稳定 - 2026-07-23
 
