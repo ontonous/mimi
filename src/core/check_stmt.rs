@@ -869,14 +869,69 @@ impl<'a> Checker<'a> {
                         format!("if condition must be bool, found {}", fmt_type(&ct)),
                     );
                 }
+                // v0.31.12: branch merge — save residuals before branching,
+                // check both branches, verify consistency at merge point.
+                let pre_residuals = self.session_residuals.clone();
                 self.var_scopes.push(HashMap::new());
                 self.check_block(then_, ret, scopes);
                 self.var_scopes.pop();
+                let then_residuals = self.session_residuals.clone();
                 if let Some(else_) = else_ {
-                    // Push new scope for else branch
+                    // Restore pre-branch state for else branch.
+                    self.session_residuals = pre_residuals.clone();
                     self.var_scopes.push(HashMap::new());
                     self.check_block(else_, ret, scopes);
                     self.var_scopes.pop();
+                    // Merge: both branches must agree on every tracked endpoint.
+                    let all_keys: std::collections::HashSet<&String> = then_residuals
+                        .keys()
+                        .chain(self.session_residuals.keys())
+                        .collect();
+                    let mut mismatches: Vec<(String, String, String)> = Vec::new();
+                    for key in all_keys {
+                        let then_r = then_residuals.get(key);
+                        let else_r = self.session_residuals.get(key);
+                        match (then_r, else_r) {
+                            (Some(t), Some(e)) if t != e => {
+                                mismatches.push((
+                                    key.clone(),
+                                    crate::session::fmt_session(t),
+                                    crate::session::fmt_session(e),
+                                ));
+                            }
+                            (Some(t), None) => {
+                                mismatches.push((
+                                    key.clone(),
+                                    crate::session::fmt_session(t),
+                                    "absent".to_string(),
+                                ));
+                            }
+                            (None, Some(e)) => {
+                                mismatches.push((
+                                    key.clone(),
+                                    "absent".to_string(),
+                                    crate::session::fmt_session(e),
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                    for (var, then_s, else_s) in mismatches {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0425,
+                            format!(
+                                "session endpoint '{}' has divergent residuals across branches: \
+                                 then-branch `{}` vs else-branch `{}`",
+                                var, then_s, else_s
+                            ),
+                        );
+                    }
+                    // Use then-branch residuals as the merged state.
+                    self.session_residuals = then_residuals;
+                } else {
+                    // No else branch: conservatively restore pre-branch state
+                    // (the then branch might not execute).
+                    self.session_residuals = pre_residuals;
                 }
             }
             Stmt::While { cond, body } => {
