@@ -19,8 +19,10 @@
 - **`fails E` 语法**：transition 签名支持 `-> Target fails ErrorType`，声明可回滚失败路径。Lexer 新增 `fails` 关键字，Parser 解析 `fails E`，AST `TransitionDef.fails: Option<Type>`。
 - **E0424**：transition 体内 `?` 无 `fails E` 声明时静态拒绝。
 - **Rejected 路径（解释器）**：`?` 失败时 transition 返回 `Err((source_payload, error))`，source generation 归还调用方。修复 `early_return` 泄漏 bug（transition 体内 `?` 的 `early_return` 不再穿透到调用方）。4 个新测试。
-- 待实现：codegen 镜像、draft isolation、`become`/`stay` 显式 terminal 关键字、返回类型 `Result<Target, (Source, E)>` 类型系统变更。
-- **已知双后端差距**：`fails E` transition 中 `?` 失败时，解释器返回 `Err((source, error))` 值（程序继续），codegen 将 error 作为进程级错误退出。Happy path 双后端一致。
+- **Codegen fail-closed**：`fails E` transition 中 `?` 在 codegen 报 `CompileError::Unsupported`（E0722），防止静默产生错误行为。无 `?` 的 `fails E` transition 正常编译。
+- **`transition_fails_types` 基础设施**：Checker 存储每个 transition 的 `fails E` 类型，为后续返回类型 `Result<Target, (Source, E)>` 变更做准备。
+- 待实现：返回类型 `Result<Target, (Source, E)>` 类型系统变更（需 Resolved IR 同步）、codegen Rejected 完整镜像、draft isolation、`become`/`stay` 显式 terminal 关键字。
+- **已知双后端差距**：`fails E` transition 中 `?` 在 codegen 被 fail-closed 拒绝（E0722）。解释器 Rejected 路径完整可用。
 
 ## [0.1.0] — 基线稳定 - 2026-07-23
 
