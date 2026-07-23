@@ -313,6 +313,9 @@ pub struct Interpreter<'a> {
     /// (there is deliberately no process-wide sink — a global slot raced under
     /// parallel test scheduling, letting one test's output leak into another's buffer).
     stdout_capture: Option<std::sync::Arc<std::sync::Mutex<String>>>,
+    /// v0.31.15: canonical semantic trace collector.
+    /// Disabled by default; enable via `enable_trace()` for trace comparison.
+    pub trace_collector: crate::trace::TraceCollector,
 }
 
 impl<'a> Interpreter<'a> {
@@ -1620,6 +1623,7 @@ impl<'a> Interpreter<'a> {
             cli_args: Vec::new(),
             cstring_registry: std::cell::RefCell::new(Vec::new()),
             stdout_capture: None,
+            trace_collector: crate::trace::TraceCollector::new(),
         }
     }
 
