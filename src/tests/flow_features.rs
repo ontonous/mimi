@@ -3394,6 +3394,34 @@ func main() -> i32 { 0 }
     );
 }
 
+#[test]
+fn session_endpoint_move_to_function_rejected() {
+    // v0.31.13: passing a session endpoint to a function moves it.
+    // Using it again is E0304 (moved after consumed).
+    let src = r#"
+session S = !i32 . end
+func send_and_close(ch: SessionChan<S>) -> i32 {
+    session_send(ch, 1)
+    session_close(ch)
+    0
+}
+func bad(ch: SessionChan<S>) -> i32 {
+    let a = send_and_close(ch)
+    let b = send_and_close(ch)
+    a + b
+}
+func main() -> i32 { 0 }
+"#;
+    let err = check_source(src);
+    assert!(err.is_err(), "session endpoint move-after-move must fail");
+    let errors = err.unwrap_err();
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0304")),
+        "expected E0304, got: {:?}",
+        errors
+    );
+}
+
 // ── v0.29.20 PeerFault cross-Actor propagation ────────────────────────
 
 #[test]
