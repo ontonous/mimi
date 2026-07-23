@@ -502,7 +502,6 @@ impl<'a> Interpreter<'a> {
             "session_recv" => self.builtin_session_recv(args),
             "session_close" => self.builtin_session_close(args),
             "session_pair" => self.builtin_session_pair(args),
-            "protocol_methods" => self.builtin_protocol_methods(args),
 
             "actor_mailbox_depth" => self.builtin_actor_mailbox_depth(args),
             "actor_is_muted" => self.builtin_actor_is_muted(args),
