@@ -3294,6 +3294,57 @@ func main() -> i32 { 0 }
     );
 }
 
+#[test]
+fn session_branch_merge_consistent_ok() {
+    // v0.31.12: both branches advance the residual identically → merge OK.
+    let src = r#"
+session S = !i32 . ?i32 . end
+func ok(ch: SessionChan<S>, flag: bool) -> i32 {
+    if flag {
+        session_send(ch, 1)
+    } else {
+        session_send(ch, 2)
+    }
+    let x = session_recv(ch)
+    session_close(ch)
+    x
+}
+func main() -> i32 { 0 }
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "branch merge consistent: {:?}",
+        check_source(src)
+    );
+}
+
+#[test]
+fn session_branch_merge_divergent_rejected() {
+    // v0.31.12: branches advance the residual differently → E0425.
+    let src = r#"
+session S = !i32 . ?i32 . end
+func bad(ch: SessionChan<S>, flag: bool) -> i32 {
+    if flag {
+        session_send(ch, 1)
+    } else {
+        session_send(ch, 2)
+        let x = session_recv(ch)
+    }
+    session_close(ch)
+    0
+}
+func main() -> i32 { 0 }
+"#;
+    let err = check_source(src);
+    assert!(err.is_err(), "divergent branch residuals must fail");
+    let errors = err.unwrap_err();
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0425")),
+        "expected E0425, got: {:?}",
+        errors
+    );
+}
+
 // ── v0.29.20 PeerFault cross-Actor propagation ────────────────────────
 
 #[test]
