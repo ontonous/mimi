@@ -1599,9 +1599,20 @@ impl<'a> Checker<'a> {
             }
             Stmt::Stay => {
                 // FLOW-TURN-001: `stay` returns the source state unchanged.
-                // The checker validates that the source type matches the return type
-                // (i.e., the transition declares the source as a valid target).
-                // No expression to check — the interpreter returns `self`.
+                // Validate that the source type (self) unifies with the return
+                // type — i.e., the transition declares the source as a valid target.
+                if let Some(self_ty) = scopes.last().and_then(|s| s.get("self")).cloned() {
+                    if !self.unification.unify(&self_ty, ret).is_ok() {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0209,
+                            format!(
+                                "stay requires the source state `{:?}` to be a valid target, \
+                                 but the transition returns `{:?}`",
+                                self_ty, ret
+                            ),
+                        );
+                    }
+                }
             }
             Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
         }

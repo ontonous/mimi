@@ -207,7 +207,7 @@ impl<'a> Checker<'a> {
         // Check if the last statement is an implicit return (expression statement)
         if let Some(last) = block.last() {
             match last.unlocated() {
-                Stmt::Return(_) => return true,
+                Stmt::Return(_) | Stmt::Become(_) | Stmt::Stay => return true,
                 Stmt::Expr(expr) => {
                     if let Expr::Match(_, arms) = expr.unlocated() {
                         return arms.iter().all(|arm| {

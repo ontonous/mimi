@@ -251,16 +251,17 @@ impl<'a> Interpreter<'a> {
             Stmt::Become(e) => {
                 // FLOW-TURN-001: `become Target { ... }` is an explicit terminal
                 // equivalent to `return Target { ... }`.
+                // Does NOT set early_return — the Ok(Some(v)) return terminates
+                // the block. early_return is reserved for `?` (Rejected signal).
                 let v = self.eval_expr(e)?;
-                self.early_return = Some(v.clone());
                 return Ok(Some(v));
             }
             Stmt::Stay => {
                 // FLOW-TURN-001: `stay` returns the source state (self) unchanged.
+                // Does NOT set early_return — same reasoning as Become.
                 let self_val = self.lookup("self").ok_or_else(|| {
                     InterpError::new("stay used outside a transition body (no self in scope)")
                 })?;
-                self.early_return = Some(self_val.clone());
                 return Ok(Some(self_val));
             }
             Stmt::Delegate { kind, expr, target } => {
@@ -636,9 +637,18 @@ impl<'a> Interpreter<'a> {
                         self.abort_persistent_tx(&flow.name);
                         self.current_flow_state = prev_flow_state;
                         let source = vals.first().cloned().unwrap_or(Value::Unit);
+                        // eval_try sets early_return to the full failure variant
+                        // (e.g. Err("div0")). Unwrap to the inner error value so
+                        // the Rejected tuple is (source, error), not (source, Err(error)).
+                        let error_val = match rejected_val {
+                            Value::Variant(_, vals) => {
+                                vals.into_iter().next().unwrap_or(Value::Unit)
+                            }
+                            other => other,
+                        };
                         return Ok(Value::Variant(
                             "Err".to_string(),
-                            vec![Value::Tuple(vec![source, rejected_val])],
+                            vec![Value::Tuple(vec![source, error_val])],
                         ));
                     }
                     return Ok(Value::Variant("Ok".to_string(), vec![v]));
