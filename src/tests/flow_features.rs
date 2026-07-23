@@ -3345,6 +3345,55 @@ func main() -> i32 { 0 }
     );
 }
 
+#[test]
+fn session_double_close_rejected() {
+    // v0.31.13: CFG dataflow catches session endpoint double-close (E0304).
+    let src = r#"
+session S = !i32 . end
+func bad(ch: SessionChan<S>) -> i32 {
+    session_send(ch, 1)
+    session_close(ch)
+    session_close(ch)
+    0
+}
+func main() -> i32 { 0 }
+"#;
+    let err = check_source(src);
+    assert!(err.is_err(), "double close must fail");
+    let errors = err.unwrap_err();
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0304")),
+        "expected E0304, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn session_branch_partial_consume_rejected() {
+    // v0.31.13: consuming a session endpoint in only one branch is E0425
+    // (scope exit with non-end residual, since the no-else branch conservatively
+    // restores the pre-branch residual).
+    let src = r#"
+session S = !i32 . end
+func bad(ch: SessionChan<S>, flag: bool) -> i32 {
+    if flag {
+        session_send(ch, 1)
+        session_close(ch)
+    }
+    0
+}
+func main() -> i32 { 0 }
+"#;
+    let err = check_source(src);
+    assert!(err.is_err(), "branch partial consume must fail");
+    let errors = err.unwrap_err();
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0425")),
+        "expected E0425, got: {:?}",
+        errors
+    );
+}
+
 // ── v0.29.20 PeerFault cross-Actor propagation ────────────────────────
 
 #[test]
