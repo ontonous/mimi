@@ -5654,3 +5654,77 @@ func main() -> i32 {
     let result = run_source_result(src);
     assert_eq!(result, Ok(interp::Value::Int(10)));
 }
+
+#[test]
+fn flow_turn_rejected_dual_backend() {
+    // FLOW-TURN-001: `?` failure in a `fails E` transition produces
+    // Err((source, error)) in both interpreter and codegen.
+    let src = r#"
+flow Account {
+    state Active { balance: i32 }
+    transition withdraw(Active, amount: i32) -> Active fails string {
+        do {
+            let result = safe_div(self.balance, amount)
+            let new_balance = result?
+            return Active { balance: new_balance }
+        }
+    }
+}
+func safe_div(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 { return Err("div0") }
+    return Ok(a / b)
+}
+func main() -> i32 {
+    let s0 = Active { balance: 100 }
+    let r = Account::withdraw(s0, 0)
+    let out = match r {
+        Ok(_) => 1,
+        Err(_) => 0 - 1,
+    }
+    println(out)
+    0
+}
+"#;
+    // Interpreter: Rejected path returns Err((source, "div0")), match hits Err branch → -1
+    let interp_result = run_source_result(src);
+    assert_eq!(interp_result, Ok(interp::Value::Int(0)));
+    // Codegen: same behavior
+    let native = compile_and_run(src).expect("codegen rejected path");
+    assert_eq!(native.trim(), "-1");
+}
+
+#[test]
+fn flow_turn_success_dual_backend() {
+    // FLOW-TURN-001: `?` success in a `fails E` transition returns Ok(target)
+    // in both interpreter and codegen.
+    let src = r#"
+flow Account {
+    state Active { balance: i32 }
+    transition withdraw(Active, amount: i32) -> Active fails string {
+        do {
+            let result = safe_div(self.balance, amount)
+            let new_balance = result?
+            return Active { balance: new_balance }
+        }
+    }
+}
+func safe_div(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 { return Err("div0") }
+    return Ok(a / b)
+}
+func main() -> i32 {
+    let s0 = Active { balance: 100 }
+    let r = Account::withdraw(s0, 5)
+    let out = match r {
+        Ok(_) => 1,
+        Err(_) => 0 - 1,
+    }
+    println(out)
+    0
+}
+"#;
+    let interp_result = run_source_result(src);
+    assert_eq!(interp_result, Ok(interp::Value::Int(0)));
+    let native = compile_and_run(src).expect("codegen success path");
+    assert_eq!(native.trim(), "1");
+}

@@ -12,15 +12,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         inner: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        // FLOW-TURN-001: `?` inside a transition with `fails E` should lower
-        // to Rejected (return source + error), not process exit. The Rejected
-        // codegen path is not yet implemented — fail closed.
+        // FLOW-TURN-001: `?` inside a transition with `fails E` lowers to
+        // Rejected: return Err((source, error)) instead of process exit.
         if self.in_fails_transition {
-            return Err(CompileError::Unsupported(
-                "`?` in a transition with `fails E` (Rejected path) is not yet implemented in codegen; \
-                 use the interpreter (`mimi run`) for this feature"
-                    .to_string(),
-            ));
+            return self.compile_try_rejected(inner, vars);
         }
         // ? operator: compile inner expr as Result/Option/enum,
         // check discriminant, extract T on Ok/Some, exit on Err/None
@@ -252,6 +247,206 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_unreachable()
             .map_err(|e| CompileError::LlvmError(format!("unreachable terminator: {}", e)))?;
 
+        self.builder.position_at_end(ok_bb);
+        Ok(payload)
+    }
+
+    /// FLOW-TURN-001: Rejected path for `?` inside a `fails E` transition.
+    /// On Err: construct `Err((source, error))` and return it from the transition.
+    /// On Ok: extract the payload and continue normally.
+    fn compile_try_rejected(
+        &mut self,
+        inner: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let result_val = self.compile_expr(inner, vars)?;
+
+        let i64_ty = self.context.i64_type();
+        let bool_ty = self.context.bool_type();
+        let function = self
+            .current_function()
+            .ok_or_else(|| "codegen: no current function for try_rejected".to_string())?;
+        let ok_bb = self.context.append_basic_block(function, "try_rej_ok");
+        let err_bb = self.context.append_basic_block(function, "try_rej_err");
+
+        // Determine struct type for the inner Result/Option.
+        let inner_type_name = match inner {
+            Expr::Ident(name) => self.var_type_names.get(name).cloned(),
+            Expr::Call(callee, _) => {
+                if let Expr::Ident(fname) = callee.unlocated() {
+                    self.func_defs
+                        .get(fname)
+                        .and_then(|f| f.ret.as_ref())
+                        .map(crate::core::fmt_type)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let is_result = inner_type_name
+            .as_ref()
+            .map(|tn| tn.starts_with("Result<") || tn == "Result")
+            .unwrap_or(false);
+
+        let struct_ty_to_use = if is_result {
+            BasicTypeEnum::StructType(self.context.struct_type(
+                &[
+                    BasicTypeEnum::IntType(bool_ty),
+                    BasicTypeEnum::IntType(i64_ty),
+                    BasicTypeEnum::IntType(i64_ty),
+                ],
+                false,
+            ))
+        } else {
+            BasicTypeEnum::StructType(self.context.struct_type(
+                &[
+                    BasicTypeEnum::IntType(bool_ty),
+                    BasicTypeEnum::IntType(i64_ty),
+                ],
+                false,
+            ))
+        };
+
+        let struct_val = match result_val {
+            BasicValueEnum::PointerValue(pv) => self
+                .builder
+                .build_load(struct_ty_to_use, pv, "try_rej_load")
+                .map_err(|e| CompileError::LlvmError(format!("try_rej load: {}", e)))?,
+            BasicValueEnum::StructValue(sv) => BasicValueEnum::StructValue(sv),
+            _ => {
+                return Err(
+                    "? operator in fails transition requires a Result/Option type".into(),
+                )
+            }
+        };
+
+        let sv = struct_val.into_struct_value();
+        let disc = self
+            .builder
+            .build_extract_value(sv, 0, "try_rej_disc")
+            .map_err(|e| CompileError::LlvmError(format!("extract_value: {}", e)))?;
+        let payload = self
+            .builder
+            .build_extract_value(sv, 1, "try_rej_payload")
+            .map_err(|e| CompileError::LlvmError(format!("extract_value: {}", e)))?;
+        let err_val = if is_result {
+            self.builder
+                .build_extract_value(sv, 2, "try_rej_err")
+                .map_err(|e| CompileError::LlvmError(format!("extract_value: {}", e)))?
+        } else {
+            payload
+        };
+
+        // discriminant == 0 means Err/None
+        let disc_int = disc.into_int_value();
+        let zero = bool_ty.const_int(0, false);
+        let is_err = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, disc_int, zero, "try_rej_is_err")
+            .map_err(|e| CompileError::LlvmError(format!("cmp: {}", e)))?;
+
+        self.builder
+            .build_conditional_branch(is_err, err_bb, ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("branch: {}", e)))?;
+
+        // Err path: construct Err((source, error)) and return it.
+        self.builder.position_at_end(err_bb);
+
+        // Get source (self) from vars.
+        let (self_ptr, self_ty) = vars.get("self").copied().ok_or_else(|| {
+            CompileError::LlvmError("fails transition has no self in scope".into())
+        })?;
+        let source_val = self.build_load(self_ty, self_ptr, "try_rej_source")?;
+
+        // Build the error tuple (source, error) as a 2-element struct.
+        let source_as_i64 = match source_val {
+            BasicValueEnum::IntValue(iv) => iv,
+            BasicValueEnum::PointerValue(pv) => self
+                .builder
+                .build_ptr_to_int(pv, i64_ty, "try_rej_src_i64")
+                .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?,
+            other => {
+                // For struct values (records), store to alloca and ptrtoint.
+                let alloca = self.build_alloca(other.get_type(), "try_rej_src_tmp")?;
+                self.build_store(alloca, other)?;
+                self.builder
+                    .build_ptr_to_int(alloca, i64_ty, "try_rej_src_i64")
+                    .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?
+            }
+        };
+        let err_as_i64 = match err_val {
+            BasicValueEnum::IntValue(iv) => iv,
+            BasicValueEnum::PointerValue(pv) => self
+                .builder
+                .build_ptr_to_int(pv, i64_ty, "try_rej_err_i64")
+                .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?,
+            other => {
+                let alloca = self.build_alloca(other.get_type(), "try_rej_err_tmp")?;
+                self.build_store(alloca, other)?;
+                self.builder
+                    .build_ptr_to_int(alloca, i64_ty, "try_rej_err_i64")
+                    .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?
+            }
+        };
+
+        // Allocate tuple struct {i64 source, i64 error} on heap.
+        let tuple_ty = self.context.struct_type(
+            &[BasicTypeEnum::IntType(i64_ty), BasicTypeEnum::IntType(i64_ty)],
+            false,
+        );
+        let tuple_alloca = self.build_alloca(tuple_ty, "try_rej_tuple")?;
+        let src_gep = self
+            .gep()
+            .build_struct_gep(tuple_ty, tuple_alloca, 0, "try_rej_tuple_src")
+            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+        self.build_store(src_gep, source_as_i64)?;
+        let err_gep = self
+            .gep()
+            .build_struct_gep(tuple_ty, tuple_alloca, 1, "try_rej_tuple_err")
+            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+        self.build_store(err_gep, err_as_i64)?;
+
+        // Build outer Result struct: {i1 disc=0, i64 ok_pad=0, i64 err=ptr_to_tuple}
+        let tuple_ptr_i64 = self
+            .builder
+            .build_ptr_to_int(tuple_alloca, i64_ty, "try_rej_tuple_i64")
+            .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?;
+        let result_struct_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(bool_ty),
+                BasicTypeEnum::IntType(i64_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let result_alloca = self.build_alloca(result_struct_ty, "try_rej_result")?;
+        let disc_gep = self
+            .gep()
+            .build_struct_gep(result_struct_ty, result_alloca, 0, "try_rej_res_disc")
+            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+        self.build_store(disc_gep, bool_ty.const_int(0, false))?; // Err
+        let ok_pad_gep = self
+            .gep()
+            .build_struct_gep(result_struct_ty, result_alloca, 1, "try_rej_res_ok")
+            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+        self.build_store(ok_pad_gep, i64_ty.const_int(0, false))?;
+        let err_store_gep = self
+            .gep()
+            .build_struct_gep(result_struct_ty, result_alloca, 2, "try_rej_res_err")
+            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+        self.build_store(err_store_gep, tuple_ptr_i64)?;
+
+        let rejected_val = self.build_load(result_struct_ty, result_alloca, "try_rej_val")?;
+
+        // Return the Err((source, error)) from the transition function.
+        self.emit_all_shared_releases()?;
+        self.discard_shared_scope();
+        self.free_heap_allocs()?;
+        self.pop_comp_scope();
+        self.build_return(Some(&rejected_val))?;
+
+        // Ok path: continue with the extracted payload.
         self.builder.position_at_end(ok_bb);
         Ok(payload)
     }

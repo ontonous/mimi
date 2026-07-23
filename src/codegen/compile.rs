@@ -915,6 +915,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             .cloned()
             .unwrap_or_else(|| "unit".to_string());
 
+        // FLOW-TURN-001: when `fails E` is declared, the transition's return type
+        // becomes Result<Target, (Source, E)> so the caller can match Ok/Err.
+        let ret_type = if let Some(fails_ty) = &t.fails {
+            Type::Result(
+                Box::new(Type::Name(ret_name, vec![]).deep_reorigin(meta)),
+                Box::new(Type::Tuple(vec![
+                    Type::Name(t.from_state.clone(), vec![]).deep_reorigin(meta),
+                    fails_ty.clone().deep_reorigin(meta),
+                ])),
+            )
+            .deep_reorigin(meta)
+        } else {
+            Type::Name(ret_name, vec![]).deep_reorigin(meta)
+        };
+
         // Unwrap a single outer `do { ... }` so compile_block sees normal stmts.
         let body: Block = match &t.body {
             Some(block) => {
@@ -944,7 +959,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             name: Self::transition_fn_name(&flow.name, &t.name, &t.from_state),
             pub_: false,
             params,
-            ret: Some(Type::Name(ret_name, vec![]).deep_reorigin(meta)),
+            ret: Some(ret_type),
             body,
             where_clause: vec![],
             generics: vec![],

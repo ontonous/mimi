@@ -1443,6 +1443,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Return(Some(expr)) => {
                     let val = self.compile_expr(expr, vars)?;
+                    let val = if self.in_fails_transition {
+                        self.compile_ok_constructor(vec![val])?
+                    } else {
+                        val
+                    };
                     let val = self.adjust_int_val(val, ret_type)?;
                     self.emit_return(
                         ret_type,
@@ -1461,6 +1466,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::Become(expr) => {
                     // FLOW-TURN-001: `become Target { ... }` compiles as `return expr`.
                     let val = self.compile_expr(expr, vars)?;
+                    let val = if self.in_fails_transition {
+                        self.compile_ok_constructor(vec![val])?
+                    } else {
+                        val
+                    };
                     let val = self.adjust_int_val(val, ret_type)?;
                     self.emit_return(
                         ret_type,
@@ -1480,6 +1490,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                     })?;
                     let val = self.build_load(self_ty, self_ptr, "stay_self")?;
+                    let val = if self.in_fails_transition {
+                        self.compile_ok_constructor(vec![val])?
+                    } else {
+                        val
+                    };
                     let val = self.adjust_int_val(val, ret_type)?;
                     self.emit_return(ret_type, ret_ty_ast, Some(val), &func.name, vars, None)?;
                     return Ok(ControlFlow::Break(()));
