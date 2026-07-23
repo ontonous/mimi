@@ -119,6 +119,8 @@ impl<'a> Interpreter<'a> {
             | Stmt::MmsBlock { .. }
             | Stmt::Do(_)
             | Stmt::Delegate { .. }
+            | Stmt::Become(_)
+            | Stmt::Stay
             | Stmt::Pinned { .. } => Ok(None),
             Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
         }

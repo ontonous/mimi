@@ -1166,7 +1166,7 @@ fn flow_codegen_transactional_fails_closed() {
     let src = r#"
 flow Tx {
     @transactional persistent state Active { value: i32 }
-    transition stay(Active) -> Active {
+    transition hold(Active) -> Active {
         do { return Active { value: self.value } }
     }
 }
@@ -5536,4 +5536,121 @@ func main() -> i32 {
 "#;
     let result = run_source_result(src);
     assert_eq!(result, Ok(interp::Value::Int(20)));
+}
+
+#[test]
+fn flow_turn_become_explicit_terminal() {
+    // FLOW-TURN-001: `become Target { ... }` is an explicit transition terminal
+    // equivalent to `return Target { ... }`.
+    let src = r#"
+flow Counter {
+    state Idle { count: i32 }
+    state Active { count: i32 }
+    transition start(Idle) -> Active {
+        do { become Active { count: self.count + 1 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Idle { count: 10 }
+    let s1 = Counter::start(s0)
+    s1.count
+}
+"#;
+    let result = run_source_result(src);
+    assert_eq!(result, Ok(interp::Value::Int(11)));
+}
+
+#[test]
+fn flow_turn_become_dual_backend() {
+    // FLOW-TURN-001: `become` works in both interpreter and codegen.
+    let src = r#"
+flow Counter {
+    state Idle { count: i32 }
+    state Active { count: i32 }
+    transition start(Idle) -> Active {
+        do { become Active { count: self.count + 1 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Idle { count: 10 }
+    let s1 = Counter::start(s0)
+    println(s1.count)
+    0
+}
+"#;
+    let interp_result = run_source_result(src);
+    assert_eq!(interp_result, Ok(interp::Value::Int(0)));
+    let native = compile_and_run(src).expect("codegen become");
+    assert_eq!(native.trim(), "11");
+}
+
+#[test]
+fn flow_turn_stay_self_loop() {
+    // FLOW-TURN-001: `stay` returns the source state unchanged (self-loop).
+    let src = r#"
+flow Counter {
+    state Active { count: i32 }
+    transition noop(Active) -> Active {
+        do { stay }
+    }
+}
+func main() -> i32 {
+    let s0 = Active { count: 42 }
+    let s1 = Counter::noop(s0)
+    s1.count
+}
+"#;
+    let result = run_source_result(src);
+    assert_eq!(result, Ok(interp::Value::Int(42)));
+}
+
+#[test]
+fn flow_turn_stay_dual_backend() {
+    // FLOW-TURN-001: `stay` works in both interpreter and codegen.
+    let src = r#"
+flow Counter {
+    state Active { count: i32 }
+    transition noop(Active) -> Active {
+        do { stay }
+    }
+}
+func main() -> i32 {
+    let s0 = Active { count: 42 }
+    let s1 = Counter::noop(s0)
+    println(s1.count)
+    0
+}
+"#;
+    let interp_result = run_source_result(src);
+    assert_eq!(interp_result, Ok(interp::Value::Int(0)));
+    let native = compile_and_run(src).expect("codegen stay");
+    assert_eq!(native.trim(), "42");
+}
+
+#[test]
+fn flow_turn_become_multi_target() {
+    // FLOW-TURN-001: `become` in a multi-target transition with conditional.
+    let src = r#"
+flow Gate {
+    state Idle { v: i32 }
+    state Open { v: i32 }
+    state Closed { v: i32 }
+    transition decide(Idle, threshold: i32) -> Open | Closed {
+        do {
+            if self.v > threshold {
+                become Open { v: self.v }
+            } else {
+                become Closed { v: self.v }
+            }
+        }
+    }
+}
+func main() -> i32 {
+    let s0 = Idle { v: 10 }
+    let s1 = Gate::decide(s0, 5)
+    s1.v
+}
+"#;
+    let result = run_source_result(src);
+    assert_eq!(result, Ok(interp::Value::Int(10)));
 }

@@ -1169,6 +1169,63 @@ impl BodyLowerer<'_> {
                     body,
                 }
             }
+            Stmt::Become(expr) => {
+                // FLOW-TURN-001: `become Target { ... }` lowers as Return.
+                let value = self.lower_expr(expr, &format!("{role}.value"))?;
+                let expected = if self.transition_fails {
+                    self.transition_target_type()
+                } else {
+                    self.signature.result.clone()
+                };
+                let conversion =
+                    self.implicit_conversion(&node_id, &value.ty, &expected)?;
+                ResolvedStmtKind::Return {
+                    value: Some(value),
+                    conversion: Some(conversion),
+                }
+            }
+            Stmt::Stay => {
+                // FLOW-TURN-001: `stay` lowers as Return of `self`.
+                let self_local_id = self.lookup_local("self").ok_or_else(|| {
+                    vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        "stay used outside a transition body (no self in scope)",
+                    )]
+                })?;
+                let self_ty = self
+                    .locals
+                    .get(&self_local_id)
+                    .map(|l| l.ty.clone())
+                    .ok_or_else(|| {
+                        vec![ResolvedBodyError::new(
+                            node_id.clone(),
+                            "stay: self local has no resolved type",
+                        )]
+                    })?;
+                let self_expr = ResolvedExpr {
+                    node_id: NodeId(format!("{}/stay-self", node_id.0)),
+                    origin: Origin::Desugared {
+                        parent: node_id.clone(),
+                        rule: "resolved_body.stay_self".into(),
+                        span: origin.user_span(),
+                    },
+                    ty: self_ty,
+                    effects: Vec::new(),
+                    backend_requirements: Vec::new(),
+                    kind: ResolvedExprKind::Load(ResolvedPlace::root(self_local_id)),
+                };
+                let expected = if self.transition_fails {
+                    self.transition_target_type()
+                } else {
+                    self.signature.result.clone()
+                };
+                let conversion =
+                    self.implicit_conversion(&node_id, &self_expr.ty, &expected)?;
+                ResolvedStmtKind::Return {
+                    value: Some(self_expr),
+                    conversion: Some(conversion),
+                }
+            }
             Stmt::Desc(..) | Stmt::Rule(..) | Stmt::MmsBlock { .. } => return Ok(None),
             Stmt::Ellipsis => return self.unsupported(&node_id, stmt_kind(stmt)),
             Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),

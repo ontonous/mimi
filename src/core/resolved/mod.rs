@@ -4228,6 +4228,8 @@ fn stmt_semantic_key(stmt: &Stmt) -> String {
         Stmt::MmsBlock { content, .. } => format!("mms:{:016x}", stable_text_hash(content)),
         Stmt::Func(function) => format!("function:{}", function.name),
         Stmt::Alloc { kind, .. } => format!("alloc:{kind:?}"),
+        Stmt::Become(expr) => format!("become:{}", expr_semantic_key(expr)),
+        Stmt::Stay => "stay".into(),
         Stmt::Ellipsis => "ellipsis".into(),
         Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
     }
@@ -4265,6 +4267,8 @@ pub(crate) fn stmt_kind(stmt: &Stmt) -> &'static str {
         Stmt::MmsBlock { .. } => "stmt.mms",
         Stmt::Func(_) => "stmt.function",
         Stmt::Alloc { .. } => "stmt.alloc",
+        Stmt::Become(_) => "stmt.become",
+        Stmt::Stay => "stmt.stay",
         Stmt::Ellipsis => "stmt.ellipsis",
         Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
     }
@@ -4677,6 +4681,16 @@ fn collect_stmt_meta(
             out,
             errors,
         ),
+        Stmt::Become(expr) => collect_expr_meta(
+            expr,
+            owner,
+            &format!("{role}.value"),
+            fallback,
+            ids,
+            out,
+            errors,
+        ),
+        Stmt::Stay => {}
         Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
     }
 }

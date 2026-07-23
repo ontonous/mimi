@@ -480,9 +480,24 @@ impl<'a> Lowerer<'a> {
             | Stmt::Rule(..)
             | Stmt::MmsBlock { .. }
             | Stmt::Ellipsis
+            | Stmt::Stay
             | Stmt::Located { .. } => {
                 self.point(&current, meta, CfgPointKind::Statement, "stmt.noop");
                 Some(current)
+            }
+            Stmt::Become(expr) => {
+                let current = self
+                    .lower_expr(expr, current, &format!("{role}.become"))
+                    .unwrap_or_else(|| self.new_block(meta, "unreachable.become"));
+                self.point(&current, meta, CfgPointKind::ResourceAction, "stmt.become");
+                self.terminate(
+                    &current,
+                    Terminator::Return {
+                        value: None,
+                        implicit: false,
+                    },
+                );
+                None
             }
         }
     }

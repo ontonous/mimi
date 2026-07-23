@@ -89,6 +89,8 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Mutate
             | TokenKind::Consume
             | TokenKind::Do
+            | TokenKind::Become
+            | TokenKind::Stay
             | TokenKind::Subflow
             | TokenKind::Session
             | TokenKind::Dual
@@ -168,6 +170,8 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "mutate" => TokenKind::Mutate,
         "consume" => TokenKind::Consume,
         "do" => TokenKind::Do,
+        "become" => TokenKind::Become,
+        "stay" => TokenKind::Stay,
         "subflow" => TokenKind::Subflow,
         "session" => TokenKind::Session,
         "dual" => TokenKind::Dual,

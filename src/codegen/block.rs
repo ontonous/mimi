@@ -84,6 +84,45 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.build_return(None)?;
                     return Ok(());
                 }
+                Stmt::Become(expr) => {
+                    // FLOW-TURN-001: `become Target { ... }` compiles as `return expr`.
+                    let mut val = self.compile_expr(expr, vars)?;
+                    let ret_type = self
+                        .current_fn_ret_type()
+                        .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
+                    val = self.adjust_int_val(val, ret_type)?;
+                    val = self.claim_string_return_value(val, ret_type, Some(expr), vars)?;
+                    val = self.load_return_value_if_needed(val)?;
+                    self.emit_all_shared_releases()?;
+                    self.discard_shared_scope();
+                    self.free_heap_allocs()?;
+                    self.pop_comp_scope();
+                    self.build_return(Some(&val))?;
+                    return Ok(());
+                }
+                Stmt::Stay => {
+                    // FLOW-TURN-001: `stay` compiles as `return self`.
+                    let (self_ptr, self_ty) = vars
+                        .get("self")
+                        .copied()
+                        .ok_or_else(|| {
+                            CompileError::LlvmError(
+                                "stay used outside a transition body (no self in scope)".into(),
+                            )
+                        })?;
+                    let mut val = self.build_load(self_ty, self_ptr, "stay_self")?;
+                    let ret_type = self
+                        .current_fn_ret_type()
+                        .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
+                    val = self.adjust_int_val(val, ret_type)?;
+                    val = self.load_return_value_if_needed(val)?;
+                    self.emit_all_shared_releases()?;
+                    self.discard_shared_scope();
+                    self.free_heap_allocs()?;
+                    self.pop_comp_scope();
+                    self.build_return(Some(&val))?;
+                    return Ok(());
+                }
                 Stmt::Let {
                     pat,
                     init: Some(init),

@@ -483,8 +483,8 @@ fn remap_stmt_spans(stmt: &mut Stmt, remap: &SourceIdRemap) -> Result<(), String
             }
             Ok(())
         }
-        Stmt::Continue | Stmt::Ellipsis => Ok(()),
-        Stmt::Expr(expr) | Stmt::Drop(expr) => remap_expr_spans(expr, remap),
+        Stmt::Continue | Stmt::Ellipsis | Stmt::Stay => Ok(()),
+        Stmt::Expr(expr) | Stmt::Drop(expr) | Stmt::Become(expr) => remap_expr_spans(expr, remap),
         Stmt::If { cond, then_, else_ } => {
             remap_expr_spans(cond, remap)?;
             remap_block_spans(then_, remap)?;

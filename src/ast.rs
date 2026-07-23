@@ -462,6 +462,12 @@ pub enum Stmt {
     OnFailure(Block),
     /// Do block — marks the implementation body of a transition
     Do(Block),
+    /// Explicit transition terminal: become TargetState { ... }
+    /// Constructs the target state and ends the transition (equivalent to return).
+    Become(Expr),
+    /// Explicit transition terminal: stay
+    /// Returns the source state unchanged (self-loop terminal).
+    Stay,
     /// Delegate resource to subflow: delegate view/mutate/consume(self.field) to target
     Delegate {
         kind: DelegateKind,
