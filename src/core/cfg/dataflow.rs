@@ -142,7 +142,7 @@ fn analyze_one(
         });
     }
 
-    analyze_canonical(cfg, actions, loans, &legacy_ends)
+    analyze_canonical(cfg, actions, loans, &legacy_ends, &BTreeSet::new())
 }
 
 pub(super) fn analyze_canonical(
@@ -150,6 +150,10 @@ pub(super) fn analyze_canonical(
     mut actions: Vec<CanonicalResourceAction>,
     mut loans: Vec<Loan>,
     fallback_ends: &BTreeMap<String, Vec<CfgLocation>>,
+    // 0.31.16: flow state resources are auto-droppable at scope exit.
+    // Unlike Cap/SessionChan (which must be explicitly consumed), flow
+    // states represent data that can be safely discarded.
+    droppable: &BTreeSet<ResourceId>,
 ) -> Result<ResourceAnalysis, Vec<Diagnostic>> {
     let (live_in, live_out) = compute_liveness(cfg);
     let loan_resources = actions
@@ -311,7 +315,7 @@ pub(super) fn analyze_canonical(
         }
     }
 
-    validate_return_resources(cfg, &out_flow, &mut errors);
+    validate_return_resources(cfg, &out_flow, &mut errors, droppable);
 
     dedup_errors(&mut errors);
     if !errors.is_empty() {
@@ -336,6 +340,7 @@ fn validate_return_resources(
     cfg: &CallableCfg,
     out: &BTreeMap<BasicBlockId, FlowState>,
     errors: &mut Vec<Diagnostic>,
+    droppable: &BTreeSet<ResourceId>,
 ) {
     for (block_id, block) in &cfg.blocks {
         if !cfg.reachable.contains(block_id)
@@ -361,11 +366,22 @@ fn validate_return_resources(
             if fact.availability != Availability::Available {
                 continue;
             }
+            // 0.31.16: flow state resources are auto-droppable at scope exit.
+            // Unlike Cap/SessionChan, flow states represent data that can be
+            // safely discarded when the function returns.
+            if droppable.contains(resource) {
+                continue;
+            }
             let name = fact
                 .owner
                 .as_ref()
                 .map(Place::display)
                 .unwrap_or_else(|| resource.0 .0.clone());
+            // 0.31.16: variables with `_` prefix are intentionally unused —
+            // auto-drop instead of reporting E0256.
+            if name.starts_with('_') {
+                continue;
+            }
             errors.push(
                 Diagnostic::error_code(
                     crate::diagnostic::codes::E0256,
