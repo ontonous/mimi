@@ -1229,6 +1229,116 @@ flow GoodFlow {
     );
 }
 
+// ── 0.31.14 追加 A: Protocol conformance × linearity ─────────────────
+
+#[test]
+fn protocol_impl_alias_bypass_rejected() {
+    // 0.31.14 追加 A: aliasing a flow state variable that implements a
+    // protocol, then using the original, must be rejected (E0423).
+    // The protocol conformance doesn't exempt the flow from linearity.
+    let src = r#"
+protocol Sensor {
+    state Idle
+    state Active { data: i32 }
+    transition start(Idle) -> Active
+}
+flow MySensor {
+    impl Sensor
+    state Idle
+    state Active { data: i32 }
+    transition start(Idle) -> Active {
+        do { return Active { data: 42 } }
+    }
+}
+func main() -> i32 {
+    let s = Idle { }
+    let alias = s
+    let r = MySensor::start(s)
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "alias bypass in protocol impl should be rejected");
+    let errors = result.unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code.as_deref() == Some("E0423")
+                && d.message.contains("alias")),
+        "expected E0423 with alias message, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn protocol_impl_alias_target_valid() {
+    // 0.31.14 追加 A: after aliasing, the alias target is the valid owner
+    // and can be used in a protocol transition.
+    let src = r#"
+protocol Sensor {
+    state Idle
+    state Active { data: i32 }
+    transition start(Idle) -> Active
+}
+flow MySensor {
+    impl Sensor
+    state Idle
+    state Active { data: i32 }
+    transition start(Idle) -> Active {
+        do { return Active { data: 42 } }
+    }
+}
+func main() -> i32 {
+    let s = Idle { }
+    let alias = s
+    let r = MySensor::start(alias)
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_ok(),
+        "alias target should be usable in protocol transition: {:?}",
+        result
+    );
+}
+
+#[test]
+fn protocol_linear_payload_downgrade_rejected() {
+    // 0.31.14 追加 A: if a protocol state declares a linear payload type
+    // (Cap), the flow state must also declare it as linear. Downgrading
+    // to a non-linear type is rejected (E0427).
+    let src = r#"
+protocol Writer {
+    state Open { handle: Cap<Write> }
+    state Closed
+    transition close(Open) -> Closed
+}
+flow BadWriter {
+    impl Writer
+    state Open { handle: i32 }
+    state Closed
+    transition close(Open) -> Closed {
+        do { return Closed { } }
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_err(),
+        "linear payload downgrade should be rejected"
+    );
+    let errors = result.unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code.as_deref() == Some("E0427")
+                || d.code.as_deref() == Some("E0209")),
+        "expected E0427 or E0209, got: {:?}",
+        errors
+    );
+}
+
 // ===================== Pinned block tests =====================
 
 #[test]
