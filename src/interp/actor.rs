@@ -58,6 +58,8 @@ impl<'a> Interpreter<'a> {
             actor_name: actor_name.to_string(),
             fields,
             methods: actor_def.methods.clone(),
+            runs_flow: actor_def.runs_flow.clone(),
+            flow_state: None,
             faulted: false,
             peer_links: Vec::new(),
             parent_id: crate::interp::value::CURRENT_ACTOR_ID.with(|id| {

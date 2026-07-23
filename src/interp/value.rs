@@ -427,6 +427,12 @@ pub struct ActorInstance {
     pub actor_name: String,
     pub fields: HashMap<String, Value>,
     pub methods: Vec<FuncDef>,
+    /// v0.31.11: `actor Name runs FlowName` — the actor owns a Flow instance.
+    /// When set, messages decode as Flow events and dispatch through transitions.
+    pub runs_flow: Option<String>,
+    /// v0.31.11: current Flow state (the actor's business state).
+    /// Initialized to the flow's root state on spawn; updated on each transition.
+    pub flow_state: Option<Value>,
     /// v0.29.11: set when the owning Flow entered Fault. Mailbox dispatch
     /// short-circuits (O(1)) while this is true — messages are dropped without
     /// waking business logic.
