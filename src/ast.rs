@@ -221,6 +221,10 @@ pub struct ActorDef {
     pub meta: AstNodeMeta,
     pub name: String,
     pub pub_: bool,
+    /// v0.31.11: `actor Name runs FlowName` — the actor owns a Flow instance.
+    /// Messages decode as Flow events; each turn atomically executes one transition.
+    /// When set, `fields` holds only non-business config (mailbox depth, etc.).
+    pub runs_flow: Option<String>,
     pub fields: Vec<ActorField>,
     pub methods: Vec<FuncDef>,
 }

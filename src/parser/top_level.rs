@@ -569,6 +569,13 @@ impl Parser {
         let start_pos = self.pos;
         self.expect_keyword(TokenKind::Actor)?;
         let name = self.expect_ident()?;
+        // v0.31.11: `actor Name runs FlowName { ... }`
+        let runs_flow = if matches!(self.peek_kind(), TokenKind::Ident(s) if s == "runs") {
+            self.advance();
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
         self.skip_newlines();
         self.expect(TokenKind::LBrace, "`{`")?;
         self.skip_newlines();
@@ -635,6 +642,7 @@ impl Parser {
             meta: self.consumed_meta(start_pos, AstOrigin::User),
             name,
             pub_: false,
+            runs_flow,
             fields,
             methods,
         })

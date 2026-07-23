@@ -552,6 +552,21 @@ impl<'a> Checker<'a> {
                 self.module_path.pop();
             }
             Item::Actor(actor) => {
+                // v0.31.11: validate `runs FlowName` references an existing flow.
+                if let Some(flow_name) = &actor.runs_flow {
+                    let flow_exists = self.file.items.iter().any(|item| {
+                        matches!(item, Item::Flow(f) if &f.name == flow_name)
+                    });
+                    if !flow_exists {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0402,
+                            format!(
+                                "actor '{}' declares `runs {}` but no flow '{}' is defined in this file",
+                                actor.name, flow_name, flow_name
+                            ),
+                        );
+                    }
+                }
                 // Register actor type so it can be used as a type
                 let actor_type_def = TypeDef {
                     meta: AstNodeMeta::inherited(
