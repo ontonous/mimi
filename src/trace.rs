@@ -34,6 +34,13 @@ pub enum TraceEventKind {
     ResourceDrop,
     /// Resource returned.
     ResourceReturn,
+    /// 0.31.15 追加 A: Flow state ownership transferred (variable → transition
+    /// or variable → alias). Records the exact moment a generation is invalidated.
+    OwnershipTransfer,
+    /// 0.31.15 追加 A: linear violation detected at runtime (use-after-move
+    /// safety net). Records the diagnostic path even though the operation is
+    /// rejected.
+    LinearViolation,
 }
 
 /// A single canonical trace event.
@@ -198,6 +205,79 @@ impl TraceCollector {
         });
     }
 
+    /// 0.31.15 追加 A: record a flow state ownership transfer.
+    /// Captures the exact moment a generation is invalidated: the source
+    /// variable is consumed and ownership moves to the transition result
+    /// or alias target.
+    pub fn record_ownership_transfer(
+        &mut self,
+        flow: &str,
+        from_var: &str,
+        to_var: &str,
+        generation: u64,
+        state: &str,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        self.logical_clock += 1;
+        let id = self.next_event_id;
+        self.next_event_id += 1;
+        self.events.push(TraceEvent {
+            event_id: id,
+            parent_event_id: None,
+            logical_actor: "main".to_string(),
+            logical_clock: self.logical_clock,
+            kind: TraceEventKind::OwnershipTransfer,
+            flow_instance: Some(flow.to_string()),
+            generation_before: Some(generation),
+            generation_after: Some(generation + 1),
+            state_before: Some(state.to_string()),
+            event_name: Some(format!("{} -> {}", from_var, to_var)),
+            state_after: Some(state.to_string()),
+            result_or_fault: None,
+            session_before: None,
+            session_after: None,
+            source_span: None,
+        });
+    }
+
+    /// 0.31.15 追加 A: record a linear violation detected at runtime.
+    /// The use-after-move safety net in the interpreter triggers this
+    /// event, making the violation visible in the trace even though the
+    /// operation is rejected.
+    pub fn record_linear_violation(
+        &mut self,
+        flow: &str,
+        var: &str,
+        state: &str,
+        reason: &str,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        self.logical_clock += 1;
+        let id = self.next_event_id;
+        self.next_event_id += 1;
+        self.events.push(TraceEvent {
+            event_id: id,
+            parent_event_id: None,
+            logical_actor: "main".to_string(),
+            logical_clock: self.logical_clock,
+            kind: TraceEventKind::LinearViolation,
+            flow_instance: Some(flow.to_string()),
+            generation_before: None,
+            generation_after: None,
+            state_before: Some(state.to_string()),
+            event_name: Some(var.to_string()),
+            state_after: None,
+            result_or_fault: Some(reason.to_string()),
+            session_before: None,
+            session_after: None,
+            source_span: None,
+        });
+    }
+
     /// Get all collected events.
     pub fn events(&self) -> &[TraceEvent] {
         &self.events
@@ -268,6 +348,21 @@ pub fn compare_traces(a: &[TraceEvent], b: &[TraceEvent]) -> Result<(), String> 
             return Err(format!(
                 "event {} result_or_fault mismatch: {:?} vs {:?}",
                 i, ea.result_or_fault, eb.result_or_fault
+            ));
+        }
+        // 0.31.15 追加 A: generation counters must match for ownership
+        // transfer and transition events. This ensures the happens-before
+        // DAG includes consistent generation edges.
+        if ea.generation_before != eb.generation_before {
+            return Err(format!(
+                "event {} generation_before mismatch: {:?} vs {:?}",
+                i, ea.generation_before, eb.generation_before
+            ));
+        }
+        if ea.generation_after != eb.generation_after {
+            return Err(format!(
+                "event {} generation_after mismatch: {:?} vs {:?}",
+                i, ea.generation_after, eb.generation_after
             ));
         }
     }
@@ -355,5 +450,42 @@ mod tests {
         let result = compare_traces(a.events(), b.events());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("length"));
+    }
+
+    #[test]
+    fn ownership_transfer_recorded() {
+        let mut c = TraceCollector::new();
+        c.enable();
+        c.record_ownership_transfer("Counter", "s0", "s1", 0, "Zero");
+        assert_eq!(c.len(), 1);
+        let e = &c.events()[0];
+        assert_eq!(e.kind, TraceEventKind::OwnershipTransfer);
+        assert_eq!(e.generation_before, Some(0));
+        assert_eq!(e.generation_after, Some(1));
+        assert_eq!(e.event_name.as_deref(), Some("s0 -> s1"));
+    }
+
+    #[test]
+    fn linear_violation_recorded() {
+        let mut c = TraceCollector::new();
+        c.enable();
+        c.record_linear_violation("Counter", "s0", "Zero", "use-after-move");
+        assert_eq!(c.len(), 1);
+        let e = &c.events()[0];
+        assert_eq!(e.kind, TraceEventKind::LinearViolation);
+        assert_eq!(e.result_or_fault.as_deref(), Some("use-after-move"));
+    }
+
+    #[test]
+    fn compare_generation_mismatch() {
+        let mut a = TraceCollector::new();
+        a.enable();
+        a.record_transition("F", "e", "A", "B", 0);
+        let mut b = TraceCollector::new();
+        b.enable();
+        b.record_transition("F", "e", "A", "B", 5);
+        let result = compare_traces(a.events(), b.events());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("generation_before"));
     }
 }
