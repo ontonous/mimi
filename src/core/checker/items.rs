@@ -566,6 +566,20 @@ impl<'a> Checker<'a> {
                             ),
                         );
                     }
+                    // v0.31.11: actors that run a Flow must not have mut business fields.
+                    // State is carried by the Flow; mutable fields break the atomic turn guarantee.
+                    for field in &actor.fields {
+                        if field.mut_ {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0402,
+                                format!(
+                                    "actor '{}' runs flow '{}' — mutable field '{}' is not allowed; \
+                                     business state must be carried by the Flow's state payloads",
+                                    actor.name, flow_name, field.name
+                                ),
+                            );
+                        }
+                    }
                 }
                 // Register actor type so it can be used as a type
                 let actor_type_def = TypeDef {
