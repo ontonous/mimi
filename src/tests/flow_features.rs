@@ -5625,6 +5625,163 @@ func main() -> i32 {
     );
 }
 
+// ── 0.31.13 追加 A: Flow state alias tracking + shared/ref rejection ──
+
+#[test]
+fn flow_state_alias_then_use_original_rejected() {
+    // 0.31.13 追加 A: `let b = s0` consumes s0 (alias transfer).
+    // Using s0 after aliasing must be rejected (E0423).
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let b = s0
+    let s1 = Counter::inc(s0)
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "use-after-alias should be rejected");
+    let errors = result.unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code.as_deref() == Some("E0423")
+                && d.message.contains("alias")),
+        "expected E0423 with alias message, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn flow_state_alias_target_usable() {
+    // 0.31.13 追加 A: after `let b = s0`, b is the valid owner.
+    // Using b in a transition should be accepted.
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let b = s0
+    let s1 = Counter::inc(b)
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_ok(),
+        "alias target should be usable: {:?}",
+        result
+    );
+}
+
+#[test]
+fn flow_state_shared_rejected() {
+    // 0.31.13 追加 A: `shared` wrapping of a flow state is rejected (E0427).
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    shared s = s0
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "shared wrapping of flow state should be rejected");
+    let errors = result.unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code.as_deref() == Some("E0427")),
+        "expected E0427, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn flow_state_ref_rejected() {
+    // 0.31.13 追加 A: `ref` borrowing of a flow state is rejected (E0427).
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let ref r = s0
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "ref borrowing of flow state should be rejected");
+    let errors = result.unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code.as_deref() == Some("E0427")),
+        "expected E0427, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn flow_state_shadowing_does_not_reset_consumption() {
+    // 0.31.13 追加 A: shadowing a consumed flow state variable does NOT
+    // clear the consumption record. The old variable remains consumed.
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let s1 = Counter::inc(s0)
+    let s0 = Zero { count: 99 }
+    let s2 = Counter::inc(s0)
+    0
+}
+"#;
+    // After shadowing removal, the second `Counter::inc(s0)` triggers E0423
+    // because the name "s0" is still marked as consumed from the first use.
+    // This is a known false positive that 0.31.16 (CFG place tracking) will fix.
+    let result = check_source(src);
+    assert!(
+        result.is_err(),
+        "shadowing should not reset consumption (conservative)"
+    );
+    let errors = result.unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code.as_deref() == Some("E0423")),
+        "expected E0423, got: {:?}",
+        errors
+    );
+}
+
 // ── FLOW-TURN-001: Atomic Turn — fails E + Rejected ──────────────────
 
 #[test]
