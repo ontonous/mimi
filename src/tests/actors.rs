@@ -353,3 +353,29 @@ func main() -> i32 {
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(2));
 }
+
+#[test]
+fn actor_runs_flow_rejects_mut_field() {
+    // v0.31.11: actors that `runs` a Flow must not have mut business fields.
+    let src = r#"
+flow Counter {
+    state Zero { n: i32 }
+    transition inc(Zero) -> Zero {
+        do { return Zero { n: self.n + 1 } }
+    }
+}
+
+actor CounterActor runs Counter {
+    mut count: i32 = 0;
+}
+
+func main() -> i32 {
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_err(),
+        "actor runs flow with mut field should be rejected"
+    );
+}
