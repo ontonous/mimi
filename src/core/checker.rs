@@ -123,6 +123,10 @@ pub(crate) struct Checker<'a> {
     pub(crate) mutate_params: std::collections::HashSet<String>,
     /// v0.29.27: nesting depth of `pinned { }` blocks (FFI anchor).
     pub(crate) in_pinned_depth: usize,
+    /// 0.31.17: lambda nesting depth + parameter names per level.
+    /// Used to reject flow state captures in closures.
+    pub(crate) lambda_depth: usize,
+    pub(crate) lambda_param_names: Vec<std::collections::HashSet<String>>,
     /// Callable identity currently producing checker-finalized typed artifacts.
     pub(crate) current_callable_owner: Option<super::NodeId>,
     /// v0.31.2: Typed artifacts — schemes recorded during generalization.
@@ -258,6 +262,8 @@ impl<'a> Checker<'a> {
             view_params: std::collections::HashSet::new(),
             mutate_params: std::collections::HashSet::new(),
             in_pinned_depth: 0,
+            lambda_depth: 0,
+            lambda_param_names: Vec::new(),
             current_callable_owner: None,
             schemes: HashMap::new(),
             zonked_func_types: HashMap::new(),

@@ -26,6 +26,41 @@ impl<'a> Checker<'a> {
             );
             // Fall through to normal lookup so the type is still available.
         }
+        // 0.31.17: reject flow state captures in closures. A lambda that
+        // references a flow state variable from an outer scope would create
+        // an implicit ownership transfer, violating linearity.
+        if self.lambda_depth > 0 {
+            let is_lambda_param = self
+                .lambda_param_names
+                .iter()
+                .any(|params| params.contains(name));
+            if !is_lambda_param {
+                // Check if the variable's type is a flow state.
+                for scope in scopes.iter().rev() {
+                    if let Some(ty) = scope.get(name) {
+                        if self.is_flow_state_type(ty) {
+                            self.errors.push(
+                                Diagnostic::error_code(
+                                    crate::diagnostic::codes::E0427,
+                                    format!(
+                                        "linear resource '{}' of type {} cannot be captured by closure; \
+                                         pass it as an explicit parameter instead",
+                                        name,
+                                        crate::core::fmt_type(ty),
+                                    ),
+                                    self.diagnostic_span(),
+                                )
+                                .with_help(
+                                    "flow states are linear: capturing them in a closure creates \
+                                     an implicit ownership transfer; pass the state as a lambda parameter",
+                                ),
+                            );
+                        }
+                        break;
+                    }
+                }
+            }
+        }
         for scope in scopes.iter().rev() {
             if let Some(t) = scope.get(name) {
                 // Arch-4: resolve TypeVars before returning so downstream unify calls

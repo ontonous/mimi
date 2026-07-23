@@ -255,6 +255,19 @@ impl<'a> Checker<'a> {
         let mut elem_ty = Type::TypeVar(self.unification.fresh_var());
         for (i, e) in elems.iter().enumerate() {
             let t = self.infer_expr(e, scopes);
+            // 0.31.17: flow states are linear — they cannot be stored in
+            // collections. A list implies multiple accessible copies, which
+            // violates exactly-once consumption.
+            if self.is_flow_state_type(&t) {
+                self.emit_code(
+                    crate::diagnostic::codes::E0427,
+                    format!(
+                        "linear resource of type {} cannot be stored in a list; \
+                         flow states must have exactly one owner",
+                        fmt_type(&t),
+                    ),
+                );
+            }
             if i == 0 {
                 elem_ty = t;
             } else if self.unification.unify(&elem_ty, &t).is_err() {
@@ -291,7 +304,18 @@ impl<'a> Checker<'a> {
                     ),
                 );
             }
-            self.infer_expr(v, scopes);
+            let val_ty = self.infer_expr(v, scopes);
+            // 0.31.17: flow states cannot be map values.
+            if self.is_flow_state_type(&val_ty) {
+                self.emit_code(
+                    crate::diagnostic::codes::E0427,
+                    format!(
+                        "linear resource of type {} cannot be stored in a map; \
+                         flow states must have exactly one owner",
+                        fmt_type(&val_ty),
+                    ),
+                );
+            }
         }
         Type::Name("Record".into(), vec![])
     }
@@ -304,6 +328,17 @@ impl<'a> Checker<'a> {
         let mut elem_ty = Type::TypeVar(self.unification.fresh_var());
         for (i, e) in elems.iter().enumerate() {
             let t = self.infer_expr(e, scopes);
+            // 0.31.17: flow states cannot be set elements.
+            if self.is_flow_state_type(&t) {
+                self.emit_code(
+                    crate::diagnostic::codes::E0427,
+                    format!(
+                        "linear resource of type {} cannot be stored in a set; \
+                         flow states must have exactly one owner",
+                        fmt_type(&t),
+                    ),
+                );
+            }
             if i == 0 {
                 elem_ty = t;
             } else if self.unification.unify(&elem_ty, &t).is_err() {

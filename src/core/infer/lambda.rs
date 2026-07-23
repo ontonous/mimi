@@ -24,6 +24,11 @@ impl<'a> Checker<'a> {
             })
             .collect();
         scopes.push(HashMap::new());
+        // 0.31.17: track lambda parameter names for flow state capture rejection.
+        let param_name_set: std::collections::HashSet<String> =
+            params.iter().map(|p| p.name.clone()).collect();
+        self.lambda_depth += 1;
+        self.lambda_param_names.push(param_name_set);
         for (p, ty) in params.iter().zip(param_types.iter()) {
             if let Some(s) = scopes.last_mut() {
                 s.insert(p.name.clone(), ty.clone());
@@ -55,6 +60,8 @@ impl<'a> Checker<'a> {
             }
         }
         scopes.pop();
+        self.lambda_depth -= 1;
+        self.lambda_param_names.pop();
         let return_type = match ret {
             Some(r) => {
                 let rty = self.resolve_type(r);
