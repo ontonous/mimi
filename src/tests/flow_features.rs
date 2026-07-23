@@ -1258,13 +1258,15 @@ func main() -> i32 {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "alias bypass in protocol impl should be rejected");
+    assert!(
+        result.is_err(),
+        "alias bypass in protocol impl should be rejected"
+    );
     let errors = result.unwrap_err();
     assert!(
         errors
             .iter()
-            .any(|d| d.code.as_deref() == Some("E0423")
-                && d.message.contains("alias")),
+            .any(|d| d.code.as_deref() == Some("E0423") && d.message.contains("alias")),
         "expected E0423 with alias message, got: {:?}",
         errors
     );
@@ -1332,8 +1334,7 @@ flow BadWriter {
     assert!(
         errors
             .iter()
-            .any(|d| d.code.as_deref() == Some("E0427")
-                || d.code.as_deref() == Some("E0209")),
+            .any(|d| d.code.as_deref() == Some("E0427") || d.code.as_deref() == Some("E0209")),
         "expected E0427 or E0209, got: {:?}",
         errors
     );
@@ -1362,13 +1363,15 @@ func main() -> i32 {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "closure capture of flow state should be rejected");
+    assert!(
+        result.is_err(),
+        "closure capture of flow state should be rejected"
+    );
     let errors = result.unwrap_err();
     assert!(
-        errors
-            .iter()
-            .any(|d| d.code.as_deref() == Some("E0427")
-                && d.message.contains("captured by closure")),
+        errors.iter().any(
+            |d| d.code.as_deref() == Some("E0427") && d.message.contains("captured by closure")
+        ),
         "expected E0427 closure capture error, got: {:?}",
         errors
     );
@@ -1425,8 +1428,7 @@ func main() -> i32 {
     assert!(
         errors
             .iter()
-            .any(|d| d.code.as_deref() == Some("E0427")
-                && d.message.contains("list")),
+            .any(|d| d.code.as_deref() == Some("E0427") && d.message.contains("list")),
         "expected E0427 list error, got: {:?}",
         errors
     );
@@ -5857,8 +5859,7 @@ func main() -> i32 {
     assert!(
         errors
             .iter()
-            .any(|d| d.code.as_deref() == Some("E0423")
-                && d.message.contains("alias")),
+            .any(|d| d.code.as_deref() == Some("E0423") && d.message.contains("alias")),
         "expected E0423 with alias message, got: {:?}",
         errors
     );
@@ -5909,12 +5910,13 @@ func main() -> i32 {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "shared wrapping of flow state should be rejected");
+    assert!(
+        result.is_err(),
+        "shared wrapping of flow state should be rejected"
+    );
     let errors = result.unwrap_err();
     assert!(
-        errors
-            .iter()
-            .any(|d| d.code.as_deref() == Some("E0427")),
+        errors.iter().any(|d| d.code.as_deref() == Some("E0427")),
         "expected E0427, got: {:?}",
         errors
     );
@@ -5938,12 +5940,13 @@ func main() -> i32 {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "ref borrowing of flow state should be rejected");
+    assert!(
+        result.is_err(),
+        "ref borrowing of flow state should be rejected"
+    );
     let errors = result.unwrap_err();
     assert!(
-        errors
-            .iter()
-            .any(|d| d.code.as_deref() == Some("E0427")),
+        errors.iter().any(|d| d.code.as_deref() == Some("E0427")),
         "expected E0427, got: {:?}",
         errors
     );
@@ -5979,9 +5982,7 @@ func main() -> i32 {
     );
     let errors = result.unwrap_err();
     assert!(
-        errors
-            .iter()
-            .any(|d| d.code.as_deref() == Some("E0423")),
+        errors.iter().any(|d| d.code.as_deref() == Some("E0423")),
         "expected E0423, got: {:?}",
         errors
     );
@@ -6495,6 +6496,40 @@ func main() -> i32 {
     assert_eq!(native.trim(), "99");
 }
 
+// ── 0.31.19 攻击审查: tuple × Flow ─────────────────────────────────
+
+#[test]
+fn flow_state_tuple_rejected() {
+    // 0.31.19 攻击审查: flow states cannot be stored in tuples (E0427).
+    // Tuple construction implies the element is accessible by index,
+    // violating exactly-once consumption.
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let t = (s0, 42)
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "flow state in tuple should be rejected");
+    let errors = result.unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code.as_deref() == Some("E0427")
+                && d.message.contains("tuple")),
+        "expected E0427 with tuple message, got: {:?}",
+        errors
+    );
+}
+
 // ── 0.31.17: 高阶交互闭环 — 集合 × Flow（补充）────────────────────
 
 #[test]
@@ -6514,13 +6549,15 @@ func main() -> i32 {
 }
 "#;
     let result = check_source(src);
-    assert!(result.is_err(), "flow state as map value should be rejected");
+    assert!(
+        result.is_err(),
+        "flow state as map value should be rejected"
+    );
     let errors = result.unwrap_err();
     assert!(
         errors
             .iter()
-            .any(|d| d.code.as_deref() == Some("E0427")
-                && d.message.contains("map")),
+            .any(|d| d.code.as_deref() == Some("E0427") && d.message.contains("map")),
         "expected E0427 with map message, got: {:?}",
         errors
     );
