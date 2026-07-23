@@ -38,12 +38,20 @@ Span/Origin -> HM -> CFG/ownership -> CheckedProgram/Resolved IR
 | 外部版本 | 内部 sprint | 阶段主题 |
 |---|---|---|
 | **0.1.0** | 0.31.0–0.31.7 | 基线稳定：CheckedProgram、Span、HM、CFG、Resolved IR、consumer 迁移、止血 I/II |
-| **0.1.1** | 0.31.8–0.31.16 | Flow 核心闭环：generation、atomic turn、Fault、Actor、Session、资源、Protocol、Trace、审查 |
-| **0.1.2** | 0.31.17–0.31.21 | 语言冻结：语法收敛、Verification IR、VC、artifact、攻击审查 |
-| **0.1.3** | 0.31.22–0.31.28 | Component 边界：Component IR、ABI、callback/async、Wire、Rust/TS SDK、审查 |
-| **0.1.4** | 0.31.29–0.31.33 | 自举与工具：MimiSpec/HM 自举、迁移、fmt/LSP/probes、experimental 隔离 |
-| **0.1.5** | 0.31.34–0.31.37 | 冻结：DEBUG、最终敌对审查、RC1、RC2 |
+| **0.1.1** | 0.31.8–0.31.37（全部） | 内部路线图 0.31 彻底完成：Flow 核心闭环、语言冻结、Component 边界、自举与工具、冻结审查、RC |
 | **1.0.0** | — | 发布：API 冻结 + 迁移指南 + 生态基线 |
+
+> **发布纪律**：0.1.1 是唯一一个覆盖完整内部路线图的长周期版本。内部 30 个 sprint（0.31.8–0.31.37）全部验收通过后才打 `0.1.1` tag。期间不打任何中间外部 tag。
+>
+> 内部按阶段划分里程碑（仅用于进度追踪，不打 tag）：
+>
+> | 阶段 | 内部 sprint | 主题 |
+> |------|------------|------|
+> | Phase A | 0.31.8–0.31.16 | Flow 核心闭环：原子 turn、Fault、Actor runs Flow、Session 线性、exactly-once、攻击审查 I |
+> | Phase B | 0.31.17–0.31.21 | 语言冻结：语法收敛、Verification IR fail-closed、VC artifact、攻击审查 II |
+> | Phase C | 0.31.22–0.31.28 | Component 边界：Component IR、Native ABI、Wire Schema、Rust/TS SDK conformance |
+> | Phase D | 0.31.29–0.31.33 | 自举与工具：MimiSpec/HM 自举、迁移、fmt/LSP/probes、experimental 隔离 |
+> | Phase E | 0.31.34–0.31.37 | 冻结：DEBUG、最终敌对审查、RC1、RC2 |
 
 详细版本及 requirement 分配见 `roadmap.toml` 和 `requirements-matrix.md`。
 
