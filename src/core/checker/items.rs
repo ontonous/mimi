@@ -845,6 +845,10 @@ impl<'a> Checker<'a> {
                 }
                 for state in &f.states {
                     let state_key = format!("{}::{}", qualified, state.name);
+                    // 0.31.13 追加 A: register flow state type names for linear
+                    // alias tracking and shared/borrow rejection.
+                    self.flow_state_type_names.insert(state_key.clone());
+                    self.flow_state_type_names.insert(state.name.clone());
                     let payload_types = state
                         .payload
                         .as_ref()

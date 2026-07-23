@@ -696,6 +696,22 @@ impl<'a> Checker<'a> {
                     }
                     None => {
                         if *ref_ {
+                            // 0.31.13 追加 A: linear resources cannot be borrowed
+                            // via `ref` — borrowing implies the original remains
+                            // usable, violating exactly-once consumption.
+                            if self.is_linear_surface_type(&init_ty) {
+                                if let PatternKind::Variable(name) = &pat.kind {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0427,
+                                        format!(
+                                            "linear resource '{}' of type {} cannot be borrowed with `ref`; \
+                                             linear resources must be moved, not borrowed",
+                                            name,
+                                            fmt_type(&init_ty),
+                                        ),
+                                    );
+                                }
+                            }
                             // ref variables have reference type
                             Type::Ref(None, Box::new(init_ty))
                         } else {
@@ -720,9 +736,11 @@ impl<'a> Checker<'a> {
                     if let Some(s) = self.mut_vars.last_mut() {
                         s.insert(name.clone(), *mut_);
                     }
-                    // FLOW-IDENTITY-001 linear generation: re-declaring a variable
-                    // (shadowing) produces a fresh binding — clear consumption.
-                    self.consumed_flow_vars.remove(name);
+                    // 0.31.13 追加 A: shadowing does NOT reset linear consumption.
+                    // The old consumed_flow_vars.remove(name) allowed bypassing
+                    // linearity via `let s0 = ...; Flow::inc(s0); let s0 = ...`.
+                    // CFG-based place tracking (0.31.16) will handle shadowing
+                    // correctly; until then, conservative = no clear.
                 }
                 self.check_pattern(pat, &final_ty, scopes);
                 // v0.29.49: track multi-target transition results.
@@ -765,6 +783,22 @@ impl<'a> Checker<'a> {
                             if let Some(residual) = self.session_residuals.remove(src) {
                                 self.consumed_session_vars.insert(src.clone());
                                 self.session_residuals.insert(name.clone(), residual);
+                            }
+                        }
+                    }
+                    // 0.31.13 追加 A: flow state alias tracking — `let b = s0`
+                    // where s0 is a flow state consumes s0 (linear transfer).
+                    // Mirrors the session E0426 mechanism: the original variable
+                    // is marked consumed so subsequent uses trigger E0423.
+                    if let Some(init_expr) = init {
+                        if let Expr::Ident(src) = init_expr.unlocated() {
+                            if self.is_flow_state_type(&final_ty)
+                                && !self.consumed_flow_vars.contains_key(src)
+                            {
+                                self.consumed_flow_vars.insert(
+                                    src.clone(),
+                                    format!("alias to '{}'", name),
+                                );
                             }
                         }
                     }
@@ -1037,6 +1071,21 @@ impl<'a> Checker<'a> {
                 init,
             } => {
                 let init_ty = self.infer_expr(init, scopes);
+                // 0.31.13 追加 A: linear resources (flow states, capabilities,
+                // session channels) cannot be wrapped in shared/local_shared/weak.
+                // Shared ownership implies multiple references, violating linearity.
+                if self.is_linear_surface_type(&init_ty) {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0427,
+                        format!(
+                            "linear resource '{}' of type {} cannot be wrapped in {:?}; \
+                             linear resources must have exactly one owner",
+                            name,
+                            fmt_type(&init_ty),
+                            kind,
+                        ),
+                    );
+                }
                 let final_ty = match kind {
                     SharedKind::Shared => Type::Shared(Box::new(init_ty.clone())),
                     SharedKind::LocalShared => Type::LocalShared(Box::new(init_ty.clone())),

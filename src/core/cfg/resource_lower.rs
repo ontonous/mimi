@@ -107,7 +107,15 @@ impl<'a> ActionEmitter<'a> {
     }
 
     fn build_resource_catalog(&mut self) {
-        for parameter in &self.signature.parameters {
+        // 0.31.13 追加 A: transition `self` (first parameter) is implicitly
+        // consumed by the transition mechanism — the source state is transformed
+        // into the target state. Don't track it as a linear resource that must
+        // be explicitly consumed in the body.
+        let is_transition = self.signature.owner.0.starts_with("transition:");
+        for (idx, parameter) in self.signature.parameters.iter().enumerate() {
+            if is_transition && idx == 0 {
+                continue;
+            }
             if !self.is_linear(&parameter.ty) {
                 continue;
             }
@@ -262,7 +270,13 @@ impl<'a> ActionEmitter<'a> {
 
     fn introduce_parameters(&mut self) {
         let entry = self.entry_location();
-        for parameter in &self.signature.parameters {
+        // 0.31.13 追加 A: transition `self` (first parameter) is implicitly
+        // consumed by the transition mechanism — skip Introduce action.
+        let is_transition = self.signature.owner.0.starts_with("transition:");
+        for (idx, parameter) in self.signature.parameters.iter().enumerate() {
+            if is_transition && idx == 0 {
+                continue;
+            }
             if !self.is_linear(&parameter.ty) {
                 continue;
             }
@@ -695,8 +709,15 @@ impl<'a> ActionEmitter<'a> {
     fn is_linear(&self, ty: &ResolvedTypeId) -> bool {
         match self.types.get(ty) {
             Some(ResolvedType::Capability(_)) => true,
+            // 0.31.13 追加 A: FlowStateSet and individual flow state Nominal
+            // types ("state:<flow>::<state>") are NOT yet included in is_linear().
+            // Full CFG dataflow for flow states requires terminal state handling,
+            // drop semantics, and transition self consumption — all 0.31.16 scope.
+            // Checker-level alias tracking (consumed_flow_vars + alias transfer)
+            // covers the immediate safety gap until then.
             Some(ResolvedType::Nominal { item, .. }) => {
-                item.as_str().ends_with("SessionChan") || item.as_str().ends_with("session_chan")
+                item.as_str().ends_with("SessionChan")
+                    || item.as_str().ends_with("session_chan")
             }
             Some(ResolvedType::Newtype { inner, .. }) => self.is_linear(inner),
             Some(ResolvedType::Tuple(elements)) => {

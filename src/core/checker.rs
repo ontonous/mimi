@@ -82,6 +82,10 @@ pub(crate) struct Checker<'a> {
     /// Used to distinguish legitimate initial-state construction from state forgery.
     /// Qualified names: "FlowName::StateName".
     pub(crate) flow_root_states: std::collections::HashSet<String>,
+    /// 0.31.13 追加 A: all flow state type names (qualified `flow::F::S` and
+    /// unqualified `S`). Used to identify flow state types for alias tracking
+    /// and shared/borrow rejection.
+    pub(crate) flow_state_type_names: std::collections::HashSet<String>,
     /// FLOW-IDENTITY-001 linear generation: variables consumed by flow transition
     /// calls. Maps variable name → transition description (e.g. "Counter::inc")
     /// for diagnostic messages. Cleared at each callable boundary.
@@ -241,6 +245,7 @@ impl<'a> Checker<'a> {
             current_ret: None,
             flow_return_targets: Vec::new(),
             flow_root_states: std::collections::HashSet::new(),
+            flow_state_type_names: std::collections::HashSet::new(),
             consumed_flow_vars: HashMap::new(),
             consumed_session_vars: std::collections::HashSet::new(),
             transition_fails: None,
@@ -352,6 +357,31 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn end_callable(&mut self, previous: Option<super::NodeId>) {
         self.current_callable_owner = previous;
+    }
+
+    /// 0.31.13 追加 A: check whether a surface `Type` refers to a flow state.
+    /// Uses the `flow_state_type_names` set populated during flow registration.
+    pub(crate) fn is_flow_state_type(&self, ty: &crate::ast::Type) -> bool {
+        match ty.unlocated() {
+            crate::ast::Type::Name(name, _) => self.flow_state_type_names.contains(name),
+            crate::ast::Type::Located { ty, .. } => self.is_flow_state_type(ty),
+            _ => false,
+        }
+    }
+
+    /// 0.31.13 追加 A: check whether a surface `Type` is a linear resource
+    /// (flow state, capability, or session channel). Used to reject
+    /// shared/borrow wrapping of linear types.
+    pub(crate) fn is_linear_surface_type(&self, ty: &crate::ast::Type) -> bool {
+        match ty.unlocated() {
+            crate::ast::Type::Cap(_) => true,
+            crate::ast::Type::Name(name, args) => {
+                self.flow_state_type_names.contains(name)
+                    || ((name == "SessionChan" || name == "session_chan") && !args.is_empty())
+            }
+            crate::ast::Type::Located { ty, .. } => self.is_linear_surface_type(ty),
+            _ => false,
+        }
     }
 
     /// Set the current position for fallback error spans.

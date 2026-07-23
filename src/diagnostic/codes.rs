@@ -125,6 +125,7 @@ pub const E0423: &str = "E0423"; // flow state use-after-transition (linear gene
 pub const E0424: &str = "E0424"; // ? in transition body without `fails E` declaration
 pub const E0425: &str = "E0425"; // session endpoint with non-end residual leaves scope
 pub const E0426: &str = "E0426"; // session endpoint use-after-alias (linear consumption)
+pub const E0427: &str = "E0427"; // linear type cannot be shared/borrowed (shared/local_shared/weak/&T)
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
