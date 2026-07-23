@@ -5851,3 +5851,63 @@ func main() -> i32 {
         "sparse flow should reject undefined (state, event) pair"
     );
 }
+
+#[test]
+fn flow_explicit_reset_overrides_system_verb() {
+    // v0.31.10: User-defined reset(Fault) -> State overrides the auto-injected
+    // system verb. The user body is used instead of the default rebuild-root.
+    let src = r#"
+flow Counter {
+    state Zero { n: i32 }
+    state Positive { n: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { n: 1 } }
+    }
+    transition reset(Fault) -> Zero {
+        do { return Zero { n: 42 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Positive { n: 5 }
+    let f = Counter::inc(s0)
+    let z = Counter::reset(f)
+    println(z.n)
+    0
+}
+"#;
+    // User-defined reset returns n=42 (not the default n=0)
+    let interp_result = run_source_result(src);
+    assert_eq!(interp_result, Ok(interp::Value::Int(0)));
+    let native = compile_and_run(src).expect("codegen explicit reset");
+    assert_eq!(native.trim(), "42");
+}
+
+#[test]
+fn flow_explicit_recover_overrides_system_verb() {
+    // v0.31.10: User-defined recover(Fault) -> State overrides the auto-injected
+    // system verb. The user body is used instead of the default rebuild-root.
+    let src = r#"
+flow Svc {
+    persistent state Config { retries: i32 }
+    state Running { n: i32 }
+    transition start(Config) -> Running {
+        do { return Running { n: self.retries } }
+    }
+    transition recover(Fault) -> Config {
+        do { return Config { retries: 99 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Running { n: 5 }
+    let f = Svc::start(s0)
+    let c = Svc::recover(f)
+    println(c.retries)
+    0
+}
+"#;
+    // User-defined recover returns retries=99 (not the persistent shadow)
+    let interp_result = run_source_result(src);
+    assert_eq!(interp_result, Ok(interp::Value::Int(0)));
+    let native = compile_and_run(src).expect("codegen explicit recover");
+    assert_eq!(native.trim(), "99");
+}
