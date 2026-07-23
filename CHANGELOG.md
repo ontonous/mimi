@@ -106,6 +106,13 @@
 - **Channel/Mutex/Atomic 遗留**：builtin 函数（整数 handle），非 ResolvedType Nominal，`is_linear()` 无法覆盖，留给后续类型表示升级。
 - 4104 测试全绿。
 
+### 0.31.17 高阶交互闭环（完成）
+
+- **闭包 × Flow**：lambda 内引用外层 flow state 变量 → E0427 拒绝（"linear resource cannot be captured by closure"）。`lambda_depth` + `lambda_param_names` 追踪，区分参数和 capture。Lambda 参数中的 flow state 合法。
+- **集合 × Flow**：`[s0, s1]` list literal → E0427 拒绝。Map literal value 为 flow state → E0427 拒绝。
+- **修复既有坏测试**：`flow_state_lambda_param_accepted`（fn 类型语法不合法）、`flow_state_in_set_rejected`（set{} 语法不存在）。
+- 4108 测试全绿。
+
 ## [0.1.0] — 基线稳定 - 2026-07-23
 
 ### 止血 II 收尾 + 版本管理切换 + 架构重构
