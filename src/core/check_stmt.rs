@@ -1587,7 +1587,10 @@ impl<'a> Checker<'a> {
                 // FLOW-TURN-001: `become Target { ... }` is an explicit transition
                 // terminal equivalent to `return Target { ... }`.
                 let ty = self.infer_expr(e, scopes);
-                if !self.unification.unify(&ty, ret).is_ok() {
+                // Skip type check for multi-target transitions where ret is unit
+                // (the actual target is determined at runtime by the become expression).
+                let is_multi_target = matches!(ret.unlocated(), Type::Name(n, _) if n == "unit");
+                if !is_multi_target && !self.unification.unify(&ty, ret).is_ok() {
                     self.emit_code(
                         crate::diagnostic::codes::E0209,
                         format!(

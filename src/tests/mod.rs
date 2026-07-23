@@ -373,6 +373,36 @@ pub(crate) fn check_source_warnings(src: &str) -> Vec<crate::diagnostic::Diagnos
     checker.warnings
 }
 
+/// H3: Run checker + interpreter. Catches checker bugs that `run_source_result`
+/// silently bypasses (e.g. E0255 false positives for become/stay).
+pub(crate) fn checked_run_source_result(src: &str) -> Result<interp::Value, String> {
+    let file = parse(src);
+    core::check(&file).map_err(|diags| {
+        diags
+            .iter()
+            .map(|d| format!("{}", d))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    let mut interp = interp::Interpreter::new(&file);
+    interp.verify_contracts = true;
+    interp.run().map_err(|e| e.message().to_string())
+}
+
+/// H3: Run checker + codegen + native execution. Catches checker bugs that
+/// `compile_and_run` silently bypasses.
+pub(crate) fn checked_compile_and_run(src: &str) -> Result<String, String> {
+    let file = parse(src);
+    core::check(&file).map_err(|diags| {
+        diags
+            .iter()
+            .map(|d| format!("{}", d))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    compile_and_run(src)
+}
+
 /// End-to-end codegen test: compile Mimi source -> LLVM -> native binary -> execute -> return stdout
 /// Requires `cc` and `ld` on PATH. Skips test if linker is unavailable.
 static E2E_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
