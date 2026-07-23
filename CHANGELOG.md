@@ -67,6 +67,12 @@
 - 3 个新测试：session_double_close_rejected、session_branch_partial_consume_rejected、session_endpoint_move_to_function_rejected。
 - 待实现：cross-turn exactly-once（Flow transition 间资源跟踪）、Fault path 资源清理。
 
+### 0.31.14 Static Protocol Stable（进行中）
+
+- **移除 deprecated `protocol_methods`**：spec 标记 `[removed]`，从 builtins/inference/codegen/interpreter 全部清除。Protocol 是纯编译期拓扑检查，不需要运行时反射。
+- **Protocol 测试迁移**：4 个双后端测试迁移到 checked helper。
+- 待实现：permission/effect 约束检查、fault 暴露策略、版本握手（需 Component IR，Phase C）。
+
 ## [0.1.0] — 基线稳定 - 2026-07-23
 
 ### 止血 II 收尾 + 版本管理切换 + 架构重构
