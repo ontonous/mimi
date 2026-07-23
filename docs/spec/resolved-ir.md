@@ -101,7 +101,7 @@ arguments. Places use stable local/field identities and typed projections.
 Permission, effect, error-propagation target, Session residual before/after, and
 node-local backend requirements are checker artifacts, not backend inference.
 
-Legacy syntax accepted before the 0.31.16 migration is normalized into these
+Legacy syntax accepted before the 0.31.20 migration is normalized into these
 canonical nodes. No executable consumer receives body contracts, a single-layer
 `do`, `shared let`, or another compatibility-only Surface node.
 
