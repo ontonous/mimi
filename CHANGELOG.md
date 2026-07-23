@@ -106,6 +106,30 @@
 - **Channel/Mutex/Atomic 遗留**：builtin 函数（整数 handle），非 ResolvedType Nominal，`is_linear()` 无法覆盖，留给后续类型表示升级。
 - 4104 测试全绿。
 
+### 0.31.19 攻击审查 I（完成）
+
+- **审查范围**：0.31.16–18 闭环后的地基层（Flow 线性完备性、generation 失效、Actor×Flow 边界、Session×Flow 交互、双后端一致性、错误信息）。
+- **P1 发现 + 修复**：tuple 构造 flow state 不消费原变量（`let t = (s0, 42); Counter::inc(s0)` 通过）→ `infer_tuple_expr` 加 `is_flow_state_type` 检查，E0427 拒绝。
+- **线性完备性审查结果**（10 条攻击路径全部静态拒绝）：
+
+| 攻击路径 | 诊断 | 层 |
+|----------|------|-----|
+| use-after-transition | E0423 | checker |
+| alias chain (`let b = s0; let c = b; use(b)`) | E0423 | checker |
+| self-loop double-use | E0423 | checker |
+| function param move | E0304 | CFG |
+| closure capture | E0427 | checker |
+| list literal | E0427 | checker |
+| map value | E0427 | checker |
+| **tuple construction** | **E0427** | **checker (本次修复)** |
+| shared/ref wrapping | E0427 | checker |
+| shadowing no-reset | E0423 | checker |
+
+- **错误信息质量**：E0423 带 transition 名 + help 文本；E0427 带类型名 + help 文本；E0304 (CFG) 无 transition 名（consumed_flow_vars 诊断增强层补充）。
+- **Known limitation**：Channel/Mutex/Atomic 非 ResolvedType Nominal，is_linear() 无法覆盖；consumed_flow_vars 名字追踪保留为诊断层。
+- **P0 = 0**。审查报告归档于 CHANGELOG。
+- 4109 测试全绿。
+
 ### 0.31.18 证据同步与回归扫描（完成）
 
 - **language-support.toml 全面更新**：implementation_version 更新至 0.1.1-dev (sprint 0.31.17)，8 个 requirement evidence 更新。
