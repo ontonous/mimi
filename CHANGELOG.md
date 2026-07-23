@@ -96,6 +96,16 @@
   - 3 个新单元测试。4104 测试全绿。
 - 待实现：session/actor trace 记录、双后端 trace 比较测试。
 
+### 0.31.16 Flow 状态 CFG 级线性（核心完成）
+
+- **`is_linear()` 纳入 Flow 状态**：`FlowStateSet`（multi-target 结果）和 `state:` 前缀 Nominal（individual flow state）在 CFG dataflow 中是线性资源。
+- **Auto-droppable**：Flow 状态代表数据，scope exit 时可安全丢弃（与 Cap/SessionChan 必须显式消费不同）。`ActionEmitter` 收集 flow state 局部变量作为 droppable 集合，`validate_return_resources` 跳过。
+- **Transition `self` 隐式消费**：`build_resource_catalog` 和 `introduce_parameters` 跳过 transition 首参。
+- **`_` 前缀 auto-drop**：`_d` 等 intentionally unused 变量不报 E0256。
+- **`consumed_flow_vars` 保留为诊断增强层**：E0423 带 transition 名（比 CFG 的 E0304 更友好），CFG dataflow 是强制层。
+- **Channel/Mutex/Atomic 遗留**：builtin 函数（整数 handle），非 ResolvedType Nominal，`is_linear()` 无法覆盖，留给后续类型表示升级。
+- 4104 测试全绿。
+
 ## [0.1.0] — 基线稳定 - 2026-07-23
 
 ### 止血 II 收尾 + 版本管理切换 + 架构重构
