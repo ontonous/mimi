@@ -244,7 +244,27 @@ impl<'a> Checker<'a> {
         elems: &[Expr],
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        Type::Tuple(elems.iter().map(|e| self.infer_expr(e, scopes)).collect())
+        let types: Vec<Type> = elems
+            .iter()
+            .map(|e| {
+                let t = self.infer_expr(e, scopes);
+                // 0.31.19 攻击审查: flow states cannot be stored in tuples.
+                // A tuple implies the element is accessible by index, which
+                // violates exactly-once consumption.
+                if self.is_flow_state_type(&t) {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0427,
+                        format!(
+                            "linear resource of type {} cannot be stored in a tuple; \
+                             flow states must have exactly one owner",
+                            fmt_type(&t),
+                        ),
+                    );
+                }
+                t
+            })
+            .collect();
+        Type::Tuple(types)
     }
 
     pub(in crate::core) fn infer_list_expr(
