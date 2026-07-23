@@ -626,6 +626,7 @@ impl<'a> Interpreter<'a> {
                             vec![Value::Tuple(vec![source, rejected_val])],
                         ));
                     }
+                    return Ok(Value::Variant("Ok".to_string(), vec![v]));
                 }
                 v
             }

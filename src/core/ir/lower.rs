@@ -66,6 +66,7 @@ pub struct FunctionBodyInput<'a> {
     pub types: &'a ResolvedTypeTable,
     pub node_meta: &'a HashMap<NodeId, NodeMeta>,
     pub sources: &'a SourceRegistry,
+    pub transition_fails: bool,
 }
 
 /// Lower the structural core of a checked function without re-running name or
@@ -144,6 +145,7 @@ fn lower_function_body_with_captures(
         lambda_contexts: Vec::new(),
         scopes: vec![capture_scope],
         nested_environments: BTreeMap::new(),
+        transition_fails: input.transition_fails,
     };
     lowerer.install_parameters()?;
     lowerer.lower_default_values()?;
@@ -222,6 +224,7 @@ pub fn lower_checked_function_bodies(
                 types: program.resolved_types(),
                 node_meta: program.node_meta(),
                 sources: &file.sources,
+                transition_fails: false,
             },
             captures,
         ) {
@@ -316,6 +319,7 @@ pub fn lower_checked_transition_bodies(
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
+            transition_fails: transition.fails.is_some(),
         }) {
             Ok(body) => {
                 bodies.insert(owner, body);
@@ -535,6 +539,7 @@ struct BodyLowerer<'a> {
     lambda_contexts: Vec<LambdaCaptureContext>,
     scopes: Vec<BTreeMap<String, ResolvedLocalId>>,
     nested_environments: BTreeMap<NodeId, BTreeMap<String, ResolvedLocalId>>,
+    transition_fails: bool,
 }
 
 struct LambdaCaptureContext {
@@ -603,6 +608,14 @@ impl BodyLowerer<'_> {
             }
         }
         Ok(())
+    }
+
+    fn transition_target_type(&self) -> ResolvedTypeId {
+        if let Some(ResolvedType::Result { ok, .. }) = self.types.get(&self.signature.result) {
+            ok.clone()
+        } else {
+            self.signature.result.clone()
+        }
     }
 
     fn lower_block(
@@ -780,11 +793,14 @@ impl BodyLowerer<'_> {
                     .as_ref()
                     .map(|expr| self.lower_expr(expr, &format!("{role}.value")))
                     .transpose()?;
+                let expected = if self.transition_fails {
+                    self.transition_target_type()
+                } else {
+                    self.signature.result.clone()
+                };
                 let conversion = value
                     .as_ref()
-                    .map(|value| {
-                        self.implicit_conversion(&node_id, &value.ty, &self.signature.result)
-                    })
+                    .map(|value| self.implicit_conversion(&node_id, &value.ty, &expected))
                     .transpose()?;
                 ResolvedStmtKind::Return { value, conversion }
             }
@@ -4868,6 +4884,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
+                transition_fails: false,
         })
         .expect("lower body");
 
@@ -4913,6 +4930,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
+                transition_fails: false,
         })
         .expect_err("missing type must fail");
         assert!(errors
@@ -4950,6 +4968,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
+                transition_fails: false,
         })
         .expect("lower body");
 
@@ -5001,6 +5020,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
+                transition_fails: false,
         })
         .expect("lower body");
 
@@ -5048,6 +5068,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
+                transition_fails: false,
         })
         .expect("lower body");
 
@@ -5189,6 +5210,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
+                transition_fails: false,
         })
         .expect("lower field load");
         let ResolvedExprKind::Load(place) = &body.root.result.as_ref().unwrap().kind else {
@@ -5231,6 +5253,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
+                transition_fails: false,
         })
         .expect("lower match");
         let ResolvedExprKind::Match { arms, .. } = &body.root.result.as_ref().unwrap().kind else {
@@ -5279,6 +5302,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
+                transition_fails: false,
         })
         .expect("lower tuple binding");
         let ResolvedStmtKind::Bind { pattern, .. } = &body.root.statements[0].kind else {
@@ -5384,6 +5408,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
+                transition_fails: false,
         })
         .expect("lower record");
         let ResolvedExprKind::Record { fields, .. } = &body.root.result.as_ref().unwrap().kind

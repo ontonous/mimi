@@ -969,16 +969,27 @@ impl<'a> Checker<'a> {
                     } else {
                         Type::Name("unit".into(), vec![])
                     };
-                    self.funcs
-                        .insert(t_key.clone(), (params.clone(), ret.clone()));
                     // FLOW-TURN-001: store fails E type for return type wrapping.
                     if let Some(fails_ty) = &t.fails {
                         let resolved_fails = self.resolve_type(fails_ty);
-                        self.transition_fails_types.insert(t_key, resolved_fails);
+                        self.transition_fails_types.insert(t_key.clone(), resolved_fails.clone());
+                        let source_ty = Type::Name(t.from_state.clone(), vec![]);
+                        let wrapped_ret = Type::Result(
+                            Box::new(ret.clone()),
+                            Box::new(Type::Tuple(vec![source_ty, resolved_fails])),
+                        );
+                        self.funcs.insert(t_key.clone(), (params.clone(), wrapped_ret));
+                    } else {
+                        self.funcs.insert(t_key.clone(), (params.clone(), ret.clone()));
                     }
                     if transition_name_counts.get(t.name.as_str()).copied() == Some(1) {
                         let short_key = format!("{}::{}", qualified, t.name);
-                        self.funcs.insert(short_key, (params, ret));
+                        let short_ret = self
+                            .funcs
+                            .get(&t_key)
+                            .map(|(_, r)| r.clone())
+                            .unwrap_or(ret);
+                        self.funcs.insert(short_key, (params, short_ret));
                     }
                 }
             }

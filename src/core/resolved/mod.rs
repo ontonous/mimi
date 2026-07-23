@@ -379,6 +379,7 @@ pub struct ResolvedTransition {
     pub is_ffi_pinned: bool,
     pub origin: Origin,
     pub span: Span,
+    pub fails: Option<Type>,
 }
 
 #[derive(Debug, Clone)]
@@ -5569,6 +5570,7 @@ fn collect_flow(
             is_ffi_pinned: transition.is_ffi_pinned,
             origin: transition_origin,
             span,
+            fails: transition.fails.clone(),
         };
         flow_transition_ids.push(id.clone());
         if transitions.insert(id.clone(), resolved).is_some() {
@@ -7945,6 +7947,92 @@ fn build_canonical_function_signatures(
                     continue;
                 }
             }
+        };
+        let result = if let Some(fails_ty) = &transition.fails {
+            let source_type = Type::Name(
+                format!("{}::{}", transition.id.flow.0, transition.id.source.name),
+                Vec::new(),
+            );
+            let source_zonked = match ZonkedTy::from_resolved(source_type) {
+                Ok(ty) => ty,
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: transition '{}' fails source type is not zonked: {error}",
+                            transition.node_id.0
+                        ),
+                        transition.span,
+                    ));
+                    continue;
+                }
+            };
+            let source_id = match types.intern_zonked(&source_zonked, &capabilities, &mut resolve_name) {
+                Ok(ty) => ty,
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: transition '{}' fails source type is not canonical: {error}",
+                            transition.node_id.0
+                        ),
+                        transition.span,
+                    ));
+                    continue;
+                }
+            };
+            let fails_zonked = match ZonkedTy::from_resolved(fails_ty.clone()) {
+                Ok(ty) => ty,
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: transition '{}' fails error type is not zonked: {error}",
+                            transition.node_id.0
+                        ),
+                        transition.span,
+                    ));
+                    continue;
+                }
+            };
+            let fails_id = match types.intern_zonked(&fails_zonked, &capabilities, &mut resolve_name) {
+                Ok(ty) => ty,
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: transition '{}' fails error type is not canonical: {error}",
+                            transition.node_id.0
+                        ),
+                        transition.span,
+                    ));
+                    continue;
+                }
+            };
+            let error_tuple = match types.intern_resolved(crate::core::ir::ResolvedType::Tuple(vec![source_id, fails_id])) {
+                Ok(ty) => ty,
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: transition '{}' fails tuple type is not canonical: {error}",
+                            transition.node_id.0
+                        ),
+                        transition.span,
+                    ));
+                    continue;
+                }
+            };
+            match types.intern_resolved(crate::core::ir::ResolvedType::Result { ok: result, error: error_tuple }) {
+                Ok(ty) => ty,
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: transition '{}' fails Result type is not canonical: {error}",
+                            transition.node_id.0
+                        ),
+                        transition.span,
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            result
         };
         if let Some(expressions) = expression_types.get(&transition.node_id) {
             for (node_id, ty) in expressions {

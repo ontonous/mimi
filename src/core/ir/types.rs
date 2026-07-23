@@ -763,7 +763,7 @@ impl ResolvedTypeTable {
             .collect()
     }
 
-    fn intern_resolved(
+    pub fn intern_resolved(
         &mut self,
         resolved: ResolvedType,
     ) -> Result<ResolvedTypeId, ResolvedTypeError> {

@@ -5462,8 +5462,11 @@ func safe_div(a: i32, b: i32) -> Result<i32, string> {
 }
 func main() -> i32 {
     let s0 = Active { balance: 100 }
-    let s1 = Account::withdraw(s0, 5)
-    s1.balance
+    let r = Account::withdraw(s0, 5)
+    match r {
+        Ok(s1) => s1.balance,
+        Err(_) => 0 - 1,
+    }
 }
 "#;
     let result = check_source(src);
@@ -5524,8 +5527,11 @@ func safe_div(a: i32, b: i32) -> Result<i32, string> {
 }
 func main() -> i32 {
     let s0 = Active { balance: 100 }
-    let s1 = Account::withdraw(s0, 5)
-    s1.balance
+    let r = Account::withdraw(s0, 5)
+    match r {
+        Ok(s1) => s1.balance,
+        Err(_) => 0 - 1,
+    }
 }
 "#;
     let result = run_source_result(src);
