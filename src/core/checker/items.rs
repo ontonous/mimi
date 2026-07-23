@@ -1737,6 +1737,37 @@ impl<'a> Checker<'a> {
                                     ),
                                 );
                             }
+                            // 0.31.14 追加 A: protocol state payload linearity —
+                            // if the protocol declares a linear payload type (Cap,
+                            // SessionChan), the flow state field must also be linear.
+                            // Downgrading a linear payload to a non-linear type would
+                            // allow aliasing/copying the resource, breaking exactly-once.
+                            if has_field && self.is_linear_surface_type(&expected_ty) {
+                                let field_is_linear = flow_state
+                                    .payload
+                                    .as_ref()
+                                    .map(|fields| {
+                                        fields.iter().any(|field| {
+                                            field.name == *proto_payload_name
+                                                && self.is_linear_surface_type(
+                                                    &self.resolve_type(&field.ty),
+                                                )
+                                        })
+                                    })
+                                    .unwrap_or(false);
+                                if !field_is_linear {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0427,
+                                        format!(
+                                            "flow '{}' state '{}' payload field '{}: {}' must be linear \
+                                             to match protocol '{}' (linear resources cannot be downgraded)",
+                                            f.name, ps.name, proto_payload_name,
+                                            crate::core::fmt_type(&expected_ty),
+                                            proto_name,
+                                        ),
+                                    );
+                                }
+                            }
                         }
                     }
                     // 2. Verify flow defines all protocol transitions (topology cover).
