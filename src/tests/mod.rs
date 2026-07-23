@@ -405,6 +405,7 @@ pub(crate) fn checked_compile_and_run(src: &str) -> Result<String, String> {
 
 /// v0.31.15: Run interpreter with trace collection enabled.
 /// Returns (main return value, collected trace events).
+#[allow(dead_code)] // 0.31.18: infrastructure for dual-backend trace comparison (0.31.15 追加)
 pub(crate) fn run_source_with_trace(src: &str) -> (interp::Value, Vec<crate::trace::TraceEvent>) {
     let file = parse(src);
     let mut interp = interp::Interpreter::new(&file);
