@@ -20,8 +20,10 @@
 - **E0424**：transition 体内 `?` 无 `fails E` 声明时静态拒绝。
 - **Rejected 路径（解释器）**：`?` 失败时 transition 返回 `Err((source_payload, error))`，source generation 归还调用方。修复 `early_return` 泄漏 bug（transition 体内 `?` 的 `early_return` 不再穿透到调用方）。4 个新测试。
 - **Codegen fail-closed**：`fails E` transition 中 `?` 在 codegen 报 `CompileError::Unsupported`（E0722），防止静默产生错误行为。无 `?` 的 `fails E` transition 正常编译。
-- **`transition_fails_types` 基础设施**：Checker 存储每个 transition 的 `fails E` 类型，为后续返回类型 `Result<Target, (Source, E)>` 变更做准备。
-- 待实现：返回类型 `Result<Target, (Source, E)>` 类型系统变更（需 Resolved IR 同步）、codegen Rejected 完整镜像、draft isolation、`become`/`stay` 显式 terminal 关键字。
+- **`transition_fails_types` 基础设施**：Checker 存储每个 transition 的 `fails E` 类型。
+- **返回类型 `Result<Target, (Source, E)>`**：Checker 注册 `fails E` transition 返回类型为 `Result<Target, (Source, E)>`；Resolved IR `ResolvedTransition.fails` 字段 + canonical 签名同步包装；IR Lower `transition_fails` 标志使 return 语句期望内层 Target 类型；Interpreter 成功路径包装 `Ok(v)`。测试更新为 match Ok/Err 模式。
+- **`become`/`stay` 显式 terminal 关键字**：`become Expr` 构造目标状态并结束 transition（等价于 return）；`stay` 返回 source 状态不变（自环终端）。全栈实现：Lexer/Parser/AST/Checker/IR Lower/CFG/Interpreter/Codegen（block.rs + func.rs）。5 个新测试（含双后端等价）。
+- 待实现：codegen Rejected 完整镜像（替换 E0722 fail-closed）、draft isolation。
 - **已知双后端差距**：`fails E` transition 中 `?` 在 codegen 被 fail-closed 拒绝（E0722）。解释器 Rejected 路径完整可用。
 
 ## [0.1.0] — 基线稳定 - 2026-07-23
