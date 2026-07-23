@@ -106,6 +106,29 @@
 - **Channel/Mutex/Atomic 遗留**：builtin 函数（整数 handle），非 ResolvedType Nominal，`is_linear()` 无法覆盖，留给后续类型表示升级。
 - 4104 测试全绿。
 
+### 0.31.18 证据同步与回归扫描（完成）
+
+- **language-support.toml 全面更新**：implementation_version 更新至 0.1.1-dev (sprint 0.31.17)，8 个 requirement evidence 更新。
+- **Clippy/fmt 修复**：`!is_ok()` → `is_err()`，`run_source_with_trace` dead_code allow。
+- **回归扫描**：4108/0/10 全绿，clippy 0 warnings，fmt clean，real_world 70/70 run / 69/70 build。
+- **Deferred 项清点（0.31.8–17）**：
+
+| 项 | 来源 | 状态 | 去向 |
+|---|---|---|---|
+| progressive Main 真 lowering | 0.31.10 | 推迟 | 需 Resolved IR 级设计（broke 23 golden IR tests） |
+| Codegen actor runs flow | 0.31.11 | 推迟 | 需 tagged-union state 存储设计 |
+| cross-turn exactly-once | 0.31.13 | 推迟 | Flow transition 间资源跟踪，需 CFG 扩展 |
+| Fault path 资源清理 | 0.31.13 | 推迟 | 需 Fault 路径 resource analysis |
+| permission/effect 约束 | 0.31.14 | 推迟 | 需 Component IR (Phase C) |
+| fault 暴露策略 | 0.31.14 | 推迟 | 需 Component IR (Phase C) |
+| 版本握手 | 0.31.14 | 推迟 | 需 Component IR (Phase C) |
+| session/actor trace 记录 | 0.31.15 | 推迟 | 需 interpreter session/actor 路径集成 |
+| 双后端 trace 比较测试 | 0.31.15 | 推迟 | 需 codegen trace 收集 |
+| Channel/Mutex/Atomic is_linear() | 0.31.16 | 降级 known limitation | builtin 函数（整数 handle），非 ResolvedType Nominal |
+| consumed_flow_vars 删除 | 0.31.16 | 降级 known limitation | 保留为诊断增强层（E0423 带 transition 名） |
+
+- **Consumer 迁移审计**：interp/codegen/verifier 三后端声明层（签名/Flow transition/Actor/Session/Protocol/ownership/CFG）从 CheckedProgram 安装；**函数体仍经 `legacy_body_file()` 消费 raw AST**（`interp/mod.rs:323`、`codegen/compile.rs:596`、`verifier/ctx.rs:1130`、`verifier/mod.rs:49,125`）。`legacy_body_file()` 为 `pub(crate)` 可见性，阻止 crate 外新 consumer 回退。函数体 Resolved IR 迁移按 body class 追踪于 0.31.8–0.31.19。
+
 ### 0.31.17 高阶交互闭环（完成）
 
 - **闭包 × Flow**：lambda 内引用外层 flow state 变量 → E0427 拒绝（"linear resource cannot be captured by closure"）。`lambda_depth` + `lambda_param_names` 追踪，区分参数和 capture。Lambda 参数中的 flow state 合法。
