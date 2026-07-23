@@ -1339,6 +1339,99 @@ flow BadWriter {
     );
 }
 
+// ── 0.31.17: 高阶交互闭环 — 闭包/集合 × Flow ────────────────────────
+
+#[test]
+fn flow_state_closure_capture_rejected() {
+    // 0.31.17: capturing a flow state in a closure is rejected (E0427).
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let f = fn() {
+        let s1 = Counter::inc(s0)
+        0
+    }
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "closure capture of flow state should be rejected");
+    let errors = result.unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code.as_deref() == Some("E0427")
+                && d.message.contains("captured by closure")),
+        "expected E0427 closure capture error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn flow_state_lambda_param_accepted() {
+    // 0.31.17: flow state passed as a lambda parameter is OK (not a capture).
+    // The lambda owns the parameter — no implicit ownership transfer.
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+}
+func main() -> i32 {
+    let f = fn(x: Zero) {
+        x.count
+    }
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_ok(),
+        "lambda parameter flow state should be accepted: {:?}",
+        result
+    );
+}
+
+#[test]
+fn flow_state_in_list_rejected() {
+    // 0.31.17: flow states cannot be stored in lists (E0427).
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    transition inc(Zero) -> Positive {
+        do { return Positive { count: self.count + 1 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let s1 = Zero { count: 1 }
+    let states = [s0, s1]
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "flow state in list should be rejected");
+    let errors = result.unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code.as_deref() == Some("E0427")
+                && d.message.contains("list")),
+        "expected E0427 list error, got: {:?}",
+        errors
+    );
+}
+
 // ===================== Pinned block tests =====================
 
 #[test]
@@ -6400,4 +6493,35 @@ func main() -> i32 {
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
     let native = checked_compile_and_run(src).expect("codegen explicit recover");
     assert_eq!(native.trim(), "99");
+}
+
+// ── 0.31.17: 高阶交互闭环 — 集合 × Flow（补充）────────────────────
+
+#[test]
+fn flow_state_map_value_rejected() {
+    // 0.31.17: flow states cannot be map values (E0427).
+    let src = r#"
+flow Counter {
+    state Zero { count: i32 }
+    transition inc(Zero) -> Zero {
+        do { return Zero { count: self.count + 1 } }
+    }
+}
+func main() -> i32 {
+    let s0 = Zero { count: 0 }
+    let m = {"state": s0}
+    0
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "flow state as map value should be rejected");
+    let errors = result.unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code.as_deref() == Some("E0427")
+                && d.message.contains("map")),
+        "expected E0427 with map message, got: {:?}",
+        errors
+    );
 }
