@@ -958,6 +958,7 @@ impl Parser {
         let mut impl_protocols = Vec::new();
         let mut persistent_fields = Vec::new();
         let mut transactional_fields = Vec::new();
+        let mut fault_type: Option<crate::ast::Type> = None;
         self.skip_newlines();
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
             self.skip_newlines();
@@ -1132,6 +1133,13 @@ impl Parser {
                     }
                     transitions.push(self.parse_transition_def()?);
                 }
+                TokenKind::Fault => {
+                    // v0.31.10: `fault ErrorType` declares a per-Flow typed Fault.
+                    self.advance();
+                    let ty = self.parse_type()?;
+                    self.match_semi();
+                    fault_type = Some(ty);
+                }
                 _ => {
                     let tok = self.peek();
                     return Err(ParseError::new(
@@ -1159,6 +1167,7 @@ impl Parser {
             persistent_fields,
             transactional_fields,
             metadata_shadow_fields: vec![],
+            fault_type,
         })
     }
 
