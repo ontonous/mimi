@@ -5502,7 +5502,7 @@ func main() -> i32 {
     0
 }
 "#;
-    let result = run_source_result(src);
+    let result = checked_run_source_result(src);
     assert_eq!(result, Ok(interp::Value::Int(0)));
 }
 
@@ -5534,7 +5534,7 @@ func main() -> i32 {
     }
 }
 "#;
-    let result = run_source_result(src);
+    let result = checked_run_source_result(src);
     assert_eq!(result, Ok(interp::Value::Int(20)));
 }
 
@@ -5556,7 +5556,7 @@ func main() -> i32 {
     s1.count
 }
 "#;
-    let result = run_source_result(src);
+    let result = checked_run_source_result(src);
     assert_eq!(result, Ok(interp::Value::Int(11)));
 }
 
@@ -5578,9 +5578,9 @@ func main() -> i32 {
     0
 }
 "#;
-    let interp_result = run_source_result(src);
+    let interp_result = checked_run_source_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
-    let native = compile_and_run(src).expect("codegen become");
+    let native = checked_compile_and_run(src).expect("codegen become");
     assert_eq!(native.trim(), "11");
 }
 
@@ -5600,7 +5600,7 @@ func main() -> i32 {
     s1.count
 }
 "#;
-    let result = run_source_result(src);
+    let result = checked_run_source_result(src);
     assert_eq!(result, Ok(interp::Value::Int(42)));
 }
 
@@ -5621,15 +5621,18 @@ func main() -> i32 {
     0
 }
 "#;
-    let interp_result = run_source_result(src);
+    let interp_result = checked_run_source_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
-    let native = compile_and_run(src).expect("codegen stay");
+    let native = checked_compile_and_run(src).expect("codegen stay");
     assert_eq!(native.trim(), "42");
 }
 
 #[test]
 fn flow_turn_become_multi_target() {
     // FLOW-TURN-001: `become` in a multi-target transition with conditional.
+    // TODO: checker does not yet support flow states as match patterns
+    // (E0226 "undefined constructor"). Use unchecked run until multi-target
+    // match support is implemented in the checker.
     let src = r#"
 flow Gate {
     state Idle { v: i32 }
@@ -5686,10 +5689,10 @@ func main() -> i32 {
 }
 "#;
     // Interpreter: Rejected path returns Err((source, "div0")), match hits Err branch → -1
-    let interp_result = run_source_result(src);
+    let interp_result = checked_run_source_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
     // Codegen: same behavior
-    let native = compile_and_run(src).expect("codegen rejected path");
+    let native = checked_compile_and_run(src).expect("codegen rejected path");
     assert_eq!(native.trim(), "-1");
 }
 
@@ -5723,9 +5726,9 @@ func main() -> i32 {
     0
 }
 "#;
-    let interp_result = run_source_result(src);
+    let interp_result = checked_run_source_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
-    let native = compile_and_run(src).expect("codegen success path");
+    let native = checked_compile_and_run(src).expect("codegen success path");
     assert_eq!(native.trim(), "1");
 }
 
@@ -5760,10 +5763,10 @@ func main() -> i32 {
         result
     );
     // Interpreter: normal transition still works
-    let interp_result = run_source_result(src);
+    let interp_result = checked_run_source_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
     // Codegen: normal transition still works
-    let native = compile_and_run(src).expect("codegen typed fault");
+    let native = checked_compile_and_run(src).expect("codegen typed fault");
     assert_eq!(native.trim(), "150");
 }
 
@@ -5786,14 +5789,15 @@ flow Svc {
     }
 }
 func main() -> i32 {
-    let s0 = Running { n: 5 }
-    let f = Svc::start(s0)
+    let s0 = Idle { n: 5 }
+    let s1 = Svc::start(s0)
+    let f = Svc::start(s1)
     println(f.error.code)
     0
 }
 "#;
     // The fallback transition should produce a Fault with error.code = 0 (default)
-    let interp_result = run_source_result(src);
+    let interp_result = checked_run_source_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
 }
 
@@ -5820,9 +5824,9 @@ func main() -> i32 {
     // Normal transition still works
     let result = check_source(src);
     assert!(result.is_ok(), "sparse flow check: {:?}", result);
-    let interp_result = run_source_result(src);
+    let interp_result = checked_run_source_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
-    let native = compile_and_run(src).expect("codegen sparse");
+    let native = checked_compile_and_run(src).expect("codegen sparse");
     assert_eq!(native.trim(), "1");
 }
 
@@ -5868,17 +5872,18 @@ flow Counter {
     }
 }
 func main() -> i32 {
-    let s0 = Positive { n: 5 }
-    let f = Counter::inc(s0)
+    let s0 = Zero { n: 0 }
+    let s1 = Counter::inc(s0)
+    let f = Counter::inc(s1)
     let z = Counter::reset(f)
     println(z.n)
     0
 }
 "#;
     // User-defined reset returns n=42 (not the default n=0)
-    let interp_result = run_source_result(src);
+    let interp_result = checked_run_source_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
-    let native = compile_and_run(src).expect("codegen explicit reset");
+    let native = checked_compile_and_run(src).expect("codegen explicit reset");
     assert_eq!(native.trim(), "42");
 }
 
@@ -5898,16 +5903,17 @@ flow Svc {
     }
 }
 func main() -> i32 {
-    let s0 = Running { n: 5 }
-    let f = Svc::start(s0)
+    let s0 = Config { retries: 0 }
+    let s1 = Svc::start(s0)
+    let f = Svc::start(s1)
     let c = Svc::recover(f)
     println(c.retries)
     0
 }
 "#;
     // User-defined recover returns retries=99 (not the persistent shadow)
-    let interp_result = run_source_result(src);
+    let interp_result = checked_run_source_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
-    let native = compile_and_run(src).expect("codegen explicit recover");
+    let native = checked_compile_and_run(src).expect("codegen explicit recover");
     assert_eq!(native.trim(), "99");
 }

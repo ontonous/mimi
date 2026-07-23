@@ -350,6 +350,9 @@ func main() -> i32 {
     s3.n
 }
 "#;
+    // TODO(0.31.11): checker does not yet register flow transitions as actor
+    // methods for `runs_flow` actors. Use unchecked run until checker integration
+    // is implemented (E0221 "has no method" false positive).
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(2));
 }
