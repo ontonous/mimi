@@ -603,7 +603,7 @@ impl<'a> Interpreter<'a> {
                 if let Expr::Ident(name) = obj.unlocated() {
                     if name == "self" {
                         // Find the actor handle in scope and update its field
-                        if let Some(Value::Actor(handle)) = self.lookup("self") {
+                        if let Some(Value::Actor(handle)) = self.lookup_ref("self") {
                             handle
                                 .inner
                                 .write()

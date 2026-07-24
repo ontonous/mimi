@@ -106,12 +106,19 @@ impl ScopeEnv {
     /// Look up a variable by name, searching from innermost to outermost scope.
     /// Returns None if the variable was moved or doesn't exist.
     pub fn lookup(&self, name: &str) -> Option<Value> {
+        self.lookup_ref(name).cloned()
+    }
+
+    /// Look up a variable by name, returning a borrowed reference.
+    /// Avoids the deep clone of `lookup()` for read-only access patterns
+    /// (comparisons, type checks, pattern matching, field access).
+    pub fn lookup_ref(&self, name: &str) -> Option<&Value> {
         for (scope, moved) in self.env.iter().zip(self.moved_vars.iter()).rev() {
             if let Some(v) = scope.get(name) {
                 if moved.get(name).copied().unwrap_or(false) {
                     return None; // Treat moved vars as undefined
                 }
-                return Some(v.clone());
+                return Some(v);
             }
         }
         None

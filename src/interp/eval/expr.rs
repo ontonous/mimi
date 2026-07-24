@@ -580,12 +580,10 @@ impl<'a> Interpreter<'a> {
                 }
             }
             // Instance variable: look up value type via actor instance methods.
-            if let Some(val) = self.lookup(name) {
-                if let Value::Actor(handle) = val {
-                    let actor = handle.inner.read().unwrap_or_else(|e| e.into_inner());
-                    if let Some(m) = actor.methods.iter().find(|m| m.name == method) {
-                        return Some(m.clone());
-                    }
+            if let Some(Value::Actor(handle)) = self.lookup_ref(name) {
+                let actor = handle.inner.read().unwrap_or_else(|e| e.into_inner());
+                if let Some(m) = actor.methods.iter().find(|m| m.name == method) {
+                    return Some(m.clone());
                 }
             }
             // Flattened import: bare function name.
@@ -664,7 +662,8 @@ impl<'a> Interpreter<'a> {
                             Expr::Field(obj_expr, field_name) => {
                                 if let Expr::Ident(obj_name) = obj_expr.unlocated() {
                                     if obj_name == "self" {
-                                        if let Some(Value::Actor(handle)) = self.lookup("self") {
+                                        if let Some(Value::Actor(handle)) = self.lookup_ref("self")
+                                        {
                                             let mut inner = handle
                                                 .inner
                                                 .write()
@@ -768,7 +767,7 @@ impl<'a> Interpreter<'a> {
                 // actor/record method calls (e.g. prelude `increment` shadowing
                 // `c.increment()` on an actor instance).
                 if let Expr::Ident(name) = obj.unlocated() {
-                    if self.lookup(name).is_some() {
+                    if self.lookup_ref(name).is_some() {
                         let obj_val = self.eval_expr(obj)?;
                         return self.call_method(&obj_val, method, vals);
                     }
@@ -1004,7 +1003,7 @@ impl<'a> Interpreter<'a> {
         if let Expr::Ident(name) = obj.unlocated() {
             if name == "self" {
                 // Look up self from scope
-                if let Some(Value::Actor(handle)) = self.lookup("self") {
+                if let Some(Value::Actor(handle)) = self.lookup_ref("self") {
                     // Clone the value immediately and drop the read lock to prevent
                     // deadlock when an assignment like `self.x = self.x + 1` tries to
                     // acquire a write lock on the same RwLock.
