@@ -1345,9 +1345,11 @@ impl<'a> Interpreter<'a> {
                 // Check if this is a known failure variant
                 let is_failure = self.failure_variants.get(&name).copied().unwrap_or(false);
                 if is_failure {
+                    // 0.31.24: From protocol - attempt error type conversion if needed.
+                    let converted = self.try_convert_error_variant(&name, vals);
                     // Set early_return so that call_func returns this value,
                     // eval_block triggers compensations, and match can catch it
-                    self.early_return = Some(Value::Variant(name, vals));
+                    self.early_return = Some(converted);
                     Ok(Value::Unit)
                 } else {
                     // Treat as success variant - return inner value
@@ -1363,6 +1365,77 @@ impl<'a> Interpreter<'a> {
                 "? operator requires Result or Option, found {}",
                 v
             ))),
+        }
+    }
+
+    /// 0.31.24: Attempt to convert an error variant to the expected error type
+    /// using the From protocol.
+    ///
+    /// If the current function returns `Result<T, E2>` and the error is `Err(E1)`,
+    /// this method looks for a `From<E1> for E2` implementation and applies it.
+    /// If no conversion is needed or possible, returns the original variant.
+    fn try_convert_error_variant(&mut self, variant_name: &str, vals: Vec<Value>) -> Value {
+        // Only attempt conversion for Err-like variants with a single payload
+        if vals.len() != 1 {
+            return Value::Variant(variant_name.to_string(), vals);
+        }
+
+        // Get the expected error type from the current function's return type
+        let expected_error_type = match &self.current_return_type {
+            Some(Type::Name(n, args)) if n == "Result" && args.len() == 2 => {
+                // Result<T, E> -> E is the expected error type
+                Some(&args[1])
+            }
+            _ => None,
+        };
+
+        let expected_error_type = match expected_error_type {
+            Some(ty) => ty,
+            None => return Value::Variant(variant_name.to_string(), vals),
+        };
+
+        // Get the actual error type name from the error value
+        let actual_error_type_name = match &vals[0] {
+            Value::Record(Some(name), _) => name.clone(),
+            Value::Variant(name, _) => name.clone(),
+            Value::String(_) => "string".to_string(),
+            Value::Int(_) => "i32".to_string(),
+            Value::Float(_) => "f64".to_string(),
+            Value::Bool(_) => "bool".to_string(),
+            _ => return Value::Variant(variant_name.to_string(), vals),
+        };
+
+        // Get the expected error type name
+        let expected_error_type_name = match expected_error_type.unlocated() {
+            Type::Name(n, _) => n.clone(),
+            _ => return Value::Variant(variant_name.to_string(), vals),
+        };
+
+        // If types match, no conversion needed
+        if actual_error_type_name == expected_error_type_name {
+            return Value::Variant(variant_name.to_string(), vals);
+        }
+
+        // Look for a From implementation: From<ActualError> for ExpectedError
+        // The convention is: impl From<ActualError> for ExpectedError { func from(e: ActualError) -> ExpectedError }
+        let from_func_name = format!("From:for:{}.from", expected_error_type_name);
+
+        // Try to find and call the from function
+        if let Some(func) = self.find_function(&from_func_name) {
+            let error_value = vals.into_iter().next().unwrap();
+            match self.call_func(&func, vec![error_value]) {
+                Ok(converted_error) => {
+                    // Return Err(converted_error)
+                    Value::Variant("Err".to_string(), vec![converted_error])
+                }
+                Err(_) => {
+                    // Conversion failed, return original
+                    Value::Variant(variant_name.to_string(), vec![Value::Unit])
+                }
+            }
+        } else {
+            // No From implementation found, return original
+            Value::Variant(variant_name.to_string(), vals)
         }
     }
 
