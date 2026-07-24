@@ -1026,7 +1026,9 @@ impl PartialEq for Type {
             (ForAll(a_params, a), ForAll(b_params, b)) => a_params == b_params && a == b,
             // `unlocated` above recursively removes every outer annotation,
             // so reaching `Located` here would indicate a broken invariant.
-            (Located { .. }, _) | (_, Located { .. }) => unreachable!(),
+            (Located { .. }, _) | (_, Located { .. }) => {
+                unreachable!("unlocated() must strip all Located wrappers before structural_eq")
+            }
             _ => false,
         }
     }
@@ -1218,7 +1220,9 @@ impl PartialEq for SessionType {
             (Self::Dual(a), Self::Dual(b)) => a == b,
             (Self::Name(a), Self::Name(b)) => a == b,
             (Self::End, Self::End) => true,
-            (Self::Located { .. }, _) | (_, Self::Located { .. }) => unreachable!(),
+            (Self::Located { .. }, _) | (_, Self::Located { .. }) => {
+                unreachable!("unlocated() must strip all Located wrappers before SessionType eq")
+            }
             _ => false,
         }
     }

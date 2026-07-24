@@ -18,8 +18,6 @@ use crate::span::Span;
 use super::{NodeId, Origin, Place};
 
 #[cfg(test)]
-pub use dataflow::analyze_cfgs;
-#[cfg(test)]
 pub use lower::lower_file;
 pub use resolved_lower::lower_resolved_bodies;
 pub use resource_lower::analyze_resolved_bodies;

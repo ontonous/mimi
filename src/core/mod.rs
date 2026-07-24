@@ -37,8 +37,8 @@ pub use ir::{
 };
 pub use ownership::{
     Availability, BranchMerge, CanonicalActionKind, CanonicalResourceAction, CfgLocation,
-    IndexProjection, Loan, LoanId, LoanKind, LocalId, OwnershipLedger, Place, PlaceProjection,
-    ResourceAction, ResourceActionKind, ResourceAnalysis, ResourceFact, ResourceId, ResourceState,
+    IndexProjection, Loan, LoanId, LoanKind, LocalId, Place, PlaceProjection, ResourceAnalysis,
+    ResourceFact, ResourceId,
 };
 pub use resolved::{
     BackendProfile, CheckedProgram, FlowId, NodeId, NodeMeta, Origin, ResolvedActor,

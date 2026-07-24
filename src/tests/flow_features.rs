@@ -6523,8 +6523,7 @@ func main() -> i32 {
     assert!(
         errors
             .iter()
-            .any(|d| d.code.as_deref() == Some("E0427")
-                && d.message.contains("tuple")),
+            .any(|d| d.code.as_deref() == Some("E0427") && d.message.contains("tuple")),
         "expected E0427 with tuple message, got: {:?}",
         errors
     );

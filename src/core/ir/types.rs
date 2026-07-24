@@ -701,7 +701,9 @@ impl ResolvedTypeTable {
                     Type::LocalShared(_) => OwnershipTypeKind::LocalShared,
                     Type::Weak(_) => OwnershipTypeKind::Weak,
                     Type::WeakLocal(_) => OwnershipTypeKind::WeakLocal,
-                    _ => unreachable!(),
+                    _ => unreachable!(
+                        "ownership_kind: only Shared/LocalShared/Weak/WeakLocal reach this arm"
+                    ),
                 },
                 target: self.intern_type(inner, capabilities, resolve_name)?,
             },

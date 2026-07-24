@@ -112,8 +112,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             ))),
             Expr::Cast(inner, target_type) => self.compile_cast_expr(inner, target_type, vars),
             Expr::OptionalChain(inner, field) => self.compile_optional_chain(inner, field, vars),
-            #[allow(unreachable_patterns)]
-            _ => Err(format!("unsupported expression in codegen: {:?}", expr).into())
+            Expr::Located { .. } => Err(format!("unsupported expression in codegen: {:?}", expr).into())
         }
     }
 

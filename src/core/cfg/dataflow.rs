@@ -5,7 +5,7 @@ use crate::core::{
     LoanKind, Place, ResourceAnalysis, ResourceFact, ResourceId,
 };
 #[cfg(test)]
-use crate::core::{IndexProjection, LocalId, OwnershipLedger, PlaceProjection, ResourceActionKind};
+use crate::core::{IndexProjection, LocalId, PlaceProjection};
 use crate::diagnostic::Diagnostic;
 
 use super::{BasicBlockId, CallableCfg, EdgeKind, Terminator};
@@ -16,58 +16,24 @@ struct FlowState {
     active_loans: BTreeSet<LoanId>,
 }
 
-#[cfg(test)]
-pub fn analyze_cfgs(
-    cfgs: &BTreeMap<crate::core::NodeId, CallableCfg>,
-    ledgers: &std::collections::HashMap<crate::core::NodeId, OwnershipLedger>,
-) -> Result<BTreeMap<crate::core::NodeId, ResourceAnalysis>, Vec<Diagnostic>> {
-    let mut analyses = BTreeMap::new();
-    let mut errors = Vec::new();
-    for (owner, cfg) in cfgs {
-        let Some(ledger) = ledgers.get(owner) else {
-            analyses.insert(
-                owner.clone(),
-                ResourceAnalysis {
-                    owner: owner.clone(),
-                    actions: Vec::new(),
-                    loans: Vec::new(),
-                    in_states: BTreeMap::new(),
-                    out_states: BTreeMap::new(),
-                },
-            );
-            continue;
-        };
-        match analyze_one(cfg, ledger) {
-            Ok(analysis) => {
-                analyses.insert(owner.clone(), analysis);
-            }
-            Err(mut analysis_errors) => errors.append(&mut analysis_errors),
-        }
-    }
-    if errors.is_empty() {
-        Ok(analyses)
-    } else {
-        Err(errors)
-    }
-}
-
+/// Test helper: run dataflow analysis from a list of (kind, resource_name, span) tuples.
 #[cfg(test)]
 fn analyze_one(
     cfg: &CallableCfg,
-    ledger: &OwnershipLedger,
+    inputs: &[(CanonicalActionKind, String, crate::span::Span)],
 ) -> Result<ResourceAnalysis, Vec<Diagnostic>> {
     let mut actions = Vec::new();
     let mut loans = Vec::<Loan>::new();
     let mut legacy_ends: BTreeMap<String, Vec<CfgLocation>> = BTreeMap::new();
 
-    for (ordinal, legacy) in ledger.actions.iter().enumerate() {
-        let parsed = parse_place(&cfg.owner, &legacy.resource);
+    for (ordinal, &(kind, ref resource_name, span)) in inputs.iter().enumerate() {
+        let parsed = parse_place(&cfg.owner, resource_name);
         let mut place = cfg
             .blocks
             .values()
             .flat_map(|block| block.points.iter())
             .flat_map(|point| point.read_places.iter().chain(&point.write_places))
-            .find(|place| place.display() == legacy.resource)
+            .find(|place| place.display() == *resource_name)
             .cloned()
             .unwrap_or(parsed);
         let parent = if place.projections.first() == Some(&PlaceProjection::Deref) {
@@ -83,8 +49,7 @@ fn analyze_one(
             None
         };
         let resource = ResourceId(place.base.0.clone());
-        let location = locate(cfg, legacy.span);
-        let kind = canonical_kind(legacy.kind);
+        let location = locate(cfg, span);
         if kind == CanonicalActionKind::BorrowEnd {
             legacy_ends
                 .entry(place.display())
@@ -122,7 +87,7 @@ fn analyze_one(
                 reference_name,
                 start: location.clone(),
                 end_edges: Vec::new(),
-                span: legacy.span,
+                span,
             });
         }
         actions.push(CanonicalResourceAction {
@@ -132,13 +97,13 @@ fn analyze_one(
             target: (kind == CanonicalActionKind::Introduce).then_some(place),
             loan: loan_id,
             location,
-            span: legacy.span,
+            span,
             origin: cfg
                 .blocks
                 .values()
-                .find(|block| block.source.span == legacy.span)
+                .find(|block| block.source.span == span)
                 .map(|block| block.source.origin.clone())
-                .unwrap_or(crate::core::Origin::User(legacy.span)),
+                .unwrap_or(crate::core::Origin::User(span)),
         });
     }
 
@@ -945,22 +910,6 @@ fn point_order(cfg: &CallableCfg, block: &BasicBlockId, point: &crate::core::Nod
         .unwrap_or(usize::MAX)
 }
 
-#[cfg(test)]
-fn canonical_kind(kind: ResourceActionKind) -> CanonicalActionKind {
-    match kind {
-        ResourceActionKind::Introduce => CanonicalActionKind::Introduce,
-        ResourceActionKind::Move => CanonicalActionKind::Move,
-        ResourceActionKind::Drop => CanonicalActionKind::Drop,
-        ResourceActionKind::Return => CanonicalActionKind::Return,
-        ResourceActionKind::BorrowShared => CanonicalActionKind::BorrowShared,
-        ResourceActionKind::BorrowMut => CanonicalActionKind::BorrowMut,
-        ResourceActionKind::BorrowEnd => CanonicalActionKind::BorrowEnd,
-        ResourceActionKind::TransferSession => CanonicalActionKind::TransferSession,
-        ResourceActionKind::TransferChild => CanonicalActionKind::TransferChild,
-        ResourceActionKind::DelegateConsume => CanonicalActionKind::DelegateConsume,
-    }
-}
-
 fn action_rank(kind: CanonicalActionKind) -> u8 {
     match kind {
         CanonicalActionKind::Read => 0,
@@ -1184,25 +1133,15 @@ func main() -> i32 { 0 }
             })
             .map(|point| point.source.span)
             .expect("token use point");
-        let ledger = OwnershipLedger {
-            owner: owner.clone(),
-            actions: vec![
-                crate::core::ResourceAction {
-                    kind: ResourceActionKind::Introduce,
-                    resource: "token".into(),
-                    control_path: Vec::new(),
-                    span: crate::span::Span::UNKNOWN,
-                },
-                crate::core::ResourceAction {
-                    kind: ResourceActionKind::Drop,
-                    resource: "token".into(),
-                    control_path: vec!["then".into()],
-                    span: consume_span,
-                },
-            ],
-            branch_merges: Vec::new(),
-        };
-        let errors = analyze_one(cfg, &ledger).expect_err("partial consume must fail");
+        let inputs = vec![
+            (
+                CanonicalActionKind::Introduce,
+                "token".to_string(),
+                crate::span::Span::UNKNOWN,
+            ),
+            (CanonicalActionKind::Drop, "token".to_string(), consume_span),
+        ];
+        let errors = analyze_one(cfg, &inputs).expect_err("partial consume must fail");
         assert!(
             errors.iter().any(|error| {
                 error.code.as_deref() == Some(crate::diagnostic::codes::E0304)
@@ -1281,17 +1220,12 @@ func main() -> i32 { 0 }
             .find(|point| point.reads.iter().any(|read| read == "value") && point.writes.is_empty())
             .map(|point| point.source.span)
             .expect("borrow source point");
-        let ledger = OwnershipLedger {
-            owner,
-            actions: vec![crate::core::ResourceAction {
-                kind: ResourceActionKind::BorrowShared,
-                resource: "value".into(),
-                control_path: Vec::new(),
-                span: borrow_span,
-            }],
-            branch_merges: Vec::new(),
-        };
-        let errors = analyze_one(cfg, &ledger).expect_err("root write must conflict");
+        let inputs = vec![(
+            CanonicalActionKind::BorrowShared,
+            "value".to_string(),
+            borrow_span,
+        )];
+        let errors = analyze_one(cfg, &inputs).expect_err("root write must conflict");
         assert!(
             errors.iter().any(|error| {
                 error.code.as_deref() == Some(crate::diagnostic::codes::E0415)

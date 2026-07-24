@@ -615,8 +615,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         self.var_type_names
                                                             .insert(name.clone(), n.clone());
                                                     }
-                                                    #[allow(unreachable_patterns)]
-                                                    _ => {}
+                                                    // Remaining variants: no var_type_names
+                                                    // tracking needed for these return types.
+                                                    Type::Located { .. }
+                                                    | Type::Ref(..)
+                                                    | Type::RefMut(..)
+                                                    | Type::Option(..)
+                                                    | Type::Result(..)
+                                                    | Type::Tuple(..)
+                                                    | Type::Func(..)
+                                                    | Type::ExternFunc(..)
+                                                    | Type::CBuffer(..)
+                                                    | Type::Cap(..)
+                                                    | Type::Shared(..)
+                                                    | Type::LocalShared(..)
+                                                    | Type::Weak(..)
+                                                    | Type::WeakLocal(..)
+                                                    | Type::Nothing
+                                                    | Type::Allocator
+                                                    | Type::Array(..)
+                                                    | Type::Slice(..)
+                                                    | Type::DynTrait(..)
+                                                    | Type::RawPtr(..)
+                                                    | Type::RawPtrMut(..)
+                                                    | Type::CShared(..)
+                                                    | Type::CBorrow(..)
+                                                    | Type::CBorrowMut(..)
+                                                    | Type::RawString
+                                                    | Type::Infer
+                                                    | Type::TypeVar(..)
+                                                    | Type::ForAll(..) => {}
                                                 }
                                                 // For async functions, track the inner result type for await.
                                                 if is_async {
@@ -1144,11 +1172,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.builder.position_at_end(cont_bb);
                     }
                 }
-                // Defensive wildcard: compile_block handles all current Stmt variants
-                // explicitly; this arm guards against future variants causing a
-                // non-exhaustive match error during development.
-                #[allow(unreachable_patterns)]
-                _ => {}
+                // Located is stripped by unlocated(); Func is handled at
+                // declaration level, not as a block statement in codegen.
+                Stmt::Located { .. } | Stmt::Func(_) => {}
             }
         }
         self.pop_shared_scope()?;

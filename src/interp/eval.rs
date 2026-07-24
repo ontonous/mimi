@@ -355,7 +355,7 @@ impl<'a> Interpreter<'a> {
                 // value (via `make_fault_value`) rather than aborting the process.
                 // The Fault is generated AFTER the body completes/fails, honoring the
                 // white-paper's "delay until C call safely returns" requirement.
-                let _pinned_timeout_ms: Option<i64> = if let Some(to_expr) = timeout {
+                let pinned_timeout_ms: Option<i64> = if let Some(to_expr) = timeout {
                     let tv = self.eval_expr(to_expr)?;
                     let ms = match tv {
                         Value::Int(n) => n,
@@ -382,7 +382,7 @@ impl<'a> Interpreter<'a> {
                     None
                 };
                 // Record start timestamp for cooperative expiry check.
-                let _pinned_start_ms: i64 = if _pinned_timeout_ms.is_some() {
+                let pinned_start_ms: i64 = if pinned_timeout_ms.is_some() {
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as i64)
@@ -419,12 +419,12 @@ impl<'a> Interpreter<'a> {
                 }
 
                 // v0.29.32: cooperative wall-clock expiry check after body.
-                if let Some(to_ms) = _pinned_timeout_ms {
+                if let Some(to_ms) = pinned_timeout_ms {
                     let now_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as i64)
-                        .unwrap_or(_pinned_start_ms);
-                    let elapsed = now_ms - _pinned_start_ms;
+                        .unwrap_or(pinned_start_ms);
+                    let elapsed = now_ms - pinned_start_ms;
                     if elapsed > to_ms {
                         // v0.29.43: timeout → delayed Fault (not abort).
                         let from_state = self.current_flow_state.as_deref().unwrap_or("FFI_Pinned");
@@ -837,7 +837,6 @@ impl<'a> Interpreter<'a> {
         from_payload: &Value,
         flow: &FlowDef,
     ) -> Value {
-        let _persistent_fields = self.effective_persistent_fields(flow);
         let transactional_fields = self.effective_transactional_fields(flow);
         let tx = self.flow_tx.get(flow_name).cloned();
         let mut restored = from_payload.clone();
@@ -885,8 +884,7 @@ impl<'a> Interpreter<'a> {
     /// C3: Like `abort_persistent_tx_restore` but when no `from_payload` is
     /// available — constructs an empty record and populates it from the tx
     /// snapshot metadata so persistent data is not silently lost.
-    fn abort_persistent_tx_restore_or_empty(&mut self, flow_name: &str, flow: &FlowDef) -> Value {
-        let _persistent_fields = self.effective_persistent_fields(flow);
+    fn abort_persistent_tx_restore_or_empty(&mut self, flow_name: &str, _flow: &FlowDef) -> Value {
         let tx = self.flow_tx.get(flow_name).cloned();
         let Some(tx) = tx else {
             return Value::Unit;
