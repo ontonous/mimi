@@ -414,7 +414,7 @@ flow SafeFFI {
 
     transition process(Active) -> Active {
         do {
-            pinned(self.buffer, timeout = 5) |ptr| {
+            pinned(self.buffer) |ptr| {
                 let _ = ptr;
             }
             return Active { buffer: self.buffer }
@@ -435,7 +435,10 @@ flow SafeFFI {
                 expr, timeout, var, ..
             } = do_body[0].unlocated()
             {
-                assert!(timeout.is_some());
+                assert!(
+                    timeout.is_none(),
+                    "timeout abolished by amendment clause 10"
+                );
                 assert_eq!(var.as_deref(), Some("ptr"));
                 match expr.unlocated() {
                     Expr::Field(obj, name) => {
@@ -1462,7 +1465,9 @@ flow TestFlow {
 }
 
 #[test]
-fn flow_check_pinned_timeout_non_int() {
+fn pinned_timeout_syntax_rejected_by_amendment_clause_10() {
+    // Architecture amendment clause 10 abolished pinned(timeout).
+    // The parser must reject `pinned(expr, timeout = N)` with a clear diagnostic.
     let src = r#"
 flow TestFlow {
     state Ready
@@ -1470,15 +1475,22 @@ flow TestFlow {
 
     transition go(Ready) -> Active {
         do {
-            pinned(self, timeout = "hello") |_ptr| {
+            pinned(self, timeout = 5) |_ptr| {
                 return Active { }
             }
         }
     }
 }
 "#;
-    let result = check_source(src);
-    assert!(result.is_err(), "pinned with non-int timeout should error");
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("tokenize");
+    let err = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect_err("pinned(expr, timeout = N) must be rejected by parser");
+    assert!(
+        err.message.contains("amendment clause 10"),
+        "error should mention amendment clause 10, got: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -1826,14 +1838,14 @@ func main() -> i32 {
 
 #[test]
 fn flow_exec_pinned_with_timeout() {
-    // v0.29.16: pinned with timeout expression.
+    // v0.29.16: pinned execution (timeout abolished by amendment clause 10).
     let src = r#"
 flow Buffer {
     state Active { data: i32 }
 
     transition process(Active) -> Active {
         do {
-            pinned(self.data, timeout = 5) |p| {
+            pinned(self.data) |p| {
                 let _ = p
             }
             return Active { data: self.data + 10 }
@@ -1867,7 +1879,7 @@ flow Buffer {
 
     transition process(Active) -> Active {
         do {
-            pinned(self.data, timeout = 1) {
+            pinned(self.data) {
                 let _ = 42
             }
             return Active { data: self.data * 2 }
@@ -4321,7 +4333,7 @@ flow Buf {
     }
     transition bad(Active) -> Active {
         do {
-            pinned(self.data, timeout = 5) |p| {
+            pinned(self.data) |p| {
                 let _ = p
                 let _ = Buf::step(Active { data: 0 })
             }
@@ -4338,202 +4350,6 @@ flow Buf {
         "got {}",
         msg
     );
-}
-
-#[test]
-fn pinned_timeout_zero_absorbed_to_fault() {
-    // L1 interp: timeout=0 → ContractViolation → Fault (panic:E0808)
-    let src = r#"
-flow Buf {
-    state Active { data: i32 }
-    transition expire(Active) -> Active {
-        do {
-            pinned(self.data, timeout = 0) |p| { let _ = p }
-            return Active { data: self.data }
-        }
-    }
-}
-func main() -> i32 {
-    let s = Active { data: 7 }
-    let f = Buf::expire(s)
-    0
-}
-"#;
-    let r = run_source_result(src);
-    assert!(r.is_ok(), "timeout should absorb to Fault, got {:?}", r);
-}
-
-#[test]
-fn pinned_timeout_zero_fault_trace_fields() {
-    // Call transition directly via interpreter API to inspect Fault Value.
-    let src = r#"
-flow Buf {
-    state Active { data: i32 }
-    transition expire(Active) -> Active {
-        do {
-            pinned(self.data, timeout = 0) |p| { let _ = p }
-            return Active { data: self.data }
-        }
-    }
-}
-func main() -> i32 { 0 }
-"#;
-    let file = parse(src);
-    let mut interp = interp::Interpreter::new(&file);
-    // Build Active { data: 7 }
-    use std::collections::HashMap;
-    let mut fields = HashMap::new();
-    fields.insert("data".into(), interp::Value::Int(7));
-    let active = interp::Value::Record(Some("Active".into()), fields);
-    let out = interp
-        .eval_flow_transition(
-            file.items
-                .iter()
-                .find_map(|i| match i {
-                    Item::Flow(f) if f.name == "Buf" => Some(f),
-                    _ => None,
-                })
-                .expect("Buf flow"),
-            file.items
-                .iter()
-                .find_map(|i| match i {
-                    Item::Flow(f) if f.name == "Buf" => {
-                        f.transitions.iter().find(|t| t.name == "expire")
-                    }
-                    _ => None,
-                })
-                .expect("expire"),
-            &[active],
-        )
-        .expect("expire should absorb to Fault Value");
-    match out {
-        interp::Value::Record(Some(name), f) => {
-            assert_eq!(name, "Fault");
-            let last = f.get("last_state").map(|v| format!("{}", v));
-            let ev = f.get("unexpected_event").map(|v| format!("{}", v));
-            assert_eq!(last.as_deref(), Some("Active"), "last_state={:?}", last);
-            let evs = ev.unwrap_or_default();
-            assert!(
-                evs.contains("panic:") || evs.contains("E0808") || evs.contains("pinned"),
-                "unexpected_event={}",
-                evs
-            );
-        }
-        other => panic!("expected Fault record, got {:?}", other),
-    }
-}
-
-#[test]
-fn pinned_positive_timeout_dual_backend() {
-    let src = r#"
-flow Buf {
-    state Active { data: i32 }
-    transition use_pin(Active) -> Active {
-        do {
-            pinned(self.data, timeout = 1000) |p| {
-                let _ = p
-            }
-            return Active { data: self.data + 1 }
-        }
-    }
-}
-func main() -> i32 {
-    let s = Active { data: 40 }
-    let r = Buf::use_pin(s)
-    println(r.data)
-    0
-}
-"#;
-    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen");
-    assert_eq!(out.trim(), "41");
-}
-
-#[test]
-fn pinned_timeout_zero_codegen_aborts() {
-    // Codegen cooperative watchdog: timeout=0 aborts process (non-zero exit).
-    let src = r#"
-flow Buf {
-    state Active { data: i32 }
-    transition expire(Active) -> Active {
-        do {
-            pinned(self.data, timeout = 0) |p| { let _ = p }
-            return Active { data: self.data }
-        }
-    }
-}
-func main() -> i32 {
-    let s = Active { data: 1 }
-    let _ = Buf::expire(s)
-    0
-}
-"#;
-    let result = compile_and_run(src);
-    assert!(
-        result.is_err(),
-        "codegen should abort on timeout=0, got {:?}",
-        result
-    );
-}
-
-// ── v0.29.32 cooperative wall-clock timeout watchdog ─────────────────
-
-#[test]
-fn pinned_cooperative_wall_clock_success() {
-    // L1: positive timeout with fast body → normal continuation (both backends).
-    let src = r#"
-flow Buf {
-    state Active { data: i32 }
-    transition use_pin(Active) -> Active {
-        do {
-            pinned(self.data, timeout = 5000) |p| {
-                let _ = p
-            }
-            return Active { data: self.data + 1 }
-        }
-    }
-}
-func main() -> i32 {
-    let s = Active { data: 40 }
-    let r = Buf::use_pin(s)
-    println(r.data)
-    0
-}
-"#;
-    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen");
-    assert_eq!(out.trim(), "41");
-}
-
-#[test]
-fn pinned_cooperative_wall_clock_elapsed_check() {
-    // L1: interp path — positive timeout, body completes fast, no expiry.
-    // Verifies that the wall-clock check does not falsely trigger.
-    let src = r#"
-flow Buf {
-    state Active { data: i32 }
-    transition use_pin(Active) -> Active {
-        do {
-            pinned(self.data, timeout = 99999) |p| {
-                let _ = p
-            }
-            return Active { data: self.data + 42 }
-        }
-    }
-}
-func main() -> i32 {
-    let s = Active { data: 0 }
-    let r = Buf::use_pin(s)
-    println(r.data)
-    0
-}
-"#;
-    assert!(check_source(src).is_ok());
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen");
-    assert_eq!(out.trim(), "42");
 }
 
 // ── v0.29.29 mutate parameter hardening ────────────────────────────────
@@ -5146,119 +4962,6 @@ flow FFI {
 // ── v0.29.43: Pinned Delayed Fault Semantics ──────────────────────────
 
 #[test]
-fn pinned_timeout_produces_fault_value() {
-    // L1 interp: pinned timeout=0 produces a Fault value directly (not Err).
-    // The Fault carries the correct last_state from the flow context.
-    let src = r#"
-flow Buf {
-    state Active { data: i32 }
-    transition expire(Active) -> Active {
-        do {
-            pinned(self.data, timeout = 0) |p| { let _ = p }
-            return Active { data: self.data }
-        }
-    }
-}
-func main() -> i32 { 0 }
-"#;
-    let file = parse(src);
-    let mut interp = interp::Interpreter::new(&file);
-    use std::collections::HashMap;
-    let mut fields = HashMap::new();
-    fields.insert("data".into(), interp::Value::Int(7));
-    let active = interp::Value::Record(Some("Active".into()), fields);
-    let out = interp
-        .eval_flow_transition(
-            file.items
-                .iter()
-                .find_map(|i| match i {
-                    Item::Flow(f) if f.name == "Buf" => Some(f),
-                    _ => None,
-                })
-                .expect("Buf flow"),
-            file.items
-                .iter()
-                .find_map(|i| match i {
-                    Item::Flow(f) if f.name == "Buf" => {
-                        f.transitions.iter().find(|t| t.name == "expire")
-                    }
-                    _ => None,
-                })
-                .expect("expire"),
-            &[active],
-        )
-        .expect("expire should produce Fault value");
-    match out {
-        interp::Value::Record(Some(name), f) => {
-            assert_eq!(name, "Fault");
-            let last = f.get("last_state").map(|v| format!("{}", v));
-            assert_eq!(last.as_deref(), Some("Active"), "last_state={:?}", last);
-        }
-        other => panic!("expected Fault record, got {:?}", other),
-    }
-}
-
-#[test]
-fn pinned_timeout_fault_has_trace() {
-    // L2: delayed Fault from pinned timeout carries SystemTrace with
-    // last_state_name and unexpected_event containing "pinned_timeout".
-    let src = r#"
-flow Buf {
-    state Active { data: i32 }
-    transition expire(Active) -> Active {
-        do {
-            pinned(self.data, timeout = 0) |p| { let _ = p }
-            return Active { data: self.data }
-        }
-    }
-}
-func main() -> i32 { 0 }
-"#;
-    let file = parse(src);
-    let mut interp = interp::Interpreter::new(&file);
-    use std::collections::HashMap;
-    let mut fields = HashMap::new();
-    fields.insert("data".into(), interp::Value::Int(7));
-    let active = interp::Value::Record(Some("Active".into()), fields);
-    let out = interp
-        .eval_flow_transition(
-            file.items
-                .iter()
-                .find_map(|i| match i {
-                    Item::Flow(f) if f.name == "Buf" => Some(f),
-                    _ => None,
-                })
-                .expect("Buf flow"),
-            file.items
-                .iter()
-                .find_map(|i| match i {
-                    Item::Flow(f) if f.name == "Buf" => {
-                        f.transitions.iter().find(|t| t.name == "expire")
-                    }
-                    _ => None,
-                })
-                .expect("expire"),
-            &[active],
-        )
-        .expect("expire should produce Fault value");
-    if let interp::Value::Record(Some(name), f) = &out {
-        assert_eq!(name, "Fault");
-        let trace = f.get("trace").expect("trace field");
-        if let interp::Value::Record(_, tf) = trace {
-            let lsn = tf.get("last_state_name").map(|v| format!("{}", v));
-            assert_eq!(lsn.as_deref(), Some("Active"));
-            let ev = tf.get("unexpected_event").map(|v| format!("{}", v));
-            let evs = ev.unwrap_or_default();
-            assert!(evs.contains("pinned_timeout"), "unexpected_event={}", evs);
-        } else {
-            panic!("trace is not a record: {:?}", trace);
-        }
-    } else {
-        panic!("expected Fault, got {:?}", out);
-    }
-}
-
-#[test]
 fn pinned_body_panic_produces_delayed_fault() {
     // L1 interp: if pinned body itself panics (e.g. div by zero),
     // the error is caught and a delayed Fault is produced (not propagated).
@@ -5267,7 +4970,7 @@ flow Buf {
     state Active { data: i32 }
     transition crash(Active) -> Active {
         do {
-            pinned(self.data, timeout = 5000) |p| {
+            pinned(self.data) |p| {
                 let x = 1 / 0
             }
             return Active { data: self.data }

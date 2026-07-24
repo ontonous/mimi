@@ -431,25 +431,29 @@ fn ip_h2_sleep_negative_rejected() {
 }
 
 #[test]
-fn ck_c4_pinned_timeout_must_be_literal() {
+fn ck_c4_pinned_timeout_rejected_by_amendment_clause_10() {
+    // Architecture amendment clause 10 abolished pinned(timeout).
+    // The parser must reject `pinned(expr, timeout = N)` with a clear diagnostic.
     let src = r#"
         flow F {
             state S { data: i32 }
             transition t(S) -> S {
                 do {
-                    let ms = 5
-                    pinned(self.data, timeout = ms) |p| { let _ = p }
+                    pinned(self.data, timeout = 5) |p| { let _ = p }
                     return S { data: self.data }
                 }
             }
         }
         func main() -> i32 { 0 }
     "#;
-    let err = check_source(src).expect_err("non-literal pinned timeout must fail");
-    let msg = format!("{err:?}");
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("tokenize");
+    let err = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect_err("pinned(expr, timeout = N) must be rejected by parser");
     assert!(
-        msg.contains("timeout") || msg.contains("literal") || msg.contains("E0209"),
-        "unexpected: {msg}"
+        err.message.contains("amendment clause 10"),
+        "error should mention amendment clause 10, got: {}",
+        err.message
     );
 }
 

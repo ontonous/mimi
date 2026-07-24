@@ -173,16 +173,18 @@ impl Parser {
                 self.advance();
                 self.expect(TokenKind::LParen, "`(`")?;
                 let expr = self.parse_expr(0)?;
-                let timeout = if self.at(&TokenKind::Comma) {
-                    self.advance();
-                    // parse timeout = 5s
-                    self.expect_ident()?; // skip "timeout"
-                    self.expect(TokenKind::Eq, "`=`")?;
-                    let t = self.parse_expr(0)?;
-                    Some(t)
-                } else {
-                    None
-                };
+                // Architecture amendment clause 10: synchronous pinned timeout
+                // is abolished. Reject `pinned(expr, timeout = N)` with a clear
+                // diagnostic pointing users to ForeignTask async timeout.
+                if self.at(&TokenKind::Comma) {
+                    return Err(ParseError::new(
+                        "pinned(timeout) was abolished by architecture amendment clause 10. \
+                         Use spawn_foreign_task() with async timeout instead. \
+                         See devdocs/v0.31/architecture-amendment-1.0.md §条款 10.",
+                        self.tokens[self.pos.saturating_sub(1)].line,
+                        self.tokens[self.pos.saturating_sub(1)].col,
+                    ));
+                }
                 self.expect(TokenKind::RParen, "`)`")?;
                 let var = if self.at(&TokenKind::PipeArrow) || self.at(&TokenKind::BitOr) {
                     self.advance();
@@ -199,7 +201,7 @@ impl Parser {
                 let body = self.parse_block()?;
                 Ok(Stmt::Pinned {
                     expr,
-                    timeout,
+                    timeout: None, // abolished by amendment clause 10
                     var,
                     body,
                 })

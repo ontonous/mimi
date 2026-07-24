@@ -5682,9 +5682,9 @@ mod tests {
     }
 
     #[test]
-    fn pinned_scope_retains_value_timeout_binding_and_capability() {
+    fn pinned_scope_retains_value_binding_and_capability() {
         let file = parse(
-            "func anchor(value: i32) -> i32 { let mut result = 0; pinned(value, timeout = 5) |ptr| { result = ptr; } result }",
+            "func anchor(value: i32) -> i32 { let mut result = 0; pinned(value) |ptr| { result = ptr; } result }",
         );
         let program = crate::core::check_program(&file).expect("check");
         let bodies = lower_checked_function_bodies(&file, &program).expect("lower pinned");
@@ -5700,7 +5700,10 @@ mod tests {
             panic!("pinned statement expected");
         };
         assert_eq!(body.locals[binding].ty, value.ty);
-        assert!(timeout.is_some());
+        assert!(
+            timeout.is_none(),
+            "timeout abolished by amendment clause 10"
+        );
         let ResolvedStmtKind::Assign { value, .. } = &pinned_body.statements[0].kind else {
             panic!("pinned body assignment expected");
         };

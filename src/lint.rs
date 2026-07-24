@@ -1383,24 +1383,23 @@ mod tests {
     }
 
     #[test]
-    fn lint_pinned_timeout_counts_as_variable_use() {
+    fn lint_pinned_timeout_rejected_by_amendment_clause_10() {
+        // Architecture amendment clause 10 abolished pinned(timeout).
+        // The parser must reject `pinned(expr, timeout = N)` before lint runs.
         let src = r#"
 func main() -> i32 {
-    let timeout_ms = 5
     let buffer = "x"
-    pinned(buffer, timeout = timeout_ms) |ptr| { println(ptr) }
+    pinned(buffer, timeout = 5) |ptr| { println(ptr) }
     0
 }
 "#;
-        let file = parse_source(src);
-        let result = Linter::new().lint(&file, src);
+        let tokens = Lexer::new(src).tokenize().expect("tokenize");
+        let result = Parser::new(tokens).parse_file();
+        let err = result.expect_err("pinned(expr, timeout = N) must be rejected by parser");
         assert!(
-            !result
-                .diagnostics
-                .iter()
-                .any(|d| { d.code.as_deref() == Some(W006) && d.message.contains("timeout_ms") }),
-            "timeout variable should be considered used: {:?}",
-            result.diagnostics
+            err.message.contains("amendment clause 10"),
+            "error should mention amendment clause 10, got: {}",
+            err.message
         );
     }
 
