@@ -54,7 +54,6 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Drop
             | TokenKind::Steps
             | TokenKind::Parasteps
-            | TokenKind::Defer
             | TokenKind::Failure
             | TokenKind::Requires
             | TokenKind::Ensures
@@ -149,7 +148,6 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "spawn" => TokenKind::Spawn,
         "steps" => TokenKind::Steps,
         "parasteps" => TokenKind::Parasteps,
-        "defer" => TokenKind::Defer,
         "quote" => TokenKind::Quote,
         "comptime" => TokenKind::Comptime,
         "failure" => TokenKind::Failure,
