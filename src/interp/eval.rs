@@ -54,7 +54,10 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn eval_block(&mut self, block: &Block) -> Result<Option<Value>, InterpError> {
         self.push_compensation_scope();
+        self.push_defer_scope();
         let result = self.eval_block_inner(block);
+        // Defer blocks always run (LIFO), regardless of exit path
+        self.pop_defer_scope();
         self.pop_compensation_scope(
             result.is_err() || self.early_return.is_some() || self.exited.is_some(),
         );
@@ -211,6 +214,10 @@ impl<'a> Interpreter<'a> {
                 // Evaluate and discard the value (for linear capability drops)
                 self.eval_expr(expr)?;
                 // In a real implementation, this would track capability usage
+            }
+            Stmt::Defer(block) => {
+                // 0.31.24: Register defer block to run when scope exits (LIFO)
+                self.register_defer(block.clone());
             }
             Stmt::SharedLet {
                 kind, name, init, ..

@@ -927,6 +927,10 @@ impl BodyLowerer<'_> {
                 kind: super::ResolvedScopeKind::FailureGuard,
                 body: self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?,
             },
+            Stmt::Defer(body) => ResolvedStmtKind::Scope {
+                kind: super::ResolvedScopeKind::Defer,
+                body: self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?,
+            },
             Stmt::Arena(body) => ResolvedStmtKind::Scope {
                 kind: super::ResolvedScopeKind::Arena,
                 body: self.lower_block(body, &format!("{role}.body"), self.unit.clone(), false)?,

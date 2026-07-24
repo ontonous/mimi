@@ -97,6 +97,14 @@ impl Parser {
                 self.match_semi();
                 Ok(Stmt::Drop(expr))
             }
+            TokenKind::Defer => {
+                self.advance();
+                self.skip_newlines();
+                self.expect(TokenKind::LBrace, "`{`")?;
+                let body = self.parse_block()?;
+                self.match_semi();
+                Ok(Stmt::Defer(body))
+            }
             TokenKind::Parasteps => {
                 self.advance();
                 self.skip_newlines();

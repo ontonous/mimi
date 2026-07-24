@@ -184,7 +184,8 @@ impl<'a> Checker<'a> {
             Stmt::Arena(block)
             | Stmt::OnFailure(block)
             | Stmt::Parasteps(block)
-            | Stmt::Unsafe(block) => {
+            | Stmt::Unsafe(block)
+            | Stmt::Defer(block) => {
                 for s in block {
                     Self::collect_uses_in_stmt(s, uses);
                 }

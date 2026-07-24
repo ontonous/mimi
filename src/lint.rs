@@ -315,6 +315,7 @@ fn collect_refs_in_stmt(stmt: &Stmt, info: &mut VarUsage) {
             collect_refs_in_block(body, info)
         }
         Stmt::Drop(e) => collect_refs_in_expr(e, info),
+        Stmt::Defer(body) => collect_refs_in_block(body, info),
         Stmt::SharedLet { init, .. } => collect_refs_in_expr(init, info),
         Stmt::Alloc { body, .. } => collect_refs_in_block(body, info),
         Stmt::Requires(e, _) | Stmt::Ensures(e, _) | Stmt::Invariant(e, _) => {

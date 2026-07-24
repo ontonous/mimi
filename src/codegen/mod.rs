@@ -185,6 +185,9 @@ pub struct CodeGenerator<'ctx> {
 
     compensation_blocks: Vec<Vec<Stmt>>,
     comp_scope_stack: Vec<usize>,
+    /// 0.31.24: Defer blocks for LIFO execution on scope exit (always runs)
+    defer_blocks: Vec<Vec<Stmt>>,
+    defer_scope_stack: Vec<usize>,
     /// Stack of shared variable heap pointers that need release on scope exit.
     shared_release_vars: Vec<Vec<inkwell::values::PointerValue<'ctx>>>,
     /// Stack of weak reference heap pointers that need weak_release on scope exit.
@@ -458,6 +461,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             target_triple: None,
             compensation_blocks: Vec::new(),
             comp_scope_stack: Vec::new(),
+            defer_blocks: Vec::new(),
+            defer_scope_stack: Vec::new(),
             shared_release_vars: vec![Vec::new()],
             weak_release_vars: vec![Vec::new()],
             shared_var_names: std::collections::HashSet::new(),

@@ -118,7 +118,8 @@ impl<'a> Checker<'a> {
             | Stmt::Arena(block)
             | Stmt::Unsafe(block)
             | Stmt::Parasteps(block)
-            | Stmt::OnFailure(block) => {
+            | Stmt::OnFailure(block)
+            | Stmt::Defer(block) => {
                 for s in block {
                     self.check_stmt_parasteps_safe(s, scopes);
                 }
@@ -238,7 +239,8 @@ impl<'a> Checker<'a> {
             | Stmt::Alloc { body: block, .. }
             | Stmt::Arena(block)
             | Stmt::Parasteps(block)
-            | Stmt::OnFailure(block) => {
+            | Stmt::OnFailure(block)
+            | Stmt::Defer(block) => {
                 for s in block {
                     self.collect_shared_writes_in_stmt(s, scopes, writes);
                 }
@@ -1047,6 +1049,12 @@ impl<'a> Checker<'a> {
             }
             Stmt::Unsafe(block) => {
                 // Unsafe block: check the body (no additional restrictions at type-check level)
+                scopes.push(HashMap::new());
+                self.check_block(block, ret, scopes);
+                scopes.pop();
+            }
+            Stmt::Defer(block) => {
+                // 0.31.24: Defer block: check the body (executes on scope exit)
                 scopes.push(HashMap::new());
                 self.check_block(block, ret, scopes);
                 scopes.pop();
