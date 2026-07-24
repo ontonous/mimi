@@ -8,7 +8,7 @@
 
 #[cfg(standalone)]
 use super::libc;
-use super::{alloc_c_string, cstr_to_string, MimiList};
+use super::{alloc_c_string, cstr_to_string, ListElementKind, MimiList};
 use std::sync::Mutex;
 
 struct CliArgs {
@@ -137,11 +137,8 @@ pub extern "C" fn mimi_args_list() -> *mut MimiList {
     // mimi_list_free is called, it frees data via libc::free and the list
     // struct via Box::from_raw.
     let _drop_guard = std::mem::ManuallyDrop::new(items);
-    Box::into_raw(Box::new(MimiList {
-        len,
-        data: data_ptr,
-        owns_data: true,
-    }))
+    // 0.31.23: args are strings.
+    Box::into_raw(Box::new(MimiList::with_data(data_ptr, len, true, ListElementKind::String)))
 }
 
 #[no_mangle]
