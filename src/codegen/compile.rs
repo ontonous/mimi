@@ -25,95 +25,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &crate::core::CheckedProgram,
     ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
-        let mut resolved = std::collections::HashMap::new();
-        let mut fallbacks = std::collections::HashSet::new();
-        let mut pinned = std::collections::HashSet::new();
-        let mut param_arity = std::collections::HashMap::new();
-        let mut param_lists = std::collections::HashMap::new();
-        for (id, transition) in program.transitions() {
-            let key = (id.flow.0.clone(), id.event.clone(), id.source.name.clone());
-            let targets = transition
-                .targets
-                .iter()
-                .map(|state| state.name.clone())
-                .collect();
-            if transition.is_fallback {
-                fallbacks.insert(key.clone());
-            }
-            if transition.is_ffi_pinned {
-                pinned.insert(key.clone());
-            }
-            param_arity.insert(key.clone(), transition.params.len());
-            param_lists.insert(
-                key.clone(),
-                transition
-                    .params
-                    .iter()
-                    .map(|(name, ty)| (name.clone(), crate::core::fmt_type(ty)))
-                    .collect(),
-            );
-            resolved.insert(key, targets);
-        }
-        self.resolved_transitions = Some(resolved);
-        self.resolved_fallback_transitions = Some(fallbacks);
-        self.resolved_ffi_pinned_transitions = Some(pinned);
-        self.resolved_transition_param_arity = Some(param_arity);
-        self.resolved_transition_params = Some(param_lists);
-
-        let mut transitions_by_flow: std::collections::HashMap<
-            String,
-            Vec<(String, String, String, bool, bool, usize)>,
-        > = std::collections::HashMap::new();
-        for transition in program.transitions().values() {
-            let flow = transition.id.flow.0.clone();
-            let event = transition.id.event.clone();
-            let source = transition.id.source.name.clone();
-            let targets = transition
-                .targets
-                .iter()
-                .map(|s| s.name.clone())
-                .collect::<Vec<_>>()
-                .join("|");
-            transitions_by_flow.entry(flow).or_default().push((
-                event,
-                source,
-                targets,
-                transition.is_fallback,
-                transition.is_ffi_pinned,
-                transition.params.len(),
-            ));
-        }
-        for list in transitions_by_flow.values_mut() {
-            list.sort();
-        }
-        let mut transitions_by_event: std::collections::HashMap<
-            String,
-            Vec<(String, String, String, bool, bool, usize)>,
-        > = std::collections::HashMap::new();
-        for transition in program.transitions().values() {
-            let flow = transition.id.flow.0.clone();
-            let event = transition.id.event.clone();
-            let source = transition.id.source.name.clone();
-            let targets = transition
-                .targets
-                .iter()
-                .map(|s| s.name.clone())
-                .collect::<Vec<_>>()
-                .join("|");
-            transitions_by_event.entry(event).or_default().push((
-                flow,
-                source,
-                targets,
-                transition.is_fallback,
-                transition.is_ffi_pinned,
-                transition.params.len(),
-            ));
-        }
-        for list in transitions_by_event.values_mut() {
-            list.sort();
-        }
-        self.resolved_transitions_by_flow = Some(transitions_by_flow);
-        self.resolved_transitions_by_event = Some(transitions_by_event);
+        // AD-6: transition tables built once in CheckedProgram, shared by both backends.
+        let tables = program.build_transition_tables();
+        self.resolved_transitions = Some(tables.resolved);
+        self.resolved_fallback_transitions = Some(tables.fallbacks);
+        self.resolved_ffi_pinned_transitions = Some(tables.pinned);
+        self.resolved_transition_param_arity = Some(tables.param_arity);
+        self.resolved_transition_params = Some(tables.param_lists);
+        self.resolved_transitions_by_flow = Some(tables.by_flow);
+        self.resolved_transitions_by_event = Some(tables.by_event);
         let mut arity = std::collections::HashMap::new();
         let mut effects = std::collections::HashMap::new();
         let mut returns = std::collections::HashMap::new();
