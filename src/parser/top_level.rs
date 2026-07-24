@@ -1003,6 +1003,7 @@ impl Parser {
                 impl_protocols.push(proto);
                 continue;
             }
+            // DEAD: 架构修正案条款 3 废止 WAL/@transactional。待清理。
             // Check for `persistent` modifier or `@` annotation
             // `@transactional` may appear without `()` before `persistent state`.
             let mut state_all_transactional = false;

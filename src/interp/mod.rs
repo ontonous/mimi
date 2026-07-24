@@ -37,6 +37,7 @@ pub(crate) enum LoopAction {
     Break(Option<Value>),
 }
 
+/// DEAD: 架构修正案条款 3 废止 WAL/@transactional。待清理。
 /// v0.29.14: Persistent-payload transaction state for one flow.
 ///
 /// At transition entry we snapshot persistent field values from `self`.

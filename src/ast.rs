@@ -477,13 +477,16 @@ pub enum Stmt {
     /// Explicit transition terminal: stay
     /// Returns the source state unchanged (self-loop terminal).
     Stay,
+    /// DEAD: 架构修正案条款 2 废止 delegate 作为 subflow 委托。
+    /// view/mutate 借用保留为纯函数参数传递（条款 6）。清理排入后续 sprint。
     /// Delegate resource to subflow: delegate view/mutate/consume(self.field) to target
     Delegate {
         kind: DelegateKind,
         expr: Expr,
         target: String,
     },
-    /// Pinned block — pin memory for FFI safety: pinned(expr, timeout = 5s) |ptr| { ... }
+    /// DEAD: 架构修正案条款 10 废除同步 pinned timeout。timeout 字段永远为 None。
+    /// Pinned block — pin memory for FFI safety: pinned(expr) |ptr| { ... }
     Pinned {
         expr: Expr,
         timeout: Option<Expr>,
@@ -1051,6 +1054,7 @@ pub struct FlowDef {
     pub impl_protocols: Vec<String>,
     /// Fields declared as `persistent` — survive Fault and recover
     pub persistent_fields: Vec<String>,
+    /// DEAD: 架构修正案条款 3 废止 WAL/@transactional。待清理。
     /// Subset of `persistent_fields` marked `@transactional` — full WAL
     /// shadow-copy on turn entry; restored on Fault (v0.29.14).
     /// Remaining persistent fields use dirty/version check (recover→reset).
@@ -1121,6 +1125,8 @@ pub struct TransitionDef {
     pub fails: Option<Type>,
     /// Transition body — requires a `do { }` block
     pub body: Option<Block>,
+    /// DEAD: 架构修正案条款 1 废止转移矩阵自动补全（强制 Sparse）。
+    /// 0.31.25 翻转 @sparse 为默认后删除。
     /// True when this transition was injected by transfer-matrix auto-completion
     /// (`(state, event) → Fault`). User-written transitions always have `false`.
     pub is_fallback: bool,

@@ -350,6 +350,8 @@ impl<'a> Interpreter<'a> {
                 timeout,
                 ..
             } => {
+                // DEAD: 架构修正案条款 10 废除同步 pinned timeout。Parser 已拒绝
+                // timeout 参数，此分支不可达（timeout 永远为 None）。清理排入后续 sprint。
                 // v0.29.32: cooperative wall-clock timeout watchdog.
                 // v0.29.43: delayed Fault semantics — timeout/crash produces a Fault
                 // value (via `make_fault_value`) rather than aborting the process.

@@ -977,6 +977,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     var,
                     body,
                 } => {
+                    // DEAD: 架构修正案条款 10 废除同步 pinned timeout。Parser 已拒绝
+                    // timeout 参数，此分支不可达（timeout 永远为 None）。清理排入后续 sprint。
                     // v0.29.32: cooperative wall-clock timeout watchdog.
                     // timeout <= 0 → mimi_runtime_abort (immediate).
                     // timeout > 0 → record start ms, run body, check elapsed.

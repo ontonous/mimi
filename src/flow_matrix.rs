@@ -1,3 +1,6 @@
+//! DEAD: 架构修正案条款 1 废止转移矩阵自动补全（强制 Sparse）。
+//! 0.31.25 翻转 @sparse 为默认后删除此模块的补全逻辑。
+//!
 //! Flow transfer-matrix auto-completion (+1 Fault fallback).
 //!
 //! For every user-defined flow, the compiler expands the N×M matrix of
