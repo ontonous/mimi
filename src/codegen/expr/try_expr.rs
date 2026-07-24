@@ -314,11 +314,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_load(struct_ty_to_use, pv, "try_rej_load")
                 .map_err(|e| CompileError::LlvmError(format!("try_rej load: {}", e)))?,
             BasicValueEnum::StructValue(sv) => BasicValueEnum::StructValue(sv),
-            _ => {
-                return Err(
-                    "? operator in fails transition requires a Result/Option type".into(),
-                )
-            }
+            _ => return Err("? operator in fails transition requires a Result/Option type".into()),
         };
 
         let sv = struct_val.into_struct_value();
@@ -390,12 +386,26 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
 
-        // Allocate tuple struct {i64 source, i64 error} on heap.
+        // P1-1 fix: allocate tuple struct {i64 source, i64 error} on HEAP.
+        // Stack alloca would dangle after return — the Result struct's err
+        // field stores ptrtoint(tuple), and the caller dereferences it.
+        // Heap allocation survives the function return. Not registered with
+        // heap_allocs: the caller owns the error payload (acceptable leak
+        // on error paths; tuple is 16 bytes).
         let tuple_ty = self.context.struct_type(
-            &[BasicTypeEnum::IntType(i64_ty), BasicTypeEnum::IntType(i64_ty)],
+            &[
+                BasicTypeEnum::IntType(i64_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
             false,
         );
-        let tuple_alloca = self.build_alloca(tuple_ty, "try_rej_tuple")?;
+        // Tuple is {i64, i64} = 16 bytes on all supported targets.
+        let tuple_size_val = i64_ty.const_int(16, false);
+        let tuple_heap_ptr = self.malloc_or_abort(tuple_size_val, "try_rej_tuple")?;
+        let tuple_alloca = self
+            .builder
+            .build_pointer_cast(tuple_heap_ptr, self.context.ptr_type(inkwell::AddressSpace::default()), "try_rej_tuple_cast")
+            .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?;
         let src_gep = self
             .gep()
             .build_struct_gep(tuple_ty, tuple_alloca, 0, "try_rej_tuple_src")

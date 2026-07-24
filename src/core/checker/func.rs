@@ -33,6 +33,9 @@ impl<'a> Checker<'a> {
         self.mutate_params.clear();
         // FLOW-IDENTITY-001: linear generation — per-function consumption tracking.
         self.consumed_flow_vars.clear();
+        // P2-3 fix: session alias consumption is per-function (same as flow vars).
+        // Without this, function A's alias marking leaks into function B.
+        self.consumed_session_vars.clear();
         for p in &func.params {
             match p.borrow {
                 Some(crate::ast::ParamBorrow::View) => {

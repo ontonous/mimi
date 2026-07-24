@@ -808,10 +808,31 @@ impl ActorHandle {
                             vals.extend(msg.args.iter().cloned());
                             match interp.eval_flow_transition(&flow_def, &transition, &vals) {
                                 Ok(new_state) => {
+                                    // P1-2 fix: for `fails E` transitions,
+                                    // eval_flow_transition returns Ok(Variant("Ok", [target]))
+                                    // or Ok(Variant("Err", [(source, error)])).
+                                    // Unwrap the Result variant to get the actual
+                                    // target state for flow_state storage.
+                                    let actual_state = match &new_state {
+                                        Value::Variant(tag, inner) if tag == "Ok" => {
+                                            inner.first().cloned().unwrap_or(Value::Unit)
+                                        }
+                                        Value::Variant(tag, inner) if tag == "Err" => {
+                                            // Rejected path: restore source state.
+                                            // inner[0] is (source, error) tuple.
+                                            match inner.first() {
+                                                Some(Value::Tuple(elems)) => {
+                                                    elems.first().cloned().unwrap_or(Value::Unit)
+                                                }
+                                                other => other.cloned().unwrap_or(Value::Unit),
+                                            }
+                                        }
+                                        other => other.clone(),
+                                    };
                                     // Update the actor's flow_state.
                                     {
                                         let mut actor = worker_inner.write().unwrap_or_else(|e| e.into_inner());
-                                        actor.flow_state = Some(new_state.clone());
+                                        actor.flow_state = Some(actual_state.clone());
                                     }
                                     Ok(new_state)
                                 }
