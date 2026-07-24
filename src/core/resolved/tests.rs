@@ -798,18 +798,18 @@ func main() -> i32 { 0 }
 "#,
     );
     let program = crate::core::check_program(&file).expect("check");
-    let ledger = program
-        .ownership_ledger(&crate::core::NodeId("function:close".into()))
-        .expect("close ledger");
+    let analysis = program
+        .resource_analysis(&crate::core::NodeId("function:close".into()))
+        .expect("close analysis");
     assert_eq!(
-        ledger.action_count(crate::core::ResourceActionKind::Introduce),
+        analysis.action_count(crate::core::CanonicalActionKind::Introduce),
         1
     );
     assert_eq!(
-        ledger.action_count(crate::core::ResourceActionKind::Drop),
+        analysis.action_count(crate::core::CanonicalActionKind::Drop),
         1
     );
-    assert!(ledger.resources().iter().any(|r| r == "f"));
+    assert!(analysis.resources().iter().any(|r| r == "f"));
     let interp = crate::interp::Interpreter::from_checked(&program);
     assert!(interp.has_resolved_ownership_owner("function:close"));
     assert_eq!(
@@ -900,23 +900,25 @@ func main() -> i32 { 0 }
 
 #[test]
 fn ownership_summary_flags_maybe_consumed_branch_merge() {
-    // This program is rejected by checker; use check_program expect_err then
-    // still materialize IR is not available. Instead check accepted both-path
-    // program for merge without maybe, and use a custom accepted pattern.
-    // For maybe-consumed, checker errors before IR success. Validate helper
-    // on a synthetic ledger instead.
-    let mut ledger =
-        crate::core::OwnershipLedger::new(crate::core::NodeId("function:synthetic".into()));
-    ledger.branch_merges.push(crate::core::BranchMerge {
+    // Validate BranchMerge with Availability directly (synthetic).
+    let merge = crate::core::BranchMerge {
         resource: "f".into(),
-        then_state: crate::core::ResourceState::Consumed,
-        else_state: crate::core::ResourceState::Available,
-        merged_state: crate::core::ResourceState::MaybeConsumed,
+        then_state: crate::core::Availability::Consumed,
+        else_state: crate::core::Availability::Available,
+        merged_state: crate::core::Availability::MaybeConsumed,
         span: crate::span::Span::single(1, 1),
-    });
-    assert!(ledger.has_maybe_consumed_merge());
+    };
+    assert_eq!(merge.merged_state, crate::core::Availability::MaybeConsumed);
+    // A ResourceAnalysis with no actions has zero Drop count.
+    let analysis = crate::core::ResourceAnalysis {
+        owner: crate::core::NodeId("function:synthetic".into()),
+        actions: Vec::new(),
+        loans: Vec::new(),
+        in_states: std::collections::BTreeMap::new(),
+        out_states: std::collections::BTreeMap::new(),
+    };
     assert_eq!(
-        ledger.action_count(crate::core::ResourceActionKind::Drop),
+        analysis.action_count(crate::core::CanonicalActionKind::Drop),
         0
     );
 }
@@ -3372,7 +3374,7 @@ func main() -> i32 { 0 }
         .expect("impl");
     let impl_owner = impl_method_owner("api::Close:for:Handle", &impl_def.methods[0]);
     assert!(program.node_meta().contains_key(&impl_owner));
-    assert!(program.ownership_ledger(&impl_owner).is_some());
+    assert!(program.resource_analysis(&impl_owner).is_some());
 
     let outer = module
         .items
@@ -3392,10 +3394,10 @@ func main() -> i32 { 0 }
         .expect("nested function");
     let nested_owner = nested_function_owner(&NodeId("function:api::outer".into()), nested);
     assert!(program.node_meta().contains_key(&nested_owner));
-    assert!(program.ownership_ledger(&nested_owner).is_some());
+    assert!(program.resource_analysis(&nested_owner).is_some());
 
     let expected_owners = program
-        .ownership_ledgers()
+        .resource_analyses()
         .keys()
         .cloned()
         .collect::<std::collections::HashSet<_>>();
@@ -3421,7 +3423,7 @@ func main() -> i32 { 0 }
     assert_eq!(
         expected_owners,
         reordered_program
-            .ownership_ledgers()
+            .resource_analyses()
             .keys()
             .cloned()
             .collect()
@@ -3645,30 +3647,34 @@ func main() -> i32 { 0 }
 "#,
     );
     let program = crate::core::check_program(&file).expect("check");
-    let ledger = program
-        .ownership_ledger(&NodeId("function:pass".to_string()))
-        .expect("pass ownership ledger");
-    assert!(ledger.actions.iter().any(|action| {
-        action.kind == crate::core::ResourceActionKind::Introduce && action.resource == "f"
+    let owner = NodeId("function:pass".to_string());
+    let analysis = program
+        .resource_analysis(&owner)
+        .expect("pass resource analysis");
+    assert!(analysis.actions.iter().any(|action| {
+        action.kind == crate::core::CanonicalActionKind::Introduce
+            && action.resource_display() == "f"
     }));
     assert_eq!(
-        ledger
+        analysis
             .actions
             .iter()
             .filter(|action| {
-                action.kind == crate::core::ResourceActionKind::Drop && action.resource == "f"
+                action.kind == crate::core::CanonicalActionKind::Drop
+                    && action.resource_display() == "f"
             })
             .count(),
         2
     );
-    let merge = ledger
-        .branch_merges
+    let cfg = program.callable_cfg(&owner).expect("pass cfg");
+    let merges = analysis.branch_merges(cfg);
+    let merge = merges
         .iter()
         .find(|merge| merge.resource == "f")
         .expect("f branch merge");
-    assert_eq!(merge.then_state, crate::core::ResourceState::Consumed);
-    assert_eq!(merge.else_state, crate::core::ResourceState::Consumed);
-    assert_eq!(merge.merged_state, crate::core::ResourceState::Consumed);
+    assert_eq!(merge.then_state, crate::core::Availability::Consumed);
+    assert_eq!(merge.else_state, crate::core::Availability::Consumed);
+    assert_eq!(merge.merged_state, crate::core::Availability::Consumed);
 }
 
 #[test]
@@ -3681,11 +3687,11 @@ func main() -> i32 { 0 }
 "#,
     );
     let program = crate::core::check_program(&file).expect("check");
-    let ledger = program
-        .ownership_ledger(&NodeId("function:identity".to_string()))
-        .expect("identity ownership ledger");
-    assert!(ledger.actions.iter().any(|action| {
-        action.kind == crate::core::ResourceActionKind::Return && action.resource == "f"
+    let analysis = program
+        .resource_analysis(&NodeId("function:identity".to_string()))
+        .expect("identity resource analysis");
+    assert!(analysis.actions.iter().any(|action| {
+        action.kind == crate::core::CanonicalActionKind::Return && action.resource_display() == "f"
     }));
 }
 
@@ -3706,22 +3712,40 @@ func main() -> i32 { 0 }
 "#,
     );
     let program = crate::core::check_program(&file).expect("borrow program checks");
-    let ledger = program
-        .ownership_ledger(&NodeId("function:inspect".to_string()))
-        .expect("inspect ownership ledger");
-    let actions: Vec<_> = ledger
+    let analysis = program
+        .resource_analysis(&NodeId("function:inspect".to_string()))
+        .expect("inspect resource analysis");
+    let actions: Vec<_> = analysis
         .actions
         .iter()
-        .map(|action| (action.kind, action.resource.as_str()))
+        .map(|action| (action.kind, action.resource_display()))
         .collect();
-    assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowShared, "p.left")));
-    assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowMut, "p.right")));
+    assert!(actions.contains(&(
+        crate::core::CanonicalActionKind::BorrowShared,
+        "p.left".to_string()
+    )));
+    assert!(actions.contains(&(
+        crate::core::CanonicalActionKind::BorrowMut,
+        "p.right".to_string()
+    )));
     // RESOURCE-LINEAR-001: canonical places retain constant-index
     // disjointness; only genuinely dynamic indices project as `[*]`.
-    assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowShared, "xs[0]")));
-    assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowEnd, "p.left")));
-    assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowEnd, "p.right")));
-    assert!(actions.contains(&(crate::core::ResourceActionKind::BorrowEnd, "xs[0]")));
+    assert!(actions.contains(&(
+        crate::core::CanonicalActionKind::BorrowShared,
+        "xs[0]".to_string()
+    )));
+    assert!(actions.contains(&(
+        crate::core::CanonicalActionKind::BorrowEnd,
+        "p.left".to_string()
+    )));
+    assert!(actions.contains(&(
+        crate::core::CanonicalActionKind::BorrowEnd,
+        "p.right".to_string()
+    )));
+    assert!(actions.contains(&(
+        crate::core::CanonicalActionKind::BorrowEnd,
+        "xs[0]".to_string()
+    )));
 
     let interp = crate::interp::Interpreter::from_checked(&program);
     assert!(interp
@@ -3750,14 +3774,14 @@ func main() -> i32 { 0 }
 "#,
     );
     let program = crate::core::check_program(&file).expect("compound return transfers caps");
-    let ledger = program
-        .ownership_ledger(&NodeId("function:pair".to_string()))
-        .expect("pair ownership ledger");
-    let returned: Vec<_> = ledger
+    let analysis = program
+        .resource_analysis(&NodeId("function:pair".to_string()))
+        .expect("pair resource analysis");
+    let returned: Vec<_> = analysis
         .actions
         .iter()
-        .filter(|action| action.kind == crate::core::ResourceActionKind::Return)
-        .map(|action| action.resource.as_str())
+        .filter(|action| action.kind == crate::core::CanonicalActionKind::Return)
+        .map(|action| action.resource_display())
         .collect();
     assert_eq!(returned, vec!["a", "b"]);
 }
@@ -3775,14 +3799,14 @@ func main() -> i32 { 0 }
 "#,
     );
     let program = crate::core::check_program(&file).expect("compound drop consumes caps");
-    let ledger = program
-        .ownership_ledger(&NodeId("function:close".to_string()))
-        .expect("close ownership ledger");
-    let dropped: Vec<_> = ledger
+    let analysis = program
+        .resource_analysis(&NodeId("function:close".to_string()))
+        .expect("close resource analysis");
+    let dropped: Vec<_> = analysis
         .actions
         .iter()
-        .filter(|action| action.kind == crate::core::ResourceActionKind::Drop)
-        .map(|action| action.resource.as_str())
+        .filter(|action| action.kind == crate::core::CanonicalActionKind::Drop)
+        .map(|action| action.resource_display())
         .collect();
     assert_eq!(dropped, vec!["a", "b"]);
 }
@@ -4015,13 +4039,13 @@ func main() -> i32 { 0 }
     );
     let program = crate::core::check_program(&file).expect("check modules");
     assert!(program
-        .ownership_ledger(&NodeId("function:A::close".to_string()))
+        .resource_analysis(&NodeId("function:A::close".to_string()))
         .is_some());
     assert!(program
-        .ownership_ledger(&NodeId("function:B::close".to_string()))
+        .resource_analysis(&NodeId("function:B::close".to_string()))
         .is_some());
     assert!(program
-        .ownership_ledger(&NodeId("function:close".to_string()))
+        .resource_analysis(&NodeId("function:close".to_string()))
         .is_none());
 }
 
@@ -4029,10 +4053,13 @@ func main() -> i32 { 0 }
 fn ownership_ledger_ignores_non_linear_drop() {
     let file = parse("func main() -> i32 { let x = 1; drop(x); 0 }");
     let program = crate::core::check_program(&file).expect("check");
-    let ledger = program
-        .ownership_ledger(&NodeId("function:main".to_string()))
-        .expect("main ledger");
-    assert!(ledger.actions.iter().all(|action| action.resource != "x"));
+    let analysis = program
+        .resource_analysis(&NodeId("function:main".to_string()))
+        .expect("main analysis");
+    assert!(analysis
+        .actions
+        .iter()
+        .all(|action| action.resource_display() != "x"));
 }
 
 #[test]

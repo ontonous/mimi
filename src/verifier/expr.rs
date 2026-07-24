@@ -164,7 +164,9 @@ fn collect_i32_definedness(
                         BinOp::Add => Z3Int::add(&[&l, &r]),
                         BinOp::Sub => Z3Int::sub(&[&l, &r]),
                         BinOp::Mul => Z3Int::mul(&[&l, &r]),
-                        _ => unreachable!(),
+                        _ => unreachable!(
+                            "checked_int_overflow: only Add/Sub/Mul are checked for i32 overflow"
+                        ),
                     };
                     let lo = Z3Int::from_i64(i32::MIN as i64);
                     let hi = Z3Int::from_i64(i32::MAX as i64);

@@ -414,7 +414,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         let tuple_heap_ptr = self.malloc_or_abort(tuple_size_val, "try_rej_tuple")?;
         let tuple_alloca = self
             .builder
-            .build_pointer_cast(tuple_heap_ptr, self.context.ptr_type(inkwell::AddressSpace::default()), "try_rej_tuple_cast")
+            .build_pointer_cast(
+                tuple_heap_ptr,
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                "try_rej_tuple_cast",
+            )
             .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?;
         let src_gep = self
             .gep()

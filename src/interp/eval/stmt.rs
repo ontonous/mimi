@@ -899,7 +899,12 @@ impl<'a> Interpreter<'a> {
                         }
                         interp.push_scope();
                         for (n, v) in captures {
-                            let _ = interp.bind(&n, v);
+                            if let Err(e) = interp.bind(&n, v) {
+                                eprintln!(
+                                    "[mimi] parasteps worker: failed to bind captured var '{}': {}",
+                                    n, e
+                                );
+                            }
                         }
                         let result = interp.eval_expr(&expr);
                         let checked = match &result {
@@ -911,7 +916,9 @@ impl<'a> Interpreter<'a> {
                             other => (*other).clone(),
                         };
                         interp.pop_scope();
-                        let _ = tx.send(checked);
+                        if let Err(e) = tx.send(checked) {
+                            eprintln!("[mimi] parasteps worker: failed to send result: {}", e);
+                        }
                     });
                     futures.push(std::sync::Arc::new(std::sync::Mutex::new(
                         crate::interp::value::PollFuture::Pending(rx),
@@ -949,11 +956,15 @@ impl<'a> Interpreter<'a> {
                                 }
                                 interp.push_scope();
                                 for (n, v) in captures {
-                                    let _ = interp.bind(&n, v);
+                                    if let Err(e) = interp.bind(&n, v) {
+                                        eprintln!("[mimi] spawn worker: failed to bind captured var '{}': {}", n, e);
+                                    }
                                 }
                                 let result = interp.eval_expr(&expr);
                                 interp.pop_scope();
-                                let _ = tx.send(result);
+                                if let Err(e) = tx.send(result) {
+                                    eprintln!("[mimi] spawn worker: failed to send result: {}", e);
+                                }
                             });
                             let fut_arc = std::sync::Arc::new(std::sync::Mutex::new(
                                 crate::interp::value::PollFuture::Pending(rx),

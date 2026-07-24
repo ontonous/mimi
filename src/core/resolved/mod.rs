@@ -8,8 +8,6 @@ use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
 use std::collections::{BTreeMap, HashMap};
 
-use super::OwnershipLedger;
-
 pub const RESOLVED_IR_VERSION: &str = "mimi-resolved-ir-1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -654,7 +652,6 @@ pub struct CheckedProgram {
     type_defs: HashMap<NodeId, ResolvedTypeDef>,
     extern_blocks: HashMap<NodeId, ResolvedExternBlock>,
     backend_requirements: Vec<CapabilityRequirement>,
-    ownership_ledgers: HashMap<NodeId, OwnershipLedger>,
     type_schemes: HashMap<NodeId, TypeScheme>,
     zonked_function_types: HashMap<NodeId, (Vec<ZonkedTy>, ZonkedTy)>,
     resolved_types: crate::core::ResolvedTypeTable,
@@ -827,16 +824,6 @@ impl CheckedProgram {
             return Err(errors);
         }
         program.callables = callables;
-        program.ownership_ledgers = program
-            .resource_analyses
-            .iter()
-            .map(|(owner, analysis)| {
-                (
-                    owner.clone(),
-                    OwnershipLedger::from_analysis(analysis, &program.callable_cfgs[owner]),
-                )
-            })
-            .collect();
         Ok(program)
     }
 
@@ -987,7 +974,6 @@ impl CheckedProgram {
             type_defs,
             extern_blocks,
             backend_requirements,
-            ownership_ledgers: HashMap::new(),
             type_schemes: HashMap::new(),
             zonked_function_types: HashMap::new(),
             resolved_types: crate::core::ResolvedTypeTable::new(),
@@ -1220,14 +1206,6 @@ impl CheckedProgram {
             .values()
             .flat_map(|block| block.signatures.iter())
             .find(|sig| sig.name == name)
-    }
-
-    pub fn ownership_ledgers(&self) -> &HashMap<NodeId, OwnershipLedger> {
-        &self.ownership_ledgers
-    }
-
-    pub fn ownership_ledger(&self, owner: &NodeId) -> Option<&OwnershipLedger> {
-        self.ownership_ledgers.get(owner)
     }
 
     pub fn type_schemes(&self) -> &HashMap<NodeId, TypeScheme> {

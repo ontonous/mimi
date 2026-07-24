@@ -176,143 +176,79 @@ pub struct ResourceAnalysis {
     pub out_states: BTreeMap<BasicBlockId, BTreeMap<ResourceId, ResourceFact>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResourceState {
-    Available,
-    Consumed,
-    MaybeConsumed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResourceActionKind {
-    Introduce,
-    Move,
-    Drop,
-    Return,
-    BorrowShared,
-    BorrowMut,
-    BorrowEnd,
-    TransferSession,
-    TransferChild,
-    DelegateConsume,
-}
-
-impl ResourceActionKind {
+impl CanonicalActionKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Read => "read",
+            Self::Write => "write",
             Self::Introduce => "introduce",
             Self::Move => "move",
             Self::Drop => "drop",
             Self::Return => "return",
-            Self::BorrowShared => "borrow_shared",
-            Self::BorrowMut => "borrow_mut",
-            Self::BorrowEnd => "borrow_end",
             Self::TransferSession => "transfer_session",
             Self::TransferChild => "transfer_child",
             Self::DelegateConsume => "delegate_consume",
+            Self::BorrowShared => "borrow_shared",
+            Self::BorrowMut => "borrow_mut",
+            Self::BorrowEnd => "borrow_end",
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResourceAction {
-    pub kind: ResourceActionKind,
-    pub resource: String,
-    pub control_path: Vec<String>,
-    pub span: Span,
+impl CanonicalResourceAction {
+    /// Display name for the resource this action operates on.
+    pub fn resource_display(&self) -> String {
+        self.source
+            .as_ref()
+            .or(self.target.as_ref())
+            .map(Place::display)
+            .unwrap_or_else(|| self.resource.0 .0.clone())
+    }
 }
 
+/// A branch-merge observation computed from `ResourceAnalysis` in/out states.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchMerge {
     pub resource: String,
-    pub then_state: ResourceState,
-    pub else_state: ResourceState,
-    pub merged_state: ResourceState,
+    pub then_state: Availability,
+    pub else_state: Availability,
+    pub merged_state: Availability,
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OwnershipLedger {
-    pub owner: NodeId,
-    pub actions: Vec<ResourceAction>,
-    pub branch_merges: Vec<BranchMerge>,
-}
-
-impl OwnershipLedger {
-    #[cfg(test)]
-    pub(crate) fn new(owner: NodeId) -> Self {
-        Self {
-            owner,
-            actions: Vec::new(),
-            branch_merges: Vec::new(),
-        }
+impl ResourceAnalysis {
+    /// Count actions of a given canonical kind.
+    pub fn action_count(&self, kind: CanonicalActionKind) -> usize {
+        self.actions.iter().filter(|a| a.kind == kind).count()
     }
 
-    pub fn action_count(&self, kind: ResourceActionKind) -> usize {
-        self.actions
-            .iter()
-            .filter(|action| action.kind == kind)
-            .count()
-    }
-
+    /// Sorted, deduplicated display names of resources (excluding Read/Write).
     pub fn resources(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .actions
             .iter()
-            .map(|action| action.resource.clone())
+            .filter(|a| {
+                !matches!(
+                    a.kind,
+                    CanonicalActionKind::Read | CanonicalActionKind::Write
+                )
+            })
+            .map(|a| a.resource_display())
             .collect();
         names.sort();
         names.dedup();
         names
     }
 
-    pub fn has_maybe_consumed_merge(&self) -> bool {
-        self.branch_merges
-            .iter()
-            .any(|merge| merge.merged_state == ResourceState::MaybeConsumed)
-    }
-
-    /// Compatibility projection for consumers not yet migrated to canonical
-    /// `ResourceAnalysis`. It is never an analysis input.
-    pub(crate) fn from_analysis(analysis: &ResourceAnalysis, cfg: &CallableCfg) -> Self {
-        let actions = analysis
-            .actions
-            .iter()
-            .filter_map(|action| {
-                let kind = match action.kind {
-                    CanonicalActionKind::Read | CanonicalActionKind::Write => return None,
-                    CanonicalActionKind::Introduce => ResourceActionKind::Introduce,
-                    CanonicalActionKind::Move => ResourceActionKind::Move,
-                    CanonicalActionKind::Drop => ResourceActionKind::Drop,
-                    CanonicalActionKind::Return => ResourceActionKind::Return,
-                    CanonicalActionKind::TransferSession => ResourceActionKind::TransferSession,
-                    CanonicalActionKind::TransferChild => ResourceActionKind::TransferChild,
-                    CanonicalActionKind::DelegateConsume => ResourceActionKind::DelegateConsume,
-                    CanonicalActionKind::BorrowShared => ResourceActionKind::BorrowShared,
-                    CanonicalActionKind::BorrowMut => ResourceActionKind::BorrowMut,
-                    CanonicalActionKind::BorrowEnd => ResourceActionKind::BorrowEnd,
-                };
-                Some(ResourceAction {
-                    kind,
-                    resource: action
-                        .source
-                        .as_ref()
-                        .or(action.target.as_ref())
-                        .map(Place::display)
-                        .unwrap_or_else(|| action.resource.0 .0.clone()),
-                    control_path: Vec::new(),
-                    span: action.span,
-                })
-            })
-            .collect();
-
+    /// Compute branch-merge observations from in/out states and the CFG.
+    pub fn branch_merges(&self, cfg: &CallableCfg) -> Vec<BranchMerge> {
         let mut branch_merges = Vec::new();
-        for (block, incoming) in &analysis.in_states {
+        for (block, incoming) in &self.in_states {
             let predecessors = cfg
                 .predecessors(block)
                 .into_iter()
                 .filter(|edge| cfg.reachable.contains(&edge.from))
-                .filter_map(|edge| analysis.out_states.get(&edge.from))
+                .filter_map(|edge| self.out_states.get(&edge.from))
                 .collect::<Vec<_>>();
             if predecessors.len() < 2 {
                 continue;
@@ -323,12 +259,8 @@ impl OwnershipLedger {
                 .collect::<std::collections::BTreeSet<_>>();
             for resource in resources {
                 let state = |fact: Option<&ResourceFact>| {
-                    fact.map(|fact| match fact.availability {
-                        Availability::Available => ResourceState::Available,
-                        Availability::Consumed => ResourceState::Consumed,
-                        Availability::MaybeConsumed => ResourceState::MaybeConsumed,
-                    })
-                    .unwrap_or(ResourceState::MaybeConsumed)
+                    fact.map(|fact| fact.availability)
+                        .unwrap_or(Availability::MaybeConsumed)
                 };
                 let name = incoming
                     .get(&resource)
@@ -340,8 +272,7 @@ impl OwnershipLedger {
                     })
                     .map(Place::display)
                     .unwrap_or_else(|| {
-                        analysis
-                            .actions
+                        self.actions
                             .iter()
                             .find(|action| action.resource == resource)
                             .and_then(|action| action.source.as_ref())
@@ -367,10 +298,13 @@ impl OwnershipLedger {
                 &right.resource,
             ))
         });
-        Self {
-            owner: analysis.owner.clone(),
-            actions,
-            branch_merges,
-        }
+        branch_merges
+    }
+
+    /// Whether any branch merge results in MaybeConsumed.
+    pub fn has_maybe_consumed_merge(&self, cfg: &CallableCfg) -> bool {
+        self.branch_merges(cfg)
+            .iter()
+            .any(|merge| merge.merged_state == Availability::MaybeConsumed)
     }
 }

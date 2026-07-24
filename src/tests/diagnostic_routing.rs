@@ -243,19 +243,22 @@ fn ownership_ledger_actions_and_merges_are_source_aware() {
     loader.load_main(&main_path).expect("load ownership source");
     let file = loader.merge_all().expect("merge ownership source");
     let program = crate::core::check_program(&file).expect("check ownership source");
-    let ledger = program
-        .ownership_ledger(&crate::core::NodeId("function:close".into()))
-        .expect("close ownership ledger");
-    assert!(ledger.actions.iter().all(|action| {
+    let owner = crate::core::NodeId("function:close".into());
+    let analysis = program
+        .resource_analysis(&owner)
+        .expect("close resource analysis");
+    assert!(analysis.actions.iter().all(|action| {
         action.span.source_id.is_known() && action.span.start_line > 0 && action.span.start_col > 0
     }));
-    assert!(ledger.branch_merges.iter().all(|merge| {
+    let cfg = program.callable_cfg(&owner).expect("close cfg");
+    let merges = analysis.branch_merges(cfg);
+    assert!(merges.iter().all(|merge| {
         merge.span.source_id.is_known() && merge.span.start_line > 0 && merge.span.start_col > 0
     }));
-    assert!(ledger
+    assert!(analysis
         .actions
         .iter()
-        .filter(|action| action.kind == crate::core::ResourceActionKind::Drop)
+        .filter(|action| action.kind == crate::core::CanonicalActionKind::Drop)
         .all(|action| action.span.start_line == 3));
 
     let _ = fs::remove_dir_all(root);

@@ -1515,7 +1515,12 @@ impl<'a> Interpreter<'a> {
         // (Arbitrary expressions still lack full env capture for true async.)
         let result = self.eval_expr(expr);
         let (tx, rx) = std::sync::mpsc::channel();
-        let _ = tx.send(result);
+        if let Err(e) = tx.send(result) {
+            eprintln!(
+                "[mimi] spawn fallback: failed to send result into channel: {}",
+                e
+            );
+        }
         Ok(Value::Future(std::sync::Arc::new(std::sync::Mutex::new(
             crate::interp::value::PollFuture::Pending(rx),
         ))))

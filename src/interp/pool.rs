@@ -13,7 +13,9 @@ impl Drop for ThreadPool {
         // Drop the sender first to signal workers (recv returns Err, loop breaks)
         // Then join all worker threads to ensure clean shutdown.
         for handle in self.workers.drain(..) {
-            let _ = handle.join();
+            if let Err(e) = handle.join() {
+                eprintln!("[pool] worker thread panicked during shutdown: {:?}", e);
+            }
         }
     }
 }

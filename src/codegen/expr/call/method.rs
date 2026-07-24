@@ -2314,7 +2314,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         "mimi_map_from_json_result_product_i64",
                                         "map_from_json_result_product",
                                     ),
-                                    _ => unreachable!(),
+                                    _ => unreachable!("from_json_result: only Option/Result product types reach this dispatch"),
                                 };
                                 let func = self.get_runtime_fn(fn_name)?;
                                 let result = self.build_call(

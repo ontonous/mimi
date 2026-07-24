@@ -250,7 +250,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_impls = Some(impls);
         self.resolved_ownership_owners = Some(
             program
-                .ownership_ledgers()
+                .resource_analyses()
                 .keys()
                 .map(|owner| owner.0.clone())
                 .collect(),
@@ -259,37 +259,49 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut ownership_resources = std::collections::HashMap::new();
         let mut ownership_actions = std::collections::HashMap::new();
         let mut ownership_merges = std::collections::HashMap::new();
-        for (owner, ledger) in program.ownership_ledgers() {
+        for (owner, analysis) in program.resource_analyses() {
+            let cfg = program.callable_cfg(owner);
+            let merges = cfg
+                .map(|cfg| analysis.branch_merges(cfg))
+                .unwrap_or_default();
             ownership_summaries.insert(
                 owner.0.clone(),
                 (
-                    ledger.action_count(crate::core::ResourceActionKind::Introduce),
-                    ledger.action_count(crate::core::ResourceActionKind::Move),
-                    ledger.action_count(crate::core::ResourceActionKind::Drop),
-                    ledger.action_count(crate::core::ResourceActionKind::Return),
-                    ledger.branch_merges.len(),
-                    ledger.has_maybe_consumed_merge(),
+                    analysis.action_count(crate::core::CanonicalActionKind::Introduce),
+                    analysis.action_count(crate::core::CanonicalActionKind::Move),
+                    analysis.action_count(crate::core::CanonicalActionKind::Drop),
+                    analysis.action_count(crate::core::CanonicalActionKind::Return),
+                    merges.len(),
+                    merges
+                        .iter()
+                        .any(|m| m.merged_state == crate::core::Availability::MaybeConsumed),
                 ),
             );
-            ownership_resources.insert(owner.0.clone(), ledger.resources());
+            ownership_resources.insert(owner.0.clone(), analysis.resources());
             ownership_actions.insert(
                 owner.0.clone(),
-                ledger
+                analysis
                     .actions
                     .iter()
-                    .map(|action| (action.kind.as_str().to_string(), action.resource.clone()))
+                    .filter(|a| {
+                        !matches!(
+                            a.kind,
+                            crate::core::CanonicalActionKind::Read
+                                | crate::core::CanonicalActionKind::Write
+                        )
+                    })
+                    .map(|action| (action.kind.as_str().to_string(), action.resource_display()))
                     .collect(),
             );
             ownership_merges.insert(
                 owner.0.clone(),
-                ledger
-                    .branch_merges
+                merges
                     .iter()
                     .map(|merge| {
-                        let encode = |s: crate::core::ResourceState| match s {
-                            crate::core::ResourceState::Available => "available",
-                            crate::core::ResourceState::Consumed => "consumed",
-                            crate::core::ResourceState::MaybeConsumed => "maybe_consumed",
+                        let encode = |s: crate::core::Availability| match s {
+                            crate::core::Availability::Available => "available",
+                            crate::core::Availability::Consumed => "consumed",
+                            crate::core::Availability::MaybeConsumed => "maybe_consumed",
                         };
                         (
                             merge.resource.clone(),
