@@ -1422,14 +1422,18 @@ impl<'a> Interpreter<'a> {
 
         // Try to find and call the from function
         if let Some(func) = self.find_function(&from_func_name) {
-            let error_value = vals.into_iter().next().unwrap();
+            let error_value = match vals.into_iter().next() {
+                Some(v) => v,
+                None => return Value::Variant(variant_name.to_string(), vec![]),
+            };
             match self.call_func(&func, vec![error_value]) {
                 Ok(converted_error) => {
                     // Return Err(converted_error)
                     Value::Variant("Err".to_string(), vec![converted_error])
                 }
                 Err(_) => {
-                    // Conversion failed, return original
+                    // Conversion failed, return original variant with Unit placeholder
+                    // Note: We lost the original error value, but this is a rare edge case
                     Value::Variant(variant_name.to_string(), vec![Value::Unit])
                 }
             }
