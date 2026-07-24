@@ -109,12 +109,31 @@ impl<'a> Interpreter<'a> {
                 // Nested funcs are not quotable; skip
                 Ok(None)
             }
+            // 0.31.22 Quote soundness hole 修复：绝对禁止静默过滤 Contract。
+            // 盲审判决：Quote 生成的 AST 必须是一等公民，必须送回 Checker 完整 re-check。
+            // 当前实现：emit 明确错误，防止静默丢弃合约（soundness hole）。
+            // TODO(0.31.22+): 完整实现 — QuotedAst 增加 Contract 变体，eval_quoted_ast 送回 Checker。
+            Stmt::Requires(_expr, span) => Err(InterpError::new(format!(
+                "quote! does not support `requires` contracts (soundness hole fix, amendment clause). \
+                 Contract at line {} col {} cannot be silently filtered. \
+                 TODO: send generated AST back to Checker for re-validation",
+                span.start_line, span.start_col
+            ))),
+            Stmt::Ensures(_expr, span) => Err(InterpError::new(format!(
+                "quote! does not support `ensures` contracts (soundness hole fix, amendment clause). \
+                 Contract at line {} col {} cannot be silently filtered. \
+                 TODO: send generated AST back to Checker for re-validation",
+                span.start_line, span.start_col
+            ))),
+            Stmt::Math(exprs) => Err(InterpError::new(format!(
+                "quote! does not support `math` blocks (soundness hole fix, amendment clause). \
+                 {} math assertion(s) cannot be silently filtered. \
+                 TODO: send generated AST back to Checker for re-validation",
+                exprs.len()
+            ))),
             Stmt::Desc(..)
             | Stmt::Rule(..)
-            | Stmt::Requires(_, _)
-            | Stmt::Ensures(_, _)
             | Stmt::Invariant(_, _)
-            | Stmt::Math(_)
             | Stmt::Ellipsis
             | Stmt::MmsBlock { .. }
             | Stmt::Do(_)
