@@ -27,21 +27,29 @@ impl<'a> Interpreter<'a> {
             _ => return Err(InterpError::new("socket: protocol must be i32")),
         };
         // SAFETY: libc::socket is safe per POSIX when arguments are valid integers;
-        // we validate types above. Returns -1 on error, which we propagate.
+        // we validate types above. Returns -1 on error.
         let fd = unsafe { libc::socket(domain as i32, type_ as i32, protocol as i32) };
-        if fd >= 0 {
-            // Set SO_REUSEADDR so bind works immediately after close (TIME_WAIT avoidance)
-            let reuse: libc::c_int = 1;
-            // SAFETY: fd is valid and option value pointer/size are correct.
-            unsafe {
-                libc::setsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_REUSEADDR,
-                    &reuse as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&reuse) as libc::socklen_t,
-                );
-            }
+        // 0.31.22 Builtins 废除 sentinel：-1 拦截在 builtin 定义处
+        if fd < 0 {
+            return Err(InterpError::new(format!(
+                "socket() failed: domain={}, type={}, protocol={} (OS error: {})",
+                domain,
+                type_,
+                protocol,
+                std::io::Error::last_os_error()
+            )));
+        }
+        // Set SO_REUSEADDR so bind works immediately after close (TIME_WAIT avoidance)
+        let reuse: libc::c_int = 1;
+        // SAFETY: fd is valid and option value pointer/size are correct.
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_REUSEADDR,
+                &reuse as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&reuse) as libc::socklen_t,
+            );
         }
         Ok(Value::Int(fd as i64))
     }
@@ -118,7 +126,16 @@ impl<'a> Interpreter<'a> {
         }
         // SAFETY: res is non-null and was returned by getaddrinfo, so freeaddrinfo is safe.
         unsafe { libc::freeaddrinfo(res) };
-        Ok(Value::Int(ret))
+        // 0.31.22 Builtins 废除 sentinel：-1 拦截在 builtin 定义处
+        if ret != 0 {
+            return Err(InterpError::new(format!(
+                "connect() failed for '{}:{}' (OS error: {})",
+                host,
+                port,
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(Value::Int(0))
     }
 
     pub(crate) fn builtin_bind(&self, args: Vec<Value>) -> Result<Value, InterpError> {
@@ -147,7 +164,16 @@ impl<'a> Interpreter<'a> {
                 std::mem::size_of::<libc::sockaddr_in>() as u32,
             )
         };
-        Ok(Value::Int(ret as i64))
+        // 0.31.22 Builtins 废除 sentinel：-1 拦截在 builtin 定义处
+        if ret < 0 {
+            return Err(InterpError::new(format!(
+                "bind() failed: fd={}, port={} (OS error: {})",
+                fd,
+                port,
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(Value::Int(0))
     }
 
     pub(crate) fn builtin_listen(&self, args: Vec<Value>) -> Result<Value, InterpError> {
@@ -164,7 +190,16 @@ impl<'a> Interpreter<'a> {
         };
         // SAFETY: listen() uses a validated fd that came from a previous socket() call.
         let ret = unsafe { libc::listen(fd as i32, backlog as i32) };
-        Ok(Value::Int(ret as i64))
+        // 0.31.22 Builtins 废除 sentinel：-1 拦截在 builtin 定义处
+        if ret < 0 {
+            return Err(InterpError::new(format!(
+                "listen() failed: fd={}, backlog={} (OS error: {})",
+                fd,
+                backlog,
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(Value::Int(0))
     }
 
     pub(crate) fn builtin_accept(&self, args: Vec<Value>) -> Result<Value, InterpError> {
@@ -187,6 +222,14 @@ impl<'a> Interpreter<'a> {
                 &mut addr_len,
             )
         };
+        // 0.31.22 Builtins 废除 sentinel：-1 拦截在 builtin 定义处
+        if client_fd < 0 {
+            return Err(InterpError::new(format!(
+                "accept() failed: fd={} (OS error: {})",
+                fd,
+                std::io::Error::last_os_error()
+            )));
+        }
         Ok(Value::Int(client_fd as i64))
     }
 
@@ -212,6 +255,15 @@ impl<'a> Interpreter<'a> {
                 0,
             )
         };
+        // 0.31.22 Builtins 废除 sentinel：-1 拦截在 builtin 定义处
+        if sent < 0 {
+            return Err(InterpError::new(format!(
+                "send() failed: fd={}, len={} (OS error: {})",
+                fd,
+                data.len(),
+                std::io::Error::last_os_error()
+            )));
+        }
         Ok(Value::Int(sent as i64))
     }
 
@@ -241,10 +293,17 @@ impl<'a> Interpreter<'a> {
                 0,
             )
         };
-        if n <= 0 {
-            // audit (MEDIUM): distinguish connection closed (n==0) from
-            // error (n<0). Both return empty string for now, but the caller
-            // can use a separate length check. On error, return empty.
+        if n < 0 {
+            // 0.31.22 Builtins 废除 sentinel：-1 拦截在 builtin 定义处
+            return Err(InterpError::new(format!(
+                "recv() failed: fd={}, buf_size={} (OS error: {})",
+                fd,
+                buf_size,
+                std::io::Error::last_os_error()
+            )));
+        }
+        if n == 0 {
+            // Connection closed by peer — return empty string (not an error)
             return Ok(Value::String(String::new()));
         }
         // n > 0: n is guaranteed <= buf_size (recv reads at most buf_size bytes).
@@ -269,7 +328,15 @@ impl<'a> Interpreter<'a> {
         };
         // SAFETY: close() uses a validated fd from a previous socket() or accept() call.
         let ret = unsafe { libc::close(fd as i32) };
-        Ok(Value::Int(ret as i64))
+        // 0.31.22 Builtins 废除 sentinel：-1 拦截在 builtin 定义处
+        if ret < 0 {
+            return Err(InterpError::new(format!(
+                "close_fd() failed: fd={} (OS error: {})",
+                fd,
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(Value::Int(0))
     }
     // === HTTP builtins (implemented via libc socket + http parsing) ===
     fn http_connect(host: &str, port: i64) -> Result<i64, InterpError> {
