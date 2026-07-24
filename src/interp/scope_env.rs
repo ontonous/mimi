@@ -124,6 +124,23 @@ impl ScopeEnv {
         None
     }
 
+    /// Remove and return a variable's value from the innermost scope that
+    /// contains it. Replaces the slot with `Value::Unit` as a sentinel.
+    /// Used by the take-before-eval optimization in `eval_assign` to avoid
+    /// cloning heap-heavy values (String, List, Record) when the variable
+    /// is being reassigned and read exactly once in the RHS.
+    pub fn take(&mut self, name: &str) -> Option<Value> {
+        for (scope, moved) in self.env.iter_mut().zip(self.moved_vars.iter()).rev() {
+            if let Some(v) = scope.get_mut(name) {
+                if moved.get(name).copied().unwrap_or(false) {
+                    return None;
+                }
+                return Some(std::mem::replace(v, Value::Unit));
+            }
+        }
+        None
+    }
+
     /// Check if a variable is mutable.
     pub fn is_mutable(&self, name: &str) -> bool {
         for mut_scope in self.mut_vars.iter().rev() {
