@@ -116,6 +116,9 @@ pub struct Interpreter<'a> {
     /// 0.31.23: Whether we're currently in comptime evaluation mode.
     /// When true, FFI calls are forbidden (abort on extern call).
     in_comptime: bool,
+    /// 0.31.23: Gensym counter for generating unique variable names in quote!.
+    /// Prevents naming conflicts with existing variables and Z3.
+    gensym_counter: usize,
     /// Loaded shared libraries: (lib_path, Library handle)
     loaded_libs: Vec<(String, libloading::Library)>,
     /// Default allocator kind (set by --allocator CLI flag)
@@ -1479,6 +1482,7 @@ impl<'a> Interpreter<'a> {
             type_defs,
             comptime_results: HashMap::new(),
             in_comptime: false,
+            gensym_counter: 0,
             loaded_libs: Vec::new(),
             default_allocator: AllocatorKind::System,
             loop_action: None,
@@ -2298,6 +2302,19 @@ impl<'a> Interpreter<'a> {
     /// results it already has.
     pub fn inject_comptime_result(&mut self, name: String, value: Value) {
         self.comptime_results.insert(name, value);
+    }
+
+    /// 0.31.23: Generate a unique variable name for quote! hygiene.
+    ///
+    /// Appends a unique suffix to prevent naming conflicts with existing
+    /// variables and Z3's internal naming. The suffix format is `$gensymN`
+    /// where N is a monotonically increasing counter.
+    ///
+    /// Example: `gensym("x")` returns `"x$gensym0"`, `"x$gensym1"`, etc.
+    pub fn gensym(&mut self, base: &str) -> String {
+        let id = self.gensym_counter;
+        self.gensym_counter += 1;
+        format!("{}$gensym{}", base, id)
     }
 
     /// Evaluate comptime functions with no arguments at startup
