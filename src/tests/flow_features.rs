@@ -5559,6 +5559,7 @@ func main() -> i32 {
 #[test]
 fn test_sandbox_multi_actor() {
     // L1 interp: test_sandbox spawns actors and runs transitions.
+    // fix-plan: verify actual output, not just is_ok() (was false success).
     let src = r#"
 actor Counter {
     n: i32
@@ -5571,8 +5572,9 @@ func main() -> i32 {
     0
 }
 "#;
-    let r = run_source_result(src);
-    assert!(r.is_ok(), "test_sandbox should not crash: {:?}", r);
+    let (val, stdout) = run_source_with_stdout(src);
+    assert_eq!(stdout.trim(), "1", "test_sandbox should spawn 1 actor, got: {}", stdout);
+    assert_eq!(val, interp::Value::Int(0));
 }
 
 // ── v0.29.49: Multi-Target Transition Caller Exhaustiveness ───────────
