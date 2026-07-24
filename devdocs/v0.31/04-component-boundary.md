@@ -2,19 +2,19 @@
 
 ## 版本
 
-- **0.31.26**：Component IR / `.mimiabi`，所有 generator 只消费同一 IR。
-- **0.31.27**：Native ABI、allocator provenance、typed generational handle 和 concurrent lease。
-- **0.31.28**（新增）：Component 稳定检查点 — ABI fuzz + handle race + 回归扫描，0 新 surface。
-- **0.31.29**：Subscription quiescence、async cancel exactly-one terminal。
-- **0.31.30**：canonical Wire Schema、limits、handshake、revision/conflict、replay。
-- **0.31.31**：Rust Safe SDK。
-- **0.31.32**：XPU FFI 验证 — extern "C" + #[repr(C)] 调通真实 C 库（OpenVINO/Level Zero/任意 .so），Z3 验证指针非空。
-- **0.31.33**：Component 攻击审查，0 新 surface。
-- **0.31.34**（新增）：SDK conformance 加固 — Rust SDK E2E + XPU FFI 边界 + Wire fuzz，0 新 surface。
+- **0.31.27**：Component IR / `.mimiabi`，所有 generator 只消费同一 IR。
+- **0.31.28**：Native ABI、allocator provenance、typed generational handle 和 concurrent lease。
+- **0.31.29**（新增）：Component 稳定检查点 — ABI fuzz + handle race + 回归扫描，0 新 surface。
+- **0.31.30**：Subscription quiescence、async cancel exactly-one terminal。
+- **0.31.31**：canonical Wire Schema、limits、handshake、revision/conflict、replay。
+- **0.31.32**：Rust Safe SDK。
+- **0.31.33**：XPU FFI 验证 — extern "C" + #[repr(C)] 调通真实 C 库（OpenVINO/Level Zero/任意 .so），Z3 验证指针非空。
+- **0.31.34**：Component 攻击审查，0 新 surface。
+- **0.31.35**（新增）：SDK conformance 加固 — Rust SDK E2E + XPU FFI 边界 + Wire fuzz，0 新 surface。
 
-## 0.31.28 稳定检查点详情
+## 0.31.29 稳定检查点详情
 
-> 插入原因：0.31.26–27 从零建立 Component IR 和 Native ABI，生成大量新代码。
+> 插入原因：0.31.27–27 从零建立 Component IR 和 Native ABI，生成大量新代码。
 > 在 Callback/Async/Wire 等上层机制构建前，确认 ABI 基础稳固。
 
 ### 交付
@@ -34,7 +34,7 @@
    - allocator provenance 标记：哪侧分配，哪侧释放
 
 4. **回归扫描**：
-   - 0.31.26–27 变更的全量测试
+   - 0.31.27–27 变更的全量测试
    - 不新增 Component surface
 
 ### 门禁
@@ -44,9 +44,9 @@
 - handle lease 并发 stress 0 race（TSan 或等价）
 - 全量测试连续两次绿
 
-## 0.31.34 SDK conformance 加固详情
+## 0.31.35 SDK conformance 加固详情
 
-> 插入原因：Rust SDK（0.31.31）和 XPU FFI（0.31.32）各自 E2E 通过后，
+> 插入原因：Rust SDK（0.31.32）和 XPU FFI（0.31.33）各自 E2E 通过后，
 > 需要验证跨语言交互的边界情况。"各自能跑" ≠ "一起能跑"。
 
 ### 交付

@@ -5,16 +5,16 @@
 
 ## 版本
 
-- **0.31.22**：Resolved IR -> trusted subset -> Verification IR -> CFG/SSA。
-- **0.31.23**：checked i32/i64、definedness obligation、VC 与 counterexample。
-- **0.31.24**：八结果代数、proof artifact、solver/infrastructure fail-closed、验证域隔离。
-- **0.31.25**：止血/攻击审查 II，0 新 proof feature。
+- **0.31.23**：Resolved IR -> trusted subset -> Verification IR -> CFG/SSA。
+- **0.31.24**：checked i32/i64、definedness obligation、VC 与 counterexample。
+- **0.31.25**：八结果代数、proof artifact、solver/infrastructure fail-closed、验证域隔离。
+- **0.31.26**：止血/攻击审查 II，0 新 proof feature。
 
 ## 范围
 
 首版只允许 bool、checked i32/i64、f64 opaque sort（类型传递，算术不验证）、纯有限分支、immutable scalar 和受限 old(param)。heap、Flow、Actor、Session、loop、recursion、allocation、任意 call、spawn/await、FFI 在 SMT 前返回 `NotInTrustedSubset`。
 
-## 0.31.22 交付（Verification IR）
+## 0.31.23 交付（Verification IR）
 
 ### 核心交付
 
@@ -52,7 +52,7 @@
 - VIR 节点无 Span（Span 在 side table）
 - Raw AST 永不产生 stable Proven
 
-## 0.31.23 交付（VC + checked integer）
+## 0.31.24 交付（VC + checked integer）
 
 ### 核心交付
 
@@ -69,7 +69,7 @@
 - known-unsound corpus 误证数为 0
 - 测试包含 overflow、除零、MIN/-1、2^53 等反例
 
-## 0.31.24 交付（artifact + fail-closed + 验证域隔离）
+## 0.31.25 交付（artifact + fail-closed + 验证域隔离）
 
 ### 核心交付
 
@@ -102,9 +102,9 @@
 - 合约级 NotInTrustedSubset 阻断 `mimi verify`；body 级不阻断
 - 证明缓存命中率 > 80%（变量重命名、注释变更不失效）
 
-## 0.31.25 交付（攻击审查 II）
+## 0.31.26 交付（攻击审查 II）
 
-- 验证 0.31.22-24 修复
+- 验证 0.31.23-24 修复
 - f64 opaque sort 不泄漏算术证明
 - Typestate 公理不引入未验证假设
 - 验证域隔离不被绕过（body 级 NotInTrustedSubset 不升级为 Proven）

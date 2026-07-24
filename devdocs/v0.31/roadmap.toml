@@ -2,7 +2,7 @@ schema_version = 2
 series = "0.31"
 baseline = "0.30.0"
 first = 0
-last = 44
+last = 45
 
 # === Phase 0: 基线（已完成，0.1.0 发布）===
 
@@ -269,11 +269,69 @@ requirements = []
 # - benchmark 数据记录到 reports/
 # - 无新增 P0、silent fallback、warning-only
 # - codegen golden 文件更新后无回归
+#
+# 完成状态（v4 更新）：
+# ✅ 追加 B（FuncDef O(1) flags + arity 合并 + mutate 守卫）— 提前到 0.31.19 交付
+# ✅ ED-10 named-arg 重排序去重
+# ✅ B9 闭包 malloc 确认已有 register_heap_alloc 机制
+# ✅ CG-H16 ValueHandle untag 确认已修 (14582d18)
+# ✅ 性能基线 benchmark（8 个，含 list_sum_1000 + string_concat_100）
+# ⏭ call_named dispatch table — Rust match on &str 编译为高效跳转表，ROI 不足，deferred post-1.0
+# ⏭ call_method scope 嵌套 — with_scope 闭包在 Rust 中零开销（单态化+内联），跳过
+# ⏭ Interpreter 结构体瘦身 — 移入 0.31.42 DEBUG 周期
+# ❌ ED-3 Value clone 消减 → 移入 0.31.21（需独立 sprint）
+# ❌ LLVM O1 默认 → 移入 0.31.21（? 操作符 + extern codegen bug 需先修）
 
-# === Phase B: 语言冻结（0.31.21–0.31.25）===
+# === 性能优化窗口 II（0.31.21，v4 插入）===
 
 [[milestone]]
 version = "0.31.21"
+kind = "implementation"
+title = "Runtime Efficiency II：Value 热路径重构 + O1 codegen 修复"
+requirements = []
+# 插入原因（v4）：0.31.20 完成了 quick wins（FuncDef flags、named-arg 去重、benchmark），
+# 但两个核心交付因规模和前置 bug 未能完成：
+# 1. ED-3 Value clone 消减是解释器最大性能瓶颈（每次变量查找深拷贝 37-variant Value），
+#    需要 scope_env.lookup() 返回 &Value/Cow<Value>，涉及 ~600 个 .clone() 调用点审计。
+# 2. LLVM O1 默认被 ? 操作符和 extern strlen 的 codegen IR bug 阻断
+#    （dual_error_question_chain + e2e_extern_strlen 在 O1 下 SIGSEGV）。
+# 在 Phase B（语言冻结）和 Phase C（Component 边界）大量新增代码前完成，
+# 避免性能债和 codegen bug 复合增长。
+#
+# 核心交付（0 新 stable feature，纯内部优化 + bug 修复）：
+#
+# 1. O1 codegen bug 修复：
+#    - 诊断 dual_error_question_chain 在 OptimizationLevel::Less 下 SIGSEGV 的 IR 根因
+#    - 诊断 e2e_extern_strlen 在 default<O1> IR pass 下 SIGSEGV 的 IR 根因
+#    - 修复 IR 生成（可能是未初始化值、错误 basic block 连接、或 lifetime 问题）
+#    - 启用 OptimizationLevel::Less 为默认（或 default<O1> IR pass）
+#    - 更新 codegen golden 文件
+#
+# 2. ED-3 Value 热路径 clone 消减：
+#    - scope_env.lookup() 返回 &Value 或 Cow<Value>（消除每次变量查找的深拷贝）
+#    - 参数传递路径减少中间 Vec<Value> 分配
+#    - trait/impl method dispatch 的 obj.clone() 消减（7 处）
+#    - async spawn 的 self.file.clone() 消减（4 处，改为 Arc<File>）
+#    - 审计 ~600 个 .clone() 调用点，按热路径优先级消减
+#
+# 3. 性能验证：
+#    - 对比 0.31.20 基线 benchmark 数据（fib_30、list_sum_1000、string_concat_100）
+#    - 记录到 reports/perf-baseline-0.31.21.md
+#    - 目标：list_sum_1000 和 string_concat_100 至少 2x 改善
+#
+# 预算：≤3000 LOC 净变更（重构为主，非新增）
+# 门禁：
+# - 全量 cargo test 连续两次绿
+# - L1 双后端等价性保持（cargo test dual_ 全绿）
+# - L2 类型系统健全性保持（cargo test typecheck:: 全绿）
+# - O1 优化下 dual_error_question_chain + e2e_extern_strlen 通过
+# - benchmark 对比数据记录到 reports/
+# - 无新增 P0、silent fallback、warning-only
+
+# === Phase B: 语言冻结（0.31.22–0.31.26）===
+
+[[milestone]]
+version = "0.31.22"
 kind = "implementation"
 title = "语言语义收敛"
 requirements = ["ERROR-ALGEBRA-001", "LANG-FUNCTION-001", "LANG-CONTRACT-001", "COMPTIME-PURE-001", "LANG-ATTRIBUTE-001", "SYNTAX-REMOVED-001"]
@@ -281,47 +339,55 @@ requirements = ["ERROR-ALGEBRA-001", "LANG-FUNCTION-001", "LANG-CONTRACT-001", "
 # - @sparse 翻转为 stable 默认（FLOW-SPARSE-001 闭环）：
 #   无注解时 = 稀疏图（未声明对 → 编译错误），@dense 显式启用 N×M Fault 注入
 #   对齐 language-spec.md §3.5："Stable mode prohibits auto-completing undeclared combinations"
+# - 【v4 吸收 AD-5】6 个独立 type walker 合并：
+#   新增 TypeVisitor trait（谓词型 walker），将 occurs_in/is_escape_type/scan_residual/
+#   contains_infer_artifacts/contains_inference_variables/contains_unresolved_type
+#   迁移到 TypeFolder/TypeVisitor 抽象（~400 LOC 净减）
 
 [[milestone]]
-version = "0.31.22"
+version = "0.31.23"
 kind = "implementation"
 title = "Verification IR"
 requirements = ["VERIFY-CORE-001"]
 
 [[milestone]]
-version = "0.31.23"
+version = "0.31.24"
 kind = "implementation"
 title = "VC 与 checked integer"
 requirements = ["VERIFY-CORE-001"]
 
 [[milestone]]
-version = "0.31.24"
+version = "0.31.25"
 kind = "implementation"
 title = "Verifier artifact 与 fail-closed"
 requirements = ["VERIFY-CORE-001"]
 
 [[milestone]]
-version = "0.31.25"
+version = "0.31.26"
 kind = "audit"
 title = "Verifier 止血与攻击审查 II"
 requirements = []
+# 【v4 吸收】~30 个假双后端测试标记：
+# - 审计 dual_backend.rs 中绕过 CheckedProgram 的测试（run_source_result 而非 checked_*）
+# - 标记为 interpreter-only 或迁移到 checked_run_source_result / checked_compile_and_run
+# - 确保 stable evidence 不虚高（贯穿止血线 §7："测试绕过 CheckedProgram 却被计入 stable evidence"）
 
-# === Phase C: Component 边界（0.31.26–0.31.34）===
+# === Phase C: Component 边界（0.31.27–0.31.35）===
 
 [[milestone]]
-version = "0.31.26"
+version = "0.31.27"
 kind = "implementation"
 title = "Component IR 与 mimiabi"
 requirements = ["COMPONENT-IR-001", "COMPONENT-RAW-001"]
 
 [[milestone]]
-version = "0.31.27"
+version = "0.31.28"
 kind = "implementation"
 title = "Native ABI 与 handle lease"
 requirements = ["COMPONENT-HANDLE-001"]
 
 [[milestone]]
-version = "0.31.28"
+version = "0.31.29"
 kind = "stabilization"
 title = "Component 稳定检查点"
 requirements = []
@@ -329,7 +395,7 @@ requirements = []
 # - ABI fuzz：size/align/offset/tag probe 跨平台
 # - Handle lease race 测试（并发 acquire/release/expiry）
 # - Allocator mismatch 检测
-# - 0.31.26–27 回归扫描
+# - 0.31.27–28 回归扫描
 # - 不新增 Component surface
 # 门禁：
 # - C/Rust size/align/offset probe 全绿
@@ -337,25 +403,25 @@ requirements = []
 # - 全量测试连续两次绿
 
 [[milestone]]
-version = "0.31.29"
+version = "0.31.30"
 kind = "implementation"
 title = "Callback 与 async 生命周期"
 requirements = ["COMPONENT-CALLBACK-001", "COMPONENT-ASYNC-001"]
 
 [[milestone]]
-version = "0.31.30"
+version = "0.31.31"
 kind = "implementation"
 title = "Wire Schema 1"
 requirements = ["COMPONENT-WIRE-001"]
 
 [[milestone]]
-version = "0.31.31"
+version = "0.31.32"
 kind = "implementation"
 title = "Rust Safe SDK"
 requirements = []
 
 [[milestone]]
-version = "0.31.32"
+version = "0.31.33"
 kind = "implementation"
 title = "XPU FFI 验证（extern C 真实库调通）"
 requirements = ["MULTILANG-AUTHORITY-001"]
@@ -370,13 +436,13 @@ requirements = ["MULTILANG-AUTHORITY-001"]
 # - 双后端等价（interp 跳过 FFI，codegen 执行）
 
 [[milestone]]
-version = "0.31.33"
+version = "0.31.34"
 kind = "audit"
 title = "Component 攻击审查"
 requirements = []
 
 [[milestone]]
-version = "0.31.34"
+version = "0.31.35"
 kind = "stabilization"
 title = "SDK conformance 加固"
 requirements = []
@@ -392,68 +458,72 @@ requirements = []
 # - Wire fuzz 0 crash
 # - 全量测试连续两次绿
 
-# === Phase D: 工具与隔离（0.31.35–0.31.40）===
-# 注：0.31.35–37（自举）已标记 deferred，移出 0.1.1 必须完成路径。
+# === Phase D: 工具与隔离（0.31.36–0.31.41）===
+# 注：0.31.36–38（自举）已标记 deferred，移出 0.1.1 必须完成路径。
 # 自举不产生用户价值，推迟到语言稳定后的 post-1.0 阶段。
 
 [[milestone]]
-version = "0.31.35"
+version = "0.31.36"
 kind = "deferred"
 title = "自举可行性 spike（deferred to post-1.0）"
 requirements = []
 
 [[milestone]]
-version = "0.31.36"
+version = "0.31.37"
 kind = "deferred"
 title = "MimiSpec parser 自举（deferred to post-1.0）"
 requirements = []
 
 [[milestone]]
-version = "0.31.37"
+version = "0.31.38"
 kind = "deferred"
 title = "HM 自举闭环（deferred to post-1.0）"
 requirements = []
 
 [[milestone]]
-version = "0.31.38"
+version = "0.31.39"
 kind = "implementation"
 title = "Pre-1.0 migration tool"
 requirements = ["MIGRATION-PRE1-001", "SYNTAX-REMOVED-001"]
 
 [[milestone]]
-version = "0.31.39"
+version = "0.31.40"
 kind = "implementation"
 title = "Tooling 全覆盖"
 requirements = ["TOOL-SUPPORT-001"]
 
 [[milestone]]
-version = "0.31.40"
+version = "0.31.41"
 kind = "implementation"
 title = "Experimental 隔离"
 requirements = ["FLOW-MULTI-001", "PROTOCOL-DYN-001", "EFFECT-CAP-001", "COMPONENT-RAW-001"]
 
-# === Phase E: 冻结与 RC（0.31.41–0.31.44）===
-
-[[milestone]]
-version = "0.31.41"
-kind = "debug"
-title = "DEBUG 周期"
-requirements = []
+# === Phase E: 冻结与 RC（0.31.42–0.31.45）===
 
 [[milestone]]
 version = "0.31.42"
+kind = "debug"
+title = "DEBUG 周期"
+requirements = []
+# 【v4 吸收】Interpreter 结构体瘦身：
+# - 审计 Interpreter<'a> ~105 个字段，将冷路径字段（comptime_results、
+#   derive_expansion_error 等 61 个 resolved_* 桥接字段）移入 Box<InterpreterCold>
+# - 减少热路径 cache miss（前提：AD-1 body 迁移完成后 resolved_* 字段可精简）
+
+[[milestone]]
+version = "0.31.43"
 kind = "audit"
 title = "最终敌对审查"
 requirements = []
 
 [[milestone]]
-version = "0.31.43"
+version = "0.31.44"
 kind = "rc"
 title = "RC1"
 requirements = []
 
 [[milestone]]
-version = "0.31.44"
+version = "0.31.45"
 kind = "rc"
 title = "RC2 与 Pre-1.0 退出"
 requirements = []
