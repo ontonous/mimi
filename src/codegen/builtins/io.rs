@@ -7244,8 +7244,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         if any {
             arity += 1;
         }
+        // P3-6: empty tuple fallback should be 0, not 2. An empty tuple
+        // has no fields; fallback=2 would generate a wrong runtime call.
+        // In practice, empty tuples don't reach this path (container product
+        // requires starts_with('(') and at least one comma for any=true).
         if arity <= 0 {
-            arity = 2;
+            arity = 0;
         }
         arity
     }

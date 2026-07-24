@@ -284,10 +284,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => None,
         };
-        let is_result = inner_type_name
-            .as_ref()
-            .map(|tn| tn.starts_with("Result<") || tn == "Result")
-            .unwrap_or(false);
+        // P3-4 fix: determine Result vs Option by LLVM struct field count
+        // (3 = Result{disc,ok,err}, 2 = Option{disc,payload}) instead of
+        // string-probing the type name. String probing breaks on type aliases
+        // (e.g., `type MyRes = Result<i32, string>` → name is "MyRes").
+        let is_result = match result_val.get_type() {
+            BasicTypeEnum::StructType(st) => st.count_fields() >= 3,
+            _ => {
+                // Fallback: string probe for non-struct values.
+                inner_type_name
+                    .as_ref()
+                    .map(|tn| tn.starts_with("Result<") || tn == "Result")
+                    .unwrap_or(false)
+            }
+        };
 
         let struct_ty_to_use = if is_result {
             BasicTypeEnum::StructType(self.context.struct_type(
