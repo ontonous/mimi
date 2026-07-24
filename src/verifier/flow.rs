@@ -220,6 +220,9 @@ fn flatten_items_inner(items: &[Item], queue: &mut Vec<StepKind>) {
                             is_comptime: false,
                             is_async: false,
                             extern_abi: None,
+                            has_requires: false,
+                            has_ensures: false,
+                            has_mutate_params: false,
                         };
                         queue.push(StepKind::Func(f));
                     }

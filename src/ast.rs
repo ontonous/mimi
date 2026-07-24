@@ -261,6 +261,11 @@ pub struct FuncDef {
     /// If Some(abi), this function is exported with a C-compatible ABI
     /// (e.g., `extern "C" func foo() { ... }`).
     pub extern_abi: Option<String>,
+    /// O(1) contract flags — computed once at parse time, eliminating
+    /// per-call body scans in the interpreter hot path (0.31.19 追加 B).
+    pub has_requires: bool,
+    pub has_ensures: bool,
+    pub has_mutate_params: bool,
 }
 
 #[derive(Debug, Clone)]

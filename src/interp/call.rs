@@ -11,27 +11,29 @@ impl<'a> Interpreter<'a> {
             return Err(error.clone());
         }
         self.last_mutate_writebacks.clear();
-        // Prefer CheckedProgram arity when installed and the function has no defaults.
-        if let Some(map) = self.resolved_functions.as_ref() {
-            if let Some((arity, _, _)) = map.get(&func.name) {
-                let has_defaults = func.params.iter().any(|p| p.default_value.is_some());
-                // Bare-name directories can also contain a flattened wrapper
-                // with the same name as an already-selected trait/impl method
-                // (for example `repeat(string, n)` vs `Str.repeat(n)`). Only
-                // apply the directory guard when it describes this exact AST
-                // callable; the FuncDef arity check below remains authoritative
-                // for a colliding method until 0.31.4 installs canonical method IDs.
-                if *arity == func.params.len() && !has_defaults && args.len() != *arity {
-                    return Err(InterpError::wrong_arg_count(format!(
-                        "function '{}' expects {} arguments, got {} (checked directory)",
-                        func.name,
-                        arity,
-                        args.len()
-                    )));
+
+        // === Unified arity check (0.31.19 追加 B: merge 3 checks → 1) ===
+        let param_count = func.params.len();
+        let has_defaults = func.params.iter().any(|p| p.default_value.is_some());
+
+        // Fast-path: CheckedProgram directory guard (O(1) lookup).
+        if !has_defaults {
+            if let Some(map) = self.resolved_functions.as_ref() {
+                if let Some((arity, _, _)) = map.get(&func.name) {
+                    if *arity == param_count && args.len() != *arity {
+                        return Err(InterpError::wrong_arg_count(format!(
+                            "function '{}' expects {} arguments, got {} (checked directory)",
+                            func.name,
+                            arity,
+                            args.len()
+                        )));
+                    }
                 }
             }
         }
-        if args.len() > func.params.len() {
+
+        // Too many arguments — detailed error with type info.
+        if args.len() > param_count {
             let expected_types: Vec<String> = func
                 .params
                 .iter()
@@ -44,36 +46,32 @@ impl<'a> Interpreter<'a> {
             return Err(InterpError::wrong_arg_count(format!(
                 "function '{}' expects {} arguments [{}], got {} [{}]",
                 func.name,
-                func.params.len(),
+                param_count,
                 expected_types.join(", "),
                 args.len(),
                 actual_types.join(", ")
             )));
         }
 
-        // Fill in default values for missing arguments
+        // Fill in default values for missing arguments.
         let mut filled_args = args;
-        let has_defaults = filled_args.len() < func.params.len()
-            && func.params[filled_args.len()..]
-                .iter()
-                .any(|p| p.default_value.is_some());
-        if has_defaults {
-            for i in filled_args.len()..func.params.len() {
+        if filled_args.len() < param_count {
+            for i in filled_args.len()..param_count {
                 if let Some(ref default_expr) = func.params[i].default_value {
                     let val = self.eval_expr(default_expr)?;
                     filled_args.push(val);
                 } else {
-                    // Missing non-default parameter — let the err below handle it
                     break;
                 }
             }
         }
 
-        if filled_args.len() != func.params.len() {
+        // Final arity validation (covers too-few without defaults).
+        if filled_args.len() != param_count {
             return Err(InterpError::wrong_arg_count(format!(
                 "function '{}' expects {} arguments, got {}",
                 func.name,
-                func.params.len(),
+                param_count,
                 filled_args.len()
             )));
         }
@@ -94,14 +92,10 @@ impl<'a> Interpreter<'a> {
         };
 
         // CG-H10 / IN mirror: only snapshot params when contract checking is on
-        // and `ensures` may reference `old(...)`. Avoid cloning every arg
-        // on the hot path when verify_contracts is off.
+        // and `ensures` may reference `old(...)`. O(1) flag read replaces
+        // per-call body scan (0.31.19 追加 B).
         let mut old_snapshots: HashMap<String, Value> = HashMap::new();
-        let need_old = self.verify_contracts
-            && func
-                .body
-                .iter()
-                .any(|s| matches!(s.unlocated(), Stmt::Ensures(_, _)));
+        let need_old = self.verify_contracts && func.has_ensures;
         for (p, a) in func.params.iter().zip(filled_args) {
             if need_old {
                 old_snapshots.insert(p.name.clone(), a.clone());
@@ -118,8 +112,8 @@ impl<'a> Interpreter<'a> {
             }
         }
 
-        // Extract and check requires conditions
-        if self.verify_contracts {
+        // Extract and check requires conditions (O(1) guard: 0.31.19 追加 B)
+        if self.verify_contracts && func.has_requires {
             for stmt in &func.body {
                 if let Stmt::Requires(expr, _) = stmt.unlocated() {
                     let cond = match self.eval_expr(expr) {
@@ -156,8 +150,8 @@ impl<'a> Interpreter<'a> {
             return Ok(Value::Int(code as i64));
         }
 
-        // Extract and check ensures conditions
-        if self.verify_contracts {
+        // Extract and check ensures conditions (O(1) guard: 0.31.19 追加 B)
+        if self.verify_contracts && func.has_ensures {
             if let Ok(Some(ref rv)) = result {
                 self.push_scope();
                 if let Err(e) = self.bind("result", rv.clone()) {
@@ -199,15 +193,16 @@ impl<'a> Interpreter<'a> {
         }
 
         // Capture `mutate` parameter values before destroying the callee scope.
-        // The caller owns the source binding, so the actual write-back happens
-        // in eval_call_dispatch where the original argument expressions exist.
-        self.last_mutate_writebacks = func
-            .params
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| matches!(p.borrow, Some(ParamBorrow::Mutate)))
-            .filter_map(|(index, p)| self.lookup(&p.name).map(|value| (index, value)))
-            .collect();
+        // O(1) guard: skip scan when no mutate params (0.31.19 追加 B).
+        if func.has_mutate_params {
+            self.last_mutate_writebacks = func
+                .params
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| matches!(p.borrow, Some(ParamBorrow::Mutate)))
+                .filter_map(|(index, p)| self.lookup(&p.name).map(|value| (index, value)))
+                .collect();
+        }
 
         self.pop_scope();
         self.pop_call();

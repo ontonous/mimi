@@ -165,6 +165,9 @@ mod tests {
             is_comptime: false,
             is_async: false,
             extern_abi: None,
+            has_requires: false,
+            has_ensures: false,
+            has_mutate_params: false,
         }));
         assert!(apply_progressive_typestate(&mut file));
         assert!(file.implicit_single);
@@ -251,6 +254,9 @@ mod tests {
             is_comptime: false,
             is_async: false,
             extern_abi: None,
+            has_requires: false,
+            has_ensures: false,
+            has_mutate_params: false,
         }));
         assert!(!apply_progressive_typestate(&mut file));
         assert!(!file.implicit_single);
