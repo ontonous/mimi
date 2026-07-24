@@ -1909,6 +1909,13 @@ pub extern "C" fn mimi_str_join(
 /// Render a `MimiList` (codegen `{i64 len, i8* data}`) to a printable
 /// heap-allocated C string. Used by the codegen `to_string` builtin
 /// when it encounters a list value.
+///
+/// 0.31.23: Uses element_kind to format elements correctly:
+/// - I64: format as integer
+/// - F64: format as float
+/// - Bool: format as true/false
+/// - String: format as string (current behavior)
+/// - Unknown: fallback to string interpretation (legacy compatibility)
 #[no_mangle]
 pub extern "C" fn mimi_list_to_string(list: *const MimiList) -> *mut std::ffi::c_char {
     if list.is_null() {
@@ -1928,14 +1935,36 @@ pub extern "C" fn mimi_list_to_string(list: *const MimiList) -> *mut std::ffi::c
         if i > 0 {
             parts.push(String::from(", "));
         }
-        // `lst.data` is `*mut *mut c_char`; dereference to a C string.
-        let item_ptr = unsafe { *lst.data.offset(i) };
-        if item_ptr.is_null() {
-            parts.push(String::from("null"));
-        } else {
-            let s = unsafe { cstr_to_string(item_ptr) };
-            parts.push(s);
-        }
+        // 0.31.23: Format based on element_kind.
+        let formatted = match lst.element_kind {
+            ListElementKind::I64 => {
+                let val = unsafe { *(lst.data as *const i64).offset(i) };
+                format!("{}", val)
+            }
+            ListElementKind::F64 => {
+                let val = unsafe { *(lst.data as *const f64).offset(i) };
+                format!("{}", val)
+            }
+            ListElementKind::Bool => {
+                let val = unsafe { *(lst.data as *const i64).offset(i) };
+                if val != 0 { "true".to_string() } else { "false".to_string() }
+            }
+            ListElementKind::String | ListElementKind::Unknown => {
+                // `lst.data` is `*mut *mut c_char`; dereference to a C string.
+                let item_ptr = unsafe { *lst.data.offset(i) };
+                if item_ptr.is_null() {
+                    String::from("null")
+                } else {
+                    unsafe { cstr_to_string(item_ptr) }
+                }
+            }
+            _ => {
+                // For other types (Map, Set, List, Record), show the pointer value.
+                let item_ptr = unsafe { *lst.data.offset(i) };
+                format!("<{:?}>", item_ptr)
+            }
+        };
+        parts.push(formatted);
     }
     parts.push(String::from("]"));
     alloc_c_string(&parts.join(""))
