@@ -131,6 +131,59 @@ use std::sync::Mutex;
 
 // Re-export types used by FFI tests and codegen
 // Must match the C layouts exactly.
+
+/// 0.31.23: Element kind for typed list storage.
+/// Blind review fix: List elements were previously all stored as *mut c_char (stringified),
+/// causing performance overhead and type information loss.
+/// Now each list tracks its element type for type-safe operations.
+#[repr(i8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListElementKind {
+    /// Unknown/unset (legacy compatibility)
+    Unknown = 0,
+    /// i64 elements stored directly in data array
+    I64 = 1,
+    /// f64 elements stored directly in data array
+    F64 = 2,
+    /// bool elements stored as i64 (0/1) in data array
+    Bool = 3,
+    /// String elements stored as *mut c_char pointers
+    String = 4,
+    /// Map handles stored as i64 in data array
+    Map = 5,
+    /// Set handles stored as i64 in data array
+    Set = 6,
+    /// Nested list pointers stored as *mut MimiList
+    List = 7,
+    /// Record pointers stored as *mut c_void
+    Record = 8,
+}
+
+impl ListElementKind {
+    /// Returns the size in bytes of each element for this kind.
+    pub fn element_size(self) -> usize {
+        match self {
+            ListElementKind::Unknown => std::mem::size_of::<*mut std::ffi::c_char>(),
+            ListElementKind::I64 => std::mem::size_of::<i64>(),
+            ListElementKind::F64 => std::mem::size_of::<f64>(),
+            ListElementKind::Bool => std::mem::size_of::<i64>(), // stored as i64
+            ListElementKind::String => std::mem::size_of::<*mut std::ffi::c_char>(),
+            ListElementKind::Map => std::mem::size_of::<i64>(),
+            ListElementKind::Set => std::mem::size_of::<i64>(),
+            ListElementKind::List => std::mem::size_of::<*mut MimiList>(),
+            ListElementKind::Record => std::mem::size_of::<*mut std::ffi::c_void>(),
+        }
+    }
+
+    /// Returns true if elements are stored as pointers (need free on list free).
+    pub fn is_pointer_kind(self) -> bool {
+        matches!(
+            self,
+            ListElementKind::String | ListElementKind::List | ListElementKind::Record
+        )
+    }
+}
+
 #[repr(C)]
 pub struct MimiList {
     len: i64,
@@ -138,6 +191,36 @@ pub struct MimiList {
     // FFI-2: Tracks whether data was allocated by Rust (true) or received from C (false).
     // When true, free(data) uses libc::free. When false, skip free to avoid wrong allocator.
     owns_data: bool,
+    /// 0.31.23: Element kind for typed storage.
+    /// Determines how to interpret the data array elements.
+    element_kind: ListElementKind,
+}
+
+impl MimiList {
+    /// 0.31.23: Create a new empty MimiList with the specified element kind.
+    pub fn new_with_kind(kind: ListElementKind) -> Self {
+        MimiList {
+            len: 0,
+            data: std::ptr::null_mut(),
+            owns_data: true,
+            element_kind: kind,
+        }
+    }
+
+    /// 0.31.23: Create a MimiList with pre-allocated data and specified element kind.
+    pub fn with_data(data: *mut *mut std::ffi::c_char, len: i64, owns_data: bool, kind: ListElementKind) -> Self {
+        MimiList {
+            len,
+            data,
+            owns_data,
+            element_kind: kind,
+        }
+    }
+
+    /// 0.31.23: Get the element kind of this list.
+    pub fn element_kind(&self) -> ListElementKind {
+        self.element_kind
+    }
 }
 
 pub type ValueHandle = usize;
@@ -471,12 +554,15 @@ fn list_cap(list: &MimiList) -> i64 {
 /// v0.28.13: Push an i64 element into a MimiList with exponential capacity growth.
 /// Uses hidden header (alloc_list_data/realloc_list_data) for O(1) amortized push.
 /// Modifies list in place (data and len are updated).
+/// 0.31.23: Sets element_kind to I64 for typed storage.
 #[no_mangle]
 pub extern "C" fn mimi_list_push_i64(list: *mut MimiList, element: i64) {
     if list.is_null() {
         return;
     }
     let lst = unsafe { &mut *list };
+    // 0.31.23: Mark this list as containing i64 elements.
+    lst.element_kind = ListElementKind::I64;
     let len = lst.len;
     let cap = list_cap(lst);
     // MEM-C10 (deep audit): use checked_add to prevent integer overflow on len+1.
@@ -599,6 +685,87 @@ pub extern "C" fn mimi_list_push_grow(
     } else {
         old_data
     }
+}
+
+// ---------------------------------------------------------------------------
+// 0.31.23: Typed list element accessors
+// ---------------------------------------------------------------------------
+// Blind review fix: List elements were previously accessed without type information,
+// leading to potential type confusion. These typed accessors use the element_kind
+// field to ensure type-safe access.
+
+/// 0.31.23: Get an i64 element from a list at the given index.
+/// Returns 0 if the list is null, index is out of bounds, or element_kind is not I64.
+#[no_mangle]
+pub extern "C" fn mimi_list_get_i64(list: *const MimiList, index: i64) -> i64 {
+    if list.is_null() {
+        return 0;
+    }
+    let lst = unsafe { &*list };
+    if index < 0 || index >= lst.len {
+        return 0;
+    }
+    if lst.data.is_null() {
+        return 0;
+    }
+    // 0.31.23: Type check - only allow access if element_kind is I64 or Unknown (legacy).
+    if !matches!(lst.element_kind, ListElementKind::I64 | ListElementKind::Unknown) {
+        return 0;
+    }
+    unsafe { *(lst.data as *const i64).add(index as usize) }
+}
+
+/// 0.31.23: Get an f64 element from a list at the given index.
+/// Returns 0.0 if the list is null, index is out of bounds, or element_kind is not F64.
+#[no_mangle]
+pub extern "C" fn mimi_list_get_f64(list: *const MimiList, index: i64) -> f64 {
+    if list.is_null() {
+        return 0.0;
+    }
+    let lst = unsafe { &*list };
+    if index < 0 || index >= lst.len {
+        return 0.0;
+    }
+    if lst.data.is_null() {
+        return 0.0;
+    }
+    // 0.31.23: Type check - only allow access if element_kind is F64 or Unknown (legacy).
+    if !matches!(lst.element_kind, ListElementKind::F64 | ListElementKind::Unknown) {
+        return 0.0;
+    }
+    unsafe { *(lst.data as *const f64).add(index as usize) }
+}
+
+/// 0.31.23: Get a string element from a list at the given index.
+/// Returns null if the list is null, index is out of bounds, or element_kind is not String.
+#[no_mangle]
+pub extern "C" fn mimi_list_get_string(list: *const MimiList, index: i64) -> *mut std::ffi::c_char {
+    if list.is_null() {
+        return std::ptr::null_mut();
+    }
+    let lst = unsafe { &*list };
+    if index < 0 || index >= lst.len {
+        return std::ptr::null_mut();
+    }
+    if lst.data.is_null() {
+        return std::ptr::null_mut();
+    }
+    // 0.31.23: Type check - only allow access if element_kind is String or Unknown (legacy).
+    if !matches!(lst.element_kind, ListElementKind::String | ListElementKind::Unknown) {
+        return std::ptr::null_mut();
+    }
+    unsafe { *lst.data.add(index as usize) }
+}
+
+/// 0.31.23: Get the element kind of a list.
+/// Returns the element kind as an i8 (see ListElementKind enum).
+#[no_mangle]
+pub extern "C" fn mimi_list_element_kind(list: *const MimiList) -> i8 {
+    if list.is_null() {
+        return ListElementKind::Unknown as i8;
+    }
+    let lst = unsafe { &*list };
+    lst.element_kind as i8
 }
 
 /// S15/S22: Free a C string allocated by alloc_c_string.
@@ -1333,22 +1500,14 @@ pub extern "C" fn mimi_map_from_list(
 
 fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
     if handle == 0 {
-        let list = Box::new(MimiList {
-            len: 0,
-            data: std::ptr::null_mut(),
-            owns_data: true, // owns the list struct (even if data is null)
-        });
+        let list = Box::new(MimiList::new_with_kind(ListElementKind::String));
         return Box::into_raw(list);
     }
     // SAFETY: handle validated by `map_from_handle`; shared reference is in a single scope.
     let map = unsafe { &*map_from_handle(handle) };
     let len = map.inner.len() as i64;
     if len == 0 {
-        let list = Box::new(MimiList {
-            len: 0,
-            data: std::ptr::null_mut(),
-            owns_data: true,
-        });
+        let list = Box::new(MimiList::new_with_kind(ListElementKind::String));
         return Box::into_raw(list);
     }
 
@@ -1359,11 +1518,7 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
     let data_size = match (len as usize).checked_mul(std::mem::size_of::<*mut std::ffi::c_char>()) {
         Some(s) => s,
         None => {
-            return Box::into_raw(Box::new(MimiList {
-                len: 0,
-                data: std::ptr::null_mut(),
-                owns_data: true,
-            }))
+            return Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::String)))
         }
     };
     let data_ptr = if data_size > 0 {
@@ -1387,11 +1542,13 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
             }
         }
     }
-    let list = Box::new(MimiList {
-        len,
-        data: data_ptr,
-        owns_data: !collect_values,
-    });
+    // 0.31.23: keys are strings, values are ValueHandles (treated as unknown)
+    let kind = if collect_values {
+        ListElementKind::Unknown
+    } else {
+        ListElementKind::String
+    };
+    let list = Box::new(MimiList::with_data(data_ptr, len, !collect_values, kind));
     Box::into_raw(list)
 }
 
@@ -1595,11 +1752,7 @@ pub extern "C" fn mimi_str_split(
             match (len as usize).checked_mul(std::mem::size_of::<*mut std::ffi::c_char>()) {
                 Some(s) => s,
                 None => {
-                    return Box::into_raw(Box::new(MimiList {
-                        len: 0,
-                        data: std::ptr::null_mut(),
-                        owns_data: true,
-                    }));
+                    return Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::String)));
                 }
             };
         // SAFETY: data_size > 0; result checked for null.
@@ -1618,11 +1771,8 @@ pub extern "C" fn mimi_str_split(
 
     // FFI-2: data + string elements are libc-allocated — owns_data: true.
     // No hidden capacity header (list_cap returns 0 → free data directly).
-    let list = Box::new(MimiList {
-        len,
-        data: data_ptr,
-        owns_data: true,
-    });
+    // 0.31.23: split produces string elements.
+    let list = Box::new(MimiList::with_data(data_ptr, len, true, ListElementKind::String));
     Box::into_raw(list)
 }
 
