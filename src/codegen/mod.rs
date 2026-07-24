@@ -2446,7 +2446,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    pub fn compile_to_object(&self, output_path: &Path) -> Result<(), CompileError> {
+    /// Create a TargetMachine for the current configuration.
+    ///
+    /// Extracted from `compile_to_object` so callers (e.g. the test
+    /// harness) can cache the TargetMachine across many compilations
+    /// and avoid repeated CPU-feature detection + MC-layer setup.
+    pub fn create_target_machine(&self) -> Result<TargetMachine, CompileError> {
         // Initialize the appropriate LLVM target(s):
         // - Native build: initialize only the host target
         // - Cross-compilation: initialize all registered targets
@@ -2490,7 +2495,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             RelocMode::Default
         };
-        let tm = target
+        target
             .create_target_machine(
                 &triple_ref,
                 &cpu,
@@ -2500,12 +2505,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 CodeModel::Default,
             )
             .ok_or_else(|| {
-                format!(
+                CompileError::LlvmError(format!(
                     "failed to create target machine for triple '{}'",
                     triple_ref
-                )
-            })?;
+                ))
+            })
+    }
 
+    pub fn compile_to_object(&self, output_path: &Path) -> Result<(), CompileError> {
+        let tm = self.create_target_machine()?;
+        self.emit_object(&tm, output_path)
+    }
+
+    /// Emit an object file using a pre-created TargetMachine.
+    ///
+    /// Allows callers to amortise TargetMachine construction across
+    /// many compilations (the test harness creates one per thread).
+    pub fn emit_object(&self, tm: &TargetMachine, output_path: &Path) -> Result<(), CompileError> {
         // Run LLVM optimization passes before codegen (opt-in via MIMI_OPT env var).
         // 0.31.21: O1 codegen bugs fixed — try_expr i32-vs-i1 type mismatch and
         // extern wrapper name collision (strlen → strlen.11) resolved. O2 passes
@@ -2513,7 +2529,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if self.optimize {
             let options = inkwell::passes::PassBuilderOptions::create();
             self.module
-                .run_passes("default<O2>", &tm, options)
+                .run_passes("default<O2>", tm, options)
                 .map_err(|e| CompileError::LlvmError(format!("optimization failed: {}", e)))?;
         }
 
