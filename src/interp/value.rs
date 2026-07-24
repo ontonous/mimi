@@ -363,7 +363,12 @@ impl Clone for Value {
             Value::QuoteAst(v) => Value::QuoteAst(v.clone()),
             Value::Newtype(name, v) => Value::Newtype(name.clone(), v.clone()),
             Value::Actor(v) => Value::Actor(v.clone()),
-            Value::Closure { params, ret, body, captured } => Value::Closure {
+            Value::Closure {
+                params,
+                ret,
+                body,
+                captured,
+            } => Value::Closure {
                 params: params.clone(),
                 ret: ret.clone(),
                 body: body.clone(),
@@ -376,17 +381,40 @@ impl Clone for Value {
             Value::Cap(v) => Value::Cap(v.clone()),
             Value::Ref(v) => Value::Ref(Arc::clone(v)),
             Value::RefMut(v) => Value::RefMut(Arc::clone(v)),
-            Value::IndexRef { owner, index } => Value::IndexRef { owner: owner.clone(), index: *index },
-            Value::IndexRefMut { owner, index } => Value::IndexRefMut { owner: owner.clone(), index: *index },
-            Value::PlaceRef { owner, projections } => Value::PlaceRef { owner: owner.clone(), projections: projections.clone() },
-            Value::PlaceRefMut { owner, projections } => Value::PlaceRefMut { owner: owner.clone(), projections: projections.clone() },
+            Value::IndexRef { owner, index } => Value::IndexRef {
+                owner: owner.clone(),
+                index: *index,
+            },
+            Value::IndexRefMut { owner, index } => Value::IndexRefMut {
+                owner: owner.clone(),
+                index: *index,
+            },
+            Value::PlaceRef { owner, projections } => Value::PlaceRef {
+                owner: owner.clone(),
+                projections: projections.clone(),
+            },
+            Value::PlaceRefMut { owner, projections } => Value::PlaceRefMut {
+                owner: owner.clone(),
+                projections: projections.clone(),
+            },
             Value::Type(v) => Value::Type(v.clone()),
             Value::Allocator(v) => Value::Allocator(*v),
             Value::Array(v) => Value::Array(v.clone()),
-            Value::Slice { source, start, end } => Value::Slice { source: source.clone(), start: *start, end: *end },
-            Value::Range { start, end } => Value::Range { start: *start, end: *end },
+            Value::Slice { source, start, end } => Value::Slice {
+                source: source.clone(),
+                start: *start,
+                end: *end,
+            },
+            Value::Range { start, end } => Value::Range {
+                start: *start,
+                end: *end,
+            },
             Value::CBuffer(v) => Value::CBuffer(Arc::clone(v)),
-            Value::DynTrait { data, concrete_type, trait_names } => Value::DynTrait {
+            Value::DynTrait {
+                data,
+                concrete_type,
+                trait_names,
+            } => Value::DynTrait {
                 data: data.clone(),
                 concrete_type: concrete_type.clone(),
                 trait_names: trait_names.clone(),
@@ -521,7 +549,11 @@ impl SharedList {
         let mut list = self.0.borrow_mut();
         if index >= list.len() {
             return Err(InterpError::IndexOutOfBounds(ErrorContext {
-                msg: format!("index {} out of bounds for list of length {}", index, list.len()),
+                msg: format!(
+                    "index {} out of bounds for list of length {}",
+                    index,
+                    list.len()
+                ),
                 function: None,
                 operation: Some("list_set".to_string()),
                 help: None,
@@ -539,7 +571,12 @@ impl SharedList {
 
     /// Iterate over cloned elements.
     pub fn iter_cloned(&self) -> impl Iterator<Item = Value> + '_ {
-        self.0.borrow().iter().cloned().collect::<Vec<_>>().into_iter()
+        self.0
+            .borrow()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 }
 

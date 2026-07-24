@@ -208,7 +208,12 @@ impl MimiList {
     }
 
     /// 0.31.23: Create a MimiList with pre-allocated data and specified element kind.
-    pub fn with_data(data: *mut *mut std::ffi::c_char, len: i64, owns_data: bool, kind: ListElementKind) -> Self {
+    pub fn with_data(
+        data: *mut *mut std::ffi::c_char,
+        len: i64,
+        owns_data: bool,
+        kind: ListElementKind,
+    ) -> Self {
         MimiList {
             len,
             data,
@@ -799,7 +804,10 @@ pub extern "C" fn mimi_list_get_i64(list: *const MimiList, index: i64) -> i64 {
         return 0;
     }
     // 0.31.23: Type check - only allow access if element_kind is I64 or Unknown (legacy).
-    if !matches!(lst.element_kind, ListElementKind::I64 | ListElementKind::Unknown) {
+    if !matches!(
+        lst.element_kind,
+        ListElementKind::I64 | ListElementKind::Unknown
+    ) {
         return 0;
     }
     unsafe { *(lst.data as *const i64).add(index as usize) }
@@ -820,7 +828,10 @@ pub extern "C" fn mimi_list_get_f64(list: *const MimiList, index: i64) -> f64 {
         return 0.0;
     }
     // 0.31.23: Type check - only allow access if element_kind is F64 or Unknown (legacy).
-    if !matches!(lst.element_kind, ListElementKind::F64 | ListElementKind::Unknown) {
+    if !matches!(
+        lst.element_kind,
+        ListElementKind::F64 | ListElementKind::Unknown
+    ) {
         return 0.0;
     }
     unsafe { *(lst.data as *const f64).add(index as usize) }
@@ -841,7 +852,10 @@ pub extern "C" fn mimi_list_get_string(list: *const MimiList, index: i64) -> *mu
         return std::ptr::null_mut();
     }
     // 0.31.23: Type check - only allow access if element_kind is String or Unknown (legacy).
-    if !matches!(lst.element_kind, ListElementKind::String | ListElementKind::Unknown) {
+    if !matches!(
+        lst.element_kind,
+        ListElementKind::String | ListElementKind::Unknown
+    ) {
         return std::ptr::null_mut();
     }
     unsafe { *lst.data.add(index as usize) }
@@ -1615,9 +1629,7 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
     // H18: use checked_mul to prevent integer overflow on large maps.
     let data_size = match (len as usize).checked_mul(std::mem::size_of::<*mut std::ffi::c_char>()) {
         Some(s) => s,
-        None => {
-            return Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::String)))
-        }
+        None => return Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::String))),
     };
     let data_ptr = if data_size > 0 {
         // SAFETY: data_size is positive and within reasonable bounds.
@@ -1846,13 +1858,14 @@ pub extern "C" fn mimi_str_split(
     let data_ptr = if len <= 0 {
         std::ptr::null_mut()
     } else {
-        let data_size =
-            match (len as usize).checked_mul(std::mem::size_of::<*mut std::ffi::c_char>()) {
-                Some(s) => s,
-                None => {
-                    return Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::String)));
-                }
-            };
+        let data_size = match (len as usize)
+            .checked_mul(std::mem::size_of::<*mut std::ffi::c_char>())
+        {
+            Some(s) => s,
+            None => {
+                return Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::String)));
+            }
+        };
         // SAFETY: data_size > 0; result checked for null.
         let ptr = unsafe { libc::malloc(data_size) as *mut *mut std::ffi::c_char };
         if ptr.is_null() {
@@ -1870,7 +1883,12 @@ pub extern "C" fn mimi_str_split(
     // FFI-2: data + string elements are libc-allocated — owns_data: true.
     // No hidden capacity header (list_cap returns 0 → free data directly).
     // 0.31.23: split produces string elements.
-    let list = Box::new(MimiList::with_data(data_ptr, len, true, ListElementKind::String));
+    let list = Box::new(MimiList::with_data(
+        data_ptr,
+        len,
+        true,
+        ListElementKind::String,
+    ));
     Box::into_raw(list)
 }
 
@@ -1947,7 +1965,11 @@ pub extern "C" fn mimi_list_to_string(list: *const MimiList) -> *mut std::ffi::c
             }
             ListElementKind::Bool => {
                 let val = unsafe { *(lst.data as *const i64).offset(i) };
-                if val != 0 { "true".to_string() } else { "false".to_string() }
+                if val != 0 {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
             }
             ListElementKind::String | ListElementKind::Unknown => {
                 // `lst.data` is `*mut *mut c_char`; dereference to a C string.
