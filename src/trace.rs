@@ -246,13 +246,7 @@ impl TraceCollector {
     /// The use-after-move safety net in the interpreter triggers this
     /// event, making the violation visible in the trace even though the
     /// operation is rejected.
-    pub fn record_linear_violation(
-        &mut self,
-        flow: &str,
-        var: &str,
-        state: &str,
-        reason: &str,
-    ) {
+    pub fn record_linear_violation(&mut self, flow: &str, var: &str, state: &str, reason: &str) {
         if !self.enabled {
             return;
         }

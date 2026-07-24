@@ -694,11 +694,8 @@ impl<'a> Interpreter<'a> {
                 }
                 self.current_flow_state = prev_flow_state;
                 // v0.31.15: record Fault entry in trace.
-                self.trace_collector.record_fault(
-                    &flow.name,
-                    &t.from_state,
-                    &event,
-                );
+                self.trace_collector
+                    .record_fault(&flow.name, &t.from_state, &event);
                 return Ok(fault);
             }
         };

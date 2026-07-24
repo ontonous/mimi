@@ -4013,9 +4013,7 @@ fn collect_item_meta(
                     crate::ast::FlowAnnotationKind::MaxChildren(max) => {
                         format!("annotation.max_children.{max}")
                     }
-                    crate::ast::FlowAnnotationKind::Sparse => {
-                        "annotation.sparse".to_string()
-                    }
+                    crate::ast::FlowAnnotationKind::Sparse => "annotation.sparse".to_string(),
                 };
                 insert_child_meta(
                     annotation.meta,
@@ -7984,7 +7982,11 @@ fn build_canonical_function_signatures(
                     continue;
                 }
             };
-            let source_id = match types.intern_zonked(&source_zonked, &capabilities, &mut resolve_name) {
+            let source_id = match types.intern_zonked(
+                &source_zonked,
+                &capabilities,
+                &mut resolve_name,
+            ) {
                 Ok(ty) => ty,
                 Err(error) => {
                     errors.push(Diagnostic::error(
@@ -8010,7 +8012,11 @@ fn build_canonical_function_signatures(
                     continue;
                 }
             };
-            let fails_id = match types.intern_zonked(&fails_zonked, &capabilities, &mut resolve_name) {
+            let fails_id = match types.intern_zonked(
+                &fails_zonked,
+                &capabilities,
+                &mut resolve_name,
+            ) {
                 Ok(ty) => ty,
                 Err(error) => {
                     errors.push(Diagnostic::error(
@@ -8023,7 +8029,9 @@ fn build_canonical_function_signatures(
                     continue;
                 }
             };
-            let error_tuple = match types.intern_resolved(crate::core::ir::ResolvedType::Tuple(vec![source_id, fails_id])) {
+            let error_tuple = match types.intern_resolved(crate::core::ir::ResolvedType::Tuple(
+                vec![source_id, fails_id],
+            )) {
                 Ok(ty) => ty,
                 Err(error) => {
                     errors.push(Diagnostic::error(
@@ -8036,7 +8044,10 @@ fn build_canonical_function_signatures(
                     continue;
                 }
             };
-            match types.intern_resolved(crate::core::ir::ResolvedType::Result { ok: result, error: error_tuple }) {
+            match types.intern_resolved(crate::core::ir::ResolvedType::Result {
+                ok: result,
+                error: error_tuple,
+            }) {
                 Ok(ty) => ty,
                 Err(error) => {
                     errors.push(Diagnostic::error(

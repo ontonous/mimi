@@ -1086,11 +1086,11 @@ impl Parser {
                                 tok.col,
                             ));
                         }
-                _ => {
-                    // PR-H2: unknown @annotations must surface as parse errors
-                    // (not eprintln!) so LSP/check can report them with span.
-                    let tok = self.peek();
-                    return Err(ParseError::new(
+                        _ => {
+                            // PR-H2: unknown @annotations must surface as parse errors
+                            // (not eprintln!) so LSP/check can report them with span.
+                            let tok = self.peek();
+                            return Err(ParseError::new(
                         format!(
                             "unknown flow annotation '@{}' — expected @mailbox(...), @max_children(...), or bare @sparse",
                             ann_name
@@ -1098,7 +1098,7 @@ impl Parser {
                         tok.line,
                         tok.col,
                     ));
-                }
+                        }
                     };
                     self.expect(TokenKind::RParen, "`)`")?;
                     annotations.push(FlowAnnotation::new(
