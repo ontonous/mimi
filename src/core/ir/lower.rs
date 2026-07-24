@@ -1177,8 +1177,7 @@ impl BodyLowerer<'_> {
                 } else {
                     self.signature.result.clone()
                 };
-                let conversion =
-                    self.implicit_conversion(&node_id, &value.ty, &expected)?;
+                let conversion = self.implicit_conversion(&node_id, &value.ty, &expected)?;
                 ResolvedStmtKind::Return {
                     value: Some(value),
                     conversion: Some(conversion),
@@ -1219,8 +1218,7 @@ impl BodyLowerer<'_> {
                 } else {
                     self.signature.result.clone()
                 };
-                let conversion =
-                    self.implicit_conversion(&node_id, &self_expr.ty, &expected)?;
+                let conversion = self.implicit_conversion(&node_id, &self_expr.ty, &expected)?;
                 ResolvedStmtKind::Return {
                     value: Some(self_expr),
                     conversion: Some(conversion),
@@ -4941,7 +4939,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
-                transition_fails: false,
+            transition_fails: false,
         })
         .expect("lower body");
 
@@ -4987,7 +4985,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
-                transition_fails: false,
+            transition_fails: false,
         })
         .expect_err("missing type must fail");
         assert!(errors
@@ -5025,7 +5023,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
-                transition_fails: false,
+            transition_fails: false,
         })
         .expect("lower body");
 
@@ -5077,7 +5075,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
-                transition_fails: false,
+            transition_fails: false,
         })
         .expect("lower body");
 
@@ -5125,7 +5123,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
-                transition_fails: false,
+            transition_fails: false,
         })
         .expect("lower body");
 
@@ -5267,7 +5265,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
-                transition_fails: false,
+            transition_fails: false,
         })
         .expect("lower field load");
         let ResolvedExprKind::Load(place) = &body.root.result.as_ref().unwrap().kind else {
@@ -5310,7 +5308,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
-                transition_fails: false,
+            transition_fails: false,
         })
         .expect("lower match");
         let ResolvedExprKind::Match { arms, .. } = &body.root.result.as_ref().unwrap().kind else {
@@ -5359,7 +5357,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
-                transition_fails: false,
+            transition_fails: false,
         })
         .expect("lower tuple binding");
         let ResolvedStmtKind::Bind { pattern, .. } = &body.root.statements[0].kind else {
@@ -5465,7 +5463,7 @@ mod tests {
             types: program.resolved_types(),
             node_meta: program.node_meta(),
             sources: &file.sources,
-                transition_fails: false,
+            transition_fails: false,
         })
         .expect("lower record");
         let ResolvedExprKind::Record { fields, .. } = &body.root.result.as_ref().unwrap().kind

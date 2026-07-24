@@ -204,7 +204,11 @@ impl<'a> Checker<'a> {
                     Self::collect_uses_in_stmt(s, uses);
                 }
             }
-            Stmt::MmsBlock { .. } | Stmt::Ellipsis | Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Stay => {}
+            Stmt::MmsBlock { .. }
+            | Stmt::Ellipsis
+            | Stmt::Desc(..)
+            | Stmt::Rule(..)
+            | Stmt::Stay => {}
             Stmt::Become(e) => Self::collect_uses_in_expr(e, uses),
             Stmt::Loop(body) => {
                 for s in body {

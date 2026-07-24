@@ -108,14 +108,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Stay => {
                     // FLOW-TURN-001: `stay` compiles as `return self`.
-                    let (self_ptr, self_ty) = vars
-                        .get("self")
-                        .copied()
-                        .ok_or_else(|| {
-                            CompileError::LlvmError(
-                                "stay used outside a transition body (no self in scope)".into(),
-                            )
-                        })?;
+                    let (self_ptr, self_ty) = vars.get("self").copied().ok_or_else(|| {
+                        CompileError::LlvmError(
+                            "stay used outside a transition body (no self in scope)".into(),
+                        )
+                    })?;
                     let mut val = self.build_load(self_ty, self_ptr, "stay_self")?;
                     if self.in_fails_transition {
                         val = self.compile_ok_constructor(vec![val])?;

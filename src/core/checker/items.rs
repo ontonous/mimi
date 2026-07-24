@@ -554,9 +554,11 @@ impl<'a> Checker<'a> {
             Item::Actor(actor) => {
                 // v0.31.11: validate `runs FlowName` references an existing flow.
                 if let Some(flow_name) = &actor.runs_flow {
-                    let flow_exists = self.file.items.iter().any(|item| {
-                        matches!(item, Item::Flow(f) if &f.name == flow_name)
-                    });
+                    let flow_exists = self
+                        .file
+                        .items
+                        .iter()
+                        .any(|item| matches!(item, Item::Flow(f) if &f.name == flow_name));
                     if !flow_exists {
                         self.emit_code(
                             crate::diagnostic::codes::E0402,
@@ -1005,15 +1007,18 @@ impl<'a> Checker<'a> {
                     // FLOW-TURN-001: store fails E type for return type wrapping.
                     if let Some(fails_ty) = &t.fails {
                         let resolved_fails = self.resolve_type(fails_ty);
-                        self.transition_fails_types.insert(t_key.clone(), resolved_fails.clone());
+                        self.transition_fails_types
+                            .insert(t_key.clone(), resolved_fails.clone());
                         let source_ty = Type::Name(t.from_state.clone(), vec![]);
                         let wrapped_ret = Type::Result(
                             Box::new(ret.clone()),
                             Box::new(Type::Tuple(vec![source_ty, resolved_fails])),
                         );
-                        self.funcs.insert(t_key.clone(), (params.clone(), wrapped_ret));
+                        self.funcs
+                            .insert(t_key.clone(), (params.clone(), wrapped_ret));
                     } else {
-                        self.funcs.insert(t_key.clone(), (params.clone(), ret.clone()));
+                        self.funcs
+                            .insert(t_key.clone(), (params.clone(), ret.clone()));
                     }
                     if transition_name_counts.get(t.name.as_str()).copied() == Some(1) {
                         let short_key = format!("{}::{}", qualified, t.name);

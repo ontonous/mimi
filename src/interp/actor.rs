@@ -59,7 +59,11 @@ impl<'a> Interpreter<'a> {
             // Find the flow and construct its root state (first declared state) with defaults.
             let flow_def = self.file.items.iter().find_map(|item| {
                 if let crate::ast::Item::Flow(f) = item {
-                    if &f.name == flow_name { Some(f) } else { None }
+                    if &f.name == flow_name {
+                        Some(f)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
