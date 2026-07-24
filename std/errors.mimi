@@ -5,7 +5,7 @@
 // These errors can be used with the From protocol for automatic error conversion.
 
 // FsError: File system operation errors.
-pub enum FsError {
+pub type FsError {
     NotFound(string),       // File or directory not found
     PermissionDenied(string), // Permission denied
     AlreadyExists(string),  // File or directory already exists
@@ -16,7 +16,7 @@ pub enum FsError {
 }
 
 // JsonError: JSON parsing/serialization errors.
-pub enum JsonError {
+pub type JsonError {
     ParseError(string),     // Failed to parse JSON
     SerializeError(string), // Failed to serialize to JSON
     TypeError(string),      // Type mismatch in JSON operation
@@ -25,7 +25,7 @@ pub enum JsonError {
 }
 
 // CollectionError: Collection operation errors.
-pub enum CollectionError {
+pub type CollectionError {
     IndexOutOfBounds(i32, i32), // Index out of bounds (index, length)
     KeyNotFound(string),    // Key not found in map
     EmptyCollection,        // Operation on empty collection
@@ -34,7 +34,7 @@ pub enum CollectionError {
 }
 
 // NetError: Network operation errors.
-pub enum NetError {
+pub type NetError {
     ConnectionFailed(string),   // Failed to connect
     Timeout(string),            // Operation timed out
     DnsError(string),           // DNS resolution failed
@@ -43,7 +43,7 @@ pub enum NetError {
 }
 
 // MathError: Mathematical operation errors.
-pub enum MathError {
+pub type MathError {
     DivisionByZero,         // Division by zero
     Overflow,               // Integer overflow
     Underflow,              // Integer underflow
@@ -53,7 +53,7 @@ pub enum MathError {
 
 // AppError: Generic application error wrapper.
 // This can be used as a top-level error type that wraps other error types.
-pub enum AppError {
+pub type AppError {
     Fs(FsError),            // File system error
     Json(JsonError),        // JSON error
     Collection(CollectionError), // Collection error
@@ -68,31 +68,31 @@ pub enum AppError {
 
 impl From<FsError, AppError> for AppError {
     func from(e: FsError) -> AppError {
-        AppError::Fs(e)
+         Fs(e)
     }
 }
 
 impl From<JsonError, AppError> for AppError {
     func from(e: JsonError) -> AppError {
-        AppError::Json(e)
+         Json(e)
     }
 }
 
 impl From<CollectionError, AppError> for AppError {
     func from(e: CollectionError) -> AppError {
-        AppError::Collection(e)
+         Collection(e)
     }
 }
 
 impl From<NetError, AppError> for AppError {
     func from(e: NetError) -> AppError {
-        AppError::Net(e)
+         Net(e)
     }
 }
 
 impl From<MathError, AppError> for AppError {
     func from(e: MathError) -> AppError {
-        AppError::Math(e)
+         Math(e)
     }
 }
 
@@ -103,68 +103,68 @@ impl From<MathError, AppError> for AppError {
 // fs_error_to_string: Convert FsError to a human-readable string.
 pub func fs_error_to_string(e: FsError) -> string {
     match e {
-        FsError::NotFound(path) => "file not found: " + path,
-        FsError::PermissionDenied(path) => "permission denied: " + path,
-        FsError::AlreadyExists(path) => "already exists: " + path,
-        FsError::NotADirectory(path) => "not a directory: " + path,
-        FsError::IsADirectory(path) => "is a directory: " + path,
-        FsError::IoError(msg) => "I/O error: " + msg,
-        FsError::InvalidPath(path) => "invalid path: " + path,
+         NotFound(path) => "file not found: " + path,
+         PermissionDenied(path) => "permission denied: " + path,
+         AlreadyExists(path) => "already exists: " + path,
+         NotADirectory(path) => "not a directory: " + path,
+         IsADirectory(path) => "is a directory: " + path,
+         IoError(msg) => "I/O error: " + msg,
+         InvalidPath(path) => "invalid path: " + path,
     }
 }
 
 // json_error_to_string: Convert JsonError to a human-readable string.
 pub func json_error_to_string(e: JsonError) -> string {
     match e {
-        JsonError::ParseError(msg) => "JSON parse error: " + msg,
-        JsonError::SerializeError(msg) => "JSON serialize error: " + msg,
-        JsonError::TypeError(msg) => "JSON type error: " + msg,
-        JsonError::MissingField(field) => "missing field: " + field,
-        JsonError::InvalidFormat(msg) => "invalid JSON format: " + msg,
+         ParseError(msg) => "JSON parse error: " + msg,
+         SerializeError(msg) => "JSON serialize error: " + msg,
+         TypeError(msg) => "JSON type error: " + msg,
+         MissingField(field) => "missing field: " + field,
+         InvalidFormat(msg) => "invalid JSON format: " + msg,
     }
 }
 
 // collection_error_to_string: Convert CollectionError to a human-readable string.
 pub func collection_error_to_string(e: CollectionError) -> string {
     match e {
-        CollectionError::IndexOutOfBounds(idx, len) => "index out of bounds: " + int_to_string(idx) + " (length " + int_to_string(len) + ")",
-        CollectionError::KeyNotFound(key) => "key not found: " + key,
-        CollectionError::EmptyCollection => "operation on empty collection",
-        CollectionError::DuplicateKey(key) => "duplicate key: " + key,
-        CollectionError::InvalidSize(size) => "invalid size: " + int_to_string(size),
+         IndexOutOfBounds(idx, len) => "index out of bounds: " + int_to_string(idx) + " (length " + int_to_string(len) + ")",
+         KeyNotFound(key) => "key not found: " + key,
+         EmptyCollection => "operation on empty collection",
+         DuplicateKey(key) => "duplicate key: " + key,
+         InvalidSize(size) => "invalid size: " + int_to_string(size),
     }
 }
 
 // net_error_to_string: Convert NetError to a human-readable string.
 pub func net_error_to_string(e: NetError) -> string {
     match e {
-        NetError::ConnectionFailed(msg) => "connection failed: " + msg,
-        NetError::Timeout(msg) => "timeout: " + msg,
-        NetError::DnsError(msg) => "DNS error: " + msg,
-        NetError::SocketError(msg) => "socket error: " + msg,
-        NetError::ProtocolError(msg) => "protocol error: " + msg,
+         ConnectionFailed(msg) => "connection failed: " + msg,
+         Timeout(msg) => "timeout: " + msg,
+         DnsError(msg) => "DNS error: " + msg,
+         SocketError(msg) => "socket error: " + msg,
+         ProtocolError(msg) => "protocol error: " + msg,
     }
 }
 
 // math_error_to_string: Convert MathError to a human-readable string.
 pub func math_error_to_string(e: MathError) -> string {
     match e {
-        MathError::DivisionByZero => "division by zero",
-        MathError::Overflow => "integer overflow",
-        MathError::Underflow => "integer underflow",
-        MathError::InvalidArgument(msg) => "invalid argument: " + msg,
-        MathError::DomainError(msg) => "domain error: " + msg,
+         DivisionByZero => "division by zero",
+         Overflow => "integer overflow",
+         Underflow => "integer underflow",
+         InvalidArgument(msg) => "invalid argument: " + msg,
+         DomainError(msg) => "domain error: " + msg,
     }
 }
 
 // app_error_to_string: Convert AppError to a human-readable string.
 pub func app_error_to_string(e: AppError) -> string {
     match e {
-        AppError::Fs(fs_err) => fs_error_to_string(fs_err),
-        AppError::Json(json_err) => json_error_to_string(json_err),
-        AppError::Collection(coll_err) => collection_error_to_string(coll_err),
-        AppError::Net(net_err) => net_error_to_string(net_err),
-        AppError::Math(math_err) => math_error_to_string(math_err),
-        AppError::Custom(msg) => msg,
+         Fs(fs_err) => fs_error_to_string(fs_err),
+         Json(json_err) => json_error_to_string(json_err),
+         Collection(coll_err) => collection_error_to_string(coll_err),
+         Net(net_err) => net_error_to_string(net_err),
+         Math(math_err) => math_error_to_string(math_err),
+         Custom(msg) => msg,
     }
 }
