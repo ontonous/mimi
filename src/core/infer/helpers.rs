@@ -282,6 +282,14 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // 追加 B: `?` after linear resource consumption is rejected — the consumed
+        // resource cannot be rolled back on Rejected. Architecture amendment clause 9.
+        if self.transition_fails.is_some() && self.linear_consumed_before_try {
+            self.emit_code(
+                crate::diagnostic::codes::E0429,
+                "linear resource consumed before fallible operation (`?`) — the consumed resource cannot be rolled back on Rejected. Move all fallible operations before consuming linear resources (amendment clause 9)",
+            );
+        }
         let inner_ty = self.infer_expr(expr, scopes);
         match inner_ty.unlocated() {
             // Built-in Result<T, E> -> ? extracts T

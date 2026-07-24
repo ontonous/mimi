@@ -6206,6 +6206,83 @@ func main() -> i32 {
     assert_eq!(native.trim(), "99");
 }
 
+/// 追加 B: `?` after linear resource consumption is rejected (E0429).
+/// Architecture amendment clause 9: linear resources consumed before
+/// fallible operations cannot be rolled back on Rejected.
+#[test]
+fn flow_turn_try_after_linear_consumption_rejected() {
+    let src = r#"
+flow Parser {
+    state Pending { data: i32 }
+    state Ready { data: i32 }
+    transition parse(Pending, token: i32) -> Ready fails string {
+        do {
+            // Consume the linear resource (flow state alias)
+            let consumed = self
+            // Then try a fallible operation — should be rejected
+            let result = safe_div(10, token)
+            let value = result?
+            return Ready { data: value }
+        }
+    }
+}
+func safe_div(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 { return Err("div0") }
+    return Ok(a / b)
+}
+func main() -> i32 { 0 }
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_err(),
+        "? after linear consumption should be rejected"
+    );
+    let errors = result.unwrap_err();
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0429")),
+        "expected E0429, got: {:?}",
+        errors
+    );
+}
+
+/// 追加 B: `?` before linear resource consumption is accepted.
+#[test]
+fn flow_turn_try_before_linear_consumption_accepted() {
+    let src = r#"
+flow Parser {
+    state Pending { data: i32 }
+    state Ready { data: i32 }
+    transition parse(Pending, token: i32) -> Ready fails string {
+        do {
+            // Fallible operation first — no linear resource consumed yet
+            let result = safe_div(10, token)
+            let value = result?
+            // Now consume the linear resource
+            return Ready { data: value + self.data }
+        }
+    }
+}
+func safe_div(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 { return Err("div0") }
+    return Ok(a / b)
+}
+func main() -> i32 {
+    let s0 = Pending { data: 5 }
+    let r = Parser::parse(s0, 2)
+    match r {
+        Ok(s1) => s1.data,
+        Err(_) => 0 - 1,
+    }
+}
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_ok(),
+        "? before linear consumption should be accepted: {:?}",
+        result
+    );
+}
+
 // ── 0.31.19 攻击审查: tuple × Flow ─────────────────────────────────
 
 #[test]

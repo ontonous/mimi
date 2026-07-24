@@ -127,6 +127,7 @@ pub const E0425: &str = "E0425"; // session endpoint with non-end residual leave
 pub const E0426: &str = "E0426"; // session endpoint use-after-alias (linear consumption)
 pub const E0427: &str = "E0427"; // linear type cannot be shared/borrowed (shared/local_shared/weak/&T)
 pub const E0428: &str = "E0428"; // ? on extern "C" call: FFI failures are Faults, not Rejected
+pub const E0429: &str = "E0429"; // linear resource consumed before fallible operation (? ordering)
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
@@ -348,6 +349,7 @@ pub fn describe(code: &str) -> &'static str {
         E0426 => "session endpoint use-after-alias (linear consumption)",
         E0427 => "linear type cannot be shared/borrowed",
         E0428 => "? on extern C call: FFI failures are Faults, not Rejected",
+        E0429 => "linear resource consumed before fallible operation",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",

@@ -93,6 +93,9 @@ pub(crate) struct Checker<'a> {
     /// v0.31.12: session endpoints consumed by aliasing (`let b = a`).
     /// Using a consumed endpoint is E0426 (linear violation).
     pub(crate) consumed_session_vars: std::collections::HashSet<String>,
+    /// 追加 B: tracks whether any linear resource was consumed before a `?` operator
+    /// in the current transition body. Used to enforce ordering constraint (条款 9).
+    pub(crate) linear_consumed_before_try: bool,
     /// FLOW-TURN-001: tracks whether we're inside a transition body and its
     /// declared `fails E` type. `None` = not in transition; `Some(None)` =
     /// transition without `fails`; `Some(Some(E))` = transition with `fails E`.
@@ -255,6 +258,7 @@ impl<'a> Checker<'a> {
             flow_state_type_names: std::collections::HashSet::new(),
             consumed_flow_vars: HashMap::new(),
             consumed_session_vars: std::collections::HashSet::new(),
+            linear_consumed_before_try: false,
             transition_fails: None,
             transition_fails_types: HashMap::new(),
             multi_target_vars: HashMap::new(),
