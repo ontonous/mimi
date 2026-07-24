@@ -35,16 +35,19 @@ pub extern "C" fn mimi_listdir(path: *const std::ffi::c_char) -> *mut MimiList {
             .filter_map(|e| e.ok())
             .filter_map(|e| e.file_name().to_str().map(alloc_c_string))
             .collect(),
-        Err(_) => {
-            return Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::String)))
-        }
+        Err(_) => return Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::String))),
     };
     let len = entries.len() as i64;
     let mut items = entries;
     let data_ptr = items.as_mut_ptr();
     std::mem::forget(items);
     // 0.31.23: directory entries are strings.
-    Box::into_raw(Box::new(MimiList::with_data(data_ptr, len, true, ListElementKind::String)))
+    Box::into_raw(Box::new(MimiList::with_data(
+        data_ptr,
+        len,
+        true,
+        ListElementKind::String,
+    )))
 }
 
 /// Returns 1 if path is a directory, 0 otherwise.
@@ -165,9 +168,7 @@ pub extern "C" fn mimi_path_dirname(path: *const std::ffi::c_char) -> *mut std::
 /// Recursively walks a directory and returns all file paths (as a Mimi List).
 #[no_mangle]
 pub extern "C" fn mimi_walk_dir(path: *const std::ffi::c_char) -> *mut MimiList {
-    let empty = || {
-        Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::String)))
-    };
+    let empty = || Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::String)));
     let path_str = if path.is_null() {
         return empty();
     } else {
@@ -185,7 +186,12 @@ pub extern "C" fn mimi_walk_dir(path: *const std::ffi::c_char) -> *mut MimiList 
     let data_ptr = items.as_mut_ptr();
     std::mem::forget(items);
     // 0.31.23: file paths are strings.
-    Box::into_raw(Box::new(MimiList::with_data(data_ptr, len, true, ListElementKind::String)))
+    Box::into_raw(Box::new(MimiList::with_data(
+        data_ptr,
+        len,
+        true,
+        ListElementKind::String,
+    )))
 }
 
 fn walk_dir_recursive(dir: &str, results: &mut Vec<String>) {

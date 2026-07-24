@@ -138,7 +138,12 @@ pub extern "C" fn mimi_args_list() -> *mut MimiList {
     // struct via Box::from_raw.
     let _drop_guard = std::mem::ManuallyDrop::new(items);
     // 0.31.23: args are strings.
-    Box::into_raw(Box::new(MimiList::with_data(data_ptr, len, true, ListElementKind::String)))
+    Box::into_raw(Box::new(MimiList::with_data(
+        data_ptr,
+        len,
+        true,
+        ListElementKind::String,
+    )))
 }
 
 #[no_mangle]
