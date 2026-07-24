@@ -411,6 +411,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             is_comptime: false,
             is_async: false,
             extern_abi: None,
+            has_requires: func.has_requires,
+            has_ensures: func.has_ensures,
+            has_mutate_params: func.has_mutate_params,
         };
         self.compile_func(&body_func)?;
 

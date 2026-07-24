@@ -2014,6 +2014,9 @@ impl<'a> Interpreter<'a> {
                             is_comptime: false,
                             is_async: false,
                             extern_abi: None,
+                            has_requires: false,
+                            has_ensures: false,
+                            has_mutate_params: false,
                         };
                         type_impls
                             .entry(type_name.clone())
@@ -2039,6 +2042,9 @@ impl<'a> Interpreter<'a> {
                             is_comptime: false,
                             is_async: false,
                             extern_abi: None,
+                            has_requires: false,
+                            has_ensures: false,
+                            has_mutate_params: false,
                         };
                         type_impls
                             .entry(type_name.clone())
@@ -2070,6 +2076,9 @@ impl<'a> Interpreter<'a> {
                             is_comptime: false,
                             is_async: false,
                             extern_abi: None,
+                            has_requires: false,
+                            has_ensures: false,
+                            has_mutate_params: false,
                         };
                         type_impls
                             .entry(type_name.clone())

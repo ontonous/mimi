@@ -3617,6 +3617,9 @@ fn resolved_ir_rejects_unknown_and_type_schemes() {
                 is_comptime: false,
                 is_async: false,
                 extern_abi: None,
+                has_requires: false,
+                has_ensures: false,
+                has_mutate_params: false,
             })],
             implicit_single: false,
         };

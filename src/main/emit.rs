@@ -123,6 +123,9 @@ pub(crate) fn resolved_exported_funcs(
             is_comptime: function.is_comptime,
             is_async: function.is_async,
             extern_abi: Some(abi.clone()),
+            has_requires: false,
+            has_ensures: false,
+            has_mutate_params: false,
         });
     }
     Ok(exported)

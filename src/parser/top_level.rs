@@ -743,6 +743,16 @@ impl Parser {
         };
         self.expect_block_start("function body")?;
         let body = self.parse_block()?;
+        // 0.31.19 追加 B: O(1) contract flags — scan once at parse time
+        let has_requires = body
+            .iter()
+            .any(|s| matches!(s.unlocated(), Stmt::Requires(..)));
+        let has_ensures = body
+            .iter()
+            .any(|s| matches!(s.unlocated(), Stmt::Ensures(..)));
+        let has_mutate_params = params
+            .iter()
+            .any(|p| matches!(p.borrow, Some(ParamBorrow::Mutate)));
         Ok(FuncDef {
             meta: self.consumed_meta(start_pos, AstOrigin::User),
             name,
@@ -756,6 +766,9 @@ impl Parser {
             is_comptime: false,
             is_async: false,
             extern_abi: None,
+            has_requires,
+            has_ensures,
+            has_mutate_params,
         })
     }
 
