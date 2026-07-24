@@ -761,6 +761,9 @@ impl<'a> ActionEmitter<'a> {
                     || item.as_str().ends_with("session_chan")
                     // 0.31.16: individual flow state types use the
                     // "state:<flow>::<state>" identity prefix.
+                    // P3-5: convention maintained by checker (items.rs:848);
+                    // no structural constraint in ResolvedType. If naming
+                    // convention changes, this predicate must be updated.
                     || item.as_str().starts_with("state:")
             }
             Some(ResolvedType::Newtype { inner, .. }) => self.is_linear(inner),
