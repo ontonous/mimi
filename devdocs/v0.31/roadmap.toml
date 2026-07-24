@@ -405,6 +405,9 @@ requirements = []
 # 6. Spec 修正：Shadow MTE 废止、Fast-Math 禁止、O2=experimental、
 #    Comptime "完全排除"→"常量折叠"、最高优化=内联+DCE+SROA
 # 7. ARCHITECTURE.md（500 字 runtime 架构文档）
+# 8. N-API i64 → BigInt 精度修复：node_bind.rs 的 i64 分支改用
+#    napi_create_bigint_int64 / napi_get_value_bigint_int64，
+#    .d.ts 输出 bigint。消除 >2^53 静默截断（P0 数据损坏）（~50 LOC）
 #
 # 门禁：
 # - 全量 cargo test 连续两次绿
@@ -412,6 +415,7 @@ requirements = []
 # - mimi_rc_upgrade 并发压力测试通过
 # - quote! 生成代码经过完整 check
 # - builtins 无裸 i32 错误码返回
+# - N-API i64 绑定生成 bigint（ffi_bindgen 测试验证）
 
 [[milestone]]
 version = "0.31.23"
@@ -459,6 +463,9 @@ requirements = ["ERROR-ALGEBRA-001"]
 # 7. mymath checked 变体：try_div/try_factorial → Result<T, MathError>，
 #    默认 Panic 被 Actor 吸收到 Fault（~200 LOC）
 # 8. 错误通道区分：契约违背 → abort，环境失败 → 错误码/Result（~200 LOC）
+# 9. N-API 回调异常传播：trampoline 中 napi_call_function 失败时，
+#    设置 thread-local error flag + 返回 sentinel，Mimi 侧检查 flag 产生 Fault。
+#    消除 JS 回调 throw 被静默吞为默认返回值 0 的问题（违反红线 #2）（~150 LOC）
 #
 # 门禁：
 # - 全量 cargo test 连续两次绿
@@ -466,6 +473,7 @@ requirements = ["ERROR-ALGEBRA-001"]
 # - ? 自动上卷测试（嵌套 Result 不同错误类型）
 # - @pure 函数调用 print_line → 编译错误
 # - defer LIFO 顺序测试
+# - N-API 回调 throw → Mimi 侧产生 Fault（ffi_bindgen 测试验证）
 
 # === Phase B: 语言冻结（0.31.25–0.31.29）===
 
@@ -566,6 +574,13 @@ kind = "implementation"
 title = "Callback 与 async 生命周期"
 # 【盲审追加】并发原语 Opaque Pointer + Generation：Mutex/Channel/Atomic 句柄改为不透明指针，
 #   内部带 Arc/Generation，非预期线程触碰 → Abort
+# 【TS FFI 追加】N-API threadsafe 回调重做：
+#   - 废除 __thread slot 模型，改用 napi_create_threadsafe_function
+#   - Actor worker 线程 → V8 主线程安全回调（解决 language-spec §8.5 Mimi→TS 推送）
+#   - napi_add_finalizer / FinalizationRegistry：V8 GC 回收闭包时通知 Mimi 减引用计数
+#   - 长期回调（事件订阅 on_data）生命周期闭环（RC 门禁：Callback quiescence）
+#   - 重计算导出默认包装为 Promise（napi_create_async_work → libuv 线程池）
+#   - 预估 ~300-500 LOC（node_bind.rs 重做回调生成路径）
 requirements = ["COMPONENT-CALLBACK-001", "COMPONENT-ASYNC-001"]
 
 [[milestone]]
