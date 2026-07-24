@@ -2,8 +2,10 @@
 #![allow(clippy::unwrap_used)]
 
 use crate::ast::*;
-use crate::interp::error::InterpError;
+use crate::interp::error::{ErrorContext, InterpError};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock, Weak as ArcWeak};
 
 /// Poll-based future state.
@@ -465,6 +467,160 @@ unsafe impl Sync for WeakLocalInner {}
 impl WeakLocalInner {
     pub fn upgrade(&self) -> Option<LocalSharedInner> {
         self.0.upgrade().map(LocalSharedInner)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 0.31.23: Shared mutable collections (Rc<RefCell> wrapping)
+// ---------------------------------------------------------------------------
+// Blind review fix: List/Map/Set cloning was expensive (deep copy).
+// These wrapper types enable shared mutability: cloning only copies the
+// smart pointer (cheap), and mutations are visible through all references.
+
+/// 0.31.23: Shared mutable list.
+///
+/// Wraps `Vec<Value>` in `Rc<RefCell<...>>` for shared mutability.
+/// Cloning is cheap (just increments the reference count).
+/// Mutations are visible through all clones.
+#[derive(Debug, Clone)]
+pub struct SharedList(pub Rc<RefCell<Vec<Value>>>);
+
+impl SharedList {
+    /// Create a new shared list from a vector.
+    pub fn new(items: Vec<Value>) -> Self {
+        SharedList(Rc::new(RefCell::new(items)))
+    }
+
+    /// Create an empty shared list.
+    pub fn empty() -> Self {
+        SharedList(Rc::new(RefCell::new(Vec::new())))
+    }
+
+    /// Get the length of the list.
+    pub fn len(&self) -> usize {
+        self.0.borrow().len()
+    }
+
+    /// Check if the list is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.borrow().is_empty()
+    }
+
+    /// Push an element to the list.
+    pub fn push(&self, value: Value) {
+        self.0.borrow_mut().push(value);
+    }
+
+    /// Get a clone of the element at the given index.
+    pub fn get(&self, index: usize) -> Option<Value> {
+        self.0.borrow().get(index).cloned()
+    }
+
+    /// Set the element at the given index.
+    pub fn set(&self, index: usize, value: Value) -> Result<(), InterpError> {
+        let mut list = self.0.borrow_mut();
+        if index >= list.len() {
+            return Err(InterpError::IndexOutOfBounds(ErrorContext {
+                msg: format!("index {} out of bounds for list of length {}", index, list.len()),
+                function: None,
+                operation: Some("list_set".to_string()),
+                help: None,
+                call_stack: vec![],
+            }));
+        }
+        list[index] = value;
+        Ok(())
+    }
+
+    /// Get a clone of the underlying vector.
+    pub fn to_vec(&self) -> Vec<Value> {
+        self.0.borrow().clone()
+    }
+
+    /// Iterate over cloned elements.
+    pub fn iter_cloned(&self) -> impl Iterator<Item = Value> + '_ {
+        self.0.borrow().iter().cloned().collect::<Vec<_>>().into_iter()
+    }
+}
+
+/// 0.31.23: Shared mutable set.
+///
+/// Wraps `Vec<Value>` in `Rc<RefCell<...>>` for shared mutability.
+/// Note: This is a set represented as a vector (no duplicate checking).
+#[derive(Debug, Clone)]
+pub struct SharedSet(pub Rc<RefCell<Vec<Value>>>);
+
+impl SharedSet {
+    /// Create a new shared set from a vector.
+    pub fn new(items: Vec<Value>) -> Self {
+        SharedSet(Rc::new(RefCell::new(items)))
+    }
+
+    /// Create an empty shared set.
+    pub fn empty() -> Self {
+        SharedSet(Rc::new(RefCell::new(Vec::new())))
+    }
+
+    /// Get the length of the set.
+    pub fn len(&self) -> usize {
+        self.0.borrow().len()
+    }
+
+    /// Check if the set is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.borrow().is_empty()
+    }
+
+    /// Insert an element into the set (no duplicate checking).
+    pub fn insert(&self, value: Value) {
+        self.0.borrow_mut().push(value);
+    }
+
+    /// Get a clone of the underlying vector.
+    pub fn to_vec(&self) -> Vec<Value> {
+        self.0.borrow().clone()
+    }
+}
+
+/// 0.31.23: Shared mutable record.
+///
+/// Wraps `HashMap<String, Value>` in `Rc<RefCell<...>>` for shared mutability.
+#[derive(Debug, Clone)]
+pub struct SharedRecord {
+    pub name: Option<String>,
+    pub fields: Rc<RefCell<HashMap<String, Value>>>,
+}
+
+impl SharedRecord {
+    /// Create a new shared record.
+    pub fn new(name: Option<String>, fields: HashMap<String, Value>) -> Self {
+        SharedRecord {
+            name,
+            fields: Rc::new(RefCell::new(fields)),
+        }
+    }
+
+    /// Create an empty shared record.
+    pub fn empty(name: Option<String>) -> Self {
+        SharedRecord {
+            name,
+            fields: Rc::new(RefCell::new(HashMap::new())),
+        }
+    }
+
+    /// Get a clone of a field value.
+    pub fn get(&self, key: &str) -> Option<Value> {
+        self.fields.borrow().get(key).cloned()
+    }
+
+    /// Set a field value.
+    pub fn set(&self, key: String, value: Value) {
+        self.fields.borrow_mut().insert(key, value);
+    }
+
+    /// Get a clone of the underlying hashmap.
+    pub fn to_map(&self) -> HashMap<String, Value> {
+        self.fields.borrow().clone()
     }
 }
 
