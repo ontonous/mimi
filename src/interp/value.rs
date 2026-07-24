@@ -504,12 +504,17 @@ impl WeakLocalInner {
 // Blind review fix: List/Map/Set cloning was expensive (deep copy).
 // These wrapper types enable shared mutability: cloning only copies the
 // smart pointer (cheap), and mutations are visible through all references.
+//
+// NOTE: These types are infrastructure for future integration into the Value
+// enum. They are not currently used but provide the foundation for eliminating
+// expensive deep copies of collections.
 
 /// 0.31.23: Shared mutable list.
 ///
 /// Wraps `Vec<Value>` in `Rc<RefCell<...>>` for shared mutability.
 /// Cloning is cheap (just increments the reference count).
 /// Mutations are visible through all clones.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SharedList(pub Rc<RefCell<Vec<Value>>>);
 
@@ -584,6 +589,7 @@ impl SharedList {
 ///
 /// Wraps `Vec<Value>` in `Rc<RefCell<...>>` for shared mutability.
 /// Note: This is a set represented as a vector (no duplicate checking).
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SharedSet(pub Rc<RefCell<Vec<Value>>>);
 
@@ -622,6 +628,7 @@ impl SharedSet {
 /// 0.31.23: Shared mutable record.
 ///
 /// Wraps `HashMap<String, Value>` in `Rc<RefCell<...>>` for shared mutability.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SharedRecord {
     pub name: Option<String>,

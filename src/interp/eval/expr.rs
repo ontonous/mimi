@@ -1422,9 +1422,10 @@ impl<'a> Interpreter<'a> {
 
         // Try to find and call the from function
         if let Some(func) = self.find_function(&from_func_name) {
-            let error_value = match vals.into_iter().next() {
-                Some(v) => v,
-                None => return Value::Variant(variant_name.to_string(), vec![]),
+            // Clone the error value before conversion attempt so we can return it if conversion fails
+            let error_value = match vals.first() {
+                Some(v) => v.clone(),
+                None => return Value::Variant(variant_name.to_string(), vals),
             };
             match self.call_func(&func, vec![error_value]) {
                 Ok(converted_error) => {
@@ -1432,9 +1433,8 @@ impl<'a> Interpreter<'a> {
                     Value::Variant("Err".to_string(), vec![converted_error])
                 }
                 Err(_) => {
-                    // Conversion failed, return original variant with Unit placeholder
-                    // Note: We lost the original error value, but this is a rare edge case
-                    Value::Variant(variant_name.to_string(), vec![Value::Unit])
+                    // Conversion failed, return original variant with original error value
+                    Value::Variant(variant_name.to_string(), vals)
                 }
             }
         } else {

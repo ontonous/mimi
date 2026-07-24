@@ -176,10 +176,17 @@ impl ListElementKind {
     }
 
     /// Returns true if elements are stored as pointers (need free on list free).
+    ///
+    /// 0.31.23: Unknown is treated as pointer kind for backward compatibility.
+    /// Legacy code that creates lists without setting element_kind will have
+    /// their elements freed correctly (assuming they are strings).
     pub fn is_pointer_kind(self) -> bool {
         matches!(
             self,
-            ListElementKind::String | ListElementKind::List | ListElementKind::Record
+            ListElementKind::Unknown
+                | ListElementKind::String
+                | ListElementKind::List
+                | ListElementKind::Record
         )
     }
 }
