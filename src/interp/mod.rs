@@ -321,94 +321,15 @@ pub struct Interpreter<'a> {
 impl<'a> Interpreter<'a> {
     pub fn from_checked(program: &'a crate::core::CheckedProgram) -> Self {
         let mut interp = Self::new(program.legacy_body_file());
-        let mut resolved = HashMap::new();
-        let mut fallbacks = std::collections::HashSet::new();
-        let mut pinned = std::collections::HashSet::new();
-        let mut param_arity = HashMap::new();
-        let mut param_lists = HashMap::new();
-        for (id, transition) in program.transitions() {
-            let key = (id.flow.0.clone(), id.event.clone(), id.source.name.clone());
-            let targets = transition
-                .targets
-                .iter()
-                .map(|state| state.name.clone())
-                .collect();
-            if transition.is_fallback {
-                fallbacks.insert(key.clone());
-            }
-            if transition.is_ffi_pinned {
-                pinned.insert(key.clone());
-            }
-            param_arity.insert(key.clone(), transition.params.len());
-            param_lists.insert(
-                key.clone(),
-                transition
-                    .params
-                    .iter()
-                    .map(|(name, ty)| (name.clone(), crate::core::fmt_type(ty)))
-                    .collect(),
-            );
-            resolved.insert(key, targets);
-        }
-        interp.resolved_transitions = Some(resolved);
-        interp.resolved_fallback_transitions = Some(fallbacks);
-        interp.resolved_ffi_pinned_transitions = Some(pinned);
-        interp.resolved_transition_param_arity = Some(param_arity);
-        let mut transitions_by_flow: HashMap<
-            String,
-            Vec<(String, String, String, bool, bool, usize)>,
-        > = HashMap::new();
-        for transition in program.transitions().values() {
-            let flow = transition.id.flow.0.clone();
-            let event = transition.id.event.clone();
-            let source = transition.id.source.name.clone();
-            let targets = transition
-                .targets
-                .iter()
-                .map(|s| s.name.clone())
-                .collect::<Vec<_>>()
-                .join("|");
-            transitions_by_flow.entry(flow).or_default().push((
-                event,
-                source,
-                targets,
-                transition.is_fallback,
-                transition.is_ffi_pinned,
-                transition.params.len(),
-            ));
-        }
-        for list in transitions_by_flow.values_mut() {
-            list.sort();
-        }
-        let mut transitions_by_event: HashMap<
-            String,
-            Vec<(String, String, String, bool, bool, usize)>,
-        > = HashMap::new();
-        for transition in program.transitions().values() {
-            let flow = transition.id.flow.0.clone();
-            let event = transition.id.event.clone();
-            let source = transition.id.source.name.clone();
-            let targets = transition
-                .targets
-                .iter()
-                .map(|s| s.name.clone())
-                .collect::<Vec<_>>()
-                .join("|");
-            transitions_by_event.entry(event).or_default().push((
-                flow,
-                source,
-                targets,
-                transition.is_fallback,
-                transition.is_ffi_pinned,
-                transition.params.len(),
-            ));
-        }
-        for list in transitions_by_event.values_mut() {
-            list.sort();
-        }
-        interp.resolved_transitions_by_flow = Some(transitions_by_flow);
-        interp.resolved_transitions_by_event = Some(transitions_by_event);
-        interp.resolved_transition_params = Some(param_lists);
+        // AD-6: transition tables built once in CheckedProgram, shared by both backends.
+        let tables = program.build_transition_tables();
+        interp.resolved_transitions = Some(tables.resolved);
+        interp.resolved_fallback_transitions = Some(tables.fallbacks);
+        interp.resolved_ffi_pinned_transitions = Some(tables.pinned);
+        interp.resolved_transition_param_arity = Some(tables.param_arity);
+        interp.resolved_transitions_by_flow = Some(tables.by_flow);
+        interp.resolved_transitions_by_event = Some(tables.by_event);
+        interp.resolved_transition_params = Some(tables.param_lists);
         let mut functions = HashMap::new();
         let mut function_params = HashMap::new();
         let mut comptime_functions = std::collections::HashSet::new();

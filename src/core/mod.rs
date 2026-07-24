@@ -48,7 +48,7 @@ pub use resolved::{
     ResolvedProtocol, ResolvedProtocolState, ResolvedProtocolTransition, ResolvedSession,
     ResolvedState, ResolvedTrait, ResolvedTypeDef, ResolvedTypeKind, ResolvedVariantMember,
     ResolvedVariantSchema, ResolvedVariantShape, SpanPrecision, StateId, TransitionId,
-    RESOLVED_IR_VERSION,
+    TransitionTables, RESOLVED_IR_VERSION,
 };
 
 pub fn check(file: &File) -> Result<(), Vec<Diagnostic>> {

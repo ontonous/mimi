@@ -629,6 +629,27 @@ pub struct ResolvedExternBlock {
     pub origin: Origin,
 }
 
+/// Pre-computed transition lookup tables shared by interpreter and codegen.
+/// Built once from `CheckedProgram::transitions()` via `build_transition_tables()`,
+/// eliminating ~90 lines of duplicated construction in each backend (AD-6).
+#[derive(Debug, Clone)]
+pub struct TransitionTables {
+    /// (flow, event, source) → target state names.
+    pub resolved: HashMap<(String, String, String), Vec<String>>,
+    /// Fallback/matrix-injected transition keys.
+    pub fallbacks: std::collections::HashSet<(String, String, String)>,
+    /// FFI-pinned system transition keys.
+    pub pinned: std::collections::HashSet<(String, String, String)>,
+    /// (flow, event, source) → event parameter arity.
+    pub param_arity: HashMap<(String, String, String), usize>,
+    /// (flow, event, source) → [(param_name, type_display)].
+    pub param_lists: HashMap<(String, String, String), Vec<(String, String)>>,
+    /// flow → [(event, source, targets_joined, is_fallback, is_pinned, param_count)].
+    pub by_flow: HashMap<String, Vec<(String, String, String, bool, bool, usize)>>,
+    /// event → [(flow, source, targets_joined, is_fallback, is_pinned, param_count)].
+    pub by_event: HashMap<String, Vec<(String, String, String, bool, bool, usize)>>,
+}
+
 #[derive(Debug)]
 pub struct CheckedProgram {
     /// Owned normalized source retained only while legacy consumers migrate.
@@ -1000,6 +1021,104 @@ impl CheckedProgram {
 
     pub fn transitions(&self) -> &HashMap<TransitionId, ResolvedTransition> {
         &self.transitions
+    }
+
+    /// Build pre-computed transition lookup tables for backend consumption.
+    /// Eliminates ~90 lines of duplicated construction in interp and codegen (AD-6).
+    pub fn build_transition_tables(&self) -> TransitionTables {
+        let mut resolved = HashMap::new();
+        let mut fallbacks = std::collections::HashSet::new();
+        let mut pinned = std::collections::HashSet::new();
+        let mut param_arity = HashMap::new();
+        let mut param_lists = HashMap::new();
+        for (id, transition) in &self.transitions {
+            let key = (
+                id.flow.0.clone(),
+                id.event.clone(),
+                id.source.name.clone(),
+            );
+            let targets = transition
+                .targets
+                .iter()
+                .map(|state| state.name.clone())
+                .collect();
+            if transition.is_fallback {
+                fallbacks.insert(key.clone());
+            }
+            if transition.is_ffi_pinned {
+                pinned.insert(key.clone());
+            }
+            param_arity.insert(key.clone(), transition.params.len());
+            param_lists.insert(
+                key.clone(),
+                transition
+                    .params
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), crate::core::fmt_type(ty)))
+                    .collect(),
+            );
+            resolved.insert(key, targets);
+        }
+
+        let mut by_flow: HashMap<String, Vec<(String, String, String, bool, bool, usize)>> =
+            HashMap::new();
+        for transition in self.transitions.values() {
+            let flow = transition.id.flow.0.clone();
+            let event = transition.id.event.clone();
+            let source = transition.id.source.name.clone();
+            let targets = transition
+                .targets
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+                .join("|");
+            by_flow.entry(flow).or_default().push((
+                event,
+                source,
+                targets,
+                transition.is_fallback,
+                transition.is_ffi_pinned,
+                transition.params.len(),
+            ));
+        }
+        for list in by_flow.values_mut() {
+            list.sort();
+        }
+
+        let mut by_event: HashMap<String, Vec<(String, String, String, bool, bool, usize)>> =
+            HashMap::new();
+        for transition in self.transitions.values() {
+            let flow = transition.id.flow.0.clone();
+            let event = transition.id.event.clone();
+            let source = transition.id.source.name.clone();
+            let targets = transition
+                .targets
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+                .join("|");
+            by_event.entry(event).or_default().push((
+                flow,
+                source,
+                targets,
+                transition.is_fallback,
+                transition.is_ffi_pinned,
+                transition.params.len(),
+            ));
+        }
+        for list in by_event.values_mut() {
+            list.sort();
+        }
+
+        TransitionTables {
+            resolved,
+            fallbacks,
+            pinned,
+            param_arity,
+            param_lists,
+            by_flow,
+            by_event,
+        }
     }
 
     pub fn flows(&self) -> &HashMap<FlowId, ResolvedFlow> {
