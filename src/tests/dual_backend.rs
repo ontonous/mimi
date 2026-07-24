@@ -13779,3 +13779,110 @@ fn dual_from_json_map_option_map_list_product_tuple() {
         "{\"a\":Some({\"x\":[(1, 2)]}),\"b\":None()}\n{\"a\":{\"Some\":[{\"x\":[[1,2]]}]},\"b\":\"None\"}"
     );
 }
+
+// ============================================================
+// 0.31.24: defer LIFO tests
+// ============================================================
+
+/// defer basic: single defer block runs on normal exit.
+#[test]
+fn dual_defer_basic() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            defer { println("deferred") }
+            println("before")
+            0
+        }
+        "#,
+        "before\ndeferred"
+    );
+}
+
+/// defer LIFO: multiple defer blocks run in reverse order.
+#[test]
+fn dual_defer_lifo_order() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            defer { println("first") }
+            defer { println("second") }
+            defer { println("third") }
+            println("body")
+            0
+        }
+        "#,
+        "body\nthird\nsecond\nfirst"
+    );
+}
+
+/// defer on early return: defer runs even when function returns early.
+#[test]
+fn dual_defer_early_return() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func helper() -> i32 {
+            defer { println("cleanup") }
+            println("work")
+            return 42
+        }
+        func main() -> i32 {
+            let x = helper()
+            println(x)
+            0
+        }
+        "#,
+        "work\ncleanup\n42"
+    );
+}
+
+/// defer in nested blocks: inner defer runs before outer defer.
+#[test]
+fn dual_defer_nested_blocks() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            defer { println("outer") }
+            {
+                defer { println("inner") }
+                println("body")
+            }
+            println("after")
+            0
+        }
+        "#,
+        "body\ninner\nafter\nouter"
+    );
+}
+
+/// defer with variable capture: defer block sees variables from enclosing scope.
+#[test]
+fn dual_defer_variable_capture() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let mut x = 1
+            defer { println(x) }
+            x = 2
+            println(x)
+            0
+        }
+        "#,
+        "2\n2"
+    );
+}
