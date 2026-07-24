@@ -375,6 +375,10 @@ pub struct ResolvedTransition {
     pub parameter_ids: Vec<NodeId>,
     pub is_fallback: bool,
     pub is_ffi_pinned: bool,
+    /// 追加 A: Silent Stay — true if this is a stay transition with no
+    /// cross-boundary operations (Channel send, FFI call, Actor event emit).
+    /// When true, codegen can skip Generation increment (amendment clause 5.1).
+    pub silent_stay: bool,
     pub origin: Origin,
     pub span: Span,
     pub fails: Option<Type>,
@@ -3095,6 +3099,116 @@ fn declaration_span(meta: crate::ast::AstNodeMeta, fallback: Span) -> Span {
     usable_span(meta.span).unwrap_or(fallback)
 }
 
+/// 追加 A: Detect cross-boundary operations in a statement block.
+/// Returns true if the block contains any of:
+/// - Channel send (session_send, channel_send)
+/// - FFI call (extern function calls)
+/// - Actor event emit (emit, send_event)
+/// Used to determine if a stay transition can be "silent" (no Generation increment).
+fn has_cross_boundary_ops(stmts: &[crate::ast::Stmt]) -> bool {
+    use crate::ast::{Expr, Stmt};
+
+    fn expr_has_cross_boundary(expr: &Expr) -> bool {
+        match expr.unlocated() {
+            Expr::Located { expr, .. } => expr_has_cross_boundary(expr),
+            Expr::Call(callee, args) => {
+                // Check if callee is a cross-boundary function
+                if let Expr::Ident(name) = callee.unlocated() {
+                    let cross_boundary_fns = [
+                        "session_send",
+                        "session_recv",
+                        "session_close",
+                        "channel_send",
+                        "channel_recv",
+                        "emit",
+                        "send_event",
+                        "spawn_actor",
+                        "spawn_foreign_task",
+                    ];
+                    if cross_boundary_fns.contains(&name.as_str()) {
+                        return true;
+                    }
+                }
+                // Recurse into callee and args
+                expr_has_cross_boundary(callee) || args.iter().any(expr_has_cross_boundary)
+            }
+            Expr::Binary(_, l, r) => expr_has_cross_boundary(l) || expr_has_cross_boundary(r),
+            Expr::Unary(_, e) | Expr::Try(e) | Expr::Await(e) | Expr::Spawn(e) => {
+                expr_has_cross_boundary(e)
+            }
+            Expr::Block(stmts) => stmts.iter().any(stmt_has_cross_boundary),
+            Expr::If { cond, then_, else_ } => {
+                expr_has_cross_boundary(cond)
+                    || then_.iter().any(stmt_has_cross_boundary)
+                    || else_
+                        .as_ref()
+                        .map(|b| b.iter().any(stmt_has_cross_boundary))
+                        .unwrap_or(false)
+            }
+            Expr::Match(scrutinee, arms) => {
+                expr_has_cross_boundary(scrutinee)
+                    || arms.iter().any(|arm| {
+                        arm.guard
+                            .as_ref()
+                            .map(expr_has_cross_boundary)
+                            .unwrap_or(false)
+                            || expr_has_cross_boundary(&arm.body)
+                    })
+            }
+            Expr::Lambda { body, .. } => body.iter().any(stmt_has_cross_boundary),
+            Expr::Comprehension {
+                expr, iter, guard, ..
+            } => {
+                expr_has_cross_boundary(expr)
+                    || expr_has_cross_boundary(iter)
+                    || guard
+                        .as_ref()
+                        .map(|g| expr_has_cross_boundary(g))
+                        .unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
+    fn stmt_has_cross_boundary(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Located { stmt, .. } => stmt_has_cross_boundary(stmt),
+            Stmt::Expr(e) => expr_has_cross_boundary(e),
+            Stmt::Return(Some(e)) | Stmt::Break(Some(e)) => expr_has_cross_boundary(e),
+            Stmt::Become(e) => expr_has_cross_boundary(e),
+            Stmt::Let { init: Some(e), .. } => expr_has_cross_boundary(e),
+            Stmt::Assign { target, value } => {
+                expr_has_cross_boundary(target) || expr_has_cross_boundary(value)
+            }
+            Stmt::If { cond, then_, else_ } => {
+                expr_has_cross_boundary(cond)
+                    || then_.iter().any(stmt_has_cross_boundary)
+                    || else_
+                        .as_ref()
+                        .map(|b| b.iter().any(stmt_has_cross_boundary))
+                        .unwrap_or(false)
+            }
+            Stmt::While { cond, body } => {
+                expr_has_cross_boundary(cond) || body.iter().any(stmt_has_cross_boundary)
+            }
+            Stmt::WhileLet { init, body, .. } => {
+                expr_has_cross_boundary(init) || body.iter().any(stmt_has_cross_boundary)
+            }
+            Stmt::Loop(body) => body.iter().any(stmt_has_cross_boundary),
+            Stmt::For { iterable, body, .. } => {
+                expr_has_cross_boundary(iterable) || body.iter().any(stmt_has_cross_boundary)
+            }
+            Stmt::Block(stmts) | Stmt::Arena(stmts) | Stmt::Unsafe(stmts) => {
+                stmts.iter().any(stmt_has_cross_boundary)
+            }
+            Stmt::Drop(e) => expr_has_cross_boundary(e),
+            _ => false,
+        }
+    }
+
+    stmts.iter().any(stmt_has_cross_boundary)
+}
+
 fn top_level_enclosing_parent(qualified_name: &str) -> NodeId {
     qualified_name
         .rsplit_once("::")
@@ -5713,6 +5827,23 @@ fn collect_flow(
                 .collect(),
             is_fallback: transition.is_fallback,
             is_ffi_pinned: transition.is_ffi_pinned,
+            // 追加 A: Silent Stay — detect stay transitions with no cross-boundary ops
+            silent_stay: {
+                // A stay transition targets only the source state
+                let is_stay = transition.to_states.len() == 1
+                    && transition.to_states[0] == transition.from_state;
+                if is_stay {
+                    // Check if body has cross-boundary operations
+                    let has_cross_boundary = transition
+                        .body
+                        .as_ref()
+                        .map(|body| has_cross_boundary_ops(body))
+                        .unwrap_or(false);
+                    !has_cross_boundary
+                } else {
+                    false
+                }
+            },
             origin: transition_origin,
             span,
             fails: transition.fails.clone(),
