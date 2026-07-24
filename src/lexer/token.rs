@@ -59,6 +59,8 @@ pub enum TokenKind {
     Spawn,
     Steps,
     Parasteps,
+    /// 0.31.24: Defer block — executes when the current scope exits (LIFO order).
+    Defer,
     Quote,
     Comptime,
     Failure,
@@ -225,6 +227,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Spawn => "spawn",
             TokenKind::Steps => "steps",
             TokenKind::Parasteps => "parasteps",
+            TokenKind::Defer => "defer",
             TokenKind::Quote => "quote",
             TokenKind::Comptime => "comptime",
 
@@ -381,6 +384,7 @@ impl TokenKind {
             TokenKind::Spawn => "spawn",
             TokenKind::Steps => "steps",
             TokenKind::Parasteps => "parasteps",
+            TokenKind::Defer => "defer",
             TokenKind::Quote => "quote",
             TokenKind::Comptime => "comptime",
 
