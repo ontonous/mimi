@@ -147,9 +147,10 @@ impl<'a> Checker<'a> {
             }
         }
         // Comptime functions: type-check body but mark as compile-time evaluable
+        // 0.31.24: Comptime purity enforcement — comptime functions must be pure
+        let was_in_comptime = self.in_comptime;
         if func.is_comptime {
-            // Comptime functions can only use pure expressions (no side effects)
-            // For now, just type-check the body normally
+            self.in_comptime = true;
         }
         // Make function's own effects available in its body
         let mut effects_scope = HashMap::new();
@@ -219,6 +220,8 @@ impl<'a> Checker<'a> {
         self.current_ret = None;
         self.current_callable_owner = None;
         self.generic_scope.truncate(generic_scope_len);
+        // 0.31.24: Restore comptime context
+        self.in_comptime = was_in_comptime;
     }
 
     /// Check if a block returns on all paths

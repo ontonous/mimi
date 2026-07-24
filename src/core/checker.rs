@@ -126,6 +126,9 @@ pub(crate) struct Checker<'a> {
     pub(crate) mutate_params: std::collections::HashSet<String>,
     /// v0.29.27: nesting depth of `pinned { }` blocks (FFI anchor).
     pub(crate) in_pinned_depth: usize,
+    /// 0.31.24: whether we're currently checking a comptime function body.
+    /// Comptime functions must be pure (no I/O, FFI, or allocation).
+    pub(crate) in_comptime: bool,
     /// 追加 C: names of extern "C" functions. `?` on extern calls is rejected
     /// because FFI failures are Faults (not Rejected) — architecture amendment clause 10.
     pub(crate) extern_funcs: std::collections::HashSet<String>,
@@ -269,6 +272,7 @@ impl<'a> Checker<'a> {
             view_params: std::collections::HashSet::new(),
             mutate_params: std::collections::HashSet::new(),
             in_pinned_depth: 0,
+            in_comptime: false,
             extern_funcs: std::collections::HashSet::new(),
             lambda_depth: 0,
             lambda_param_names: Vec::new(),
