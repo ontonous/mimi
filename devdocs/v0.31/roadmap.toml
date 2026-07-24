@@ -408,6 +408,9 @@ requirements = []
 # 8. N-API i64 → BigInt 精度修复：node_bind.rs 的 i64 分支改用
 #    napi_create_bigint_int64 / napi_get_value_bigint_int64，
 #    .d.ts 输出 bigint。消除 >2^53 静默截断（P0 数据损坏）（~50 LOC）
+# 9. 错误码注册表 + 退役策略：docs/error-codes.md 列出所有已分配码（E02xx/E03xx/E04xx/ZONK-LEAK），
+#    一旦分配永不复用，废止码标注 retired + 原因。codes.rs 加 #[test] 断言无重复码。
+#    AGENTS.md 红线追加："错误码一旦分配永不复用"（~100 行文档 + ~20 LOC 测试）
 #
 # 门禁：
 # - 全量 cargo test 连续两次绿
@@ -416,6 +419,7 @@ requirements = []
 # - quote! 生成代码经过完整 check
 # - builtins 无裸 i32 错误码返回
 # - N-API i64 绑定生成 bigint（ffi_bindgen 测试验证）
+# - error-codes 无重复分配（diagnostic_codes_no_duplicates 测试绿）
 
 [[milestone]]
 version = "0.31.23"

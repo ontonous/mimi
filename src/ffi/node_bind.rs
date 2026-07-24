@@ -227,9 +227,10 @@ impl NodeBindGenerator {
                                 )?;
                             }
                             _ => {
+                                // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 避免 >2^53 截断
                                 writeln!(
                                     out,
-                                    "    napi_create_int64({}.env, arg{}, &argv{});",
+                                    "    napi_create_bigint_int64({}.env, arg{}, &argv{});",
                                     slot, j, j
                                 )?;
                             }
@@ -270,9 +271,10 @@ impl NodeBindGenerator {
                                 )?;
                             }
                             _ => {
+                                // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 避免 >2^53 截断
                                 writeln!(
                                     out,
-                                    "    napi_get_value_int64({}.env, result, &ret);",
+                                    "    napi_get_value_bigint_int64({}.env, result, &ret, NULL);",
                                     slot
                                 )?;
                             }
@@ -346,14 +348,17 @@ impl NodeBindGenerator {
             .iter()
             .enumerate()
             .map(|(i, ty)| {
+                // 0.31.22 N-API i64 → BigInt 精度修复：i64 使用 bigint 类型
                 let ty_str = match ty.unlocated() {
-                    Type::Name(name, _) if name == "f64" => "number",
+                    Type::Name(name, _) if name == "i64" => "bigint",
                     _ => "number",
                 };
                 format!("arg{}: {}", i, ty_str)
             })
             .collect();
+        // 0.31.22 N-API i64 → BigInt 精度修复：i64 使用 bigint 类型
         let ret = match ret_type.unlocated() {
+            Type::Name(name, _) if name == "i64" => "bigint",
             Type::Name(name, _) if name == "f64" => "number",
             Type::Name(name, _) if name == "unit" => "void",
             _ => "number",
@@ -396,9 +401,10 @@ impl NodeBindGenerator {
                     }
                     crate::ffi::contract::FfiScalarType::I64 => {
                         writeln!(out, "    int64_t {}_val;", p.name)?;
+                        // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 避免 >2^53 截断
                         writeln!(
                             out,
-                            "    napi_get_value_int64(env, args[{}], &{}_val);",
+                            "    napi_get_value_bigint_int64(env, args[{}], &{}_val, NULL);",
                             i, p.name
                         )?;
                     }
@@ -508,7 +514,8 @@ impl NodeBindGenerator {
                         c_args.join(", ")
                     )?;
                     writeln!(out, "    napi_value result;")?;
-                    writeln!(out, "    napi_create_int64(env, ret, &result);")?;
+                    // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 避免 >2^53 截断
+                    writeln!(out, "    napi_create_bigint_int64(env, ret, &result);")?;
                 }
                 crate::ffi::contract::FfiScalarType::Bool => {
                     writeln!(out, "    bool ret = {}({});", func.name, c_args.join(", "))?;
@@ -637,7 +644,11 @@ impl NodeBindGenerator {
         match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => format!("napi_get_value_int32(env, {}, &{});", js_var, c_var),
-                "i64" => format!("napi_get_value_int64(env, {}, &{});", js_var, c_var),
+                // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 避免 >2^53 截断
+                "i64" => format!(
+                    "napi_get_value_bigint_int64(env, {}, &{}, NULL);",
+                    js_var, c_var
+                ),
                 "f64" => format!("napi_get_value_double(env, {}, &{});", js_var, c_var),
                 "bool" => format!("napi_get_value_bool(env, {}, &{});", js_var, c_var),
                 _ => format!("// unsupported field type {}", name),
@@ -650,7 +661,11 @@ impl NodeBindGenerator {
         match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
                 "i32" => format!("napi_create_int32(env, {}, &{}_prop);", c_var, prop_var),
-                "i64" => format!("napi_create_int64(env, {}, &{}_prop);", c_var, prop_var),
+                // 0.31.22 N-API i64 → BigInt 精度修复：使用 BigInt 避免 >2^53 截断
+                "i64" => format!(
+                    "napi_create_bigint_int64(env, {}, &{}_prop);",
+                    c_var, prop_var
+                ),
                 "f64" => format!("napi_create_double(env, {}, &{}_prop);", c_var, prop_var),
                 "bool" => format!("napi_get_boolean(env, {}, &{}_prop);", c_var, prop_var),
                 _ => format!("// unsupported field type {}", name),
@@ -695,6 +710,8 @@ impl NodeBindGenerator {
             return "any".to_string();
         }
         match &contract.args[index] {
+            // 0.31.22 N-API i64 → BigInt 精度修复：i64 使用 bigint 类型
+            FfiArgContract::Int(crate::ffi::contract::FfiScalarType::I64) => "bigint".to_string(),
             FfiArgContract::Int(_) => "number".to_string(),
             FfiArgContract::Float => "number".to_string(),
             FfiArgContract::StringBorrow | FfiArgContract::StringTransfer => "string".to_string(),
@@ -716,6 +733,10 @@ impl NodeBindGenerator {
     fn ret_type_to_ts(&self, contract: &FfiContract) -> String {
         match &contract.ret {
             crate::ffi::contract::FfiRetContract::Unit => "void".to_string(),
+            // 0.31.22 N-API i64 → BigInt 精度修复：i64 使用 bigint 类型
+            crate::ffi::contract::FfiRetContract::Int(crate::ffi::contract::FfiScalarType::I64) => {
+                "bigint".to_string()
+            }
             crate::ffi::contract::FfiRetContract::Int(_) => "number".to_string(),
             crate::ffi::contract::FfiRetContract::Float => "number".to_string(),
             crate::ffi::contract::FfiRetContract::String
@@ -753,7 +774,9 @@ impl NodeBindGenerator {
     fn mimi_type_to_ts_field(&self, ty: &Type) -> String {
         match ty.unlocated() {
             Type::Name(name, _) => match name.as_str() {
-                "i32" | "i64" | "f64" => "number".to_string(),
+                "i32" | "f64" => "number".to_string(),
+                // 0.31.22 N-API i64 → BigInt 精度修复：i64 使用 bigint 类型
+                "i64" => "bigint".to_string(),
                 "bool" => "boolean".to_string(),
                 _ => "any".to_string(),
             },
