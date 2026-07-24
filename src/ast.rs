@@ -495,9 +495,6 @@ pub enum Stmt {
     },
     /// Parallel steps block (parasteps)
     Parasteps(Block),
-    /// 0.31.24: Defer block — executes when the current scope exits (LIFO order).
-    /// Triggered on normal exit, ? propagation, and panic.
-    Defer(Block),
     /// mms {} super-comment block containing MimiSpec intent
     MmsBlock {
         content: String,
