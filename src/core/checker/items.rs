@@ -409,6 +409,10 @@ impl<'a> Checker<'a> {
                 };
                 self.funcs
                     .insert(qualified_name.clone(), (params, func_sig_ret));
+                // 追加 C: track extern functions for `?` rejection (FFI failures are Faults)
+                if f.extern_abi.is_some() {
+                    self.extern_funcs.insert(qualified_name.clone());
+                }
                 // Store generic parameters if present
                 if !f.generics.is_empty() {
                     self.func_generics
@@ -814,6 +818,8 @@ impl<'a> Checker<'a> {
                         .map(|t| self.resolve_type(t))
                         .unwrap_or_else(|| Type::Name("unit".into(), vec![]));
                     self.funcs.insert(func.name.clone(), (params, ret));
+                    // 追加 C: track extern functions for `?` rejection
+                    self.extern_funcs.insert(func.name.clone());
                 }
             }
             Item::Const {

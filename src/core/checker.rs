@@ -123,6 +123,9 @@ pub(crate) struct Checker<'a> {
     pub(crate) mutate_params: std::collections::HashSet<String>,
     /// v0.29.27: nesting depth of `pinned { }` blocks (FFI anchor).
     pub(crate) in_pinned_depth: usize,
+    /// 追加 C: names of extern "C" functions. `?` on extern calls is rejected
+    /// because FFI failures are Faults (not Rejected) — architecture amendment clause 10.
+    pub(crate) extern_funcs: std::collections::HashSet<String>,
     /// 0.31.17: lambda nesting depth + parameter names per level.
     /// Used to reject flow state captures in closures.
     pub(crate) lambda_depth: usize,
@@ -262,6 +265,7 @@ impl<'a> Checker<'a> {
             view_params: std::collections::HashSet::new(),
             mutate_params: std::collections::HashSet::new(),
             in_pinned_depth: 0,
+            extern_funcs: std::collections::HashSet::new(),
             lambda_depth: 0,
             lambda_param_names: Vec::new(),
             current_callable_owner: None,
