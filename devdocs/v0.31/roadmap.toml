@@ -366,19 +366,18 @@ requirements = []
 #   - 确认 undo trail 仅用于错误恢复，非歧义重载解析
 #   - 如用于重载 → 砍掉歧义重载，强制类型注解
 #
-# 【Runtime 盲审判决待排期】（devdocs/blind-review-runtime-2026-07-25.md）：
-# 以下判决尚未排入具体 sprint，避免 0.31.21 过载：
-# - mimi_rc_upgrade ABA 修复（P0，~200 LOC）
-# - 统一分配器 mimi_alloc/mimi_free（~300 LOC）
-# - Shadow MTE 砍掉（spec 修正）
-# - List Typed Storage 去字符串化（~2000-3000 LOC，需独立 sprint）
+# 【Runtime 盲审判决排期追踪】（devdocs/blind-review-runtime-2026-07-25.md）：
+# - mimi_rc_upgrade ABA 修复（P0，~200 LOC） → 0.31.22
+# - 统一分配器 mimi_alloc/mimi_free（~300 LOC） → 0.31.22
+# - Shadow MTE 砍掉（spec 修正） → 0.31.22
+# - ARCHITECTURE.md 500 字 → 0.31.22
+# - List Typed Storage 去字符串化（~2000-3000 LOC） → 0.31.23
+# - 错误通道区分 abort vs 错误码 → 0.31.24
 # - Handle Registry → 胖指针（Phase C 架构变更）
 # - String 胖指针废弃 C String（Phase C 架构变更）
 # - 并发原语 Opaque Pointer + Generation（Phase C）
 # - ABI 生成器 runtime↔codegen 契约（Phase C）
-# - 错误通道区分 abort vs 错误码（0.31.25+）
-# - ARCHITECTURE.md 500 字（即时）
-# 具体排期在下一轮路线图更新中统一处理。
+# 未标注排期的项在下一轮路线图更新中统一处理。
 # 追加门禁：
 #   - transition process(Active) -> stay { /* no cross-boundary */ } → silent stay, 零 Generation 递增
 #   - session_send(token, "HELO"); read()? → E04xx "linear resource consumed before fallible"

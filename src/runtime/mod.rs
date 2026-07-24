@@ -926,13 +926,36 @@ pub extern "C" fn mimi_rc_upgrade(ptr: *mut std::ffi::c_void) -> *mut std::ffi::
     }
     // SAFETY: `ptr` was checked non-null and came from `mimi_rc_alloc`; `rc_header_ref` contract satisfied.
     let hdr = unsafe { rc_header_ref(ptr) };
+
+    // 0.31.22 RC ABA 修复：先增加 weak 计数，防止 header 在 upgrade 期间被释放。
+    // 这确保了即使 strong 归零，header 也不会被 dealloc（因为 weak > 0）。
+    // 如果 weak 增加失败（strong=0 且 weak=0），说明对象已被释放，返回 null。
+    loop {
+        let s = hdr.strong.load(Ordering::Acquire);
+        let w = hdr.weak.load(Ordering::Relaxed);
+        if s == 0 && w == 0 {
+            // 对象已被释放或正在释放
+            return std::ptr::null_mut();
+        }
+        // 尝试增加 weak 计数
+        match hdr
+            .weak
+            .compare_exchange_weak(w, w + 1, Ordering::AcqRel, Ordering::Relaxed)
+        {
+            Ok(_) => break,     // 成功增加 weak，header 现在不会被释放
+            Err(_) => continue, // CAS 失败，重试
+        }
+    }
+
+    // 现在 header 不会被释放（weak > 0），可以安全地尝试升级 strong
     // H19: use Acquire on initial load to match the CAS on the release path,
     // ensuring we see the latest strong count. Relaxed could observe a stale 0
     // and return null even when strong=1, causing a false-negative upgrade failure.
     let mut s = hdr.strong.load(Ordering::Acquire);
-    loop {
+    let result = loop {
         if s == 0 {
-            return std::ptr::null_mut();
+            // strong 归零，升级失败
+            break std::ptr::null_mut();
         }
         // RT-H7: success path AcqRel so the increment synchronizes with
         // Release decrements on the free path (not only a post-CAS fence).
@@ -944,11 +967,28 @@ pub extern "C" fn mimi_rc_upgrade(ptr: *mut std::ffi::c_void) -> *mut std::ffi::
                 // M31: Acquire fence ensures all prior writes to the RC object
                 // are visible after a successful weak upgrade.
                 std::sync::atomic::fence(Ordering::Acquire);
-                return ptr;
+                break ptr;
             }
             Err(new_s) => s = new_s,
         }
+    };
+
+    // 释放我们临时增加的 weak 计数
+    // 注意：即使升级失败，我们也要释放 weak，否则会导致 weak 泄漏
+    if hdr.weak.fetch_sub(1, Ordering::Release) == 1 {
+        // 我们是最后一个 weak 引用，且 strong 可能已经归零
+        // 检查是否需要释放 header
+        std::sync::atomic::fence(Ordering::Acquire);
+        if hdr.strong.load(Ordering::Acquire) <= 0 {
+            let layout = unsafe { rc_dealloc_layout(hdr as *const RcHeader as *mut RcHeader) };
+            // SAFETY: 我们观察到 weak==0 且 strong<=0，没有其他线程持有引用
+            unsafe {
+                std::alloc::dealloc(hdr as *const RcHeader as *mut u8, layout);
+            }
+        }
     }
+
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -17867,6 +17907,8 @@ pub extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
     std::process::abort();
 }
 
+/// DEAD: 架构修正案条款 10 废除同步 pinned timeout。此函数仅供已废止的看门狗使用。
+/// 清理排入后续 sprint。
 /// v0.29.32: Wall-clock timestamp in milliseconds since UNIX epoch.
 /// Used by the pinned timeout watchdog to check cooperative expiry.
 #[no_mangle]
@@ -17894,6 +17936,8 @@ pub extern "C" fn mimi_wall_clock_ms() -> i64 {
     }
 }
 
+// DEAD: 架构修正案条款 10 废除同步 pinned timeout。此标志仅供已废止的看门狗使用。
+// 清理排入后续 sprint。
 // v0.29.43: Thread-local flag for delayed Fault from pinned blocks.
 // When set, the codegen pinned timeout path does NOT abort the process;
 // instead it sets this flag and returns, allowing the C call stack to
@@ -17907,6 +17951,8 @@ struct PinnedFaultInfo {
     state_name: String,
 }
 
+/// DEAD: 架构修正案条款 10 废除同步 pinned timeout。此函数仅供已废止的看门狗使用。
+/// 清理排入后续 sprint。
 /// v0.29.43: Set a pending delayed Fault from a pinned block.
 /// Called by codegen when pinned timeout expires or FFI crash detected.
 /// The process is NOT aborted — the flag is set and the function returns,
