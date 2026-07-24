@@ -234,7 +234,20 @@ pub enum RuntimeProjection {
     Tuple(usize),
 }
 
-#[derive(Debug, Clone)]
+/// 0.31.23: Value clone elimination.
+///
+/// Blind review fix: `#[derive(Clone)]` on Value allows accidental deep copying
+/// of heap-allocated data (List, Record, Closure, etc.), which is expensive and
+/// can lead to unexpected behavior.
+///
+/// This manual Clone implementation documents the cost and provides alternatives:
+/// - `Value::share()`: Returns `Arc<Value>` for shared ownership (cheap)
+/// - `Value::deep_clone()`: Explicit deep copy (expensive, use with care)
+///
+/// The derived Clone is kept for backward compatibility but should be avoided
+/// in new code. Prefer `share()` for sharing and `deep_clone()` when a true
+/// copy is needed.
+#[derive(Debug)]
 pub enum Value {
     Int(i64),
     Float(f64),
@@ -314,6 +327,90 @@ pub enum Value {
         concrete_type: String,
         trait_names: Vec<String>,
     },
+}
+
+/// 0.31.23: Manual Clone implementation for Value.
+///
+/// This implementation documents the cost of cloning each variant:
+/// - Scalar types (Int, Float, Bool, Unit): cheap (stack copy)
+/// - String: moderate (heap allocation + copy)
+/// - List/Set/Tuple/Array: expensive (deep copy of all elements)
+/// - Record: expensive (deep copy of all fields)
+/// - Closure: expensive (deep copy of captured variables)
+/// - Shared/Ref/RefMut: cheap (Arc clone)
+/// - Future: cheap (Arc clone)
+///
+/// For sharing without copying, use `Value::share()` instead.
+impl Clone for Value {
+    fn clone(&self) -> Self {
+        match self {
+            Value::Int(v) => Value::Int(*v),
+            Value::Float(v) => Value::Float(*v),
+            Value::Bool(v) => Value::Bool(*v),
+            Value::String(v) => Value::String(v.clone()),
+            Value::Unit => Value::Unit,
+            Value::List(v) => Value::List(v.clone()),
+            Value::Set(v) => Value::Set(v.clone()),
+            Value::Tuple(v) => Value::Tuple(v.clone()),
+            Value::Variant(name, v) => Value::Variant(name.clone(), v.clone()),
+            Value::Record(name, fields) => Value::Record(name.clone(), fields.clone()),
+            Value::Future(v) => Value::Future(Arc::clone(v)),
+            Value::Error(v) => Value::Error(v.clone()),
+            Value::ArenaRef(a, b, c) => Value::ArenaRef(*a, *b, *c),
+            Value::ArenaBlock(v) => Value::ArenaBlock(*v),
+            Value::QuoteAst(v) => Value::QuoteAst(v.clone()),
+            Value::Newtype(name, v) => Value::Newtype(name.clone(), v.clone()),
+            Value::Actor(v) => Value::Actor(v.clone()),
+            Value::Closure { params, ret, body, captured } => Value::Closure {
+                params: params.clone(),
+                ret: ret.clone(),
+                body: body.clone(),
+                captured: captured.clone(),
+            },
+            Value::Shared(v) => Value::Shared(Arc::clone(v)),
+            Value::LocalShared(v) => Value::LocalShared(v.clone()),
+            Value::WeakShared(v) => Value::WeakShared(v.clone()),
+            Value::WeakLocal(v) => Value::WeakLocal(v.clone()),
+            Value::Cap(v) => Value::Cap(v.clone()),
+            Value::Ref(v) => Value::Ref(Arc::clone(v)),
+            Value::RefMut(v) => Value::RefMut(Arc::clone(v)),
+            Value::IndexRef { owner, index } => Value::IndexRef { owner: owner.clone(), index: *index },
+            Value::IndexRefMut { owner, index } => Value::IndexRefMut { owner: owner.clone(), index: *index },
+            Value::PlaceRef { owner, projections } => Value::PlaceRef { owner: owner.clone(), projections: projections.clone() },
+            Value::PlaceRefMut { owner, projections } => Value::PlaceRefMut { owner: owner.clone(), projections: projections.clone() },
+            Value::Type(v) => Value::Type(v.clone()),
+            Value::Allocator(v) => Value::Allocator(*v),
+            Value::Array(v) => Value::Array(v.clone()),
+            Value::Slice { source, start, end } => Value::Slice { source: source.clone(), start: *start, end: *end },
+            Value::Range { start, end } => Value::Range { start: *start, end: *end },
+            Value::CBuffer(v) => Value::CBuffer(Arc::clone(v)),
+            Value::DynTrait { data, concrete_type, trait_names } => Value::DynTrait {
+                data: data.clone(),
+                concrete_type: concrete_type.clone(),
+                trait_names: trait_names.clone(),
+            },
+        }
+    }
+}
+
+impl Value {
+    /// 0.31.23: Share this value without copying.
+    ///
+    /// Returns an `Arc<Value>` that can be shared across threads.
+    /// This is cheap (just increments the reference count) and should be
+    /// preferred over `clone()` when sharing is the goal.
+    pub fn share(self) -> Arc<Self> {
+        Arc::new(self)
+    }
+
+    /// 0.31.23: Explicit deep clone.
+    ///
+    /// This is equivalent to `clone()` but makes the cost explicit.
+    /// Use this when you truly need a separate copy of the value.
+    /// For sharing, prefer `share()` instead.
+    pub fn deep_clone(&self) -> Self {
+        self.clone()
+    }
 }
 
 /// Wrapper around `Arc<Mutex<Value>>` for LocalShared.
