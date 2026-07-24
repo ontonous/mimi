@@ -80,6 +80,60 @@ func main() -> i32 { sum([1,2,3,4,5,6,7,8,9,10]) }
     });
 }
 
+fn interp_list_sum_1000(c: &mut Criterion) {
+    // 0.31.20: scaled-up list benchmark for hot-path clone measurement.
+    let src = r#"
+func make_list(n: i32) -> List<i32> {
+    let mut xs: List<i32> = [];
+    let mut i = 0;
+    while i < n { push(xs, i); i = i + 1; }
+    xs
+}
+func sum(items: List<i32>) -> i32 {
+    let mut total = 0;
+    for x in items { total = total + x; }
+    total
+}
+func main() -> i32 { sum(make_list(1000)) }
+"#
+    .to_string();
+    c.bench_function("interp/list_sum_1000", |b| {
+        b.iter(|| {
+            let tokens = lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
+            let file = parser::Parser::new(tokens).parse_file().unwrap();
+            let program = core::check_program(&file).unwrap();
+            let mut vm = interp::Interpreter::from_checked(&program);
+            vm.run().unwrap();
+        })
+    });
+}
+
+fn interp_string_concat(c: &mut Criterion) {
+    // 0.31.20: string concatenation benchmark (Value::String clone cost).
+    let src = r#"
+func main() -> i32 {
+    let mut s = "";
+    let mut i = 0;
+    while i < 100 {
+        s = s + "x";
+        i = i + 1;
+    }
+    println(s.len());
+    0
+}
+"#
+    .to_string();
+    c.bench_function("interp/string_concat_100", |b| {
+        b.iter(|| {
+            let tokens = lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
+            let file = parser::Parser::new(tokens).parse_file().unwrap();
+            let program = core::check_program(&file).unwrap();
+            let mut vm = interp::Interpreter::from_checked(&program);
+            vm.run().unwrap();
+        })
+    });
+}
+
 fn interp_match_enum(c: &mut Criterion) {
     let src = r#"
 type Shape = Circle(f64) | Rect(f64, f64)
@@ -133,6 +187,8 @@ criterion_group!(
     interp_fib,
     interp_prime,
     interp_list_sum,
+    interp_list_sum_1000,
+    interp_string_concat,
     interp_match_enum,
     interp_contract_check,
 );
