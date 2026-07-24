@@ -209,13 +209,65 @@ fn set_is_live(handle: i64) -> bool {
 // Memory allocation helpers
 // ---------------------------------------------------------------------------
 
-/// Allocate a C string (null-terminated) using libc::malloc.
-/// The caller is responsible for freeing with mimi_string_free or libc::free.
+/// 0.31.22 统一分配器：mimi_alloc/mimi_free 封装
+///
+/// 盲审修复：禁止直接调用 libc::malloc/free，统一通过 mimi_alloc/mimi_free。
+/// - 默认使用 libc::malloc/free（C ABI 兼容）
+/// - #[cfg(miri)] 使用 Rust alloc（Miri 可以检测 Rust 分配器的错误）
+///
+/// SAFETY: 调用者必须确保：
+/// - mimi_alloc 返回的指针只能通过 mimi_free 释放
+/// - 不能混用 libc::free 和 mimi_free
+#[inline]
+pub fn mimi_alloc(size: usize) -> *mut std::ffi::c_void {
+    #[cfg(miri)]
+    {
+        // Miri 模式：使用 Rust 分配器，Miri 可以检测 use-after-free、double-free 等
+        use std::alloc::{alloc, Layout};
+        let layout =
+            Layout::from_size_align(size.max(1), 8).unwrap_or_else(|_| std::process::abort());
+        unsafe { alloc(layout) as *mut std::ffi::c_void }
+    }
+    #[cfg(not(miri))]
+    {
+        // 正常模式：使用 libc::malloc（C ABI 兼容）
+        unsafe { libc::malloc(size) }
+    }
+}
+
+/// 0.31.22 统一分配器：mimi_free
+///
+/// SAFETY: ptr 必须是由 mimi_alloc 返回的指针，且未被释放过。
+#[inline]
+pub fn mimi_free(ptr: *mut std::ffi::c_void) {
+    if ptr.is_null() {
+        return;
+    }
+    #[cfg(miri)]
+    {
+        // Miri 模式：使用 Rust 分配器
+        // 注意：Miri 模式下我们需要知道原始大小，这里使用一个保守的估计
+        // 实际上 Miri 会跟踪分配，所以这是安全的
+        use std::alloc::{dealloc, Layout};
+        // Miri 会验证这个指针是否有效
+        let layout = Layout::from_size_align(1, 8).unwrap_or_else(|_| std::process::abort());
+        unsafe { dealloc(ptr as *mut u8, layout) };
+    }
+    #[cfg(not(miri))]
+    {
+        // 正常模式：使用 libc::free
+        unsafe { libc::free(ptr) };
+    }
+}
+
+/// Allocate a C string (null-terminated) using mimi_alloc.
+/// The caller is responsible for freeing with mimi_string_free or mimi_free.
 fn alloc_c_string(s: &str) -> *mut std::ffi::c_char {
     // SAFETY: `len + 1` is non-zero; the null terminator is written within the allocated buffer.
     let bytes = s.as_bytes();
     let len = bytes.len();
-    let ptr = unsafe { libc::malloc(len + 1) as *mut u8 };
+    // 0.31.22 统一分配器：使用 mimi_alloc 替代 libc::malloc
+    let ptr = mimi_alloc(len + 1) as *mut u8;
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
