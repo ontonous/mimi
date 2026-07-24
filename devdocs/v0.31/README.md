@@ -9,7 +9,7 @@
 
 v0.30.0 是已完成的止血基线。v0.31.x 不重做 v0.30 已关闭的架构债务，而是在其上建立唯一语义中枢，并完整实现 Pre-1.0 的 31 项 requirement。
 
-v0.31.x 的完成不由版本号决定。即使到达 v0.31.43，只要 stable requirement、P0、双后端轨迹、Verified Core、Component conformance、迁移或 RC 门禁有一项未满足，就继续增加 v0.31.x。
+v0.31.x 的完成不由版本号决定。即使到达 v0.31.44，只要 stable requirement、P0、双后端轨迹、Verified Core、Component conformance、迁移或 RC 门禁有一项未满足，就继续增加 v0.31.x。
 
 ## 2. 权威边界
 
@@ -38,23 +38,24 @@ Span/Origin -> HM -> CFG/ownership -> CheckedProgram/Resolved IR
 | 外部版本 | 内部 sprint | 阶段主题 |
 |---|---|---|
 | **0.1.0** | 0.31.0–0.31.7 | 基线稳定：CheckedProgram、Span、HM、CFG、Resolved IR、consumer 迁移、止血 I/II |
-| **0.1.1** | 0.31.8–0.31.43（全部） | 内部路线图 0.31 彻底完成：Flow 核心闭环、地基深修、语言冻结、Component 边界、自举与工具、冻结审查、RC |
+| **0.1.1** | 0.31.8–0.31.44（全部） | 内部路线图 0.31 彻底完成：Flow 核心闭环、地基深修、**Runtime Efficiency**、语言冻结、Component 边界、自举与工具、冻结审查、RC |
 | **1.0.0** | — | 发布：API 冻结 + 迁移指南 + 生态基线 |
 
-> **发布纪律**：0.1.1 是唯一一个覆盖完整内部路线图的长周期版本。内部 36 个 sprint（0.31.8–0.31.43）全部验收通过后才打 `0.1.1` tag。期间不打任何中间外部 tag。
+> **发布纪律**：0.1.1 是唯一一个覆盖完整内部路线图的长周期版本。内部 37 个 sprint（0.31.8–0.31.44）全部验收通过后才打 `0.1.1` tag。期间不打任何中间外部 tag。
 >
 > 内部按阶段划分里程碑（仅用于进度追踪，不打 tag）：
 >
 > | 阶段 | 内部 sprint | 主题 |
 > |------|------------|------|
 > | Phase A | 0.31.8–0.31.19 | Flow 核心闭环 + 地基深修：原子 turn、Fault、Actor runs Flow、Session 线性、exactly-once、**Flow 类型级线性、高阶交互闭环、证据同步**、攻击审查 I |
-> | Phase B | 0.31.20–0.31.24 | 语言冻结：语法收敛、Verification IR fail-closed、VC artifact、攻击审查 II |
-> | Phase C | 0.31.25–0.31.33 | Component 边界：Component IR、Native ABI、**稳定检查点**、Wire Schema、Rust SDK conformance、**XPU FFI 验证**、**SDK 加固** |
-> | Phase D | 0.31.34–0.31.39 | 工具与隔离：~~自举（deferred to post-1.0）~~、迁移、fmt/LSP/probes、experimental 隔离 |
-> | Phase E | 0.31.40–0.31.43 | 冻结：DEBUG、最终敌对审查、RC1、RC2 |
+> | **Perf** | **0.31.20** | **Runtime Efficiency：解释器热路径 dispatch 重构 + Value clone 消减 + LLVM O1 默认 + 性能基线 CI** |
+> | Phase B | 0.31.21–0.31.25 | 语言冻结：语法收敛、Verification IR fail-closed、VC artifact、攻击审查 II |
+> | Phase C | 0.31.26–0.31.34 | Component 边界：Component IR、Native ABI、**稳定检查点**、Wire Schema、Rust SDK conformance、**XPU FFI 验证**、**SDK 加固** |
+> | Phase D | 0.31.35–0.31.40 | 工具与隔离：~~自举（deferred to post-1.0）~~、迁移、fmt/LSP/probes、experimental 隔离 |
+> | Phase E | 0.31.41–0.31.44 | 冻结：DEBUG、最终敌对审查、RC1、RC2 |
 >
-> **加粗**为 v2 路线图新增 sprint（共 +6：0.31.16–18 地基深修、0.31.27 Component 稳定检查点、0.31.33 SDK 加固、0.31.34 自举 spike）。
-> **v3 变更**：0.31.34–36（自举）标记 `deferred`，移出必须完成路径；0.31.31 替换为 XPU FFI 验证；0.31.18 增加 CI 防护（gas limit）；0.31.19 增加 ABI 前置验证。
+> **加粗**为 v2 路线图新增 sprint（共 +6：0.31.16–18 地基深修、0.31.28 Component 稳定检查点、0.31.34 SDK 加固、0.31.35 自举 spike）。
+> **v3 变更**：0.31.19 追加 B（性能 quick wins）；插入 0.31.20（Runtime Efficiency）；原 0.31.20–43 顺延为 0.31.21–44；0.31.35–37（自举）标记 `deferred`；0.31.32 替换为 XPU FFI 验证；0.31.18 增加 CI 防护（gas limit）；0.31.19 增加 ABI 前置验证。
 
 详细版本及 requirement 分配见 `roadmap.toml` 和 `requirements-matrix.md`。
 
@@ -77,7 +78,7 @@ Span/Origin -> HM -> CFG/ownership -> CheckedProgram/Resolved IR
 - 普通实现版：建议净新增生产代码不超过 3,000 LOC，最多 2 个新核心抽象。
 - 止血、DEBUG、审查、RC：0 个新 stable feature。
 - 每版预留 25% 容量修复回归。
-- 超预算必须拆版，不以“临时兼容层”掩盖未完成迁移。
+- 超预算必须拆版，不以"临时兼容层"掩盖未完成迁移。
 
 ## 7. 贯穿止血线
 
@@ -93,12 +94,12 @@ Span/Origin -> HM -> CFG/ownership -> CheckedProgram/Resolved IR
 
 ## 8. 分册
 
-- `01-foundation.md`：0.31.0–0.31.7、0.31.35–0.31.36
+- `01-foundation.md`：0.31.0–0.31.7、0.31.36–0.31.37
 - `02-flow-runtime.md`：0.31.8–0.31.15（含版本内追加）
-- `02b-foundation-repair.md`：0.31.16–0.31.18（地基深修）+ 0.31.19（攻击审查 I）
-- `03-verified-core.md`：0.31.21–0.31.24
-- `04-component-boundary.md`：0.31.25–0.31.33
-- `05-migration-tooling.md`：0.31.20、0.31.34、0.31.37–0.31.39
+- `02b-foundation-repair.md`：0.31.16–0.31.18（地基深修）+ 0.31.19（攻击审查 I + 追加 B 性能 quick wins）
+- `03-verified-core.md`：0.31.22–0.31.25
+- `04-component-boundary.md`：0.31.26–0.31.34
+- `05-migration-tooling.md`：0.31.21、0.31.35、0.31.38–0.31.40
 - `06-audit-debug-rc.md`：止血、审查、DEBUG 和 RC 门禁
 
 ## 9. 最终退出

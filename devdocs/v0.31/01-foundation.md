@@ -13,7 +13,7 @@
 - **0.31.4 CheckedProgram**：typed items/calls/conversions/effects/residual/resource actions/origins。
 - **0.31.5 Consumer 迁移**：interp/native/verifier/component 不再重查 raw AST。
 - **0.31.6 止血 I**：只修回归、ICE、性能和基础 ignored。
-- **0.31.35–36 自举**（deferred to post-1.0）：不阻塞 0.1.1 退出。语言稳定性由 MCDD 真实程序验证替代。
+- **0.31.36–37 自举**（deferred to post-1.0）：不阻塞 0.1.1 退出。语言稳定性由 MCDD 真实程序验证替代。
 
 ## 当前进度
 

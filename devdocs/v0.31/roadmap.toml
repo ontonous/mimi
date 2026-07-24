@@ -2,7 +2,7 @@ schema_version = 2
 series = "0.31"
 baseline = "0.30.0"
 first = 0
-last = 43
+last = 44
 
 # === Phase 0: 基线（已完成，0.1.0 发布）===
 
@@ -203,11 +203,77 @@ requirements = []
 # - 发现的 P1 有 owner 和 deadline
 # - 审查报告归档
 # - ABI 偏移验证通过（不通过则阻断 Phase C，插入 DataLayout 修复）
+#
+# 追加 B（性能 quick wins，不修改审查交付）：
+# - FuncDef 追加 has_ensures: bool / has_requires: bool / has_mutate_params: bool
+#   在 checker 或 parser 阶段设置，消除 call_func 每次调用的 body 线性扫描
+#   （call.rs:100-104 的 func.body.iter().any(|s| matches!(s, Stmt::Ensures(..)))
+#    和 call.rs:122-142 的 requires 遍历，改为 O(1) 布尔读取）
+# - call_func 三次 arity 检查合并为一次（目录检查 + > params + < params with defaults）
+# - call_func mutate 参数写回扫描改为 has_mutate_params 守卫
+#   （call.rs:204-210 的 func.params.iter().filter(|p| matches!(p.borrow, Some(Mutate)))
+#    改为 O(1) 布尔守卫 + 仅在 true 时遍历）
+# 预算：≤200 LOC 变更，~4h
+# 门禁：全量 cargo test 连续两次绿，双后端等价性保持
 
-# === Phase B: 语言冻结（0.31.20–0.31.24）===
+# === 性能优化窗口（0.31.20，Phase A→B 之间）===
 
 [[milestone]]
 version = "0.31.20"
+kind = "implementation"
+title = "Runtime Efficiency：解释器热路径与 codegen 优化"
+requirements = []
+# 插入原因：0.31.8–19 建立了 Flow/Actor/Session/Protocol 完整功能骨架，
+# 但解释器热路径存在结构性效率问题（每次函数调用 body 扫描、202-arm 字符串
+# dispatch、Value 深拷贝膨胀、LLVM 优化默认关闭）。在语言冻结（Phase B）和
+# 组件边界（Phase C）大量新增代码前完成热路径优化，避免性能债复合增长。
+#
+# 核心交付（0 新 stable feature，纯内部优化）：
+#
+# 1. call_named dispatch 重构：
+#    - 202-arm 字符串 match → 静态 dispatch table（HashMap<&'static str, BuiltinFn>
+#      或 phf 编译期完美哈希）
+#    - call_method 外层 Value match + 内层字符串方法名 match 合并为
+#      (ValueDiscriminant, method_id) 二级索引
+#
+# 2. call_method scope 嵌套消除：
+#    - trait/impl method dispatch 的 with_scope 闭包导致双层 scope push/pop
+#    - 改为直接传 self 引用，消除闭包分配和重复 scope 操作
+#
+# 3. Value 热路径 clone 消减：
+#    - bind/bind_mut 改为接受 &Value 或 Cow<Value>，仅在需要修改时 clone
+#    - 参数传递路径（eval_call → call_named → call_func）减少中间 Vec<Value> 分配
+#    - old_snapshots 仅在 verify_contracts && has_ensures 时分配（0.31.19 追加 B 已加标记）
+#
+# 4. LLVM codegen 优化级别：
+#    - 默认 OptimizationLevel 从 None 提升至 O1（安全优化，不改变语义）
+#    - MIMI_OPT 环境变量保留为 O2/O3 升级开关
+#    - 更新 codegen golden 文件（UPDATE_GOLDEN=1 cargo test codegen_golden）
+#
+# 5. 性能基线与 CI 集成：
+#    - Criterion benchmark（benches/interp.rs）纳入 CI（continue-on-error: true）
+#    - 记录基线数据：fib(30)、list_sum(1000)、string_concat(100)、match_enum
+#    - 基线数据归档到 reports/perf-baseline-0.31.20.md
+#    - mimi run --profile 输出格式标准化（top-20 函数 + 总时间）
+#
+# 6. Interpreter 结构体瘦身（可选，视预算）：
+#    - 审计 Interpreter<'a> ~170 个字段，将冷路径字段（comptime_results、
+#      derive_expansion_error 等）移入 Box<InterpreterCold> 减少热路径 cache miss
+#
+# 预算：≤3000 LOC 净变更（重构为主，非新增）
+# 门禁：
+# - 全量 cargo test 连续两次绿
+# - real_world 69/69 双后端通过（flow_test_macros.mimi 除外）
+# - L1 双后端等价性保持（cargo test dual_ 全绿）
+# - L2 类型系统健全性保持（cargo test typecheck:: 全绿）
+# - benchmark 数据记录到 reports/
+# - 无新增 P0、silent fallback、warning-only
+# - codegen golden 文件更新后无回归
+
+# === Phase B: 语言冻结（0.31.21–0.31.25）===
+
+[[milestone]]
+version = "0.31.21"
 kind = "implementation"
 title = "语言语义收敛"
 requirements = ["ERROR-ALGEBRA-001", "LANG-FUNCTION-001", "LANG-CONTRACT-001", "COMPTIME-PURE-001", "LANG-ATTRIBUTE-001", "SYNTAX-REMOVED-001"]
@@ -217,45 +283,45 @@ requirements = ["ERROR-ALGEBRA-001", "LANG-FUNCTION-001", "LANG-CONTRACT-001", "
 #   对齐 language-spec.md §3.5："Stable mode prohibits auto-completing undeclared combinations"
 
 [[milestone]]
-version = "0.31.21"
+version = "0.31.22"
 kind = "implementation"
 title = "Verification IR"
 requirements = ["VERIFY-CORE-001"]
 
 [[milestone]]
-version = "0.31.22"
+version = "0.31.23"
 kind = "implementation"
 title = "VC 与 checked integer"
 requirements = ["VERIFY-CORE-001"]
 
 [[milestone]]
-version = "0.31.23"
+version = "0.31.24"
 kind = "implementation"
 title = "Verifier artifact 与 fail-closed"
 requirements = ["VERIFY-CORE-001"]
 
 [[milestone]]
-version = "0.31.24"
+version = "0.31.25"
 kind = "audit"
 title = "Verifier 止血与攻击审查 II"
 requirements = []
 
-# === Phase C: Component 边界（0.31.25–0.31.33）===
+# === Phase C: Component 边界（0.31.26–0.31.34）===
 
 [[milestone]]
-version = "0.31.25"
+version = "0.31.26"
 kind = "implementation"
 title = "Component IR 与 mimiabi"
 requirements = ["COMPONENT-IR-001", "COMPONENT-RAW-001"]
 
 [[milestone]]
-version = "0.31.26"
+version = "0.31.27"
 kind = "implementation"
 title = "Native ABI 与 handle lease"
 requirements = ["COMPONENT-HANDLE-001"]
 
 [[milestone]]
-version = "0.31.27"
+version = "0.31.28"
 kind = "stabilization"
 title = "Component 稳定检查点"
 requirements = []
@@ -263,7 +329,7 @@ requirements = []
 # - ABI fuzz：size/align/offset/tag probe 跨平台
 # - Handle lease race 测试（并发 acquire/release/expiry）
 # - Allocator mismatch 检测
-# - 0.31.25–26 回归扫描
+# - 0.31.26–27 回归扫描
 # - 不新增 Component surface
 # 门禁：
 # - C/Rust size/align/offset probe 全绿
@@ -271,25 +337,25 @@ requirements = []
 # - 全量测试连续两次绿
 
 [[milestone]]
-version = "0.31.28"
+version = "0.31.29"
 kind = "implementation"
 title = "Callback 与 async 生命周期"
 requirements = ["COMPONENT-CALLBACK-001", "COMPONENT-ASYNC-001"]
 
 [[milestone]]
-version = "0.31.29"
+version = "0.31.30"
 kind = "implementation"
 title = "Wire Schema 1"
 requirements = ["COMPONENT-WIRE-001"]
 
 [[milestone]]
-version = "0.31.30"
+version = "0.31.31"
 kind = "implementation"
 title = "Rust Safe SDK"
 requirements = []
 
 [[milestone]]
-version = "0.31.31"
+version = "0.31.32"
 kind = "implementation"
 title = "XPU FFI 验证（extern C 真实库调通）"
 requirements = ["MULTILANG-AUTHORITY-001"]
@@ -304,13 +370,13 @@ requirements = ["MULTILANG-AUTHORITY-001"]
 # - 双后端等价（interp 跳过 FFI，codegen 执行）
 
 [[milestone]]
-version = "0.31.32"
+version = "0.31.33"
 kind = "audit"
 title = "Component 攻击审查"
 requirements = []
 
 [[milestone]]
-version = "0.31.33"
+version = "0.31.34"
 kind = "stabilization"
 title = "SDK conformance 加固"
 requirements = []
@@ -326,68 +392,68 @@ requirements = []
 # - Wire fuzz 0 crash
 # - 全量测试连续两次绿
 
-# === Phase D: 工具与隔离（0.31.37–0.31.39）===
-# 注：0.31.34–36（自举）已标记 deferred，移出 0.1.1 必须完成路径。
+# === Phase D: 工具与隔离（0.31.35–0.31.40）===
+# 注：0.31.35–37（自举）已标记 deferred，移出 0.1.1 必须完成路径。
 # 自举不产生用户价值，推迟到语言稳定后的 post-1.0 阶段。
 
 [[milestone]]
-version = "0.31.34"
+version = "0.31.35"
 kind = "deferred"
 title = "自举可行性 spike（deferred to post-1.0）"
 requirements = []
 
 [[milestone]]
-version = "0.31.35"
+version = "0.31.36"
 kind = "deferred"
 title = "MimiSpec parser 自举（deferred to post-1.0）"
 requirements = []
 
 [[milestone]]
-version = "0.31.36"
+version = "0.31.37"
 kind = "deferred"
 title = "HM 自举闭环（deferred to post-1.0）"
 requirements = []
 
 [[milestone]]
-version = "0.31.37"
+version = "0.31.38"
 kind = "implementation"
 title = "Pre-1.0 migration tool"
 requirements = ["MIGRATION-PRE1-001", "SYNTAX-REMOVED-001"]
 
 [[milestone]]
-version = "0.31.38"
+version = "0.31.39"
 kind = "implementation"
 title = "Tooling 全覆盖"
 requirements = ["TOOL-SUPPORT-001"]
 
 [[milestone]]
-version = "0.31.39"
+version = "0.31.40"
 kind = "implementation"
 title = "Experimental 隔离"
 requirements = ["FLOW-MULTI-001", "PROTOCOL-DYN-001", "EFFECT-CAP-001", "COMPONENT-RAW-001"]
 
-# === Phase E: 冻结与 RC（0.31.40–0.31.43）===
+# === Phase E: 冻结与 RC（0.31.41–0.31.44）===
 
 [[milestone]]
-version = "0.31.40"
+version = "0.31.41"
 kind = "debug"
 title = "DEBUG 周期"
 requirements = []
 
 [[milestone]]
-version = "0.31.41"
+version = "0.31.42"
 kind = "audit"
 title = "最终敌对审查"
 requirements = []
 
 [[milestone]]
-version = "0.31.42"
+version = "0.31.43"
 kind = "rc"
 title = "RC1"
 requirements = []
 
 [[milestone]]
-version = "0.31.43"
+version = "0.31.44"
 kind = "rc"
 title = "RC2 与 Pre-1.0 退出"
 requirements = []
