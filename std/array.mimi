@@ -1,5 +1,26 @@
 // Array: Fixed-size (or length-bounded) helpers built on top of List<T>.
 //
+// ⚠ DEPRECATED (0.31.24): This module is deprecated. Use `std::collections` instead.
+// The generic ListExt trait and standalone functions in collections.mimi provide
+// the same functionality with better type safety and genericity.
+//
+// Migration guide:
+// - array_new(n, default) → fill_list(n, default)
+// - array_len(arr) → len(arr)
+// - array_get(arr, i) → arr[i] (with bounds check) or arr.get(i)
+// - array_set(arr, i, v) → arr.remove_at(i).concat([v]) or manual loop
+// - array_fill(arr, v) → fill_list(len(arr), v)
+// - array_slice(arr, s, e) → arr[s..e]
+// - array_reverse(arr) → reverse_list(arr) or arr.reverse()
+// - array_rotate_left/right → manual implementation or use collections
+// - array_binary_search → manual implementation (requires sorted list)
+// - array_index_of(arr, t) → arr.find(t).1
+// - array_contains(arr, t) → contains(arr, t)
+// - array_equals(a, b) → a == b
+// - array_concat(a, b) → concat(a, b) or a.concat(b)
+// - array_take(arr, n) → take(arr, n) or arr.take(n)
+// - array_drop(arr, n) → drop_n(arr, n) or arr.drop_n(n)
+//
 // Mimi's built-in `List<T>` is the dynamic, growable array. The helpers
 // here provide ergonomic wrappers for the common fixed-size patterns:
 // filling, slicing, rotating, searching, and aggregating. They work for
