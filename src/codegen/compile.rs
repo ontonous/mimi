@@ -1191,6 +1191,13 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Run LLVM optimization passes on the module (O2).
     /// Called from compile_to_object during actual builds.
+    ///
+    /// ⚠️ 0.31.22 Spec 修正：O2 = experimental
+    /// 架构修正案规定：
+    /// - O2 优化是 experimental，不保证语义等价
+    /// - 最高稳定优化 = 内联 + DCE + SROA（O1 级别）
+    /// - O2/O3 可能触发 LLVM 优化器 bug（如 inttoptr provenance UB）
+    /// - 生产环境建议使用 O1（MIMI_OPT=1）
     pub fn optimize_module(&self) -> MimiResult<()> {
         if self.target_triple.is_some() {
             Target::initialize_all(&InitializationConfig::default());
