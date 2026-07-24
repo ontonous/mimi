@@ -502,3 +502,27 @@ func main() -> i32 {
     let result = check_source(src);
     assert!(result.is_err(), "regular extern should reject shared type");
 }
+
+/// 追加 C: `?` on extern "C" calls is rejected — FFI failures are Faults, not Rejected.
+#[test]
+fn ffi_try_operator_rejected_on_extern_call() {
+    let src = r#"
+extern "C" {
+    func risky_ffi() -> i32
+}
+func main() -> i32 {
+    let x = risky_ffi()?
+    x
+}
+"#;
+    let result = check_source(src);
+    assert!(result.is_err(), "? on extern call should be rejected");
+    let errors = result.unwrap_err();
+    let messages: Vec<String> = errors.iter().map(|d| d.message.clone()).collect();
+    let combined = messages.join("\n");
+    assert!(
+        combined.contains("E0428") || combined.contains("FFI failures are Faults"),
+        "expected E0428 error about FFI Faults, got:\n{}",
+        combined
+    );
+}

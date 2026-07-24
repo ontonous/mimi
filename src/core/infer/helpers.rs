@@ -267,6 +267,21 @@ impl<'a> Checker<'a> {
                 "`?` operator in transition body requires a `fails E` declaration on the transition signature",
             );
         }
+        // 追加 C: `?` on extern "C" calls is rejected — FFI failures are Faults,
+        // not Rejected. Architecture amendment clause 10.
+        if let Expr::Call(callee, _) = expr.unlocated() {
+            if let Expr::Ident(name) = callee.unlocated() {
+                if self.extern_funcs.contains(name) {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0428,
+                        format!(
+                            "`?` cannot be used on extern \"C\" function '{}' — FFI failures are Faults, not Rejected (amendment clause 10). Use spawn_foreign_task() for async FFI error handling",
+                            name
+                        ),
+                    );
+                }
+            }
+        }
         let inner_ty = self.infer_expr(expr, scopes);
         match inner_ty.unlocated() {
             // Built-in Result<T, E> -> ? extracts T
