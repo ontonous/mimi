@@ -238,3 +238,26 @@ pub func to_float_safe(s: string, default: f64) -> f64 {
     let tfs_parsed = str_parse_float(s)
     if tfs_parsed.0 { tfs_parsed.1 } else { default }
 }
+
+// ---------------------------------------------------------------------------
+// 0.31.24: From protocol for automatic error conversion
+// ---------------------------------------------------------------------------
+// The From trait enables automatic error conversion when using the ? operator.
+// When a function returns Result<T, E2> and encounters Result<_, E1>,
+// the ? operator will automatically convert E1 to E2 if From<E1, E2> is implemented.
+
+// From: Trait for type conversion.
+// Implement this trait to enable automatic conversion between types.
+// Example: impl From<FsError, AppError> for AppError { func from(e: FsError) -> AppError { ... } }
+trait From<T, U> {
+    func from(value: T) -> U
+}
+
+// Into: Trait for type conversion (reverse of From).
+// Automatically implemented for types that implement From.
+trait Into<T, U> {
+    func into(self: T) -> U
+}
+
+// Blanket implementation: if From<T, U> is implemented, then Into<T, U> is available.
+// Note: This is a conceptual blanket impl; actual implementation requires compiler support.

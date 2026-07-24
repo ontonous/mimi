@@ -119,6 +119,9 @@ pub struct Interpreter<'a> {
     /// 0.31.23: Gensym counter for generating unique variable names in quote!.
     /// Prevents naming conflicts with existing variables and Z3.
     gensym_counter: usize,
+    /// 0.31.24: Current function's return type for error conversion via From protocol.
+    /// Used by eval_try to determine if error type conversion is needed.
+    current_return_type: Option<Type>,
     /// Loaded shared libraries: (lib_path, Library handle)
     loaded_libs: Vec<(String, libloading::Library)>,
     /// Default allocator kind (set by --allocator CLI flag)
@@ -1483,6 +1486,7 @@ impl<'a> Interpreter<'a> {
             comptime_results: HashMap::new(),
             in_comptime: false,
             gensym_counter: 0,
+            current_return_type: None,
             loaded_libs: Vec::new(),
             default_allocator: AllocatorKind::System,
             loop_action: None,

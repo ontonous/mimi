@@ -139,6 +139,10 @@ impl<'a> Interpreter<'a> {
         // Isolate early_return per function call — save outer, clear for this function's body
         let saved_early_return = self.early_return.take();
 
+        // 0.31.24: Track current return type for error conversion via From protocol.
+        let saved_return_type = self.current_return_type.take();
+        self.current_return_type = func.ret.clone();
+
         let result = self.eval_block(&func.body);
 
         // If `exit()` was called inside the function body, propagate the exit code
@@ -206,6 +210,8 @@ impl<'a> Interpreter<'a> {
 
         self.pop_scope();
         self.pop_call();
+        // 0.31.24: Restore outer return type.
+        self.current_return_type = saved_return_type;
         // Check early_return set by this function's execution
         if let Some(val) = self.early_return.take() {
             self.early_return = saved_early_return; // restore outer early_return
