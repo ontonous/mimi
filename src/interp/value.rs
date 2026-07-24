@@ -193,6 +193,7 @@ pub enum QuotedAst {
     Arena(Box<QuotedAst>),
     Unsafe(Box<QuotedAst>),
     Drop(Box<QuotedAst>),
+    Defer(Box<QuotedAst>),
     SharedLet {
         kind: SharedKind,
         name: String,

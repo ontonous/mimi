@@ -52,6 +52,7 @@ pub fn is_keyword_kind(kind: &TokenKind) -> bool {
             | TokenKind::Use
             | TokenKind::Pub
             | TokenKind::Drop
+            | TokenKind::Defer
             | TokenKind::Steps
             | TokenKind::Parasteps
             | TokenKind::Failure
@@ -142,6 +143,7 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "use" => TokenKind::Use,
         "pub" => TokenKind::Pub,
         "drop" => TokenKind::Drop,
+        "defer" => TokenKind::Defer,
         "await" => TokenKind::Await,
         "async" => TokenKind::Async,
         "unsafe" => TokenKind::Unsafe,

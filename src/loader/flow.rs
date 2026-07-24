@@ -508,7 +508,8 @@ fn remap_stmt_spans(stmt: &mut Stmt, remap: &SourceIdRemap) -> Result<(), String
         | Stmt::Unsafe(body)
         | Stmt::OnFailure(body)
         | Stmt::Do(body)
-        | Stmt::Parasteps(body) => remap_block_spans(body, remap),
+        | Stmt::Parasteps(body)
+        | Stmt::Defer(body) => remap_block_spans(body, remap),
         Stmt::For { iterable, body, .. } => {
             remap_expr_spans(iterable, remap)?;
             remap_block_spans(body, remap)

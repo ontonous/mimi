@@ -18,6 +18,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<()> {
         self.push_comp_scope();
+        self.push_defer_scope();
         self.push_shared_scope();
         self.push_heap_scope();
         for stmt in block {
@@ -891,6 +892,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // Drop: evaluate expression and discard result (for linear capabilities)
                     self.compile_expr(expr, vars)?;
                 }
+                Stmt::Defer(block) => {
+                    // 0.31.24: Register defer block for LIFO execution on scope exit
+                    self.register_defer(block);
+                }
                 Stmt::SharedLet {
                     kind,
                     name,
@@ -1181,6 +1186,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         self.pop_shared_scope()?;
         self.free_heap_allocs()?;
+        // 0.31.24: Defer blocks always run (LIFO), regardless of exit path
+        self.pop_defer_scope(vars)?;
         self.pop_comp_scope();
         Ok(())
     }

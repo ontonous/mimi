@@ -460,6 +460,8 @@ pub enum Stmt {
     Unsafe(Block),
     /// Drop a capability
     Drop(Expr),
+    /// Defer block — executes when control leaves the current scope (LIFO order)
+    Defer(Block),
     /// Shared ownership binding: shared x = expr;
     SharedLet {
         kind: SharedKind,

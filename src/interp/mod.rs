@@ -89,6 +89,10 @@ pub struct Interpreter<'a> {
     compensation_stack: Vec<Vec<Vec<Stmt>>>,
     /// M12: count of compensation blocks that failed (not silently lost).
     pub(crate) compensation_error_count: usize,
+    /// 0.31.24: Defer stack for defer blocks (LIFO) - scope-aware
+    /// Each scope level contains defer blocks registered in that scope
+    /// Push a new scope when entering a block, pop when exiting (always runs)
+    defer_stack: Vec<Vec<Block>>,
     /// Arena memory blocks (arena_id -> Arena)
     arenas: Vec<Arena>,
     /// Current arena scope depth (track nesting for error messages)
@@ -1473,6 +1477,7 @@ impl<'a> Interpreter<'a> {
             cap_defs,
             compensation_stack: Vec::new(),
             compensation_error_count: 0,
+            defer_stack: Vec::new(),
             arenas: Vec::new(),
             arena_depth: 0,
             verify_contracts: true,
@@ -2661,6 +2666,34 @@ impl<'a> Interpreter<'a> {
                     }
                 }
             }
+        }
+    }
+
+    /// 0.31.24: Push a new defer scope level
+    fn push_defer_scope(&mut self) {
+        self.defer_stack.push(Vec::new());
+    }
+
+    /// 0.31.24: Pop the current defer scope level and execute all defer blocks in LIFO order.
+    /// Unlike compensation scopes, defer blocks always run (on normal exit and error exit).
+    fn pop_defer_scope(&mut self) {
+        if let Some(scope) = self.defer_stack.pop() {
+            // Execute defer blocks in reverse order (LIFO)
+            for block in scope.iter().rev() {
+                for stmt in block {
+                    if let Err(e) = self.eval_stmt(stmt) {
+                        // Surface defer failures but continue executing remaining defers
+                        eprintln!("defer error: {} (continuing remaining defers)", e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 0.31.24: Register a defer block in the current scope
+    fn register_defer(&mut self, block: Block) {
+        if let Some(scope) = self.defer_stack.last_mut() {
+            scope.push(block);
         }
     }
 

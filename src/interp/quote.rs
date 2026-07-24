@@ -84,6 +84,7 @@ impl<'a> Interpreter<'a> {
             Stmt::Arena(block) => Ok(Some(QuotedAst::Arena(Box::new(self.quote_block(block)?)))),
             Stmt::Unsafe(block) => Ok(Some(QuotedAst::Unsafe(Box::new(self.quote_block(block)?)))),
             Stmt::Drop(expr) => Ok(Some(QuotedAst::Drop(Box::new(self.quote_expr(expr)?)))),
+            Stmt::Defer(block) => Ok(Some(QuotedAst::Defer(Box::new(self.quote_block(block)?)))),
             Stmt::SharedLet {
                 kind, name, init, ..
             } => Ok(Some(QuotedAst::SharedLet {
@@ -773,6 +774,12 @@ impl<'a> Interpreter<'a> {
             QuotedAst::Unsafe(body) => self.eval_quoted_ast(body),
             QuotedAst::Drop(expr) => {
                 self.eval_quoted_ast(expr)?;
+                Ok(Value::Unit)
+            }
+            QuotedAst::Defer(body) => {
+                // 0.31.24: Defer in quoted AST: register for LIFO execution
+                // For simplicity, we execute immediately in quoted context
+                self.eval_quoted_ast(body)?;
                 Ok(Value::Unit)
             }
             QuotedAst::SharedLet { kind, name, init } => {

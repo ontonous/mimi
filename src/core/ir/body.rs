@@ -440,6 +440,7 @@ pub enum ResolvedScopeKind {
     Lexical,
     Unsafe,
     FailureGuard,
+    Defer,
     Arena,
     Allocator(AllocatorKind),
     Parallel,

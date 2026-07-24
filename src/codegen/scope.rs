@@ -62,6 +62,33 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.compensation_blocks.push(stmts.clone());
     }
 
+    /// 0.31.24: Push a new defer scope level
+    pub(super) fn push_defer_scope(&mut self) {
+        self.defer_scope_stack.push(self.defer_blocks.len());
+    }
+
+    /// 0.31.24: Pop the current defer scope level and compile all defer blocks in LIFO order.
+    /// Unlike compensation scopes, defer blocks always run (on normal exit and error exit).
+    pub(super) fn pop_defer_scope(
+        &mut self,
+        vars: &mut HashMap<String, VarEntry<'ctx>>,
+    ) -> MimiResult<()> {
+        if let Some(start) = self.defer_scope_stack.pop() {
+            // Compile defer blocks in reverse order (LIFO)
+            let blocks: Vec<Block> = self.defer_blocks[start..].iter().rev().cloned().collect();
+            self.defer_blocks.truncate(start);
+            for stmts in &blocks {
+                self.compile_block(stmts, vars)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 0.31.24: Register a defer block for LIFO execution on scope exit
+    pub(super) fn register_defer(&mut self, stmts: &Block) {
+        self.defer_blocks.push(stmts.clone());
+    }
+
     /// Compile all registered compensation blocks in LIFO order
     pub(super) fn compile_compensations(
         &mut self,

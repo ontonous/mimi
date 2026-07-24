@@ -2921,6 +2921,7 @@ fn collect_nested_function_records(
             | Stmt::OnFailure(body)
             | Stmt::Do(body)
             | Stmt::Parasteps(body)
+            | Stmt::Defer(body)
             | Stmt::Alloc { body, .. }
             | Stmt::Pinned { body, .. } => collect_nested_function_records(
                 body,
@@ -4464,6 +4465,7 @@ fn stmt_semantic_key(stmt: &Stmt) -> String {
         Stmt::Arena(_) => "arena".into(),
         Stmt::Unsafe(_) => "unsafe".into(),
         Stmt::Drop(expr) => format!("drop:{}", expr_semantic_key(expr)),
+        Stmt::Defer(_) => "defer".into(),
         Stmt::SharedLet { name, .. } => format!("shared-let:{name}"),
         Stmt::OnFailure(_) => "on-failure".into(),
         Stmt::Do(_) => "do".into(),
@@ -4503,6 +4505,7 @@ pub(crate) fn stmt_kind(stmt: &Stmt) -> &'static str {
         Stmt::Arena(_) => "stmt.arena",
         Stmt::Unsafe(_) => "stmt.unsafe",
         Stmt::Drop(_) => "stmt.drop",
+        Stmt::Defer(_) => "stmt.defer",
         Stmt::SharedLet { .. } => "stmt.shared_let",
         Stmt::OnFailure(_) => "stmt.on_failure",
         Stmt::Do(_) => "stmt.do",
@@ -4773,7 +4776,8 @@ fn collect_stmt_meta(
         | Stmt::Unsafe(body)
         | Stmt::OnFailure(body)
         | Stmt::Do(body)
-        | Stmt::Parasteps(body) => collect_block_meta(
+        | Stmt::Parasteps(body)
+        | Stmt::Defer(body) => collect_block_meta(
             body,
             owner,
             &format!("{role}.body"),
@@ -6537,7 +6541,8 @@ fn collect_stmt_call_sites(
         | Stmt::Unsafe(body)
         | Stmt::OnFailure(body)
         | Stmt::Do(body)
-        | Stmt::Parasteps(body) => {
+        | Stmt::Parasteps(body)
+        | Stmt::Defer(body) => {
             collect_block_call_sites(
                 body,
                 owner,
