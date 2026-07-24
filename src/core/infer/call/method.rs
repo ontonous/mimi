@@ -638,6 +638,15 @@ impl<'a> Checker<'a> {
                 );
                 return Type::Name("unknown".into(), vec![]);
             }
+            // 追加 E: reject unconstrained type variables in from_json::<T>
+            // The deserialization target type must be fully resolved at compile time.
+            let target_ty = &type_args[0];
+            if crate::core::unification::scan_residual(target_ty).is_err() {
+                self.emit_code(
+                    crate::diagnostic::codes::E0430,
+                    "from_json::<T> requires a concrete type argument, found unconstrained type. Use from_json::<ConcreteType>(s) to specify the deserialization target",
+                );
+            }
             if args.len() != 1 {
                 self.emit_code(
                     crate::diagnostic::codes::E0242,
