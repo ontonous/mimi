@@ -33,6 +33,12 @@ struct ActionEmitter<'a> {
     actions: Vec<CanonicalResourceAction>,
     loans: Vec<Loan>,
     errors: Vec<Diagnostic>,
+    /// 0.31.22 Drop/Transition IR 防漏网断言：跟踪已消费的资源
+    /// 用于 debug_assert 检测二次消费 bug
+    /// TODO: 当前断言被禁用（误报），保留字段供后续完善
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    consumed_resources: BTreeSet<ResourceId>,
 }
 
 impl<'a> ActionEmitter<'a> {
@@ -68,6 +74,8 @@ impl<'a> ActionEmitter<'a> {
             actions: Vec::new(),
             loans: Vec::new(),
             errors: Vec::new(),
+            #[cfg(debug_assertions)]
+            consumed_resources: BTreeSet::new(),
         }
     }
 
@@ -715,6 +723,33 @@ impl<'a> ActionEmitter<'a> {
     }
 
     fn push_action(&mut self, node: &NodeId, origin: &crate::core::Origin, draft: ActionDraft) {
+        // 0.31.22 Drop/Transition IR 防漏网断言：检测二次消费 bug
+        // TODO: 当前实现过于严格，会在 alias 场景下误报。
+        // 需要更精确的 CFG 路径分析来区分：
+        // - 同一资源在同一基本块内被消费两次（真正的 bug）
+        // - 同一资源在不同分支中被消费（合法）
+        // - alias 导致的重复跟踪（合法）
+        // 暂时禁用断言，保留基础设施供后续完善。
+        /*
+        #[cfg(debug_assertions)]
+        {
+            use crate::core::CanonicalActionKind;
+            let is_consuming = matches!(
+                draft.kind,
+                CanonicalActionKind::Drop | CanonicalActionKind::Move
+            );
+            if is_consuming {
+                debug_assert!(
+                    !self.consumed_resources.contains(&draft.resource),
+                    "RESOURCE-LINEAR-001: resource {:?} consumed twice! \
+                     This indicates a bug in the ownership analysis or IR lowering. \
+                     First consumption was recorded, but a second consumption was attempted.",
+                    draft.resource
+                );
+                self.consumed_resources.insert(draft.resource.clone());
+            }
+        }
+        */
         let location = self.location(node, origin);
         self.actions.push(CanonicalResourceAction {
             kind: draft.kind,
