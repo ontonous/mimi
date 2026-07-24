@@ -64,6 +64,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.emit_all_shared_releases()?;
                     self.discard_shared_scope();
                     self.free_heap_allocs()?;
+                    self.pop_defer_scope(vars)?;
                     self.pop_comp_scope();
                     self.build_return(Some(&val))?;
                     return Ok(());
@@ -84,6 +85,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.emit_all_shared_releases()?;
                     self.discard_shared_scope();
                     self.free_heap_allocs()?;
+                    self.pop_defer_scope(vars)?;
                     self.pop_comp_scope();
                     self.build_return(None)?;
                     return Ok(());
@@ -103,6 +105,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.emit_all_shared_releases()?;
                     self.discard_shared_scope();
                     self.free_heap_allocs()?;
+                    self.pop_defer_scope(vars)?;
                     self.pop_comp_scope();
                     self.build_return(Some(&val))?;
                     return Ok(());
@@ -126,6 +129,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.emit_all_shared_releases()?;
                     self.discard_shared_scope();
                     self.free_heap_allocs()?;
+                    self.pop_defer_scope(vars)?;
                     self.pop_comp_scope();
                     self.build_return(Some(&val))?;
                     return Ok(());

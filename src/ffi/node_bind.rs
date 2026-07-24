@@ -48,7 +48,15 @@ impl NodeBindGenerator {
         writeln!(out, "// 0.31.24-9: Thread-local error flag for callback exception propagation")?;
         writeln!(out, "// When a JS callback throws, this flag is set and the trampoline returns a sentinel.")?;
         writeln!(out, "// Mimi side checks this flag and produces a Fault.")?;
-        writeln!(out, "static _Thread_local int mimi_callback_error_flag = 0;")?;
+        // Portable thread-local: C11 _Thread_local, MSVC __declspec(thread), GCC __thread
+        writeln!(out, "#if defined(_MSC_VER)")?;
+        writeln!(out, "  #define MIMI_THREAD_LOCAL __declspec(thread)")?;
+        writeln!(out, "#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L")?;
+        writeln!(out, "  #define MIMI_THREAD_LOCAL _Thread_local")?;
+        writeln!(out, "#else")?;
+        writeln!(out, "  #define MIMI_THREAD_LOCAL __thread")?;
+        writeln!(out, "#endif")?;
+        writeln!(out, "static MIMI_THREAD_LOCAL int mimi_callback_error_flag = 0;")?;
         writeln!(out)?;
         writeln!(out, "// Check and clear the callback error flag. Returns 1 if an error occurred.")?;
         writeln!(out, "int mimi_check_callback_error(void) {{")?;
@@ -261,8 +269,14 @@ impl NodeBindGenerator {
                         param_types.len(),
                         argv_list.join(", ")
                     )?;
-                    // 0.31.24-9: Set thread-local error flag when callback fails
-                    writeln!(out, "        mimi_callback_error_flag = 1;  // 0.31.24-9: callback exception")?;
+                    // 0.31.24-9: Check for pending JS exception vs other N-API errors
+                    writeln!(out, "        bool pending = false;")?;
+                    writeln!(out, "        napi_is_exception_pending({}.env, &pending);", slot)?;
+                    writeln!(out, "        if (pending) {{")?;
+                    writeln!(out, "            napi_value exc;")?;
+                    writeln!(out, "            napi_get_and_clear_last_exception({}.env, &exc);", slot)?;
+                    writeln!(out, "            mimi_callback_error_flag = 1;  // 0.31.24-9: JS callback threw")?;
+                    writeln!(out, "        }}")?;
                     writeln!(
                         out,
                         "        return {};  // sentinel value",

@@ -1452,6 +1452,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         val
                     };
                     let val = self.adjust_int_val(val, ret_type)?;
+                    self.pop_defer_scope(vars)?;
                     self.emit_return(
                         ret_type,
                         ret_ty_ast,
@@ -1463,6 +1464,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Ok(ControlFlow::Break(()));
                 }
                 Stmt::Return(None) => {
+                    self.pop_defer_scope(vars)?;
                     self.emit_return(ret_type, ret_ty_ast, None, &func.name, vars, None)?;
                     return Ok(ControlFlow::Break(()));
                 }
@@ -1475,6 +1477,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         val
                     };
                     let val = self.adjust_int_val(val, ret_type)?;
+                    self.pop_defer_scope(vars)?;
                     self.emit_return(
                         ret_type,
                         ret_ty_ast,
@@ -1499,6 +1502,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         val
                     };
                     let val = self.adjust_int_val(val, ret_type)?;
+                    self.pop_defer_scope(vars)?;
                     self.emit_return(ret_type, ret_ty_ast, Some(val), &func.name, vars, None)?;
                     return Ok(ControlFlow::Break(()));
                 }
@@ -2379,6 +2383,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                 }
+                Stmt::Defer(block) => {
+                    // 0.31.24: Register defer block for LIFO execution on scope exit
+                    self.register_defer(block);
+                }
                 Stmt::SharedLet {
                     kind,
                     name,
@@ -2861,6 +2869,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Push scopes for function body
         self.push_cap_scope();
         self.push_comp_scope();
+        self.push_defer_scope();
         self.push_heap_scope();
         self.push_shared_scope();
 
@@ -2877,8 +2886,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => None,
         });
         match self.compile_func_body(func, ret_type, &mut vars)? {
-            ControlFlow::Break(()) => return Ok(()),
+            ControlFlow::Break(()) => {
+                // Early return: defer blocks already executed inside compile_func_body
+                return Ok(());
+            }
             ControlFlow::Continue(last_val) => {
+                // Normal exit: execute defer blocks before implicit return
+                self.pop_defer_scope(&mut vars)?;
                 self.emit_implicit_return(
                     ret_type, ret_ty_ast, last_val, &func.name, &vars, last_expr,
                 )?;

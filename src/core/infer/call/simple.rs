@@ -2508,6 +2508,11 @@ fn is_impure_builtin(name: &str) -> bool {
             | "sleep_ms"
             // Random (side-effect: reads RNG state)
             | "random_int"
+            | "random"
+            | "random_normal"
+            | "random_uniform"
+            | "random_exponential"
+            | "random_bernoulli"
             // Environment (side-effect: reads process state)
             | "get_var"
             | "cli_args"
