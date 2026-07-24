@@ -45,6 +45,8 @@ impl<'a> Checker<'a> {
                         source_var.clone(),
                         format!("{}::{}", module_name, method_name),
                     );
+                    // 追加 B: mark linear consumption for ? ordering constraint
+                    self.linear_consumed_before_try = true;
                 }
                 let from_ty = arg_types
                     .first()

@@ -782,6 +782,8 @@ impl<'a> Checker<'a> {
                         if let Expr::Ident(src) = init_expr.unlocated() {
                             if let Some(residual) = self.session_residuals.remove(src) {
                                 self.consumed_session_vars.insert(src.clone());
+                                // 追加 B: mark linear consumption for ? ordering constraint
+                                self.linear_consumed_before_try = true;
                                 self.session_residuals.insert(name.clone(), residual);
                             }
                         }
@@ -797,6 +799,8 @@ impl<'a> Checker<'a> {
                             {
                                 self.consumed_flow_vars
                                     .insert(src.clone(), format!("alias to '{}'", name));
+                                // 追加 B: mark linear consumption for ? ordering constraint
+                                self.linear_consumed_before_try = true;
                             }
                         }
                     }

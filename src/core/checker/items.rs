@@ -1658,9 +1658,13 @@ impl<'a> Checker<'a> {
                         let prev_transition_fails = self
                             .transition_fails
                             .replace(t.fails.as_ref().map(|ty| self.resolve_type(ty)));
+                        // 追加 B: reset linear consumption tracking for ? ordering constraint
+                        let prev_linear_consumed =
+                            std::mem::replace(&mut self.linear_consumed_before_try, false);
                         // Type-check the body as a block
                         self.check_block(body, &ret_type, &mut scopes);
                         self.transition_fails = prev_transition_fails;
+                        self.linear_consumed_before_try = prev_linear_consumed;
                         if capture_typed_body {
                             self.finish_expression_type_capture();
                         }
