@@ -2509,7 +2509,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
             })?;
 
-        // Run LLVM optimization passes before codegen (opt-in via MIMI_OPT env var)
+        // Run LLVM optimization passes before codegen (opt-in via MIMI_OPT env var).
+        // 0.31.20 NOTE: O1 baseline deferred — both OptimizationLevel::Less and
+        // default<O1> IR passes expose pre-existing codegen bugs (? operator
+        // and extern strlen SIGSEGV under optimization). Fix tracked separately.
         if self.optimize {
             let options = inkwell::passes::PassBuilderOptions::create();
             self.module
