@@ -1,9 +1,24 @@
 // Iter: Iterator-style combinators for List<string>.
 //
+// ⚠ EXPERIMENTAL (0.31.24): This module is experimental and may change
+// or be removed in future versions. The API is not stable.
+//
 // These helpers provide a small subset of iterator semantics
 // (range, zip, enumerate, take, drop, chain, repeat) on top of
 // Mimi's List<string>. They are intentionally eager: each
 // function returns a new List containing the result.
+//
+// For stable alternatives, use:
+// - iter_range → range(start, end) + map_list(to_string)
+// - iter_zip → manual loop or collections
+// - iter_enumerate → manual loop with index
+// - iter_take → take(arr, n) or arr.take(n)
+// - iter_drop → drop_n(arr, n) or arr.drop_n(n)
+// - iter_chain → concat(a, b) or a.concat(b)
+// - iter_repeat → fill_list(n, value)
+// - iter_reversed → reverse_list(arr) or arr.reverse()
+// - iter_count → count_val(arr, value)
+// - iter_unique → unique(arr) or arr.dedup()
 
 // iter_range: Returns the integers in [start, end) as stringified values.
 // Example: iter_range(3, 7) -> ["3", "4", "5", "6"]
