@@ -3,6 +3,33 @@
 // ---------------------------------------------------------------------------
 // This module defines typed error enums for common stdlib operations.
 // These errors can be used with the From protocol for automatic error conversion.
+//
+// ERROR CHANNEL DISTINCTION (0.31.24-8):
+// ---------------------------------------
+// Mimi distinguishes between two types of errors:
+//
+// 1. CONTRACT VIOLATIONS (programming errors):
+//    - requires/ensures/invariant failures
+//    - These indicate bugs in the program logic
+//    - Handling: ABORT (call mimi_runtime_abort)
+//    - Rationale: Contract violations are unrecoverable; the program is in
+//      an inconsistent state and continuing would be unsafe.
+//
+// 2. ENVIRONMENT FAILURES (runtime errors):
+//    - I/O errors (file not found, permission denied)
+//    - Network errors (connection failed, timeout)
+//    - Resource exhaustion (out of memory)
+//    - These indicate problems with the external environment
+//    - Handling: Return Result<T, E> or error code
+//    - Rationale: Environment failures are often recoverable; the program
+//      can retry, use a fallback, or report the error gracefully.
+//
+// USAGE GUIDELINES:
+// - Use `requires`/`ensures` for preconditions/postconditions that must
+//   always hold. Violations abort.
+// - Use Result<T, E> for operations that can fail due to environment.
+// - Never use Result for contract violations (that would hide bugs).
+// - Never abort for environment failures (that would be unfriendly).
 
 // FsError: File system operation errors.
 pub type FsError {
