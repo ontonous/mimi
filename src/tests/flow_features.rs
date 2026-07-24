@@ -5573,7 +5573,12 @@ func main() -> i32 {
 }
 "#;
     let (val, stdout) = run_source_with_stdout(src);
-    assert_eq!(stdout.trim(), "1", "test_sandbox should spawn 1 actor, got: {}", stdout);
+    assert_eq!(
+        stdout.trim(),
+        "1",
+        "test_sandbox should spawn 1 actor, got: {}",
+        stdout
+    );
     assert_eq!(val, interp::Value::Int(0));
 }
 

@@ -1,5 +1,4 @@
 use crate::ast::*;
-use inkwell::types::BasicMetadataTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
 
@@ -115,21 +114,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_global_string_ptr(&full_msg, "contract_msg")
             .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
-        let abort_fn = self
-            .module
-            .get_function("mimi_runtime_abort")
-            .unwrap_or_else(|| {
-                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                let ty = self
-                    .context
-                    .void_type()
-                    .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false);
-                self.module.add_function(
-                    "mimi_runtime_abort",
-                    ty,
-                    Some(inkwell::module::Linkage::External),
-                )
-            });
+        let abort_fn = self.get_or_declare_abort_fn();
         self.build_call(
             abort_fn,
             &[BasicMetadataValueEnum::PointerValue(

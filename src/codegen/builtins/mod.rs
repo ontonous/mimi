@@ -9,10 +9,20 @@ pub mod string;
 pub mod time_env;
 
 use crate::codegen::CallSiteValueExt;
+use inkwell::attributes::AttributeLoc;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::BasicMetadataTypeEnum;
 use inkwell::AddressSpace;
+
+/// Mark a function declaration as `noreturn` so LLVM's optimizer knows
+/// control flow never falls through. Without this, O1+ may miscompile
+/// code after calls to exit/abort-like runtime functions.
+fn add_noreturn_attr(ctx: &Context, f: inkwell::values::FunctionValue<'_>) {
+    let kind = inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn");
+    let attr = ctx.create_enum_attribute(kind, 0);
+    f.add_attribute(AttributeLoc::Function, attr);
+}
 
 pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     let i8_ptr = ctx.ptr_type(AddressSpace::default());
@@ -2011,7 +2021,7 @@ fn register_string_fns<'ctx>(
 
 fn register_regex_fns<'ctx>(
     module: &Module<'ctx>,
-    _ctx: &'ctx Context,
+    ctx: &'ctx Context,
     i8_ptr: inkwell::types::PointerType<'ctx>,
     i32: inkwell::types::IntType<'ctx>,
     i64: inkwell::types::IntType<'ctx>,
@@ -2110,15 +2120,16 @@ fn register_regex_fns<'ctx>(
     );
 
     // mimi_try_exit(payload): print error and exit(1) for ? operator
-    module.add_function(
+    let try_exit_fn = module.add_function(
         "mimi_try_exit",
         void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External),
     );
+    add_noreturn_attr(ctx, try_exit_fn);
 
     // mimi_try_exit_str(str, len): print string error and exit(1) for ? operator
     // Used when the error type is Result<T, string> to display the actual message.
-    module.add_function(
+    let try_exit_str_fn = module.add_function(
         "mimi_try_exit_str",
         void.fn_type(
             &[
@@ -2129,13 +2140,15 @@ fn register_regex_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    add_noreturn_attr(ctx, try_exit_str_fn);
 
     // mimi_match_panic(): abort on non-exhaustive match (CG-C1)
-    module.add_function(
+    let match_panic_fn = module.add_function(
         "mimi_match_panic",
         void.fn_type(&[], false),
         Some(inkwell::module::Linkage::External),
     );
+    add_noreturn_attr(ctx, match_panic_fn);
 }
 
 fn register_ffi_fns_defined_in_rust_ffi_rt_rs<'ctx>(

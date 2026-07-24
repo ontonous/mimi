@@ -382,11 +382,14 @@ declare void @mimi_sort_f64_inplace(ptr, i64)
 
 declare void @mimi_sort_str_inplace(ptr, i64)
 
-declare void @mimi_try_exit(i64)
+; Function Attrs: noreturn
+declare void @mimi_try_exit(i64) #0
 
-declare void @mimi_try_exit_str(ptr, i64)
+; Function Attrs: noreturn
+declare void @mimi_try_exit_str(ptr, i64) #0
 
-declare void @mimi_match_panic()
+; Function Attrs: noreturn
+declare void @mimi_match_panic() #0
 
 declare i64 @mimi_shared_retain(i64)
 
@@ -886,3 +889,5 @@ entry:
   %ret_load = load { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
   ret { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load
 }
+
+attributes #0 = { noreturn }

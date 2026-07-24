@@ -263,6 +263,10 @@ pub struct CodeGenerator<'ctx> {
     extern_func_defs: HashMap<String, crate::ast::ExternFunc>,
     /// ABI per extern function name (e.g., "C", "stdcall").
     extern_block_abis: HashMap<String, String>,
+    /// Generated extern wrapper functions, keyed by the original extern name.
+    /// Needed because LLVM may mangle the wrapper name (e.g., `strlen` → `strlen.11`)
+    /// when a C library function with the same name already exists in the module.
+    extern_wrapper_fns: HashMap<String, inkwell::values::FunctionValue<'ctx>>,
     /// TLS callback globals that need clearing after the current extern call.
     /// Stores pointers to the fn_ptr and env_ptr TLS globals so they can be
     /// nulled out immediately after the C call returns.
@@ -496,6 +500,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             fn_ptr_var_names: std::collections::HashSet::new(),
             extern_func_defs: HashMap::new(),
             extern_block_abis: HashMap::new(),
+            extern_wrapper_fns: HashMap::new(),
             pending_callback_tls: Vec::new(),
             list_elem_llvm_types: HashMap::new(),
             closure_wrappers: HashMap::new(),
@@ -1236,11 +1241,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             .context
             .void_type()
             .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false);
-        self.module.add_function(
+        let f = self.module.add_function(
             "mimi_runtime_abort",
             ty,
             Some(inkwell::module::Linkage::External),
-        )
+        );
+        // Mark noreturn so the optimizer knows control flow never falls through.
+        let kind = inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn");
+        let attr = self.context.create_enum_attribute(kind, 0);
+        f.add_attribute(inkwell::attributes::AttributeLoc::Function, attr);
+        f
     }
 
     /// v0.29.43: Get or declare `mimi_pinned_fault` runtime function.
@@ -2263,20 +2273,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Fail path: call abort (allocation failure is unrecoverable)
         self.builder.position_at_end(alloc_fail_bb);
-        let abort_fn = if let Some(f) = self.module.get_function("mimi_runtime_abort") {
-            f
-        } else {
-            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-            let ty = self
-                .context
-                .void_type()
-                .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false);
-            self.module.add_function(
-                "mimi_runtime_abort",
-                ty,
-                Some(inkwell::module::Linkage::External),
-            )
-        };
+        let abort_fn = self.get_or_declare_abort_fn();
         let msg_ptr = self
             .builder
             .build_global_string_ptr(
@@ -2510,9 +2507,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             })?;
 
         // Run LLVM optimization passes before codegen (opt-in via MIMI_OPT env var).
-        // 0.31.20 NOTE: O1 baseline deferred — both OptimizationLevel::Less and
-        // default<O1> IR passes expose pre-existing codegen bugs (? operator
-        // and extern strlen SIGSEGV under optimization). Fix tracked separately.
+        // 0.31.21: O1 codegen bugs fixed — try_expr i32-vs-i1 type mismatch and
+        // extern wrapper name collision (strlen → strlen.11) resolved. O2 passes
+        // are safe; O1 default enablement deferred to broader fuzz testing.
         if self.optimize {
             let options = inkwell::passes::PassBuilderOptions::create();
             self.module

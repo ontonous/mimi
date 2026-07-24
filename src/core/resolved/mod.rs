@@ -1032,11 +1032,7 @@ impl CheckedProgram {
         let mut param_arity = HashMap::new();
         let mut param_lists = HashMap::new();
         for (id, transition) in &self.transitions {
-            let key = (
-                id.flow.0.clone(),
-                id.event.clone(),
-                id.source.name.clone(),
-            );
+            let key = (id.flow.0.clone(), id.event.clone(), id.source.name.clone());
             let targets = transition
                 .targets
                 .iter()
