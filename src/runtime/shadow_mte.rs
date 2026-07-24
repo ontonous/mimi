@@ -2,6 +2,15 @@
 // v0.29.44 — Software Shadow Memory Tagging (MTE simulation)
 // White-paper section 4.2: "软件层面的影子内存（Shadow Memory）"
 //
+// ⚠️ DEAD CODE — 架构修正案条款废止（0.31.22 Spec 修正）
+// Shadow MTE 已被废止。原因：
+// 1. 软件 MTE 性能开销过大（每次 alloc/free 都需要 HashMap 查找）
+// 2. 硬件 MTE（ARM MTE）是更好的选择，但需要硬件支持
+// 3. 与统一分配器（mimi_alloc/mimi_free）冲突
+//
+// 此模块保留为历史参考，不再维护。所有 mimi_shadow_* 函数已废弃。
+// 清理排入后续 sprint（删除整个模块）。
+//
 // This module owns the thread-local `SHADOW_MAP` and all `mimi_shadow_*`
 // extern "C" entry points (alloc / tag / check / free / dump).
 // ===========================================================================
