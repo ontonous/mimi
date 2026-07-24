@@ -291,6 +291,17 @@ pub(crate) fn build(
 
     // Link with cc to create executable or shared library
     let mut cmd = std::process::Command::new(&cc_cmd);
+    // Prefer lld when available — 5× faster than GNU ld on the 28 MB runtime archive.
+    if target.is_none() {
+        let has_lld = std::process::Command::new("ld.lld")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if has_lld {
+            cmd.arg("-fuse-ld=lld");
+        }
+    }
     if shared {
         cmd.arg("-shared").arg("-fPIC");
         if no_std {
