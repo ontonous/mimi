@@ -1,0 +1,221 @@
+// ---------------------------------------------------------------------------
+// 0.31.24: Stdlib effect annotations
+// ---------------------------------------------------------------------------
+// This module documents the effects of stdlib functions.
+// Effects are used by the type checker to enforce purity constraints.
+//
+// Effect types:
+// - @pure: No side effects, deterministic output for same input
+// - @io: Performs I/O operations (stdin/stdout/stderr)
+// - @fs: Performs file system operations
+// - @net: Performs network operations
+// - @blocking: May block the current thread
+// - @random: Produces non-deterministic output
+//
+// Usage:
+// Functions marked with @pure can be called from comptime contexts.
+// Functions marked with @io/@fs/@net/@blocking cannot be called from comptime.
+
+// ---------------------------------------------------------------------------
+// io.mimi effects
+// ---------------------------------------------------------------------------
+// print_line: @io
+// print_raw: @io
+// print_format: @io
+// print_err: @io
+// print_lines: @io
+// print_bool: @io
+// input_line: @io @blocking
+// input_int: @io @blocking
+// input_float: @io @blocking
+// input_bool: @io @blocking
+
+// ---------------------------------------------------------------------------
+// fs.mimi effects
+// ---------------------------------------------------------------------------
+// exists: @fs
+// read: @fs @blocking
+// write: @fs @blocking
+// read_lines: @fs @blocking
+// write_lines: @fs @blocking
+// file_size: @fs
+// listdir: @fs
+// is_dir: @fs
+// mkdir_p: @fs
+// remove_file: @fs
+// walk_dir: @fs @blocking
+
+// ---------------------------------------------------------------------------
+// net.mimi effects
+// ---------------------------------------------------------------------------
+// tcp_socket: @net
+// tcp_connect: @net @blocking
+// tcp_listen: @net @blocking
+// tcp_accept: @net @blocking
+// tcp_send: @net @blocking
+// tcp_recv: @net @blocking
+// fetch: @net @blocking
+// fetch_post: @net @blocking
+
+// ---------------------------------------------------------------------------
+// random.mimi effects
+// ---------------------------------------------------------------------------
+// random_int: @random
+// random_float: @random
+// random_choice: @random
+// shuffle: @random
+
+// ---------------------------------------------------------------------------
+// mymath.mimi effects (all @pure)
+// ---------------------------------------------------------------------------
+// abs: @pure
+// abs_float: @pure
+// gcd: @pure
+// lcm: @pure
+// hypot: @pure
+// clamp_int: @pure
+// factorial: @pure
+// fibonacci: @pure
+// is_prime: @pure
+// power: @pure
+// sqrt_val: @pure
+// collatz_steps: @pure
+// mod_pow: @pure
+// is_power_of_two: @pure
+// next_power_of_two: @pure
+
+// ---------------------------------------------------------------------------
+// collections.mimi effects (all @pure)
+// ---------------------------------------------------------------------------
+// find: @pure
+// dedup: @pure
+// concat: @pure
+// sort_list: @pure
+// map_list: @pure
+// unique: @pure
+// any: @pure
+// all: @pure
+// partition: @pure
+// group_by: @pure
+// chunks: @pure
+// intersperse: @pure
+// min_list: @pure
+// max_list: @pure
+// filter_list: @pure
+// reduce_list: @pure
+
+// ---------------------------------------------------------------------------
+// strings.mimi effects (all @pure)
+// ---------------------------------------------------------------------------
+// char_at: @pure
+// substring: @pure
+// split: @pure
+// join: @pure
+// contains: @pure
+// capitalize: @pure
+// title: @pure
+// reverse_string: @pure
+// truncate: @pure
+// pad_left: @pure
+// pad_right: @pure
+// count_substring: @pure
+// is_blank: @pure
+// replace_all: @pure
+
+// ---------------------------------------------------------------------------
+// json.mimi effects (all @pure)
+// ---------------------------------------------------------------------------
+// to_json: @pure
+// from_json: @pure
+// get_string: @pure
+// get_int: @pure
+// get_element: @pure
+// get_bool: @pure
+// get_float: @pure
+// is_valid_json: @pure
+// array_length: @pure
+
+// ---------------------------------------------------------------------------
+// time.mimi effects
+// ---------------------------------------------------------------------------
+// timestamp: @io (reads system clock)
+// timestamp_ms: @io (reads system clock)
+// sleep_ms: @io @blocking
+// elapsed: @io (reads system clock)
+// seconds_since: @io (reads system clock)
+// millis_since: @io (reads system clock)
+// duration: @pure
+
+// ---------------------------------------------------------------------------
+// datetime.mimi effects
+// ---------------------------------------------------------------------------
+// format_duration_secs: @pure
+// days_from_now: @io (reads system clock)
+// hours_from_now: @io (reads system clock)
+// is_future: @io (reads system clock)
+// is_past: @io (reads system clock)
+// time_since: @io (reads system clock)
+// time_until: @io (reads system clock)
+// sleep_until: @io @blocking
+
+// ---------------------------------------------------------------------------
+// env.mimi effects
+// ---------------------------------------------------------------------------
+// get_var: @io (reads environment)
+// cli_args: @io (reads command line)
+// get_var_or: @io (reads environment)
+// has_var: @io (reads environment)
+// get_int: @io (reads environment)
+// get_float: @io (reads environment)
+// arg_count: @io (reads command line)
+// first_arg: @io (reads command line)
+
+// ---------------------------------------------------------------------------
+// crypto.mimi effects (all @pure)
+// ---------------------------------------------------------------------------
+// sha256: @pure
+// base64_encode: @pure
+// base64_decode: @pure
+// hex_encode: @pure
+// hex_decode: @pure
+
+// ---------------------------------------------------------------------------
+// csv.mimi effects (all @pure)
+// ---------------------------------------------------------------------------
+// parse_csv: @pure
+// serialize_csv: @pure
+
+// ---------------------------------------------------------------------------
+// template.mimi effects (all @pure)
+// ---------------------------------------------------------------------------
+// render_template: @pure
+
+// ---------------------------------------------------------------------------
+// maps.mimi effects (all @pure)
+// ---------------------------------------------------------------------------
+// new: @pure
+// get: @pure
+// set: @pure
+// has_key: @pure
+// remove: @pure
+// size: @pure
+// from_list: @pure
+// is_empty: @pure
+// get_or_default: @pure
+// merge: @pure
+// to_list: @pure
+// filter_keys: @pure
+// map_values: @pure
+// update: @pure
+// pick: @pure
+// omit: @pure
+
+// ---------------------------------------------------------------------------
+// set.mimi effects (all @pure)
+// ---------------------------------------------------------------------------
+// size: @pure
+// is_empty: @pure
+// contains: @pure
+// insert: @pure
+// remove: @pure
+// to_list: @pure
