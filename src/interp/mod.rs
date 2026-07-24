@@ -113,6 +113,9 @@ pub struct Interpreter<'a> {
     type_defs: HashMap<String, TypeDef>,
     /// Pre-computed results for comptime functions (no-arg functions evaluated at startup)
     comptime_results: HashMap<String, Value>,
+    /// 0.31.23: Whether we're currently in comptime evaluation mode.
+    /// When true, FFI calls are forbidden (abort on extern call).
+    in_comptime: bool,
     /// Loaded shared libraries: (lib_path, Library handle)
     loaded_libs: Vec<(String, libloading::Library)>,
     /// Default allocator kind (set by --allocator CLI flag)
@@ -1475,6 +1478,7 @@ impl<'a> Interpreter<'a> {
             ffi_contracts,
             type_defs,
             comptime_results: HashMap::new(),
+            in_comptime: false,
             loaded_libs: Vec::new(),
             default_allocator: AllocatorKind::System,
             loop_action: None,
@@ -2297,6 +2301,8 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Evaluate comptime functions with no arguments at startup
+    ///
+    /// 0.31.23: Sets `in_comptime` flag during evaluation to prevent FFI calls.
     fn eval_comptime_funcs(&mut self) -> Result<(), InterpError> {
         let funcs: Vec<FuncDef> = self
             .file
@@ -2307,16 +2313,23 @@ impl<'a> Interpreter<'a> {
                 _ => None,
             })
             .collect();
-        for func in funcs {
-            // I-H9: skip if already cached (e.g. was called as a dependency
-            // from another comptime func's body during its pre-evaluation).
-            if self.comptime_results.contains_key(&func.name) {
-                continue;
+        // 0.31.23: Enter comptime mode - FFI calls are forbidden.
+        self.in_comptime = true;
+        let result = (|| {
+            for func in funcs {
+                // I-H9: skip if already cached (e.g. was called as a dependency
+                // from another comptime func's body during its pre-evaluation).
+                if self.comptime_results.contains_key(&func.name) {
+                    continue;
+                }
+                let result = self.call_func(&func, vec![])?;
+                self.comptime_results.insert(func.name.clone(), result);
             }
-            let result = self.call_func(&func, vec![])?;
-            self.comptime_results.insert(func.name.clone(), result);
-        }
-        Ok(())
+            Ok(())
+        })();
+        // 0.31.23: Exit comptime mode.
+        self.in_comptime = false;
+        result
     }
 
     /// Evaluate top-level const declarations at startup

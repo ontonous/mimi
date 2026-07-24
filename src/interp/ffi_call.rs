@@ -15,6 +15,17 @@ impl<'a> Interpreter<'a> {
         contract: &FfiContract,
         args: Vec<Value>,
     ) -> Result<Value, Errno> {
+        // 0.31.23: Comptime FFI whitelist - FFI calls are forbidden during comptime evaluation.
+        // Blind review fix: Comptime execution must be pure (no side effects, no FFI).
+        if self.in_comptime {
+            return Err(Errno::Generic(format!(
+                "FFI call to extern function '{}' is forbidden during comptime evaluation.\n\
+                 Comptime functions must be pure and cannot call extern functions.\n\
+                 Move the FFI call to a runtime function.",
+                extern_func.name
+            )));
+        }
+
         // Stage 2 wrapper layer: validate and convert arguments according to the
         // FFI contract before loading any shared library.  This keeps the
         // interpreter FFI path aligned with the codegen wrapper path.
