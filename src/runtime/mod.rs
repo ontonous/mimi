@@ -598,6 +598,96 @@ pub extern "C" fn mimi_list_push_i64(list: *mut MimiList, element: i64) {
     lst.len = len + 1;
 }
 
+/// 0.31.23: Push an f64 element into a MimiList with exponential capacity growth.
+/// Sets element_kind to F64 for typed storage.
+#[no_mangle]
+pub extern "C" fn mimi_list_push_f64(list: *mut MimiList, element: f64) {
+    if list.is_null() {
+        return;
+    }
+    let lst = unsafe { &mut *list };
+    // 0.31.23: Mark this list as containing f64 elements.
+    lst.element_kind = ListElementKind::F64;
+    let len = lst.len;
+    let cap = list_cap(lst);
+    let new_len = match len.checked_add(1) {
+        Some(n) => n,
+        None => return,
+    };
+    if new_len > cap {
+        let nc = if cap <= 0 {
+            4
+        } else {
+            match cap.checked_mul(2) {
+                Some(c) => c,
+                None => return,
+            }
+        };
+        let nd = realloc_list_data(lst.data, nc);
+        if nd.is_null() {
+            return;
+        }
+        lst.data = nd;
+        unsafe {
+            *(nd as *mut f64).add(len as usize) = element;
+        }
+    } else {
+        unsafe {
+            *(lst.data as *mut f64).add(len as usize) = element;
+        }
+    }
+    lst.len = len + 1;
+}
+
+/// 0.31.23: Push a string element into a MimiList.
+/// The string is copied into a new allocation (caller retains ownership of the input).
+/// Sets element_kind to String for typed storage.
+#[no_mangle]
+pub extern "C" fn mimi_list_push_string(list: *mut MimiList, element: *const std::ffi::c_char) {
+    if list.is_null() {
+        return;
+    }
+    let lst = unsafe { &mut *list };
+    // 0.31.23: Mark this list as containing string elements.
+    lst.element_kind = ListElementKind::String;
+    let len = lst.len;
+    let cap = list_cap(lst);
+    let new_len = match len.checked_add(1) {
+        Some(n) => n,
+        None => return,
+    };
+    // Copy the string into a new allocation
+    let element_copy = if element.is_null() {
+        alloc_c_string("")
+    } else {
+        let s = unsafe { cstr_to_string(element) };
+        alloc_c_string(&s)
+    };
+    if new_len > cap {
+        let nc = if cap <= 0 {
+            4
+        } else {
+            match cap.checked_mul(2) {
+                Some(c) => c,
+                None => return,
+            }
+        };
+        let nd = realloc_list_data(lst.data, nc);
+        if nd.is_null() {
+            return;
+        }
+        lst.data = nd;
+        unsafe {
+            *nd.add(len as usize) = element_copy;
+        }
+    } else {
+        unsafe {
+            *lst.data.add(len as usize) = element_copy;
+        }
+    }
+    lst.len = len + 1;
+}
+
 /// v0.28.13: Grow the data array of a MimiList if needed (exponential growth).
 /// Returns the (possibly new) data pointer. The caller is responsible for
 /// storing the element at `data[len]` and incrementing `list.len`.
@@ -788,6 +878,10 @@ pub extern "C" fn mimi_string_free(ptr: *mut std::ffi::c_char) {
 ///
 /// v0.28.13: Detects the hidden capacity header (negative value at data[-8]).
 /// If present, frees the allocation base at data-8. Otherwise original behavior.
+///
+/// 0.31.23: Uses element_kind to determine whether elements need freeing.
+/// Only String/List/Record elements are heap-allocated pointers; I64/F64/Bool/Map/Set
+/// are stored directly in the data array and don't need individual freeing.
 #[no_mangle]
 pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
     if list.is_null() {
@@ -800,6 +894,7 @@ pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
         let owns_data = (*list).owns_data;
         let data_ptr = (*list).data;
         let list_len = (*list).len;
+        let element_kind = (*list).element_kind;
         // MEM-C10 (deep audit): bound iteration against a corrupt/negative `len`
         // so a hostile or buggy `len` cannot drive an out-of-bounds read or an
         // unbounded `libc::free` loop. When a capacity header is present we also
@@ -820,10 +915,13 @@ pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
                 n
             }
         };
+        // 0.31.23: Only free elements if they are pointer types (String/List/Record).
+        // I64/F64/Bool/Map/Set are stored directly and don't need freeing.
+        let should_free_elements = free_elements && element_kind.is_pointer_kind();
         if owns_data && !data_ptr.is_null() {
             let cap = list_cap(&*list);
             if cap > 0 {
-                if free_elements {
+                if should_free_elements {
                     for i in 0..safe_count {
                         let e = *data_ptr.add(i);
                         if !e.is_null() {
@@ -834,7 +932,7 @@ pub extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool) {
                 let base = (data_ptr as *mut i64).offset(-1) as *mut std::ffi::c_void;
                 libc::free(base);
             } else {
-                if free_elements {
+                if should_free_elements {
                     for i in 0..safe_count {
                         let e = *data_ptr.add(i);
                         if !e.is_null() {
