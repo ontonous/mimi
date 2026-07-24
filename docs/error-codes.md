@@ -4,6 +4,17 @@
 > Error code values remain valid; semantic definitions (Result/Fault/PeerFault/exit layering) defer to the specification.
 > Sourced from `src/diagnostic/codes.rs`.
 
+## Retirement Policy
+
+**错误码一旦分配永不复用。** 废止码标注 `retired` + 原因，保留在文档中供历史参考。
+
+| Code | Status | Reason |
+|------|--------|--------|
+| E0240 | retired | superseded by E0253 (where constraint violated) |
+| E0241 | retired | superseded by E0254 (effect not available) |
+| E0255 | retired | duplicate of E0235 (function does not return on all paths) |
+| E0701 | retired | duplicate of E0722 (unsupported expression in codegen) |
+
 ## Code Ranges
 
 | Range | Category |
@@ -15,11 +26,13 @@
 | E0400–E0499 | Semantic errors |
 | E0500–E0599 | Contract/intention errors |
 | E0600–E0699 | Warnings (legacy E06xx) |
-| W001–W010  | Warnings (preferred W0xx) |
+| W001–W012  | Warnings (preferred W0xx) |
+| W0400–W0499 | Flow warnings |
 | E0700–E0722 | Codegen errors |
 | E0741–E0742 | FFI errors |
 | E0750–E0751 | File/resource errors |
 | E0800+      | Runtime errors |
+| ZONK-LEAK-001 | Type inference leak detector |
 
 ## Error Codes
 
@@ -132,6 +145,25 @@
 | E0409 | type alias cycle |
 | E0410 | cannot infer record type without explicit type name |
 | E0411 | weak requires a shared value |
+| E0412 | protocol must be flat (no nested protocol-state payloads) |
+| E0413 | unknown session type name |
+| E0414 | session protocol order violation |
+| E0415 | view/mutate borrow violation |
+| E0416 | transition under pinned FFI anchor |
+| E0417 | mutate parameter reassign (realloc/swap banned) |
+| E0418 | subflow cannot be conservatively projected to flat protocol |
+| E0419 | multi-target transition states have incompatible payload layouts |
+| E0420 | multi-target transition result must be exhaustively matched |
+| E0421 | flow state forgery: non-root state constructed outside transition |
+| E0422 | flow state nominal distinctness: unqualified name shadowed by another flow |
+| E0423 | flow state use-after-transition (linear generation) |
+| E0424 | ? in transition body without fails E declaration |
+| E0425 | session endpoint with non-end residual leaves scope |
+| E0426 | session endpoint use-after-alias (linear consumption) |
+| E0427 | linear type cannot be shared/borrowed |
+| E0428 | ? on extern C call: FFI failures are Faults, not Rejected |
+| E0429 | linear resource consumed before fallible operation |
+| E0430 | from_json requires concrete type argument |
 | E0500 | cannot modify $-locked fragment |
 | E0501 | strict mode: contract modifications not allowed |
 | E0502 | contract on function with shared parameter is not verifiable by Z3 |
@@ -183,3 +215,18 @@
 | W008 | `== true` / `== false` anti-pattern |
 | W009 | recursion depth hint |
 | W010 | unused import |
+| W011 | progressive Typestate migration (script mode → explicit flow) |
+| W012 | type escape hatch (`_` or `Any`) bypasses static checks |
+
+## Flow Warning Codes (W04xx)
+
+| Code | Description |
+|------|-------------|
+| W0400 | flow state unreachable (no transition targets to it) |
+| W0401 | flow state has no outgoing transitions (terminal state) |
+
+## Type Inference Leak Detector
+
+| Code | Description |
+|------|-------------|
+| ZONK-LEAK-001 | unresolved type in function signature (TypeVar/Infer/ForAll leak) |
