@@ -482,6 +482,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Phase 6: Return
         self.emit_extern_return(&ef, wrapper_fn, &call, &sig, sret_alloca)?;
 
+        // Store the wrapper so call sites can find it even if LLVM mangled
+        // the name (e.g., `strlen` → `strlen.11` when C lib strlen exists).
+        self.extern_wrapper_fns.insert(name.to_string(), wrapper_fn);
+
         if let Some(block) = previous_block {
             self.builder.position_at_end(block);
         }

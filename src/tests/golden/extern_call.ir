@@ -383,11 +383,14 @@ declare void @mimi_sort_f64_inplace(ptr, i64)
 
 declare void @mimi_sort_str_inplace(ptr, i64)
 
-declare void @mimi_try_exit(i64)
+; Function Attrs: noreturn
+declare void @mimi_try_exit(i64) #0
 
-declare void @mimi_try_exit_str(ptr, i64)
+; Function Attrs: noreturn
+declare void @mimi_try_exit_str(ptr, i64) #0
 
-declare void @mimi_match_panic()
+; Function Attrs: noreturn
+declare void @mimi_match_panic() #0
 
 declare i64 @mimi_shared_retain(i64)
 
@@ -735,9 +738,10 @@ declare ptr @mimi_quote_list_child(ptr, i64)
 
 define i32 @main() {
 entry:
-  %call = call i64 @strlen(ptr @str.10)
-  %trunc = trunc i64 %call to i32
-  ret i32 %trunc
+  %strlen_call = call i64 @strlen(ptr @str.10)
+  %str_wrap_len = insertvalue { ptr, i64 } { ptr @str.10, i64 undef }, i64 %strlen_call, 1
+  %call = call i32 @strlen.11({ ptr, i64 } %str_wrap_len)
+  ret i32 %call
 }
 
 define {} @Main__run__from_Single({} %0) {
@@ -894,3 +898,5 @@ entry:
   %extern_call = call i32 @__mimi_extern_strlen(ptr %str_ptr_0)
   ret i32 %extern_call
 }
+
+attributes #0 = { noreturn }

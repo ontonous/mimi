@@ -117,19 +117,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             payload
         };
 
-        // Compare discriminant != 0 (Ok/Some = 1, Err/None = 0)
+        // Compare discriminant != 0 (Ok/Some = 1, Err/None = 0).
+        // Use the actual discriminant type for the zero constant to avoid
+        // i32-vs-i1 type mismatch in the icmp instruction. User-defined enums
+        // have i32 tags; built-in Result/Option have i1. Mismatched types
+        // produce invalid IR that O0 tolerates but O1 miscompiles → SIGSEGV.
         let disc_int = disc.into_int_value();
-        let is_err = if is_user_enum {
-            let zero = self.context.i32_type().const_int(0, false);
-            self.builder
-                .build_int_compare(inkwell::IntPredicate::EQ, disc_int, zero, "is_err")
-                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
-        } else {
-            let zero = self.context.bool_type().const_int(0, false);
-            self.builder
-                .build_int_compare(inkwell::IntPredicate::EQ, disc_int, zero, "is_err")
-                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
-        };
+        let zero = disc_int.get_type().const_int(0, false);
+        let is_err = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, disc_int, zero, "is_err")
+            .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
 
         self.builder
             .build_conditional_branch(is_err, err_bb, ok_bb)
@@ -344,9 +342,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             payload
         };
 
-        // discriminant == 0 means Err/None
+        // discriminant == 0 means Err/None.
+        // Use the actual discriminant type (i32 for user enums, i1 for
+        // built-in Result/Option) to avoid invalid IR type mismatch.
         let disc_int = disc.into_int_value();
-        let zero = bool_ty.const_int(0, false);
+        let zero = disc_int.get_type().const_int(0, false);
         let is_err = self
             .builder
             .build_int_compare(inkwell::IntPredicate::EQ, disc_int, zero, "try_rej_is_err")

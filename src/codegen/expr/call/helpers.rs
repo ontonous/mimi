@@ -1319,10 +1319,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         arg_exprs: &[Expr],
         compiled_args: &mut [BasicValueEnum<'ctx>],
     ) -> Result<(), CompileError> {
-        let Some(fdef) = self.func_defs.get(name) else {
+        // Collect parameter types from func_defs (regular functions) or
+        // extern_func_defs (extern "C" wrappers). Extern wrappers expect
+        // Mimi string structs {ptr, i64}, not raw C string pointers.
+        let param_types: Vec<Type> = if let Some(fdef) = self.func_defs.get(name) {
+            fdef.params.iter().map(|p| p.ty.clone()).collect()
+        } else if let Some(ef) = self.extern_func_defs.get(name) {
+            ef.params.iter().map(|p| p.ty.clone()).collect()
+        } else {
             return Ok(());
         };
-        let param_types: Vec<Type> = fdef.params.iter().map(|p| p.ty.clone()).collect();
         for (i, (_arg_expr, compiled)) in arg_exprs.iter().zip(compiled_args.iter_mut()).enumerate()
         {
             if i >= param_types.len() {

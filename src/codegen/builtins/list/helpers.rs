@@ -172,21 +172,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_global_string_ptr(&msg, "oob_msg")
             .map_err(|e| CompileError::LlvmError(format!("oob msg: {}", e)))?;
-        let abort_fn = self
-            .module
-            .get_function("mimi_runtime_abort")
-            .unwrap_or_else(|| {
-                let i8_ptr = self.context.ptr_type(AddressSpace::default());
-                let ty = self.context.void_type().fn_type(
-                    &[inkwell::types::BasicMetadataTypeEnum::PointerType(i8_ptr)],
-                    false,
-                );
-                self.module.add_function(
-                    "mimi_runtime_abort",
-                    ty,
-                    Some(inkwell::module::Linkage::External),
-                )
-            });
+        let abort_fn = self.get_or_declare_abort_fn();
         self.builder
             .build_call(
                 abort_fn,

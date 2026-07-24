@@ -6664,6 +6664,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get(name)
             .is_some_and(|f| !f.generics.is_empty());
         if !is_generic {
+            // Extern wrappers may have been mangled by LLVM (e.g., `strlen` →
+            // `strlen.11`) when a C library function with the same name exists.
+            // Check the wrapper map first to call the correct function.
+            if let Some(&wrapper) = self.extern_wrapper_fns.get(name) {
+                return self.emit_function_call(wrapper, name, metadata_args);
+            }
             if let Some(function) = self.module.get_function(name) {
                 return self.emit_function_call(function, name, metadata_args);
             }
