@@ -213,7 +213,7 @@ fn set_is_live(handle: i64) -> bool {
 ///
 /// 盲审修复：禁止直接调用 libc::malloc/free，统一通过 mimi_alloc/mimi_free。
 /// - 默认使用 libc::malloc/free（C ABI 兼容）
-/// - #[cfg(miri)] 使用 Rust alloc（Miri 可以检测 Rust 分配器的错误）
+/// - #[cfg(miri)] 使用 Rust alloc + size header（Miri 可以检测 Rust 分配器的错误）
 ///
 /// SAFETY: 调用者必须确保：
 /// - mimi_alloc 返回的指针只能通过 mimi_free 释放
@@ -222,11 +222,24 @@ fn set_is_live(handle: i64) -> bool {
 pub fn mimi_alloc(size: usize) -> *mut std::ffi::c_void {
     #[cfg(miri)]
     {
-        // Miri 模式：使用 Rust 分配器，Miri 可以检测 use-after-free、double-free 等
+        // Miri 模式：使用 Rust 分配器 + size header
+        // Miri 可以检测 use-after-free、double-free、layout mismatch 等
         use std::alloc::{alloc, Layout};
+        // 在分配前添加 size header，以便 mimi_free 可以正确 dealloc
+        let header_size = std::mem::size_of::<usize>();
+        let total_size = size.saturating_add(header_size).max(1);
         let layout =
-            Layout::from_size_align(size.max(1), 8).unwrap_or_else(|_| std::process::abort());
-        unsafe { alloc(layout) as *mut std::ffi::c_void }
+            Layout::from_size_align(total_size, 8).unwrap_or_else(|_| std::process::abort());
+        let base_ptr = unsafe { alloc(layout) };
+        if base_ptr.is_null() {
+            return std::ptr::null_mut();
+        }
+        // 在 header 中存储原始 size
+        unsafe {
+            *(base_ptr as *mut usize) = size;
+        }
+        // 返回跳过 header 的指针
+        unsafe { base_ptr.add(header_size) as *mut std::ffi::c_void }
     }
     #[cfg(not(miri))]
     {
@@ -245,13 +258,17 @@ pub fn mimi_free(ptr: *mut std::ffi::c_void) {
     }
     #[cfg(miri)]
     {
-        // Miri 模式：使用 Rust 分配器
-        // 注意：Miri 模式下我们需要知道原始大小，这里使用一个保守的估计
-        // 实际上 Miri 会跟踪分配，所以这是安全的
+        // Miri 模式：从 header 读取 size，使用正确的 layout dealloc
         use std::alloc::{dealloc, Layout};
-        // Miri 会验证这个指针是否有效
-        let layout = Layout::from_size_align(1, 8).unwrap_or_else(|_| std::process::abort());
-        unsafe { dealloc(ptr as *mut u8, layout) };
+        let header_size = std::mem::size_of::<usize>();
+        // 回退到 header 位置
+        let base_ptr = unsafe { (ptr as *mut u8).sub(header_size) };
+        // 读取原始 size
+        let size = unsafe { *(base_ptr as *mut usize) };
+        let total_size = size.saturating_add(header_size).max(1);
+        let layout =
+            Layout::from_size_align(total_size, 8).unwrap_or_else(|_| std::process::abort());
+        unsafe { dealloc(base_ptr, layout) };
     }
     #[cfg(not(miri))]
     {
