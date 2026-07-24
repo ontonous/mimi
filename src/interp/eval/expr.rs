@@ -499,106 +499,69 @@ impl<'a> Interpreter<'a> {
             .iter()
             .any(|a| matches!(a.unlocated(), Expr::NamedArg(_, _)));
         if has_named {
-            if let Expr::Ident(name) = callee.unlocated() {
-                if let Some(f) = self.find_function(name) {
-                    let mut ordered_exprs: Vec<Expr> = Vec::new();
-                    let mut dest_idx = 0;
-                    // Process positional args
-                    for arg in args {
-                        match arg.unlocated() {
-                            Expr::NamedArg(n, val) => {
-                                // Find position in params
-                                if let Some(pos) = f.params.iter().position(|p| p.name == *n) {
-                                    while ordered_exprs.len() <= pos {
-                                        ordered_exprs.push(Expr::Literal(Lit::Unit));
-                                    }
-                                    ordered_exprs[pos] = *val.clone();
-                                } else {
-                                    // Unknown named arg — push the expr itself (evaluated later)
-                                    ordered_exprs.push(arg.clone());
-                                    continue;
-                                }
-                            }
-                            _ => {
-                                while ordered_exprs.len() <= dest_idx {
-                                    ordered_exprs.push(Expr::Literal(Lit::Unit));
-                                }
-                                ordered_exprs[dest_idx] = arg.clone();
-                                dest_idx += 1;
-                            }
-                        }
-                    }
-                    // Fill in defaults
-                    for (i, p) in f.params.iter().enumerate() {
-                        if i >= ordered_exprs.len()
-                            || matches!(ordered_exprs[i].unlocated(), Expr::Literal(Lit::Unit))
-                        {
-                            if let Some(ref default_expr) = p.default_value {
-                                if i >= ordered_exprs.len() {
-                                    ordered_exprs.push(default_expr.clone());
-                                } else {
-                                    ordered_exprs[i] = default_expr.clone();
-                                }
-                            }
-                        }
-                    }
-                    let vals: Result<Vec<_>, _> =
-                        ordered_exprs.iter().map(|a| self.eval_expr(a)).collect();
-                    let vals = vals?;
-                    return self.eval_call_dispatch(callee, &vals, args);
-                }
-            } else if let Expr::Field(obj, method) = callee.unlocated() {
-                // Named args on method calls: resolve method params from actor
-                // methods (or bare functions) when possible.
-                if let Some(f) = self.find_method_def(obj, method) {
-                    let mut ordered_exprs: Vec<Expr> = Vec::new();
-                    let mut dest_idx = 0;
-                    for arg in args {
-                        match arg.unlocated() {
-                            Expr::NamedArg(n, val) => {
-                                if let Some(pos) = f.params.iter().position(|p| p.name == *n) {
-                                    while ordered_exprs.len() <= pos {
-                                        ordered_exprs.push(Expr::Literal(Lit::Unit));
-                                    }
-                                    ordered_exprs[pos] = *val.clone();
-                                } else {
-                                    ordered_exprs.push(arg.clone());
-                                    continue;
-                                }
-                            }
-                            _ => {
-                                while ordered_exprs.len() <= dest_idx {
-                                    ordered_exprs.push(Expr::Literal(Lit::Unit));
-                                }
-                                ordered_exprs[dest_idx] = arg.clone();
-                                dest_idx += 1;
-                            }
-                        }
-                    }
-                    for (i, p) in f.params.iter().enumerate() {
-                        if i >= ordered_exprs.len()
-                            || matches!(ordered_exprs[i].unlocated(), Expr::Literal(Lit::Unit))
-                        {
-                            if let Some(ref default_expr) = p.default_value {
-                                if i >= ordered_exprs.len() {
-                                    ordered_exprs.push(default_expr.clone());
-                                } else {
-                                    ordered_exprs[i] = default_expr.clone();
-                                }
-                            }
-                        }
-                    }
-                    let vals: Result<Vec<_>, _> =
-                        ordered_exprs.iter().map(|a| self.eval_expr(a)).collect();
-                    let vals = vals?;
-                    return self.eval_call_dispatch(callee, &vals, args);
-                }
+            // ED-10: unified named-arg reordering for functions and methods.
+            let func_def = match callee.unlocated() {
+                Expr::Ident(name) => self.find_function(name),
+                Expr::Field(obj, method) => self.find_method_def(obj, method),
+                _ => None,
+            };
+            if let Some(f) = func_def {
+                let vals = self.reorder_named_args(&f.params, args)?;
+                return self.eval_call_dispatch(callee, &vals, args);
             }
         }
 
         let vals: Result<Vec<_>, _> = args.iter().map(|a| self.eval_expr(a)).collect();
         let vals = vals?;
         self.eval_call_dispatch(callee, &vals, args)
+    }
+
+    /// ED-10: Reorder named arguments to positional order using parameter definitions.
+    /// Shared by function calls and method calls (was 48 lines × 2 duplicated).
+    fn reorder_named_args(
+        &mut self,
+        params: &[crate::ast::Param],
+        args: &[Expr],
+    ) -> Result<Vec<Value>, InterpError> {
+        let mut ordered_exprs: Vec<Expr> = Vec::new();
+        let mut dest_idx = 0;
+        for arg in args {
+            match arg.unlocated() {
+                Expr::NamedArg(n, val) => {
+                    if let Some(pos) = params.iter().position(|p| p.name == *n) {
+                        while ordered_exprs.len() <= pos {
+                            ordered_exprs.push(Expr::Literal(Lit::Unit));
+                        }
+                        ordered_exprs[pos] = *val.clone();
+                    } else {
+                        ordered_exprs.push(arg.clone());
+                        continue;
+                    }
+                }
+                _ => {
+                    while ordered_exprs.len() <= dest_idx {
+                        ordered_exprs.push(Expr::Literal(Lit::Unit));
+                    }
+                    ordered_exprs[dest_idx] = arg.clone();
+                    dest_idx += 1;
+                }
+            }
+        }
+        // Fill in defaults for missing positions
+        for (i, p) in params.iter().enumerate() {
+            if i >= ordered_exprs.len()
+                || matches!(ordered_exprs[i].unlocated(), Expr::Literal(Lit::Unit))
+            {
+                if let Some(ref default_expr) = p.default_value {
+                    if i >= ordered_exprs.len() {
+                        ordered_exprs.push(default_expr.clone());
+                    } else {
+                        ordered_exprs[i] = default_expr.clone();
+                    }
+                }
+            }
+        }
+        ordered_exprs.iter().map(|a| self.eval_expr(a)).collect()
     }
 
     /// Look up a method `FuncDef` for named-arg reordering on `obj.method(...)`.
