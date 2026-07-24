@@ -44,6 +44,20 @@ impl NodeBindGenerator {
         writeln!(out, "#include <stdint.h>")?;
         writeln!(out)?;
 
+        // 0.31.24-9: Thread-local error flag for callback exception propagation
+        writeln!(out, "// 0.31.24-9: Thread-local error flag for callback exception propagation")?;
+        writeln!(out, "// When a JS callback throws, this flag is set and the trampoline returns a sentinel.")?;
+        writeln!(out, "// Mimi side checks this flag and produces a Fault.")?;
+        writeln!(out, "static _Thread_local int mimi_callback_error_flag = 0;")?;
+        writeln!(out)?;
+        writeln!(out, "// Check and clear the callback error flag. Returns 1 if an error occurred.")?;
+        writeln!(out, "int mimi_check_callback_error(void) {{")?;
+        writeln!(out, "    int err = mimi_callback_error_flag;")?;
+        writeln!(out, "    mimi_callback_error_flag = 0;")?;
+        writeln!(out, "    return err;")?;
+        writeln!(out, "}}")?;
+        writeln!(out)?;
+
         // Forward declarations for Mimi runtime
         writeln!(out, "// Mimi runtime function declarations")?;
         writeln!(out, "extern void mimi_string_free(char* s);")?;
@@ -247,9 +261,11 @@ impl NodeBindGenerator {
                         param_types.len(),
                         argv_list.join(", ")
                     )?;
+                    // 0.31.24-9: Set thread-local error flag when callback fails
+                    writeln!(out, "        mimi_callback_error_flag = 1;  // 0.31.24-9: callback exception")?;
                     writeln!(
                         out,
-                        "        return {};",
+                        "        return {};  // sentinel value",
                         self.callback_default_ret(ret_type)
                     )?;
                     writeln!(out, "    }}")?;
