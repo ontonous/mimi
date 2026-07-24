@@ -845,6 +845,43 @@ impl CheckedProgram {
             return Err(errors);
         }
         program.callables = callables;
+
+        // ── Zonk Leak Detector (追加 F, architecture-amendment-1.0.md) ──
+        // Final safety net: scan all function signatures for residual inference
+        // artifacts (TypeVar, Infer, ForAll, "_", "unknown"). If any leak through
+        // the per-signature zonk gate, abort compilation instead of passing dirty
+        // types to backends (which would cause LLVM ICE / interpreter panic).
+        {
+            use crate::core::unification::scan_residual;
+            let mut leaks = Vec::new();
+            for (node_id, func) in &program.functions {
+                for (param_name, param_ty) in &func.params {
+                    if let Err(e) = scan_residual(param_ty) {
+                        leaks.push(Diagnostic::error(
+                            format!(
+                                "ZONK-LEAK-001: unresolved type in parameter '{}' of '{}': {}",
+                                param_name, func.qualified_name, e
+                            ),
+                            func.origin.user_span(),
+                        ));
+                    }
+                }
+                if let Err(e) = scan_residual(&func.ret) {
+                    leaks.push(Diagnostic::error(
+                        format!(
+                            "ZONK-LEAK-001: unresolved return type in '{}': {}",
+                            func.qualified_name, e
+                        ),
+                        func.origin.user_span(),
+                    ));
+                }
+                let _ = node_id; // used for iteration context
+            }
+            if !leaks.is_empty() {
+                return Err(leaks);
+            }
+        }
+
         Ok(program)
     }
 

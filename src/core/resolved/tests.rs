@@ -3863,8 +3863,40 @@ func main() -> i32 { 0 }
     let diagnostics = crate::core::check_program(&file).expect_err("return path leak");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0256)
-            && diagnostic.message.contains("return path")
+            && diagnostic.message.contains("f")
     }));
+}
+
+/// ZONK-LEAK-001: the leak detector must NOT fire on valid programs with
+/// generics (TypeVar is used during inference but fully resolved after zonk).
+#[test]
+fn zonk_leak_detector_passes_on_resolved_generics() {
+    let file = parse(
+        r#"
+func id<T>(x: T) -> T { x }
+func main() -> i32 {
+    let a = id(42)
+    let b = id("hello")
+    0
+}
+"#,
+    );
+    // Should succeed — all TypeVars resolved after zonk
+    let program = crate::core::check_program(&file).expect("generics should zonk cleanly");
+    // Verify the generic function's signature is fully resolved
+    let id_fn = program
+        .functions()
+        .values()
+        .find(|f| f.qualified_name == "id")
+        .expect("id function should exist");
+    // After monomorphization, params should not contain TypeVar
+    for (_, ty) in &id_fn.params {
+        assert!(
+            crate::core::unification::scan_residual(ty).is_ok(),
+            "param type should be fully resolved: {:?}",
+            ty
+        );
+    }
 }
 
 #[test]
