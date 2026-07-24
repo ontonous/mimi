@@ -2437,12 +2437,18 @@ impl<'a> Interpreter<'a> {
     }
 
     fn lookup(&self, name: &str) -> Option<Value> {
-        let v = self.scope_env.lookup(name);
-        if v.is_some() {
-            return v;
+        if let Some(v) = self.scope_env.lookup_ref(name) {
+            return Some(v.clone());
         }
         // Check globals
         self.globals.get(name).cloned()
+    }
+
+    /// Borrowed lookup — avoids deep clone for read-only access.
+    /// Returns `None` if the variable is moved, undefined, or only in globals
+    /// (globals require a clone since they live in a separate HashMap).
+    fn lookup_ref(&self, name: &str) -> Option<&Value> {
+        self.scope_env.lookup_ref(name)
     }
 
     fn is_mutable(&self, name: &str) -> bool {
@@ -2473,7 +2479,7 @@ impl<'a> Interpreter<'a> {
             Expr::Field(obj, field) => {
                 if let Expr::Ident(name) = obj.unlocated() {
                     if name == "self" {
-                        if let Some(Value::Actor(handle)) = self.lookup("self") {
+                        if let Some(Value::Actor(handle)) = self.lookup_ref("self") {
                             handle
                                 .inner
                                 .write()

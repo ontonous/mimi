@@ -51,7 +51,7 @@ impl<'a> Interpreter<'a> {
                 // contexts, treat a constructor name as a constructor pattern unless
                 // the name is currently bound as a variable (shadowing). In binding
                 // contexts (let, spawn), always bind it as a variable.
-                let is_bound = self.lookup(name).is_some();
+                let is_bound = self.lookup_ref(name).is_some();
                 if allow_constructor && !is_bound && self.constructors.contains_key(name) {
                     if let Value::Variant(vname, _) = value {
                         return vname == name;

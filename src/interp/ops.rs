@@ -35,18 +35,21 @@ pub(crate) fn apply_binary(
     match op {
         ResolvedBinaryOp::LogicalAnd => Ok(Value::Bool(is_truthy(&left) && is_truthy(&right))),
         ResolvedBinaryOp::LogicalOr => Ok(Value::Bool(is_truthy(&left) || is_truthy(&right))),
-        ResolvedBinaryOp::Add => match (&left, &right) {
-            (Value::String(left), Value::String(right)) => {
-                Ok(Value::String(format!("{left}{right}")))
+        ResolvedBinaryOp::Add => match (left, right) {
+            // String concatenation: reuse left's buffer via push_str to avoid
+            // the extra allocation that format!("{left}{right}") would create.
+            (Value::String(mut a), Value::String(b)) => {
+                a.push_str(&b);
+                Ok(Value::String(a))
             }
-            (Value::Int(left), Value::Int(right)) => left
-                .checked_add(*right)
+            (Value::Int(a), Value::Int(b)) => a
+                .checked_add(b)
                 .map(Value::Int)
                 .ok_or_else(|| InterpError::integer_overflow("integer addition overflow")),
-            (Value::Float(left), Value::Float(right)) => float_op(*left, *right, "+"),
-            (Value::Int(left), Value::Float(right)) => float_op(*left as f64, *right, "+"),
-            (Value::Float(left), Value::Int(right)) => float_op(*left, *right as f64, "+"),
-            _ => type_error("+", &left, &right),
+            (Value::Float(a), Value::Float(b)) => float_op(a, b, "+"),
+            (Value::Int(a), Value::Float(b)) => float_op(a as f64, b, "+"),
+            (Value::Float(a), Value::Int(b)) => float_op(a, b as f64, "+"),
+            (left, right) => type_error("+", &left, &right),
         },
         ResolvedBinaryOp::Subtract => match (&left, &right) {
             (Value::Int(left), Value::Int(right)) => left
