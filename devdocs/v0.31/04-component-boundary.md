@@ -8,7 +8,7 @@
 - **0.31.30**：Subscription quiescence、async cancel exactly-one terminal。
 - **0.31.31**：canonical Wire Schema、limits、handshake、revision/conflict、replay。
 - **0.31.32**：Rust Safe SDK。
-- **0.31.33**：XPU FFI 验证 — extern "C" + #[repr(C)] 调通真实 C 库（OpenVINO/Level Zero/任意 .so），Z3 验证指针非空。
+- **0.31.33**：XPU FFI 验证 — extern "C" + #[repr(C)] 调通真实 C 库（OpenVINO/Level Zero/任意 .so），**全生命周期 E2E 闭环**（v2 升级），Z3 验证指针非空 + ASan 零泄漏。
 - **0.31.34**：Component 攻击审查，0 新 surface。
 - **0.31.35**（新增）：SDK conformance 加固 — Rust SDK E2E + XPU FFI 边界 + Wire fuzz，0 新 surface。
 
@@ -87,6 +87,40 @@
 - Stable surface 不暴露 internal Value、Rust layout、void* fallback 或裸 integer handle。
 - Native token、pointer、allocator、callback ctx 永不进入 wire。
 - GUI 只持 projection/speculative state，不持业务提交权。
+- **隐式 JSON 回退在 0.31.40 后移除**（v2 盲审修正）：复杂类型跨边界必须显式 `#[abi(json)]` 或使用 ffi slice/handle 模式。
+- **函数名 errno 猜测在 0.31.22 后废除**（v2 盲审修正）：外部 import 必须显式声明 `#[abi(errno(...))]`。
+- **fork() 崩溃隔离在 Component 阶段移除**（v2 盲审修正）：C 库崩溃直接传播，真正的隔离通过 Wire Schema / 进程隔离实现。
+
+## 0.31.33 XPU FFI 全生命周期 E2E 详情（v2 升级）
+
+> 盲审修正：原"调通一个真实 C 库函数"范围不足。必须打通全生命周期闭环。
+
+### 交付
+
+1. **全生命周期 E2E**：
+   - **Create**：调用 C 库初始化函数，返回 `#[repr(C)]` 句柄/上下文
+   - **Transfer**：C 侧分配的内存所有权转移到 Mimi（或 Mimi 分配传给 C）
+   - **Compute**：用句柄执行实际计算（非 trivial 操作）
+   - **Drop/Free**：Mimi 侧 drop 触发 C 侧 cleanup，资源完全释放
+
+2. **验证**：
+   - Z3 验证指针非空（`requires: ptr != 0`）
+   - ASan 验证零泄漏（E2E 结束后无 dangling allocation）
+   - 结构体偏移与 C 侧 `_Static_assert(offsetof(...))` 一致
+   - 双后端等价（interp 跳过 FFI，codegen 执行）
+
+3. **错误路径**：
+   - C 函数返回 NULL → Mimi `Result::Err` 正确传播
+   - C 函数设置 errno → Mimi `Result::Err` 正确映射
+   - 中途失败 → 已分配资源正确释放（无泄漏）
+
+### 门禁
+
+- ≥1 个真实 C 库全生命周期 E2E 通过（`mimi build && ./output`）
+- ASan 零泄漏、零 UAF
+- Z3 指针非空验证通过
+- 结构体偏移与 C 侧一致
+- 错误路径 ≥3 个通过
 
 ## 门禁
 

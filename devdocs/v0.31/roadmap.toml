@@ -134,6 +134,10 @@ requirements = ["FLOW-IDENTITY-001", "RESOURCE-LINEAR-001"]
 # - interp/codegen 适配新类型表示（0.31.9–12 路径可能需要调整）
 # - 【追加】Channel<T>/Mutex<T> guard token/AtomicI32/I64/Bool 纳入 is_linear()
 #   （与 Flow 状态同一个谓词修改，resource_lower.rs:695-707）
+# - 【v2 盲审】Mutex 线性 token API：lock() 返回必须消费的线性 token，
+#   废除手动 lock/unlock（不 unlock → 编译错误，绝生死锁）
+# - 【v2 盲审】Generation 混合模式：同线程同步零开销（不插入递增），
+#   跨 Actor/FFI 边界打包校验（防 Stale Event）
 # 门禁：
 # - let b = s0; Flow::inc(s0); use(b) → 编译错误（非 warning）
 # - Flow::tick(s0) 自循环后 use(s0) → 编译错误（generation 失效）
@@ -157,6 +161,9 @@ requirements = ["RESOURCE-LINEAR-001", "FLOW-IDENTITY-001"]
 # - 错误信息可理解（不是裸 E0423，带 help 文本）
 # - 【追加】双后端拒绝等价测试：≥5 个用例验证 interp 和 codegen
 #   在 checker 被绕过时独立拒绝线性违反（L1 不变量的错误路径）
+# - 【v2 盲审】禁止 Flow 状态字段嵌套 Flow：
+#   flow ResourcePool<T> 中 T 是 Flow → 编译错误（可判定性底线）
+#   只允许 handle、原生类型、shared/weak
 # 门禁：
 # - identity(s0) 后 use(s0) → 编译错误
 # - fn() { Flow::inc(s0) } 捕获 → 编译错误或转移语义
