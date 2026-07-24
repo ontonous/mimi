@@ -1,4 +1,5 @@
 // IntMath: Trait for integer arithmetic operations on i32.
+
 trait IntMath {
     func square() -> i32
     func cube() -> i32
@@ -557,4 +558,96 @@ pub func random_int_range(lo: i32, hi: i32) -> i32 {
     let span = hi - lo
     if span <= 0 { return lo }
     random_int(lo, hi)
+}
+
+// ---------------------------------------------------------------------------
+// 0.31.24: Checked variants (return Result<T, string>)
+// ---------------------------------------------------------------------------
+// These functions return Result instead of panicking or returning sentinel
+// values. Use these when you want explicit error handling.
+
+// try_div: Checked integer division. Returns Err("division by zero") if divisor is 0.
+pub func try_div(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 {
+        Err("division by zero")
+    } else {
+        Ok(a / b)
+    }
+}
+
+// try_mod: Checked integer modulo. Returns Err("division by zero") if divisor is 0.
+pub func try_mod(a: i32, b: i32) -> Result<i32, string> {
+    if b == 0 {
+        Err("division by zero")
+    } else {
+        Ok(a % b)
+    }
+}
+
+// try_factorial: Checked factorial. Returns Err for n < 0 or n > 12 (13! exceeds i32::MAX).
+pub func try_factorial(n: i32) -> Result<i32, string> {
+    if n < 0 {
+        Err("factorial of negative number")
+    } else if n > 12 {
+        Err("factorial overflow: n > 12")
+    } else {
+        let mut fac_acc = 1
+        let mut fac_k = 2
+        while fac_k <= n {
+            fac_acc *= fac_k
+            fac_k += 1
+        }
+        Ok(fac_acc)
+    }
+}
+
+// try_sqrt: Checked square root. Returns Err for negative input.
+pub func try_sqrt(x: f64) -> Result<f64, string> {
+    if x < 0.0 {
+        Err("sqrt of negative number")
+    } else {
+        Ok(sqrt(x))
+    }
+}
+
+// try_ln: Checked natural logarithm. Returns Err for x <= 0.
+pub func try_ln(x: f64) -> Result<f64, string> {
+    if x <= 0.0 {
+        Err("ln of non-positive number")
+    } else {
+        Ok(ln(x))
+    }
+}
+
+// try_log: Checked logarithm with base. Returns Err for invalid inputs.
+pub func try_log(x: f64, base: f64) -> Result<f64, string> {
+    if x <= 0.0 {
+        Err("log of non-positive number")
+    } else if base <= 0.0 || base == 1.0 {
+        Err("log base must be positive and not 1")
+    } else {
+        Ok(log(x, base))
+    }
+}
+
+// try_pow_int: Checked integer power. Returns Err if result would overflow.
+pub func try_pow_int(base: i32, exp: i32) -> Result<i32, string> {
+    if exp < 0 {
+        Err("negative exponent for integer power")
+    } else {
+        let mut result = 1
+        let mut i = 0
+        while i < exp {
+            // Check for overflow before multiplication
+            if result > 2147483647 / base && base > 0 {
+                return Err("integer overflow")
+            }
+            if result < -2147483648 / base && base < 0 {
+                return Err("integer overflow")
+            }
+            result *= base
+            i += 1
+        }
+        Ok(result)
+    }
 }
