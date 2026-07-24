@@ -13,6 +13,30 @@ impl<'a> Checker<'a> {
         args: &[Expr],
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
+        // 0.31.24: Comptime purity enforcement — reject impure calls in comptime functions
+        if self.in_comptime {
+            if is_impure_builtin(name) {
+                self.emit_code(
+                    crate::diagnostic::codes::E0242,
+                    format!(
+                        "comptime function cannot call impure builtin '{}'; \
+                         comptime functions must be pure (no I/O, FFI, or allocation)",
+                        name
+                    ),
+                );
+            }
+            // Also reject extern "C" function calls (FFI)
+            if self.extern_funcs.contains(name) {
+                self.emit_code(
+                    crate::diagnostic::codes::E0242,
+                    format!(
+                        "comptime function cannot call extern \"C\" function '{}'; \
+                         comptime functions must be pure (no FFI calls)",
+                        name
+                    ),
+                );
+            }
+        }
         // Builtins
         match name {
             "println" => {
@@ -2440,4 +2464,60 @@ impl<'a> Checker<'a> {
             ));
         }
     }
+}
+
+/// 0.31.24: Check if a builtin function is impure (I/O, FFI, or allocation).
+/// Comptime functions cannot call these.
+fn is_impure_builtin(name: &str) -> bool {
+    // I/O operations
+    matches!(
+        name,
+        "println"
+            | "print_line"
+            | "print_raw"
+            | "print_format"
+            | "print_err"
+            | "input_line"
+            | "input_int"
+            | "input_float"
+            | "input_bool"
+            // File system operations
+            | "fs_exists"
+            | "fs_read"
+            | "fs_write"
+            | "fs_read_lines"
+            | "fs_write_lines"
+            | "fs_file_size"
+            | "fs_listdir"
+            | "fs_walk_dir"
+            // Network operations
+            | "tcp_socket"
+            | "tcp_connect"
+            | "tcp_listen"
+            | "tcp_accept"
+            | "tcp_send"
+            | "tcp_recv"
+            | "fetch"
+            | "fetch_post"
+            // Allocation
+            | "alloc"
+            | "arena_alloc"
+            // Time (side-effect: reads system clock)
+            | "timestamp"
+            | "timestamp_ms"
+            | "sleep_ms"
+            // Random (side-effect: reads RNG state)
+            | "random_int"
+            // Environment (side-effect: reads process state)
+            | "get_var"
+            | "cli_args"
+            | "get_var_or"
+            | "has_var"
+            | "get_int"
+            | "get_float"
+            | "arg_count"
+            | "first_arg"
+            // Process control
+            | "exit"
+    )
 }
