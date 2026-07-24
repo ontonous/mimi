@@ -122,4 +122,45 @@ mod verification {
             result.err()
         );
     }
+
+    /// 追加 E: from_json::<T> with unconstrained type variable is rejected (E0430).
+    #[test]
+    fn test_from_json_unconstrained_type_rejected() {
+        // from_json::<_> with Infer placeholder should be rejected
+        let src = r#"
+func main() -> i32 {
+    let x = from_json::<_>("42")
+    0
+}
+"#;
+        let result = parse_and_check(src);
+        assert!(
+            result.is_err(),
+            "from_json::<_> should be rejected: {:?}",
+            result
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("E0430") || err.contains("concrete type"),
+            "expected E0430 error, got: {}",
+            err
+        );
+    }
+
+    /// 追加 E: from_json::<ConcreteType> is accepted.
+    #[test]
+    fn test_from_json_concrete_type_accepted() {
+        let src = r#"
+func main() -> i32 {
+    let x = from_json::<i32>("42")
+    x
+}
+"#;
+        let result = parse_and_check(src);
+        assert!(
+            result.is_ok(),
+            "from_json::<i32> should be accepted: {:?}",
+            result
+        );
+    }
 }

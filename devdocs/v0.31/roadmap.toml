@@ -2,7 +2,7 @@ schema_version = 2
 series = "0.31"
 baseline = "0.30.0"
 first = 0
-last = 45
+last = 48
 
 # === Phase 0: 基线（已完成，0.1.0 发布）===
 
@@ -285,7 +285,7 @@ requirements = []
 # ✅ 性能基线 benchmark（8 个，含 list_sum_1000 + string_concat_100）
 # ⏭ call_named dispatch table — Rust match on &str 编译为高效跳转表，ROI 不足，deferred post-1.0
 # ⏭ call_method scope 嵌套 — with_scope 闭包在 Rust 中零开销（单态化+内联），跳过
-# ⏭ Interpreter 结构体瘦身 — 移入 0.31.42 DEBUG 周期
+# ⏭ Interpreter 结构体瘦身 — 移入 0.31.45 DEBUG 周期
 # ❌ ED-3 Value clone 消减 → 移入 0.31.21（需独立 sprint）
 # ❌ LLVM O1 默认 → 移入 0.31.21（? 操作符 + extern codegen bug 需先修）
 
@@ -376,7 +376,7 @@ requirements = []
 # - String 胖指针废弃 C String（Phase C 架构变更）
 # - 并发原语 Opaque Pointer + Generation（Phase C）
 # - ABI 生成器 runtime↔codegen 契约（Phase C）
-# - 错误通道区分 abort vs 错误码（0.31.22+）
+# - 错误通道区分 abort vs 错误码（0.31.25+）
 # - ARCHITECTURE.md 500 字（即时）
 # 具体排期在下一轮路线图更新中统一处理。
 # 追加门禁：
@@ -384,10 +384,94 @@ requirements = []
 #   - session_send(token, "HELO"); read()? → E04xx "linear resource consumed before fallible"
 #   - extern 调用 + ? → 编译错误（跨 FFI 无原子性）
 
-# === Phase B: 语言冻结（0.31.22–0.31.26）===
+
+# === Soundness 止血 + Runtime 架构 + 错误模型（0.31.22–0.31.24，盲审统一排期）===
 
 [[milestone]]
 version = "0.31.22"
+kind = "implementation"
+title = "Soundness 止血（盲审 P0 修复）"
+requirements = []
+# 九轮盲审统一排期。P0 soundness 修复，必须在语言冻结前完成。
+#
+# 核心交付：
+# 1. RC ABA 修复：mimi_rc_upgrade 原子 CAS 保护，refcount 归零后 upgrade 返回 null（~200 LOC）
+# 2. Quote soundness hole：移除 quote.rs 静默过滤（Requires/Ensures/Math），
+#    生成 AST 必须送回 Checker 完整 re-check + lowering（~500 LOC）
+# 3. Builtins 废除 sentinel：socket()/bind()/listen() 等返回 Result<i32, OSError>，
+#    -1 拦截在 builtin 定义处（~800 LOC）
+# 4. 统一分配器：mimi_alloc()/mimi_free() 封装，#[cfg(miri)] 指向 Rust alloc，
+#    禁止直接调用 libc::malloc/free（~300 LOC）
+# 5. Drop/Transition IR 防漏网断言：生成 Drop/Transition IR 前断言资源未被二次消费（~100 LOC）
+# 6. Spec 修正：Shadow MTE 废止、Fast-Math 禁止、O2=experimental、
+#    Comptime "完全排除"→"常量折叠"、最高优化=内联+DCE+SROA
+# 7. ARCHITECTURE.md（500 字 runtime 架构文档）
+#
+# 门禁：
+# - 全量 cargo test 连续两次绿
+# - L1 双后端等价性保持
+# - mimi_rc_upgrade 并发压力测试通过
+# - quote! 生成代码经过完整 check
+# - builtins 无裸 i32 错误码返回
+
+[[milestone]]
+version = "0.31.23"
+kind = "implementation"
+title = "Runtime 架构升级（去字符串化 + 去全局锁）"
+requirements = []
+# 九轮盲审统一排期。Runtime 三大原罪修复：类型丢失、全局锁、契约裸奔。
+#
+# 核心交付：
+# 1. List Typed Storage：废除字符串化存储，标量（i32/i64/f64）连续内存块，
+#    复杂对象存指针。mimi_list_push_i64 直接按值写内存（~1500 LOC）
+# 2. Value 删除 #[derive(Clone)]：手写 impl Clone，
+#    FlowState/SessionChan/Capability → panic!("linear resource clone")（~300 LOC）
+# 3. 可变堆类型 Rc<RefCell>：List/Map/Set 包裹 Rc<RefCell<...>>，
+#    查找时只拷贝智能指针，保证多处引用指向同一内存（~800 LOC）
+# 4. Comptime FFI 白名单：Comptime 执行禁用所有 FFI 路径，遇到 extern → abort（~200 LOC）
+# 5. Quote Gensym/UUID 卫生性：生成 AST 变量打不可见生成代，防 Z3 命名冲突（~200 LOC）
+#
+# 门禁：
+# - 全量 cargo test 连续两次绿
+# - L1 双后端等价性保持
+# - real_world 69/69 双后端通过
+# - List<f64> 精度往返测试（IEEE-754 无损）
+# - Value::FlowState.clone() → panic 测试
+
+[[milestone]]
+version = "0.31.24"
+kind = "implementation"
+title = "错误模型与 Stdlib 质量"
+requirements = ["ERROR-ALGEBRA-001"]
+# 九轮盲审统一排期。错误模型收敛 + stdlib 质量提升。
+#
+# 核心交付：
+# 1. From 协议 / 隐式错误上卷：AppError 包含 FsError 时 ? 自动封箱，
+#    消除 .map_err() 地狱（~500 LOC）
+# 2. Typed errors：FsError/JsonError/CollectionError enum +
+#    通用 Error { code: i32, msg: string }（1.0 务实方案）（~400 LOC）
+# 3. Stdlib effect 标注：io/fs/net/random → @io/@blocking，
+#    mymath/collections/strings → @pure（~300 LOC）
+# 4. defer LIFO：控制流离开 scope 时 defer 按逆序执行，? 和 panic 均触发（~400 LOC）
+# 5. Comptime 纯度强制：is_comptime 函数 Checker 校验 Effect=pure，
+#    io/ffi/alloc 调用 → 编译错误（~300 LOC）
+# 6. API 清洗：array 合并到 collections，iter 标记 experimental，
+#    命名统一（~200 LOC）
+# 7. mymath checked 变体：try_div/try_factorial → Result<T, MathError>，
+#    默认 Panic 被 Actor 吸收到 Fault（~200 LOC）
+# 8. 错误通道区分：契约违背 → abort，环境失败 → 错误码/Result（~200 LOC）
+#
+# 门禁：
+# - 全量 cargo test 连续两次绿
+# - L1 双后端等价性保持
+# - ? 自动上卷测试（嵌套 Result 不同错误类型）
+# - @pure 函数调用 print_line → 编译错误
+# - defer LIFO 顺序测试
+
+# === Phase B: 语言冻结（0.31.25–0.31.29）===
+
+[[milestone]]
+version = "0.31.25"
 kind = "implementation"
 title = "语言语义收敛"
 requirements = ["ERROR-ALGEBRA-001", "LANG-FUNCTION-001", "LANG-CONTRACT-001", "COMPTIME-PURE-001", "LANG-ATTRIBUTE-001", "SYNTAX-REMOVED-001"]
@@ -408,7 +492,7 @@ requirements = ["ERROR-ALGEBRA-001", "LANG-FUNCTION-001", "LANG-CONTRACT-001", "
 #   - DSP 44100 采样/秒：就地修改 buffer，不 consume 整个 Payload
 #   - 预估 ~1500-2000 LOC
 #   - 门禁：apply_filter(mutate self.buffer, sample) 编译通过 + 双后端等价
-# 追加 C：Multi-target 转移（条款 7，1.0 必须，从 0.31.41 提前）
+# 追加 C：Multi-target 转移（条款 7，1.0 必须，从 0.31.44 提前）
 #   - transition decide(Pending) -> Approved | Rejected 表示为 Tagged Union
 #   - LLVM Codegen Lowering 为带 Tag 的 C 结构体
 #   - 调用方必须 match 所有目标状态
@@ -416,25 +500,25 @@ requirements = ["ERROR-ALGEBRA-001", "LANG-FUNCTION-001", "LANG-CONTRACT-001", "
 #   - 门禁：multi-target 双后端等价 + 未穷尽 match → 编译错误
 
 [[milestone]]
-version = "0.31.23"
+version = "0.31.26"
 kind = "implementation"
 title = "Verification IR"
 requirements = ["VERIFY-CORE-001"]
 
 [[milestone]]
-version = "0.31.24"
+version = "0.31.27"
 kind = "implementation"
 title = "VC 与 checked integer"
 requirements = ["VERIFY-CORE-001"]
 
 [[milestone]]
-version = "0.31.25"
+version = "0.31.28"
 kind = "implementation"
 title = "Verifier artifact 与 fail-closed"
 requirements = ["VERIFY-CORE-001"]
 
 [[milestone]]
-version = "0.31.26"
+version = "0.31.29"
 kind = "audit"
 title = "Verifier 止血与攻击审查 II"
 requirements = []
@@ -443,22 +527,26 @@ requirements = []
 # - 标记为 interpreter-only 或迁移到 checked_run_source_result / checked_compile_and_run
 # - 确保 stable evidence 不虚高（贯穿止血线 §7："测试绕过 CheckedProgram 却被计入 stable evidence"）
 
-# === Phase C: Component 边界（0.31.27–0.31.35）===
+# === Phase C: Component 边界（0.31.30–0.31.38）===
 
 [[milestone]]
-version = "0.31.27"
+version = "0.31.30"
 kind = "implementation"
 title = "Component IR 与 mimiabi"
+# 【盲审追加】ABI 生成器：扫描 Runtime 导出强类型接口，干掉 get_runtime_fn("string")（P0，RC 前）
+# 【盲审追加】零拷贝视图 .as_c_slice()：List/string 跨 FFI 零拷贝（胶水语言 Marshalling Tax）
 requirements = ["COMPONENT-IR-001", "COMPONENT-RAW-001"]
 
 [[milestone]]
-version = "0.31.28"
+version = "0.31.31"
 kind = "implementation"
 title = "Native ABI 与 handle lease"
+# 【盲审追加】Handle Registry → 胖指针：Map/Set/List 直接在栈和堆上流动（RC 管理），去全局锁
+# 【盲审追加】String 胖指针：废弃 C String（*mut c_char），改用 { data, len, capacity }
 requirements = ["COMPONENT-HANDLE-001"]
 
 [[milestone]]
-version = "0.31.29"
+version = "0.31.32"
 kind = "stabilization"
 title = "Component 稳定检查点"
 requirements = []
@@ -466,7 +554,7 @@ requirements = []
 # - ABI fuzz：size/align/offset/tag probe 跨平台
 # - Handle lease race 测试（并发 acquire/release/expiry）
 # - Allocator mismatch 检测
-# - 0.31.27–28 回归扫描
+# - 0.31.30–28 回归扫描
 # - 不新增 Component surface
 # 门禁：
 # - C/Rust size/align/offset probe 全绿
@@ -474,25 +562,27 @@ requirements = []
 # - 全量测试连续两次绿
 
 [[milestone]]
-version = "0.31.30"
+version = "0.31.33"
 kind = "implementation"
 title = "Callback 与 async 生命周期"
+# 【盲审追加】并发原语 Opaque Pointer + Generation：Mutex/Channel/Atomic 句柄改为不透明指针，
+#   内部带 Arc/Generation，非预期线程触碰 → Abort
 requirements = ["COMPONENT-CALLBACK-001", "COMPONENT-ASYNC-001"]
 
 [[milestone]]
-version = "0.31.31"
+version = "0.31.34"
 kind = "implementation"
 title = "Wire Schema 1"
 requirements = ["COMPONENT-WIRE-001"]
 
 [[milestone]]
-version = "0.31.32"
+version = "0.31.35"
 kind = "implementation"
 title = "Rust Safe SDK"
 requirements = []
 
 [[milestone]]
-version = "0.31.33"
+version = "0.31.36"
 kind = "implementation"
 title = "XPU FFI 验证（extern C 真实库调通）"
 requirements = ["MULTILANG-AUTHORITY-001"]
@@ -507,13 +597,13 @@ requirements = ["MULTILANG-AUTHORITY-001"]
 # - 双后端等价（interp 跳过 FFI，codegen 执行）
 
 [[milestone]]
-version = "0.31.34"
+version = "0.31.37"
 kind = "audit"
 title = "Component 攻击审查"
 requirements = []
 
 [[milestone]]
-version = "0.31.35"
+version = "0.31.38"
 kind = "stabilization"
 title = "SDK conformance 加固"
 requirements = []
@@ -529,53 +619,60 @@ requirements = []
 # - Wire fuzz 0 crash
 # - 全量测试连续两次绿
 
-# === Phase D: 工具与隔离（0.31.36–0.31.41）===
-# 注：0.31.36–38（自举）已标记 deferred，移出 0.1.1 必须完成路径。
+# === Phase D: 工具与隔离（0.31.39–0.31.44）===
+# 注：0.31.39–38（自举）已标记 deferred，移出 0.1.1 必须完成路径。
 # 自举不产生用户价值，推迟到语言稳定后的 post-1.0 阶段。
 
 [[milestone]]
-version = "0.31.36"
+version = "0.31.39"
 kind = "deferred"
 title = "自举可行性 spike（deferred to post-1.0）"
 requirements = []
 
 [[milestone]]
-version = "0.31.37"
+version = "0.31.40"
 kind = "deferred"
 title = "MimiSpec parser 自举（deferred to post-1.0）"
 requirements = []
 
 [[milestone]]
-version = "0.31.38"
+version = "0.31.41"
 kind = "deferred"
 title = "HM 自举闭环（deferred to post-1.0）"
 requirements = []
 
 [[milestone]]
-version = "0.31.39"
+version = "0.31.42"
 kind = "implementation"
 title = "Pre-1.0 migration tool"
 requirements = ["MIGRATION-PRE1-001", "SYNTAX-REMOVED-001"]
 
 [[milestone]]
-version = "0.31.40"
+version = "0.31.43"
 kind = "implementation"
 title = "Tooling 全覆盖"
+# 【盲审追加】Provenance Tracking：InferTy 记录约束来源行号，Flow 专属报错
+# 【盲审追加】TyErr 毒药类型：推断失败标记 TyErr，防级联错误刷屏
+# 【盲审追加】Z3 报错翻译：SMT 公式 → 大白话（双重报错折叠，Python 难民 DX）
 requirements = ["TOOL-SUPPORT-001"]
 
 [[milestone]]
-version = "0.31.41"
+version = "0.31.44"
 kind = "implementation"
 title = "Experimental 隔离"
 requirements = ["PROTOCOL-DYN-001", "EFFECT-CAP-001", "COMPONENT-RAW-001"]
-# 注：FLOW-MULTI-001 已提前到 0.31.22 追加 C（架构修正案条款 7）
+# 注：FLOW-MULTI-001 已提前到 0.31.25 追加 C（架构修正案条款 7）
 
-# === Phase E: 冻结与 RC（0.31.42–0.31.45）===
+# === Phase E: 冻结与 RC（0.31.45–0.31.48）===
 
 [[milestone]]
-version = "0.31.42"
+version = "0.31.45"
 kind = "debug"
 title = "DEBUG 周期"
+# 【盲审追加】L1 强化：比对 exit code + Fault Trace + ASSERT_FAULT 测试宏
+# 【盲审追加】L1 浮点 assert_approx_eq（跨平台浮点非确定性）
+# 【盲审追加】Surface interpreter 物理删除（ResolvedInterpreter 69/69 后）
+# 【盲审追加】876 unsafe SAFETY 注释（AI 批量 + 人工审计高风险项，贯穿 0.31.45-48）
 requirements = []
 # 【v4 吸收】Interpreter 结构体瘦身：
 # - 审计 Interpreter<'a> ~105 个字段，将冷路径字段（comptime_results、
@@ -583,19 +680,21 @@ requirements = []
 # - 减少热路径 cache miss（前提：AD-1 body 迁移完成后 resolved_* 字段可精简）
 
 [[milestone]]
-version = "0.31.43"
+version = "0.31.46"
 kind = "audit"
 title = "最终敌对审查"
+# 【盲审追加】Trap Tests：IEEE-754 边界 + 整数溢出 + OOB，检测解释器/codegen 共享 bug
+# 【盲审追加】对抗性 Fuzzing：843 个 extern fn 随机输入 + ASan
 requirements = []
 
 [[milestone]]
-version = "0.31.44"
+version = "0.31.47"
 kind = "rc"
 title = "RC1"
 requirements = []
 
 [[milestone]]
-version = "0.31.45"
+version = "0.31.48"
 kind = "rc"
 title = "RC2 与 Pre-1.0 退出"
 requirements = []
