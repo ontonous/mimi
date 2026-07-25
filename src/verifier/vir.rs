@@ -299,8 +299,15 @@ impl VFunction {
     /// Produce a normalized string for semantic hashing.
     /// Variable names are already canonical (%N), so this is just
     /// the structural representation without spans.
+    ///
+    /// 0.31.29 audit P2-7/P2-14: includes `typestate_context` and
+    /// `is_verified_attr` so that functions differing only in these
+    /// fields produce different hashes.
     pub fn normalized_repr(&self) -> String {
         let mut s = String::new();
+        if self.is_verified_attr {
+            s.push_str("#[verified] ");
+        }
         s.push_str(&format!("func {}(", self.id));
         for (i, (var, ty, _)) in self.params.iter().enumerate() {
             if i > 0 {
@@ -314,6 +321,26 @@ impl VFunction {
         }
         for post in &self.postconditions {
             s.push_str(&format!("  ensures {}\n", post));
+        }
+        // Include typestate context in the hash so that functions with
+        // different Flow transition axioms produce different hashes.
+        if let Some(ref ts) = self.typestate_context {
+            if !ts.source_invariants.is_empty()
+                || !ts.transition_guards.is_empty()
+                || !ts.target_invariants.is_empty()
+            {
+                s.push_str("  typestate {\n");
+                for inv in &ts.source_invariants {
+                    s.push_str(&format!("    source_inv {}\n", inv));
+                }
+                for guard in &ts.transition_guards {
+                    s.push_str(&format!("    guard {}\n", guard));
+                }
+                for inv in &ts.target_invariants {
+                    s.push_str(&format!("    target_inv {}\n", inv));
+                }
+                s.push_str("  }\n");
+            }
         }
         s.push('}');
         s
@@ -688,6 +715,12 @@ impl LoweringCtx {
             Expr::Literal(crate::ast::Lit::Int(_)) => {
                 // When the function returns i32, integer literals are i32
                 // (so that definedness checks apply to constant expressions).
+                // P2-11: This is a function-level heuristic. If a function
+                // returns i32 but has intermediate i64 computations, the
+                // literals in those computations would be incorrectly typed
+                // as i32. Fixing this requires integrating the checker's
+                // type information into the VIR lowering (post-CheckedProgram
+                // migration).
                 if self.return_vtype == Some(VType::I32) {
                     VType::I32
                 } else {
@@ -1235,6 +1268,12 @@ fn lower_expr_to_vir(expr: &crate::ast::Expr, ctx: &mut LoweringCtx) -> Option<V
 }
 
 /// Lower match arms to a nested Select (ite chain).
+///
+/// 0.31.29 audit P2-8: non-exhaustive matches (no wildcard/variable arm)
+/// return None (fail-closed) instead of using IntConst(0) as fallback.
+///
+/// 0.31.29 audit P2-9: bool patterns use BoolConst + direct bool encoding
+/// instead of IntConst(0/1) which fails for bool-typed scrutinees.
 fn lower_match_arms_to_vir(
     matched: &VExpr,
     arms: &[crate::ast::MatchArm],
@@ -1262,11 +1301,16 @@ fn lower_match_arms_to_vir(
                 Box::new(matched.clone()),
                 Box::new(VExpr::IntConst(*n)),
             ),
-            PatternKind::Literal(Lit::Bool(b)) => VExpr::Compare(
-                VCmpOp::Eq,
-                Box::new(matched.clone()),
-                Box::new(VExpr::IntConst(if *b { 1 } else { 0 })),
-            ),
+            // P2-9: bool patterns use BoolConst so that encode_bool can
+            // handle bool-typed scrutinees correctly (not int comparison).
+            PatternKind::Literal(Lit::Bool(true)) => {
+                // match b { true => ... } → condition is just `b`
+                matched.clone()
+            }
+            PatternKind::Literal(Lit::Bool(false)) => {
+                // match b { false => ... } → condition is `!b`
+                VExpr::Not(Box::new(matched.clone()))
+            }
             _ => return None, // Constructor, Tuple, etc. not in trusted subset
         };
 
@@ -1280,11 +1324,9 @@ fn lower_match_arms_to_vir(
 
         result = Some(match result {
             Some(prev) => VExpr::Select(Box::new(cond), Box::new(arm_val), Box::new(prev)),
-            None => VExpr::Select(
-                Box::new(cond),
-                Box::new(arm_val),
-                Box::new(VExpr::IntConst(0)), // fallback for non-exhaustive
-            ),
+            // P2-8: no wildcard/variable arm means non-exhaustive match.
+            // Fail-closed: return None instead of using IntConst(0) fallback.
+            None => return None,
         });
     }
     result
@@ -1640,7 +1682,12 @@ impl VirZ3Ctx {
                 self.collect_definedness(lhs, obligations);
                 self.collect_definedness(rhs, obligations);
 
-                // Only generate obligations for i32 (checked)
+                // Only generate obligations for i32 (checked).
+                // P2-10: i64 is modeled as unbounded (no overflow/div-zero
+                // definedness checks). This is a documented soundness gap:
+                // i64 operations can overflow silently in verification.
+                // Fixing this requires adding i64 range constraints similar
+                // to i32, but with i64::MIN/MAX bounds.
                 if *ty != VType::I32 {
                     return;
                 }
