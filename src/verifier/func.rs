@@ -1081,6 +1081,189 @@ impl VerifierCtx {
         }
     }
 
+    /// 0.31.27+: Attempt to inline callee ensures for VIR path.
+    ///
+    /// If the function contains calls to verified functions, replace each call
+    /// with a fresh variable and inject the callee's ensures as additional
+    /// requires. This extends VIR coverage to functions that call verified
+    /// pure functions.
+    ///
+    /// Returns `None` if:
+    /// - The function has no calls
+    /// - Any call is to an unverified function (V-C4: only admit verified callees)
+    /// - Any call argument is not in the trusted subset
+    ///
+    /// V1 limitations:
+    /// - Only handles calls where the callee has explicit ensures
+    /// - Callee ensures are injected as requires (unconditional assumptions)
+    /// - Nested calls (f(g(x))) are handled recursively (inner first)
+    fn try_inline_callee_ensures(&self, func: &FuncDef) -> Option<FuncDef> {
+        let mut counter = 0usize;
+        let mut injected: Vec<Stmt> = Vec::new();
+
+        // Walk the body and inline calls
+        let new_body = self.inline_calls_in_stmts(&func.body, &mut counter, &mut injected)?;
+
+        if injected.is_empty() {
+            return None; // No calls were inlined
+        }
+
+        // Prepend injected requires to the body
+        let mut body = injected;
+        body.extend(new_body);
+
+        Some(FuncDef {
+            body,
+            ..func.clone()
+        })
+    }
+
+    /// Recursively walk statements, inlining calls to verified functions.
+    fn inline_calls_in_stmts(
+        &self,
+        stmts: &[Stmt],
+        counter: &mut usize,
+        injected: &mut Vec<Stmt>,
+    ) -> Option<Vec<Stmt>> {
+        let mut result = Vec::with_capacity(stmts.len());
+        for stmt in stmts {
+            let new_stmt = self.inline_calls_in_stmt(stmt, counter, injected)?;
+            result.push(new_stmt);
+        }
+        Some(result)
+    }
+
+    /// Inline calls in a single statement.
+    fn inline_calls_in_stmt(
+        &self,
+        stmt: &Stmt,
+        counter: &mut usize,
+        injected: &mut Vec<Stmt>,
+    ) -> Option<Stmt> {
+        match stmt.unlocated() {
+            Stmt::Let { pat, ty, init, mut_, ref_ } => {
+                let new_init = match init {
+                    Some(expr) => Some(self.inline_calls_in_expr(expr, counter, injected)?),
+                    None => None,
+                };
+                Some(Stmt::Let {
+                    pat: pat.clone(),
+                    ty: ty.clone(),
+                    init: new_init,
+                    mut_: *mut_,
+                    ref_: *ref_,
+                })
+            }
+            Stmt::Return(expr) => {
+                let new_expr = match expr {
+                    Some(e) => Some(self.inline_calls_in_expr(e, counter, injected)?),
+                    None => None,
+                };
+                Some(Stmt::Return(new_expr))
+            }
+            Stmt::Expr(expr) => {
+                let new_expr = self.inline_calls_in_expr(expr, counter, injected)?;
+                Some(Stmt::Expr(new_expr))
+            }
+            // Contracts and other statements pass through unchanged
+            _ => Some(stmt.clone()),
+        }
+    }
+
+    /// Recursively walk an expression, replacing calls to verified functions
+    /// with fresh variables and injecting callee ensures.
+    ///
+    /// V1: only handles Call, Binary, Unary, Old, Located. Complex expressions
+    /// (If, Match, Block, etc.) return None → fall back to AST path.
+    fn inline_calls_in_expr(
+        &self,
+        expr: &Expr,
+        counter: &mut usize,
+        injected: &mut Vec<Stmt>,
+    ) -> Option<Expr> {
+        match expr.unlocated() {
+            Expr::Call(callee, args) => {
+                // Only handle identifier callees (not method calls or complex expressions)
+                let callee_name = match callee.unlocated() {
+                    Expr::Ident(name) => name.clone(),
+                    _ => return None, // Not a simple call; can't inline
+                };
+
+                // V-C4: only admit ensures from callees that already verified
+                let callee_ok = self
+                    .func_status
+                    .get(&callee_name)
+                    .is_some_and(|s| *s == VerifStatus::Verified);
+                if !callee_ok {
+                    return None; // Callee not verified; can't inline
+                }
+
+                // Get callee's ensures
+                let callee_func = self.func_defs.get(&callee_name)?;
+                let callee_ensures: Vec<Expr> = callee_func
+                    .body
+                    .iter()
+                    .filter_map(|s| {
+                        if let Stmt::Ensures(e, _) = s.unlocated() {
+                            Some(e.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if callee_ensures.is_empty() {
+                    return None; // No ensures to inline
+                }
+
+                // Recursively inline calls in arguments first
+                let new_args: Vec<Expr> = args
+                    .iter()
+                    .map(|a| self.inline_calls_in_expr(a, counter, injected))
+                    .collect::<Option<Vec<_>>>()?;
+
+                // Generate fresh variable for the call result
+                let fresh_name = format!("__call_{}", counter);
+                *counter += 1;
+
+                // Substitute callee ensures: params → args, result → fresh_var
+                let callee_params = callee_func.params.clone();
+                for ens_expr in &callee_ensures {
+                    let substituted =
+                        self.substitute_call(ens_expr, &callee_params, &new_args, &fresh_name);
+                    // Inject as a requires statement (assumed precondition, not
+                    // a postcondition to prove). The VIR lowering maps
+                    // Stmt::Requires → VStmt::Assume.
+                    let span = expr
+                        .meta()
+                        .map(|m| m.span)
+                        .unwrap_or(Span::UNKNOWN);
+                    injected.push(Stmt::Requires(substituted, span));
+                }
+
+                // Replace the call with the fresh variable
+                Some(Expr::Ident(fresh_name))
+            }
+            Expr::Binary(op, lhs, rhs) => {
+                let new_lhs = self.inline_calls_in_expr(lhs, counter, injected)?;
+                let new_rhs = self.inline_calls_in_expr(rhs, counter, injected)?;
+                Some(Expr::Binary(*op, Box::new(new_lhs), Box::new(new_rhs)))
+            }
+            Expr::Unary(op, inner) => {
+                let new_inner = self.inline_calls_in_expr(inner, counter, injected)?;
+                Some(Expr::Unary(*op, Box::new(new_inner)))
+            }
+            Expr::Old(inner) => {
+                let new_inner = self.inline_calls_in_expr(inner, counter, injected)?;
+                Some(Expr::Old(Box::new(new_inner)))
+            }
+            // Leaf expressions: no calls to inline
+            Expr::Literal(_) | Expr::Ident(_) => Some(expr.clone()),
+            // Complex expressions (If, Match, Block, etc.): can't inline in v1
+            _ => None,
+        }
+    }
+
     /// VIR-based verification path (0.31.26).
     ///
     /// Attempts to verify a function using the Verification IR:
@@ -1092,6 +1275,12 @@ impl VerifierCtx {
     /// Returns `None` if the function is not in the trusted subset
     /// (caller should fall back to the AST-based path).
     /// Returns `Some(result)` if verification was attempted via VIR.
+    ///
+    /// 0.31.27+: Callee ensures propagation. If the gate rejects due to
+    /// calls, we attempt to inline callee ensures: replace each call to a
+    /// verified function with a fresh variable and inject the callee's
+    /// ensures as additional requires. This extends VIR coverage to
+    /// functions that call verified pure functions.
     pub(crate) fn verify_func_vir(
         &mut self,
         session: &mut SolverSession,
@@ -1102,9 +1291,26 @@ impl VerifierCtx {
         let start = Instant::now();
 
         // 1. Trusted-subset gate
-        if vir::check_trusted_subset(func).is_err() {
-            return None; // Fall back to AST-based path
-        }
+        // 0.31.27+: If the gate rejects due to calls, try inlining callee
+        // ensures from verified functions. This extends VIR coverage to
+        // functions that call verified pure functions.
+        let effective_func: FuncDef;
+        let func_ref: &FuncDef = if vir::check_trusted_subset(func).is_err() {
+            // Gate rejected. Try callee ensures inlining.
+            match self.try_inline_callee_ensures(func) {
+                Some(inlined) => {
+                    // Re-check the gate on the inlined function.
+                    if vir::check_trusted_subset(&inlined).is_err() {
+                        return None; // Still not in trusted subset; fall back
+                    }
+                    effective_func = inlined;
+                    &effective_func
+                }
+                None => return None, // No inlinable calls; fall back to AST
+            }
+        } else {
+            func
+        };
 
         // 1b. Fall back to AST path for constructs VIR doesn't handle yet:
         // - invariant statements (VIR doesn't encode loop invariants)
@@ -1112,7 +1318,7 @@ impl VerifierCtx {
         // 0.31.28: f64 parameters/return are now handled by the VIR path:
         // - f64 arithmetic → NotInTrustedSubset (lowering returns None)
         // - f64 comparison → F64Compare (uninterpreted predicate)
-        let has_invariant = func
+        let has_invariant = func_ref
             .body
             .iter()
             .any(|s| matches!(s.unlocated(), Stmt::Invariant(..)));
@@ -1121,16 +1327,16 @@ impl VerifierCtx {
         }
 
         // 2. Lower to VIR
-        let (vfunc, _span_table) = match vir::lower_func_to_vir(func) {
+        let (vfunc, _span_table) = match vir::lower_func_to_vir(func_ref) {
             Ok(result) => result,
             Err(reason) => {
                 // 0.31.28: Lowering failed. If the function has f64 parameters
                 // or return type, this is likely because of f64 arithmetic
                 // (which is NOT in the trusted subset). Return NotInTrustedSubset
                 // instead of falling back to the AST path.
-                let has_f64 = func.params.iter().any(|p| {
+                let has_f64 = func_ref.params.iter().any(|p| {
                     matches!(p.ty.unlocated(), Type::Name(n, _) if n == "f64")
-                }) || func.ret.as_ref().is_some_and(|t| {
+                }) || func_ref.ret.as_ref().is_some_and(|t| {
                     matches!(t.unlocated(), Type::Name(n, _) if n == "f64")
                 });
                 if has_f64 {
@@ -1178,11 +1384,11 @@ impl VerifierCtx {
         }
 
         // 3. Set up Z3 encoding context
-        let returns_f64 = func
+        let returns_f64 = func_ref
             .ret
             .as_ref()
             .is_some_and(|t| matches!(t.unlocated(), Type::Name(n, _) if n == "f64"));
-        let returns_bool = func.ret.as_ref().is_some_and(
+        let returns_bool = func_ref.ret.as_ref().is_some_and(
             |t| matches!(t.unlocated(), Type::Name(n, _) if n == "bool" || n == "Bool"),
         );
 
@@ -1215,6 +1421,73 @@ impl VerifierCtx {
         // 4. Process body statements
         // 0.31.29 audit P1-3: all encoding failures are fail-closed (return
         // NotInTrustedSubset instead of silently skipping).
+
+        // 0.31.27+: Pre-register all variables in the VIR body.
+        // Callee ensures inlining introduces fresh variables (__call_N) in
+        // Assume statements that precede their Let bindings. Without
+        // pre-registration, encode_bool/encode_int would fail to find them.
+        // Scan all VStmts for VarIds and register any not yet known.
+        {
+            use crate::verifier::vir::VExpr;
+            fn collect_var_ids(expr: &VExpr, out: &mut Vec<(crate::verifier::vir::VarId, crate::verifier::vir::VType)>) {
+                match expr {
+                    VExpr::Var(id) => {
+                        // Infer type from context: default to I64
+                        out.push((*id, crate::verifier::vir::VType::I64));
+                    }
+                    VExpr::Old(id) => {
+                        out.push((*id, crate::verifier::vir::VType::I64));
+                    }
+                    VExpr::CheckedArith(_, l, r, ty) => {
+                        collect_var_ids(l, out);
+                        collect_var_ids(r, out);
+                        // Also register the result type
+                        let _ = ty;
+                    }
+                    VExpr::CheckedNeg(inner, _) => collect_var_ids(inner, out),
+                    VExpr::Compare(_, l, r) | VExpr::F64Compare(_, l, r) => {
+                        collect_var_ids(l, out);
+                        collect_var_ids(r, out);
+                    }
+                    VExpr::Boolean(_, operands) => {
+                        for op in operands {
+                            collect_var_ids(op, out);
+                        }
+                    }
+                    VExpr::Not(inner) => collect_var_ids(inner, out),
+                    VExpr::Select(c, t, e) => {
+                        collect_var_ids(c, out);
+                        collect_var_ids(t, out);
+                        collect_var_ids(e, out);
+                    }
+                    VExpr::OpaqueF64(id) => {
+                        out.push((*id, crate::verifier::vir::VType::F64Opaque));
+                    }
+                    _ => {}
+                }
+            }
+            let mut all_vars: Vec<(crate::verifier::vir::VarId, crate::verifier::vir::VType)> = Vec::new();
+            for stmt in &vfunc.body {
+                match stmt {
+                    VStmt::Assume(expr) | VStmt::Assert(expr) => collect_var_ids(expr, &mut all_vars),
+                    VStmt::Let(var, expr) => {
+                        let vty = expr.ty().unwrap_or(crate::verifier::vir::VType::I64);
+                        all_vars.push((*var, vty));
+                        collect_var_ids(expr, &mut all_vars);
+                    }
+                    VStmt::Return(expr) => collect_var_ids(expr, &mut all_vars),
+                }
+            }
+            // Also scan postconditions
+            for pc in &vfunc.postconditions {
+                collect_var_ids(pc, &mut all_vars);
+            }
+            for (var, vty) in all_vars {
+                if !z3ctx.var_types.contains_key(&var) {
+                    z3ctx.register_let(var, vty);
+                }
+            }
+        }
 
         for stmt in &vfunc.body {
             match stmt {
