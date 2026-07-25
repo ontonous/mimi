@@ -203,7 +203,6 @@ pub struct Interpreter<'a> {
         Option<HashMap<String, (usize, String)>>,
     pub(in crate::interp) resolved_actor_method_params:
         Option<HashMap<String, Vec<(String, String)>>>,
-    pub(in crate::interp) resolved_actor_method_effects: Option<HashMap<String, Vec<String>>>,
     pub(in crate::interp) resolved_actor_fields:
         Option<HashMap<String, Vec<(String, String, bool)>>>,
     /// Capability names materialised from CheckedProgram.
@@ -221,8 +220,6 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_method_signatures: Option<HashMap<String, (usize, String)>>,
     /// Trait/impl method parameter directories: "TraitName.Method" -> [(param_name, type display)].
     pub(in crate::interp) resolved_method_params: Option<HashMap<String, Vec<(String, String)>>>,
-    /// Trait/impl method effect directories: "TraitName.Method" -> [effect].
-    pub(in crate::interp) resolved_method_effects: Option<HashMap<String, Vec<String>>>,
     /// Impl directories materialised from CheckedProgram: "Trait:for:Type" -> methods.
     pub(in crate::interp) resolved_impls: Option<HashMap<String, Vec<String>>>,
     /// Ownership ledger owners materialised from CheckedProgram.
@@ -261,27 +258,6 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_extern_params: Option<HashMap<String, Vec<(String, String)>>>,
     pub(in crate::interp) resolved_extern_no_panic: Option<std::collections::HashSet<String>>,
     pub(in crate::interp) resolved_extern_unsafe: Option<std::collections::HashSet<String>>,
-    /// Typed call sites from CheckedProgram: node_id -> (owner, callee, argc, kind).
-    pub(in crate::interp) resolved_call_sites: Option<
-        HashMap<
-            String,
-            (
-                String,
-                String,
-                usize,
-                Option<usize>,
-                Vec<String>,
-                Option<String>,
-                String,
-            ),
-        >,
-    >,
-    /// Call sites grouped by owner: owner -> [(callee, argc, kind)].
-    pub(in crate::interp) resolved_call_sites_by_owner:
-        Option<HashMap<String, Vec<(String, usize, String)>>>,
-    /// Call sites grouped by callee: callee -> [(owner, argc, kind)].
-    pub(in crate::interp) resolved_call_sites_by_callee:
-        Option<HashMap<String, Vec<(String, usize, String)>>>,
     /// Flow mailbox depth limits materialised from CheckedProgram: flow -> depth.
     pub(in crate::interp) resolved_mailbox_depths: Option<HashMap<String, usize>>,
     /// Flow state payloads: "Flow.State" -> [(field, type display)].
@@ -454,7 +430,6 @@ impl<'a> Interpreter<'a> {
         let mut actors = HashMap::new();
         let mut actor_method_signatures = HashMap::new();
         let mut actor_method_params = HashMap::new();
-        let mut actor_method_effects = HashMap::new();
         let mut actor_fields = HashMap::new();
         for actor in program.actors().values() {
             actors.insert(actor.qualified_name.clone(), actor.methods.clone());
@@ -463,7 +438,6 @@ impl<'a> Interpreter<'a> {
                 actor_method_signatures
                     .insert(key.clone(), (method.params.len(), method.ret.clone()));
                 actor_method_params.insert(key.clone(), method.params.clone());
-                actor_method_effects.insert(key, method.effects.clone());
             }
             if !actor.fields.is_empty() {
                 actor_fields.insert(
@@ -479,7 +453,6 @@ impl<'a> Interpreter<'a> {
         interp.resolved_actors = Some(actors);
         interp.resolved_actor_method_signatures = Some(actor_method_signatures);
         interp.resolved_actor_method_params = Some(actor_method_params);
-        interp.resolved_actor_method_effects = Some(actor_method_effects);
         interp.resolved_actor_fields = Some(actor_fields);
         let capabilities = program
             .capabilities()
@@ -514,14 +487,12 @@ impl<'a> Interpreter<'a> {
         let mut traits = HashMap::new();
         let mut method_signatures = HashMap::new();
         let mut method_params = HashMap::new();
-        let mut method_effects = HashMap::new();
         for trait_def in program.traits().values() {
             traits.insert(trait_def.qualified_name.clone(), trait_def.methods.clone());
             for method in &trait_def.method_signatures {
                 let key = format!("{}.{}", trait_def.qualified_name, method.name);
                 method_signatures.insert(key.clone(), (method.params.len(), method.ret.clone()));
                 method_params.insert(key.clone(), method.params.clone());
-                method_effects.insert(key, method.effects.clone());
             }
         }
         interp.resolved_traits = Some(traits);
@@ -532,13 +503,11 @@ impl<'a> Interpreter<'a> {
                 let key = format!("{}.{}", impl_def.qualified_name, method.name);
                 method_signatures.insert(key.clone(), (method.params.len(), method.ret.clone()));
                 method_params.insert(key.clone(), method.params.clone());
-                method_effects.insert(key, method.effects.clone());
             }
         }
         interp.resolved_impls = Some(impls);
         interp.resolved_method_signatures = Some(method_signatures);
         interp.resolved_method_params = Some(method_params);
-        interp.resolved_method_effects = Some(method_effects);
         interp.resolved_ownership_owners = Some(
             program
                 .resource_analyses()
@@ -704,50 +673,6 @@ impl<'a> Interpreter<'a> {
         }
         interp.resolved_extern_no_panic = Some(extern_no_panic);
         interp.resolved_extern_unsafe = Some(extern_unsafe);
-        let mut call_sites = HashMap::new();
-        for (node_id, site) in program.call_sites() {
-            call_sites.insert(
-                node_id.0.clone(),
-                (
-                    site.owner.clone(),
-                    site.callee.clone(),
-                    site.argc,
-                    site.expected_argc,
-                    site.effects.clone(),
-                    site.ret.clone(),
-                    match site.kind {
-                        crate::core::ResolvedCallKind::Function => "function".into(),
-                        crate::core::ResolvedCallKind::Extern => "extern".into(),
-                        crate::core::ResolvedCallKind::Builtin => "builtin".into(),
-                        crate::core::ResolvedCallKind::Method => "method".into(),
-                        crate::core::ResolvedCallKind::Unknown => "unknown".into(),
-                    },
-                ),
-            );
-        }
-        interp.resolved_call_sites = Some(call_sites);
-        let mut call_sites_by_owner: HashMap<String, Vec<(String, usize, String)>> = HashMap::new();
-        if let Some(sites) = interp.resolved_call_sites.as_ref() {
-            for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in sites {
-                call_sites_by_owner.entry(owner.clone()).or_default().push((
-                    callee.clone(),
-                    *argc,
-                    kind.clone(),
-                ));
-            }
-        }
-        interp.resolved_call_sites_by_owner = Some(call_sites_by_owner);
-        let mut call_sites_by_callee: HashMap<String, Vec<(String, usize, String)>> =
-            HashMap::new();
-        if let Some(sites) = interp.resolved_call_sites.as_ref() {
-            for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in sites {
-                call_sites_by_callee
-                    .entry(callee.clone())
-                    .or_default()
-                    .push((owner.clone(), *argc, kind.clone()));
-            }
-        }
-        interp.resolved_call_sites_by_callee = Some(call_sites_by_callee);
         // Prefer CheckedProgram flow annotations for process spawn quota.
         let checked_max = program.flows().values().find_map(|flow| flow.max_children);
         if checked_max.is_some() {
@@ -851,14 +776,6 @@ impl<'a> Interpreter<'a> {
             .and_then(|map| map.get(qualified_name).map(|(arity, _, _)| *arity))
     }
 
-    /// Test/diagnostic access to CheckedProgram function effects.
-    pub(crate) fn resolved_function_effects(&self, qualified_name: &str) -> Option<Vec<String>> {
-        self.resolved_functions.as_ref().and_then(|map| {
-            map.get(qualified_name)
-                .map(|(_, _, effects)| effects.clone())
-        })
-    }
-
     pub(crate) fn resolved_function_params(
         &self,
         qualified_name: &str,
@@ -949,16 +866,6 @@ impl<'a> Interpreter<'a> {
             .and_then(|map| map.get(&format!("{actor}.{method}")).cloned())
     }
 
-    pub(crate) fn resolved_actor_method_effects(
-        &self,
-        actor: &str,
-        method: &str,
-    ) -> Option<Vec<String>> {
-        self.resolved_actor_method_effects
-            .as_ref()
-            .and_then(|map| map.get(&format!("{actor}.{method}")).cloned())
-    }
-
     pub(crate) fn resolved_actor_fields(&self, actor: &str) -> Option<Vec<(String, String, bool)>> {
         self.resolved_actor_fields
             .as_ref()
@@ -1006,12 +913,6 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn resolved_method_params(&self, key: &str) -> Option<Vec<(String, String)>> {
         self.resolved_method_params
-            .as_ref()
-            .and_then(|map| map.get(key).cloned())
-    }
-
-    pub(crate) fn resolved_method_effects(&self, key: &str) -> Option<Vec<String>> {
-        self.resolved_method_effects
             .as_ref()
             .and_then(|map| map.get(key).cloned())
     }
@@ -1164,78 +1065,6 @@ impl<'a> Interpreter<'a> {
         self.resolved_extern_unsafe
             .as_ref()
             .is_some_and(|set| set.contains(name))
-    }
-
-    pub(crate) fn resolved_call_sites(
-        &self,
-    ) -> Option<
-        &HashMap<
-            String,
-            (
-                String,
-                String,
-                usize,
-                Option<usize>,
-                Vec<String>,
-                Option<String>,
-                String,
-            ),
-        >,
-    > {
-        self.resolved_call_sites.as_ref()
-    }
-
-    pub(crate) fn resolved_call_sites_for_owner(
-        &self,
-        owner: &str,
-    ) -> Option<Vec<(String, usize, String)>> {
-        self.resolved_call_sites_by_owner
-            .as_ref()
-            .and_then(|map| map.get(owner).cloned())
-    }
-
-    pub(crate) fn resolved_call_sites_for_callee(
-        &self,
-        callee: &str,
-    ) -> Option<Vec<(String, usize, String)>> {
-        self.resolved_call_sites_by_callee
-            .as_ref()
-            .and_then(|map| map.get(callee).cloned())
-    }
-
-    pub(crate) fn has_resolved_call_to(&self, callee: &str) -> bool {
-        self.resolved_call_sites
-            .as_ref()
-            .is_some_and(|map| map.values().any(|(_, name, _, _, _, _, _)| name == callee))
-    }
-
-    pub(crate) fn resolved_call_return_type(&self, callee: &str) -> Option<String> {
-        self.resolved_call_sites.as_ref().and_then(|map| {
-            map.values()
-                .find(|(_, name, _, _, _, _, _)| name == callee)
-                .and_then(|(_, _, _, _, _, ret, _)| ret.clone())
-        })
-    }
-
-    pub(crate) fn has_resolved_call_with_effect(&self, callee: &str, effect: &str) -> bool {
-        self.resolved_call_sites.as_ref().is_some_and(|map| {
-            map.values().any(|(_, name, _, _, effects, _, _)| {
-                name == callee && effects.iter().any(|e| e == effect)
-            })
-        })
-    }
-
-    pub(crate) fn resolved_call_arity_mismatches(&self) -> usize {
-        self.resolved_call_sites
-            .as_ref()
-            .map(|map| {
-                map.values()
-                    .filter(|(_, _, argc, expected, _, _, _)| {
-                        expected.map(|exp| exp != *argc).unwrap_or(false)
-                    })
-                    .count()
-            })
-            .unwrap_or(0)
     }
 
     pub(crate) fn is_resolved_fallback_transition(
@@ -1551,7 +1380,6 @@ impl<'a> Interpreter<'a> {
             resolved_actors: None,
             resolved_actor_method_signatures: None,
             resolved_actor_method_params: None,
-            resolved_actor_method_effects: None,
             resolved_actor_fields: None,
             resolved_capabilities: None,
             resolved_capability_combined: None,
@@ -1560,7 +1388,6 @@ impl<'a> Interpreter<'a> {
             resolved_traits: None,
             resolved_method_signatures: None,
             resolved_method_params: None,
-            resolved_method_effects: None,
             resolved_impls: None,
             resolved_ownership_owners: None,
             resolved_ownership_summaries: None,
@@ -1581,9 +1408,6 @@ impl<'a> Interpreter<'a> {
             resolved_extern_params: None,
             resolved_extern_no_panic: None,
             resolved_extern_unsafe: None,
-            resolved_call_sites: None,
-            resolved_call_sites_by_owner: None,
-            resolved_call_sites_by_callee: None,
             resolved_mailbox_depths: None,
             resolved_flow_state_payloads: None,
             resolved_flow_states: None,

@@ -646,7 +646,6 @@ pub struct VerifierCtx {
     pub(crate) let_subst: HashMap<String, Expr>,
     /// Function names materialised from CheckedProgram (qualified).
     pub(crate) checked_function_names: std::collections::HashSet<String>,
-    pub(crate) checked_function_effects: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_function_returns: std::collections::HashMap<String, String>,
     pub(crate) checked_function_params: std::collections::HashMap<String, Vec<(String, String)>>,
     pub(crate) checked_comptime_functions: std::collections::HashSet<String>,
@@ -685,22 +684,6 @@ pub struct VerifierCtx {
     pub(crate) checked_extern_params: std::collections::HashMap<String, Vec<(String, String)>>,
     pub(crate) checked_extern_no_panic: std::collections::HashSet<String>,
     pub(crate) checked_extern_unsafe: std::collections::HashSet<String>,
-    pub(crate) checked_call_sites: std::collections::HashMap<
-        String,
-        (
-            String,
-            String,
-            usize,
-            Option<usize>,
-            Vec<String>,
-            Option<String>,
-            String,
-        ),
-    >,
-    pub(crate) checked_call_sites_by_owner:
-        std::collections::HashMap<String, Vec<(String, usize, String)>>,
-    pub(crate) checked_call_sites_by_callee:
-        std::collections::HashMap<String, Vec<(String, usize, String)>>,
     /// Protocol names materialised from CheckedProgram.
     pub(crate) checked_protocols: std::collections::HashSet<String>,
     pub(crate) checked_protocol_transitions:
@@ -713,14 +696,11 @@ pub struct VerifierCtx {
     pub(crate) checked_method_signatures: std::collections::HashMap<String, (usize, String)>,
     /// Trait/impl method parameter directories: "TraitName.Method" -> [(param_name, type display)].
     pub(crate) checked_method_params: std::collections::HashMap<String, Vec<(String, String)>>,
-    /// Trait/impl method effect directories: "TraitName.Method" -> [effect].
-    pub(crate) checked_method_effects: std::collections::HashMap<String, Vec<String>>,
     /// Actor names materialised from CheckedProgram.
     pub(crate) checked_actors: std::collections::HashSet<String>,
     pub(crate) checked_actor_method_signatures: std::collections::HashMap<String, (usize, String)>,
     pub(crate) checked_actor_method_params:
         std::collections::HashMap<String, Vec<(String, String)>>,
-    pub(crate) checked_actor_method_effects: std::collections::HashMap<String, Vec<String>>,
     pub(crate) checked_actor_fields: std::collections::HashMap<String, Vec<(String, String, bool)>>,
     /// Flow mailbox depths materialised from CheckedProgram.
     pub(crate) checked_mailbox_depths: std::collections::HashMap<String, usize>,
@@ -795,11 +775,6 @@ impl Verifier {
             .functions()
             .values()
             .map(|function| function.qualified_name.clone())
-            .collect();
-        self.ctx.checked_function_effects = program
-            .functions()
-            .values()
-            .map(|function| (function.qualified_name.clone(), function.effects.clone()))
             .collect();
         self.ctx.checked_function_returns = program
             .functions()
@@ -1017,55 +992,6 @@ impl Verifier {
         }
         self.ctx.checked_extern_no_panic = extern_no_panic;
         self.ctx.checked_extern_unsafe = extern_unsafe;
-        let mut call_sites = std::collections::HashMap::new();
-        for (node_id, site) in program.call_sites() {
-            call_sites.insert(
-                node_id.0.clone(),
-                (
-                    site.owner.clone(),
-                    site.callee.clone(),
-                    site.argc,
-                    site.expected_argc,
-                    site.effects.clone(),
-                    site.ret.clone(),
-                    match site.kind {
-                        crate::core::ResolvedCallKind::Function => "function".into(),
-                        crate::core::ResolvedCallKind::Extern => "extern".into(),
-                        crate::core::ResolvedCallKind::Builtin => "builtin".into(),
-                        crate::core::ResolvedCallKind::Method => "method".into(),
-                        crate::core::ResolvedCallKind::Unknown => "unknown".into(),
-                    },
-                ),
-            );
-        }
-        self.ctx.checked_call_sites = call_sites;
-        let mut call_sites_by_owner: std::collections::HashMap<
-            String,
-            Vec<(String, usize, String)>,
-        > = std::collections::HashMap::new();
-        for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in
-            &self.ctx.checked_call_sites
-        {
-            call_sites_by_owner.entry(owner.clone()).or_default().push((
-                callee.clone(),
-                *argc,
-                kind.clone(),
-            ));
-        }
-        self.ctx.checked_call_sites_by_owner = call_sites_by_owner;
-        let mut call_sites_by_callee: std::collections::HashMap<
-            String,
-            Vec<(String, usize, String)>,
-        > = std::collections::HashMap::new();
-        for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in
-            &self.ctx.checked_call_sites
-        {
-            call_sites_by_callee
-                .entry(callee.clone())
-                .or_default()
-                .push((owner.clone(), *argc, kind.clone()));
-        }
-        self.ctx.checked_call_sites_by_callee = call_sites_by_callee;
         self.ctx.checked_protocols = program
             .protocols()
             .values()
@@ -1117,13 +1043,11 @@ impl Verifier {
             .collect();
         let mut method_signatures = std::collections::HashMap::new();
         let mut method_params = std::collections::HashMap::new();
-        let mut method_effects = std::collections::HashMap::new();
         for trait_def in program.traits().values() {
             for method in &trait_def.method_signatures {
                 let key = format!("{}.{}", trait_def.qualified_name, method.name);
                 method_signatures.insert(key.clone(), (method.params.len(), method.ret.clone()));
                 method_params.insert(key.clone(), method.params.clone());
-                method_effects.insert(key, method.effects.clone());
             }
         }
         for impl_def in program.impls().values() {
@@ -1131,12 +1055,10 @@ impl Verifier {
                 let key = format!("{}.{}", impl_def.qualified_name, method.name);
                 method_signatures.insert(key.clone(), (method.params.len(), method.ret.clone()));
                 method_params.insert(key.clone(), method.params.clone());
-                method_effects.insert(key, method.effects.clone());
             }
         }
         self.ctx.checked_method_signatures = method_signatures;
         self.ctx.checked_method_params = method_params;
-        self.ctx.checked_method_effects = method_effects;
         self.ctx.checked_actors = program
             .actors()
             .values()
@@ -1144,19 +1066,16 @@ impl Verifier {
             .collect();
         let mut actor_method_signatures = std::collections::HashMap::new();
         let mut actor_method_params = std::collections::HashMap::new();
-        let mut actor_method_effects = std::collections::HashMap::new();
         for actor in program.actors().values() {
             for method in &actor.method_signatures {
                 let key = format!("{}.{}", actor.qualified_name, method.name);
                 actor_method_signatures
                     .insert(key.clone(), (method.params.len(), method.ret.clone()));
                 actor_method_params.insert(key.clone(), method.params.clone());
-                actor_method_effects.insert(key, method.effects.clone());
             }
         }
         self.ctx.checked_actor_method_signatures = actor_method_signatures;
         self.ctx.checked_actor_method_params = actor_method_params;
-        self.ctx.checked_actor_method_effects = actor_method_effects;
         let mut actor_fields = std::collections::HashMap::new();
         for actor in program.actors().values() {
             if !actor.fields.is_empty() {
@@ -1393,10 +1312,6 @@ impl Verifier {
         self.ctx.checked_function_names.contains(name)
     }
 
-    pub(crate) fn checked_function_effects(&self, name: &str) -> Option<Vec<String>> {
-        self.ctx.checked_function_effects.get(name).cloned()
-    }
-
     pub(crate) fn checked_function_return_type(&self, name: &str) -> Option<&str> {
         self.ctx
             .checked_function_returns
@@ -1542,61 +1457,6 @@ impl Verifier {
         self.ctx.checked_extern_unsafe.contains(name)
     }
 
-    pub(crate) fn checked_call_sites_for_owner(
-        &self,
-        owner: &str,
-    ) -> Option<Vec<(String, usize, String)>> {
-        self.ctx.checked_call_sites_by_owner.get(owner).cloned()
-    }
-
-    pub(crate) fn checked_call_sites_for_callee(
-        &self,
-        callee: &str,
-    ) -> Option<Vec<(String, usize, String)>> {
-        self.ctx.checked_call_sites_by_callee.get(callee).cloned()
-    }
-
-    pub(crate) fn has_checked_call_to(&self, callee: &str) -> bool {
-        self.ctx
-            .checked_call_sites
-            .values()
-            .any(|(_, name, _, _, _, _, _)| name == callee)
-    }
-
-    pub(crate) fn checked_call_return_type(&self, callee: &str) -> Option<String> {
-        self.ctx
-            .checked_call_sites
-            .values()
-            .find_map(
-                |(_, name, _, _, _, ret, _)| {
-                    if name == callee {
-                        ret.clone()
-                    } else {
-                        None
-                    }
-                },
-            )
-    }
-
-    pub(crate) fn has_checked_call_with_effect(&self, callee: &str, effect: &str) -> bool {
-        self.ctx
-            .checked_call_sites
-            .values()
-            .any(|(_, name, _, _, effects, _, _)| {
-                name == callee && effects.iter().any(|e| e == effect)
-            })
-    }
-
-    pub(crate) fn checked_call_arity_mismatches(&self) -> usize {
-        self.ctx
-            .checked_call_sites
-            .values()
-            .filter(|(_, _, argc, expected, _, _, _)| {
-                expected.map(|exp| exp != *argc).unwrap_or(false)
-            })
-            .count()
-    }
-
     pub(crate) fn has_checked_protocol(&self, name: &str) -> bool {
         self.ctx.checked_protocols.contains(name)
     }
@@ -1642,10 +1502,6 @@ impl Verifier {
         self.ctx.checked_method_params.get(key).cloned()
     }
 
-    pub(crate) fn checked_method_effects(&self, key: &str) -> Option<Vec<String>> {
-        self.ctx.checked_method_effects.get(key).cloned()
-    }
-
     pub(crate) fn has_checked_actor(&self, name: &str) -> bool {
         self.ctx.checked_actors.contains(name)
     }
@@ -1668,17 +1524,6 @@ impl Verifier {
     ) -> Option<Vec<(String, String)>> {
         self.ctx
             .checked_actor_method_params
-            .get(&format!("{actor}.{method}"))
-            .cloned()
-    }
-
-    pub(crate) fn checked_actor_method_effects(
-        &self,
-        actor: &str,
-        method: &str,
-    ) -> Option<Vec<String>> {
-        self.ctx
-            .checked_actor_method_effects
             .get(&format!("{actor}.{method}"))
             .cloned()
     }
