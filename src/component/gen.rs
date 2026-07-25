@@ -6,7 +6,7 @@
 //!
 //! Future: automated extraction from `register_runtime()` LLVM declarations.
 
-use super::symbol::{AbiCallConv, AbiParam, AbiSymbol, AbiSymbolKind};
+use super::symbol::{AbiCallConv, AbiCallbackCategory, AbiParam, AbiSymbol, AbiSymbolKind};
 use super::types::{AbiPrimitive, AbiTypeRef};
 use super::{ComponentIdentity, ComponentIr};
 
@@ -103,6 +103,7 @@ pub struct SymbolBuilder {
     effects: Vec<String>,
     is_unsafe: bool,
     call_conv: AbiCallConv,
+    callback_category: Option<AbiCallbackCategory>,
 }
 
 impl SymbolBuilder {
@@ -115,6 +116,7 @@ impl SymbolBuilder {
             effects: Vec::new(),
             is_unsafe: false,
             call_conv: AbiCallConv::C,
+            callback_category: None,
         }
     }
 
@@ -162,6 +164,13 @@ impl SymbolBuilder {
         self
     }
 
+    /// 0.31.33: Set callback category.
+    pub fn callback(mut self, category: AbiCallbackCategory) -> Self {
+        self.kind = AbiSymbolKind::Callback;
+        self.callback_category = Some(category);
+        self
+    }
+
     fn build(self) -> AbiSymbol {
         AbiSymbol {
             name: self.name,
@@ -171,6 +180,7 @@ impl SymbolBuilder {
             effects: self.effects,
             is_unsafe: self.is_unsafe,
             call_conv: self.call_conv,
+            callback_category: self.callback_category,
         }
     }
 }
