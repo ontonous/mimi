@@ -2,87 +2,160 @@
 
 # Mimi 语言
 
-**面向类型状态（Typestate-Oriented）的系统编程语言 — Flow 状态机、合约验证与结构化并发**
+**Flow-first、面向类型状态（Typestate-Oriented）的系统编程语言**
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.1.1--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-4063%20total-brightgreen.svg)](#)
-[![Flow](https://img.shields.io/badge/flow-v0.29%20complete-orange.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-4100%2B-brightgreen.svg)](#)
+[![Semantics](https://img.shields.io/badge/semantics-Pre--1.0-orange.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
-解释器 + LLVM 18 Codegen 双后端 · Z3 形式化验证 · 面向类型状态 · Flow 状态机 · 协议/会话类型 · Actor 模型
+解释器 + LLVM 18 Codegen 双后端 · Z3 形式化验证 · 稀疏 Flow 状态机 · 线性资源 · Actor 模型 · 会话类型 · Component 边界
 
 ---
+
 </div>
-
----
 
 ## 什么是 Mimi？
 
-Mimi 是一门**面向类型状态（Typestate-Oriented）** 的系统编程语言。其核心洞见：**用业务控制流抽象（Flow/状态机）平替生命周期标注与 `&mut self`**。每个资源的生命周期绑定到一个业务状态——编译器通过状态转移保证安全，而非借用检查。
+Mimi 是一门 **Flow-first、面向类型状态（Typestate-Oriented）** 的系统编程语言。核心洞见：**用业务逻辑状态机（Flow）平替生命周期标注与 `&mut self`**。每个资源的生命周期绑定到一个业务状态——编译器通过状态转移保证安全，而非借用检查。
+
+Mimi 要求五个问题的答案直接从源码和类型中可见：
+
+1. 这个业务对象当前处于**什么状态**？
+2. 当前状态允许发生**哪些事件**？
+3. 状态变化时资源和所有权**如何转移**？
+4. 这个失败是局部返回、状态 Fault，还是并发对端 PeerFault？
+5. 哪些错误可以在程序运行前被**拒绝**？
 
 ```mimi
-flow Door {
-    state Open   { opened_at: i64 }
-    state Closed { locked: bool }
+flow Order {
+    state Pending
+    state Paid
+    state Shipped
 
-    transition open(Closed) -> Open {
-        do { return Open { opened_at: timestamp() } }
-    }
-    transition close(Open { opened_at }) -> Closed {
-        do { return Closed { locked: false } }
-    }
-    transition lock(Closed) -> Closed {
-        do { return Closed { locked: true } }
-    }
+    transition pay(Pending, payment: Payment) -> Paid { ... }
+    transition ship(Paid, tracking: Tracking) -> Shipped { ... }
 }
 ```
 
-编译器自动补全转移矩阵——每个未定义的 (state, event) 对自动生成 `→ Fault`。无遗漏状态，无遗忘转移。
+**稀疏，而非稠密。** 你不需要声明 `pay(Paid)` 或 `ship(Pending)`。这些组合不是"缺失的矩阵格、自动补全到 Fault"——**它们在类型上不存在**。对 `Pending` 的订单调用 `ship` 是编译错误，不是运行时兜底。动态边界（网络、FFI、反序列化）产生类型化的 `UnexpectedEvent` 错误，不伪造业务边。
+
+### 最小心智模型
+
+| 构造 | 唯一职责 |
+|------|---------|
+| `func` | 无持久状态的同步计算与组合 |
+| `flow` | 跨时间存在的业务状态及其合法变化 |
+| `actor` | 邮箱、调度、隔离、监督；业务状态由 Flow 承载 |
+| `protocol` | Flow 对外可见的静态状态拓扑投影 |
+| `session` | 两个线性端点之间的消息顺序 |
+| `Result<T, E>` | 同步、可恢复的失败 |
+| `Fault` | Flow 不变量破坏或不可继续的状态故障 |
+| `view / mutate / consume` | 只读、原位修改、所有权转移权限 |
+| `requires / ensures` | 可动态检查或静态证明的合约 |
+| `component / foreign` | 跨语言边界，带类型化所有权、错误和 effect |
+
+Mimi 是生产编译后端。意图层设计使用 **MimiSpec**（`.mms`），通过 `mimi promote` 提升为 Mimi。
+
+---
+
+## 设计不变量
+
+[架构修正案（2026-07-25）](devdocs/v0.31/architecture-amendment-1.0.md)经九轮外部盲审后确立了 10 条不可逆不变量：
+
+| # | 不变量 | 含义 |
+|---|--------|------|
+| 1 | **Sparse 不可逆** | 不存在 dense 模式。未声明的 `(state, event)` 组合是编译错误。 |
+| 2 | **禁止嵌套 Flow** | Flow payload 只持有普通数据——handle、原生类型、`shared`/`weak` 引用。永远不持有另一个 Flow 实例。 |
+| 3 | **无 WAL** | 编译器不生成事务日志。数据一致性是业务逻辑的职责。 |
+| 4 | **Recover = 原位复用** | Recover 保留内存句柄（XPU 上 1GB 张量重新分配是灾难）。不是事务回滚。 |
+| 5 | **Generation 由逃逸分析决定** | 无显式语法。局部句柄：零开销。跨边界句柄：编译器 Lowering 时自动打包 Generation。 |
+| 6 | **View/Mutate 是 1.0 必须** | `view`/`mutate` 借用用于纯函数参数传递。不是 nice-to-have。 |
+| 7 | **Multi-target 是 1.0 必须** | `transition parse(Pending) -> Connected \| Rejected`，保留名义 state tag。 |
+| 8 | **跨 FFI 失败 = Fault** | 跨 FFI 失败必须进入 Fault，绝不能 Rejected。无法撤销 C 已改变的外部状态。 |
+| 9 | **`?` 之前禁止线性消费** | Checker 静态拦截：fallible 操作之前消费线性资源 → 编译错误。 |
+| 10 | **无同步 Pinned 超时** | 可能挂死的 C 函数放到 ForeignTask（异步）。不存在同步看门狗。 |
+
+> 完整修正案：13 条款 + 10 不变量。与白皮书（`devdocs/Mimi语言特性设计研究.md`）冲突时以修正案为准。
 
 ---
 
 ## 特性
 
-| 分类 | 特性 | 状态 |
-|------|------|------|
-| **Flow** | `flow`/`state`/`transition` 声明、状态负载、转移分发 | ✅ v0.29.9 |
-| **Flow** | 转移矩阵自动补全（+1 Fault 兜底） | ✅ v0.29.10 |
-| **Flow** | Fault 吸收态 + 资源自动析构 | ✅ v0.29.11 |
-| **Flow** | SystemTrace 溯源信息（`last_state`、`unexpected_event`、快照） | ✅ v0.29.12 |
-| **Flow** | Reset / Recover 系统动词（Fault→根状态，保留持久化字段） | ✅ v0.29.13 |
-| **Flow** | Persistent 持久化负载 + `@transactional` WAL 回滚 | ✅ v0.29.14 |
-| **Flow** | `delegate view/mutate/consume`（三级权限委托） | ✅ v0.29.15 |
-| **Flow** | `pinned { timeout }` FFI 内存锚定 | ✅ v0.29.16 |
-| **Flow** | Subflow 同步嵌套（深度优先析构） | ✅ v0.29.17 |
-| **Flow** | Protocol 接口抽象（保守投影子类型化） | ✅ v0.29.18 |
-| **Flow** | 会话类型：`session`/`dual`/`end`，编译时线性检查 | ✅ v0.29.19 |
-| **Flow** | PeerFault 跨 Actor 传播 | ✅ v0.29.20 |
-| **Flow** | Mailbox 背压自动治理 | ✅ v0.29.21 |
-| **Flow** | 渐进式 Typestate（脚本→隐式 `flow Main { state Single }`） | ✅ v0.29.22 |
-| **Flow** | `view`/`mutate` 局部借用（零开销 GEP 传参） | ✅ v0.29.23 |
-| **Flow** | Spawn 配额控制（`@max_children(N)`） | ✅ v0.29.24 |
-| **Flow** | 多态广播（`Vec<Protocol>`） | ✅ v0.29.25 |
-| **Flow** | Protocol methods、session_pair、lifecycle | ✅ v0.29.27–31 |
-| **合约** | `requires:` / `ensures:` / `invariant:` 函数内声明 | ✅ |
-| **合约** | Z3 SMT 求解器集成（`mimi verify`） | ✅ |
-| **合约** | 运行时合约断言（`mimi build --verify-contracts`） | ✅ |
-| **Actor** | `actor` 关键字、可变字段、mailbox 分发、worker 线程 | ✅ |
-| **双后端** | 解释器（快速开发）+ LLVM 18 codegen（原生编译） | ✅ |
-| **泛型** | `<T: Bound>` 类型参数、递归类型 | ✅ |
-| **ADT** | 枚举/记录/元组、`match` 穷尽检查、`while let` | ✅ |
-| **Option/Result** | `Option<T>` / `Result<T, E>` / `?` 运算符 | ✅ |
-| **FFI** | `extern "C"`、`repr(C)`、多语言 bindgen（C/C++/Rust/Go/Node.js/Java/Python） | ✅ |
-| **Comptime** | `comptime func` + `quote!` AST 生成 | ✅ |
-| **LSP** | 补全、悬停、跳转定义、合约检查镜头 | ✅ |
-| **包管理** | `mimi.toml` 清单、registry、git 依赖、依赖树 | ✅ |
-| **交叉编译** | `--target` 标志、共享库 `.so` 输出 | ✅ |
+### Flow 核心
+
+| 特性 | 状态 |
+|------|------|
+| `flow` / `state` / `transition` 声明、状态负载、转移分发 | ✅ |
+| 稀疏转移图——未声明 `(state, event)` = 编译错误（`@sparse`） | ✅ |
+| 类型化 Fault——per-flow `fault ErrorType` 声明 | ✅ |
+| `become` / `stay` 显式终端关键字 | ✅ |
+| `fails E` 可回滚路径——`?` 返回 `Err((source, error))`，source generation 归还 | ✅ |
+| Reset / Recover 系统动词（用户可覆盖） | ✅ |
+| SystemTrace 溯源（`last_state`、`unexpected_event`、快照） | ✅ |
+| 渐进模式——脚本 `main()` 通过 shell 注入（真 lowering：post-1.0） | ✅ |
+| 多目标转移（`-> A \| B`，保留 state tag） | 📋 0.31.25 |
+
+### 线性安全与所有权
+
+| 特性 | 状态 |
+|------|------|
+| Flow 状态 use-after-move 拒绝（E0423） | ✅ |
+| 别名链、闭包捕获、集合/元组插入拒绝（E0427） | ✅ |
+| CFG 级线性——`is_linear()` 对 Flow 状态的 dataflow 分析 | ✅ |
+| Session 端点线性——scope exit（E0425）、use-after-alias（E0426） | ✅ |
+| 线性资源的 shared/weak 包装拒绝 | ✅ |
+| View/mutate 借用（纯函数参数传递） | 📋 0.31.25 |
+| 跨 turn exactly-once 资源追踪 | 📋 |
+| Channel/Mutex/Atomic 类型级线性 | 📋（已知限制：builtin 整数 handle） |
+
+### 并发
+
+| 特性 | 状态 |
+|------|------|
+| `actor Name runs FlowName`——Actor 业务状态由 Flow 承载 | ✅（解释器；codegen 待实现） |
+| 会话类型：`session` / `dual` / `end`，编译时 residual 检查 | ✅ |
+| Protocol 接口抽象（保守投影子类型化） | ✅ |
+| PeerFault 跨 Actor 传播 | ✅ |
+| 邮箱背压自动治理 | ✅ |
+| 生成配额控制（`@max_children(N)`） | ✅ |
+| 多态广播（`Vec<Protocol>`） | ✅ |
+
+### 合约与验证
+
+| 特性 | 状态 |
+|------|------|
+| 函数体内 `requires:` / `ensures:` / `invariant:` | ✅ |
+| Z3 SMT 求解器集成（`mimi verify`） | ✅ |
+| 运行时合约断言（`mimi build --verify-contracts`） | ✅ |
+
+### 双后端与类型系统
+
+| 特性 | 状态 |
+|------|------|
+| 解释器（快速开发）+ LLVM 18 codegen（原生二进制）——L1 等价测试 | ✅ |
+| Hindley-Milner 类型推断（undo trail + TypeScheme + zonk） | ✅ |
+| 泛型 `<T: Bound>`、递归类型 | ✅ |
+| 枚举 / 记录 / 元组，`match` 穷尽性，`while let` | ✅ |
+| `Option<T>` / `Result<T, E>` / `?` 操作符 | ✅ |
+
+### FFI、Comptime 与工具链
+
+| 特性 | 状态 |
+|------|------|
+| `extern "C"`、`repr(C)`、多语言 bindgen（C/C++/Rust/Go/Node.js/Java/Python） | ✅ |
+| `comptime func` + `quote!` AST 生成 | ✅ |
+| LSP：补全、悬停、跳转定义、合约 lens | ✅ |
+| 包管理器：`mimi.toml`、registry、git 依赖、依赖树 | ✅ |
+| 交叉编译：`--target` 标志、共享库 `.so` 输出 | ✅ |
+| Component IR + Native ABI + Wire Schema | 📋 Phase C |
 
 ---
 
 ## 快速开始
 
-### 从源码构建
+### 构建
 
 ```bash
 git clone https://github.com/ontonous/mimi
@@ -126,6 +199,8 @@ func main() -> i32 {
 # => 0
 ```
 
+`Counter::inc(s0)` **消费** `s0`——transition 之后继续使用 `s0` 是编译错误（E0423）。每次 transition 产生状态的新 generation。
+
 ### 运行测试
 
 ```bash
@@ -134,40 +209,90 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
 
 ---
 
-## 标准库（24 模块）
+## 架构
 
-| 模块 | 文件 | 功能 |
+### CheckedProgram：语义中枢
+
+所有后端（解释器、LLVM codegen、Z3 验证器）消费唯一真值源：**CheckedProgram**。没有后端重查 AST 或重猜类型。
+
+```
+Source → Lexer → Parser → AST
+  → HM 推断 → 类型检查器 → CheckedProgram
+    → Typed Resolved IR（canonical 签名、目录、物化类型）
+    → CFG（per-callable 控制流图）
+    → Ownership Ledger（线性资源分析）
+      ↓
+  ┌───────────┼───────────┐
+  解释器        Codegen      验证器
+  (from_checked) (compile_checked) (verify_checked)
+```
+
+**铁律**：后端不能回退 raw AST。`CheckedProgram::file()` 已收紧为 crate 内 `legacy_body_file()`——函数体向 Resolved IR 的迁移按 body class 在 0.1.1 sprint 中追踪。
+
+### 依赖主链
+
+```
+Span/Origin → HM → CFG/ownership → CheckedProgram/Resolved IR
+  → Flow generation/turn → Actor/Session/resource → semantic trace
+  → Verified Core
+  → Component IR → Native ABI → Wire → Rust SDK / XPU FFI
+```
+
+### 核心抽象
+
+| 抽象 | 位置 | 职责 |
 |------|------|------|
-| `prelude` | `prelude.mimi` | identity、clamp、lerp、compose、pipe、fail、assert_msg |
-| `io` | `io.mimi` | print_line、input_line、print_format、IoOps trait |
-| `fs` | `fs.mimi` | read、write、exists、read_lines、write_lines、file_size |
-| `strings` | `strings.mimi` | split、join、replace_all、capitalize、reverse、truncate、pad |
-| `collections` | `collections.mimi` | sort、map、filter、reduce、partition、group_by、chunks、dedup |
-| `maps` | `maps.mimi` | get、set、merge、pick、omit、has_key、from_list、filter_keys |
-| `set` | `set.mimi` | contains、insert、remove、to_list、is_empty |
-| `json` | `json.mimi` | to_json、from_json、get_int、get_bool、get_string、JsonExt trait |
-| `net` | `net.mimi` | TCP socket、HTTP fetch/fetch_post、NetError |
-| `csv` | `csv.mimi` | parse_csv、serialize_csv |
-| `crypto` | `crypto.mimi` | sha256、base64_encode/decode、hex_encode/decode |
-| `template` | `template.mimi` | render_template |
-| `regex` | (builtins) | regex_match、regex_find、regex_replace |
-| `time` / `datetime` | `time.mimi` / `datetime.mimi` | timestamp、sleep_ms、duration、days_from_now、time_since |
-| `env` | `env.mimi` | get_var、cli_args、has_var、get_int、get_float |
-| `mymath` | `mymath.mimi` | gcd、lcm、factorial、fibonacci、is_prime、is_power_of_two |
-| `array` | `array.mimi` | fill、slice、rotate、binary_search |
-| `iter` | `iter.mimi` | range、zip、enumerate、take、drop、chain |
-| `random` | `random.mimi` | random_int、random_float、random_range |
-| `text` | `text.mimi` | slugify、indent、wrap |
-| `result` | `result.mimi` | unwrap、map、map_err、and_then、or_else |
-| `testing` | `testing.mimi` | assert_eq_int、assert_true、assert_approx_eq_float |
+| **CheckedProgram** | `src/core/checker/` | 唯一语义中枢：canonical 签名、目录、物化类型 |
+| **Typed Resolved IR** | `src/core/resolved/` | ResolvedFunction / ResolvedFlow / ResolvedTransition / ResolvedActor |
+| **HM 统一** | `src/core/unification.rs` | Undo trail + TypeScheme + zonk；泛型调用 fresh instantiate |
+| **TypeFolder** | `src/core/type_folder.rs` | Binder-aware 类型折叠（SurfaceTy / InferTy / ZonkedTy / BackendTy） |
+| **CFG** | `src/core/cfg/` | Per-callable 控制流图，stable-ID CallableCfg |
+| **Ownership Ledger** | `src/core/ownership.rs` | 线性资源 Introduce / Move / Drop / Return + borrow 分析 |
+| **AstNodeMeta** | `src/span.rs` | SourceId + Span + AstOrigin；NodeIdBuilder 稳定身份 |
 
-内置并发原语（全局可用）：`Mutex<T>`、`AtomicI32`/`AtomicI64`/`AtomicBool`、`Channel<T>`、`broadcast`。
+### 编译器内部 Flow 范式
+
+编译器自身建立在 Flow 范式之上——每个前端模块都是状态机，签名为 `fn transition(self, event) -> Self`。五条铁律：禁止 `&mut self`、禁止 `Arc<Mutex<T>>`、禁止 `unsafe`、禁止 `transmute`/生命周期标注、禁止裸 `panic!`/`unwrap()`。Parser、Lexer、Loader、LSP、Verifier：严格 Flow。Interpreter、Core Checker：宽松 Flow。Codegen、Runtime、FFI：非 Flow（LLVM API / C 风格 / 文本生成）。
+
+---
+
+## 标准库（24 个模块）
+
+| 模块 | 描述 |
+|------|------|
+| `prelude` | identity, clamp, lerp, compose, pipe, fail, assert_msg |
+| `io` | print_line, input_line, print_format, IoOps trait |
+| `fs` | read, write, exists, read_lines, write_lines, file_size |
+| `strings` | split, join, replace_all, capitalize, reverse, truncate, pad |
+| `collections` | sort, map, filter, reduce, partition, group_by, chunks, dedup |
+| `maps` | get, set, merge, pick, omit, has_key, from_list, filter_keys |
+| `set` | contains, insert, remove, to_list, is_empty |
+| `json` | to_json, from_json, get_int, get_bool, get_string, JsonExt trait |
+| `net` | TCP socket, HTTP fetch/fetch_post, `Result<T, NetError>` |
+| `csv` | parse_csv, serialize_csv |
+| `crypto` | sha256, base64_encode/decode, hex_encode/decode |
+| `template` | render_template |
+| `time` / `datetime` | timestamp, sleep_ms, duration, days_from_now, time_since |
+| `env` | get_var, cli_args, has_var, get_int, get_float |
+| `mymath` | gcd, lcm, factorial, fibonacci, is_prime, is_power_of_two |
+| `array` | fill, slice, rotate, binary_search |
+| `iter` | range, zip, enumerate, take, drop, chain |
+| `random` | random_int, random_float, random_range |
+| `text` | slugify, indent, wrap |
+| `result` | unwrap, map, map_err, and_then, or_else |
+| `testing` | assert_eq_int, assert_true, assert_approx_eq_float |
+| `effects` | Stdlib effect 标注（类型检查器纯度约束） |
+| `errors` | 类型化错误枚举（FsError, JsonError, CollectionError）+ From 协议 |
+
+内建正则（始终可用）：`regex_match`、`regex_find`、`regex_replace`。
+
+内建并发原语（始终可用）：`Mutex<T>`、`AtomicI32`/`AtomicI64`/`AtomicBool`、`Channel<T>`、`broadcast`。
 
 ---
 
 ## CLI 命令
 
-| 命令 | 说明 |
+| 命令 | 描述 |
 |------|------|
 | `mimi check <path>` | 类型检查，完整错误报告 |
 | `mimi run <path>` | 运行（解释执行），可选 `--verify-contracts` / `--profile` / `--watch` |
@@ -187,12 +312,12 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
 | `mimi publish` | 发布到本地 registry |
 | `mimi search <query>` | 搜索包 |
 | `mimi doc <path>` | 生成文档 |
-| `mimi promote <path>` | 升级 `.mms` → `.mimi` |
+| `mimi promote <path>` | 提升 `.mms` → `.mimi` |
 | `mimi mms <files>` | 处理 MimiSpec 文件 |
 | `mimi stats <path>` | 使用统计 |
 | `mimi stat <path>` | 目录分析 |
 | `mimi bindgen <path>` | 生成多语言 FFI 绑定 |
-| `mimi emit-c-headers` / `emit-py-bindings` / `emit-rust-bindings` / `emit-go-bindings` / `emit-node-bindings` / `emit-cpp-bindings` / `emit-java-bindings` | 各语言 FFI 绑定生成 |
+| `mimi emit-*-bindings` | 语言特定 FFI 绑定生成（C/C++/Rust/Go/Node.js/Java/Python） |
 
 ---
 
@@ -200,82 +325,67 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
 
 ```
 mimi/
-├── src/                       # Rust 编译器（323 文件，~172k LOC）
-│   ├── main.rs                # CLI 入口（clap derive）
-│   ├── lib.rs                 # 库入口
-│   ├── ast.rs                 # AST：FlowDef、StateDef、TransitionDef、ProtocolDef……
-│   ├── flow_matrix.rs         # 转移矩阵 + Fault 自动补全（+1 兜底）
-│   ├── session.rs             # 会话类型对偶化 + 顺序检查
-│   ├── progressive.rs         # 脚本 → 隐式 flow Main { state Single }
-│   ├── parser/                # Flow 解析器（严格 Flow 状态机）         ✅ v0.29.0
-│   ├── lexer/                 # Flow 词法分析器（严格 Flow 状态机）     ✅ v0.29.1
-│   ├── core/                  # 类型推断与检查（宽松 Flow）             ✅ v0.29.8
-│   ├── interp/                # 解释器（宽松 Flow）                     ✅ v0.29.6
-│   ├── codegen/               # LLVM 18 codegen（via inkwell）
-│   │   └── builtins/          # 内置函数 codegen（io、string、json……）
-│   ├── verifier/              # Z3 合约验证器（严格 Flow）              ✅ v0.29.7
-│   │   └── flow.rs            # 验证器本身是 Flow 状态机
-│   ├── ffi/                   # 多语言绑定生成（7 种语言）
-│   ├── lsp/                   # LSP 服务器（严格 Flow）                ✅ v0.29.5
-│   ├── loader/                # 模块加载器（严格 Flow）                 ✅ v0.29.4
-│   ├── runtime/               # Rust 运行时 + actor mailbox + profiler
-│   ├── fmt.rs                 # 代码格式化器
-│   ├── lint.rs                # 静态分析器
-│   ├── main/                  # CLI 子命令实现
-│   ├── diagnostic/            # 错误码与格式化
-│   └── tests/                 # 3100+ 测试，96 个模块
-├── std/                       # 标准库（24 模块）
-├── examples/                  # 示例程序（28+）
-├── demos/                     # 演示程序（23+）
-├── devdocs/                   # 设计文档：白皮书、Flow 草案、ADR
-├── scripts/                   # 构建与 CI 脚本
+├── src/                        # Rust 编译器（360 文件，~278k LOC）
+│   ├── main.rs                 # CLI 入口（clap derive）
+│   ├── lib.rs                  # 库入口
+│   ├── ast.rs                  # AST：FlowDef, StateDef, TransitionDef, ProtocolDef, ...
+│   ├── span.rs                 # SourceId / Span / AstNodeMeta——稳定节点身份
+│   ├── flow_matrix.rs          # 转移矩阵 + Fault 注入
+│   ├── session.rs              # Session 类型对偶 + 顺序检查
+│   ├── progressive.rs          # 脚本 → 隐式 flow Main { state Single }
+│   ├── trace.rs                # Canonical 语义追踪（Transition / Fault / OwnershipTransfer）
+│   ├── path_safety.rs          # 统一路径验证
+│   ├── source_scan.rs          # 共享 SourceScanner（fmt/lint）
+│   ├── parser/                 # Flow 解析器（严格 Flow 状态机）
+│   ├── lexer/                  # Flow 词法分析器（严格 Flow 状态机）
+│   ├── core/                   # 类型推断与检查 → CheckedProgram
+│   │   ├── checker/            # 类型检查器 → CheckedProgram 语义中枢
+│   │   ├── resolved/           # Typed Resolved IR（canonical 声明）
+│   │   ├── unification.rs      # HM 统一（undo trail + TypeScheme）
+│   │   ├── type_folder.rs      # Binder-aware 类型折叠
+│   │   ├── cfg/                # Per-callable 控制流图
+│   │   ├── ownership.rs        # 线性资源 ledger（分析）
+│   │   └── infer/              # HM 类型推断 + 合约推导
+│   ├── interp/                 # 解释器（from_checked）
+│   ├── codegen/                # LLVM 18 codegen（compile_checked）
+│   │   └── builtins/           # 内建函数 codegen（io, string, json, ...）
+│   ├── verifier/               # Z3 合约验证器（verify_checked）
+│   ├── ffi/                    # 多语言绑定生成（7 种语言）
+│   ├── lsp/                    # LSP 服务器（严格 Flow）
+│   ├── loader/                 # 模块加载器（严格 Flow）
+│   ├── runtime/                # Rust 运行时 + actor 邮箱 + profiler
+│   ├── fmt.rs                  # 代码格式化器
+│   ├── lint.rs                 # 静态分析器
+│   ├── main/                   # CLI 子命令实现（24 个命令）
+│   ├── diagnostic/             # 错误码与格式化
+│   └── tests/                  # 4100+ 测试
+├── std/                        # 标准库（24 个模块）
+├── examples/                   # 示例程序（32 个）
+├── demos/                      # 演示程序（30 个）
+├── tests/real_world/           # MCDD 真实程序双后端套件（70 个程序）
+├── devdocs/                    # 设计文档、盲审报告、修正案、路线图
+├── scripts/                    # 构建与 CI 脚本
 ├── Cargo.toml
 └── CHANGELOG.md
 ```
 
 ---
 
-## 架构：Flow 范式
-
-编译器本身构建在它要编译的同一 Flow 范式之上——每个模块都是一个状态机：
-
-| 模块 | Flow 度 | 状态 |
-|------|---------|------|
-| Parser | 严格 Flow | ✅ v0.29.0（454 LOC） |
-| Lexer | 严格 Flow | ✅ v0.29.1（970 LOC） |
-| Loader | 严格 Flow | ✅ v0.29.4 |
-| LSP | 严格 Flow | ✅ v0.29.5 |
-| Verifier | 严格 Flow | ✅ v0.29.7 |
-| Core Checker | 宽松 Flow | ✅ v0.29.8 |
-| Interpreter | 宽松 Flow | ✅ v0.29.6 |
-| Codegen | 非 Flow（LLVM API） | N/A |
-| Runtime | 非 Flow（C 风格 unsafe） | N/A |
-| FFI | 非 Flow（文本生成器） | N/A |
-
-**Flow 范式五条铁律：**
-1. 禁止 `&mut self` — 使用 `fn transition(self, event) -> Self`
-2. 禁止 `Arc<Mutex<T>>` — 使用 `enum + transition`
-3. Flow 模块中禁止 `unsafe`
-4. 禁止 `transmute` 和生命周期标注
-5. 禁止裸 `panic!`/`unwrap()`/`expect()` — 返回 `Result<Self, Error>`
-
----
-
 ## 开发
 
-### 环境要求
+### 前置条件
 
 - **Rust** 1.75+
-- **LLVM 18**（可用 `scripts/setup-llvm-wrapper.sh` 自动配置）
+- **LLVM 18**（通过 `scripts/setup-llvm-wrapper.sh` 自动配置）
 - **libffi**（FFI 支持）
-- **Z3**（合约验证，`cargo build` 自动处理）
+- **Z3**（合约验证；由 `cargo build` 处理）
 
-### 测试层级
+### 测试层级（IDD）
 
 | 层级 | 测试 | 含义 |
 |------|------|------|
-| **L1** | `cargo test dual_` | 双后端等价性（interp == codegen） |
-| **L2** | `cargo test typecheck::` | 类型系统健全性（错误代码被拒绝） |
+| **L1** | `cargo test dual_` | 双后端等价性（解释器 == codegen） |
+| **L2** | `cargo test typecheck::` | 类型系统健全性（坏代码被拒绝） |
 | **L3** | `cargo test e2e_asan -- --ignored` | 内存安全（Valgrind/ASan/Miri） |
 
 ### 常用命令
@@ -290,7 +400,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test dual_
 # 类型系统健全性（L2）
 LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test "typecheck::"
 
-# 真实世界 MCDD 测试套件
+# 真实程序 MCDD 套件
 LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test real_world
 
 # Clippy（零警告门禁）
@@ -300,34 +410,55 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
 LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 ```
 
-> **内存注意**：`cargo test` debug 模式可能使用 ~12 GB 内存。内存受限环境请使用 `ulimit -v 20000000` 和 `--test-threads=1`。详见 [AGENTS.md](AGENTS.md)。
+> **内存提示**：debug 模式下 `cargo test` 最高可达 ~12 GB 内存。内存受限环境请使用 `ulimit -v 20000000` 和 `--test-threads=1`。详见 [AGENTS.md](AGENTS.md)。
+
+---
+
+## 路线图（0.1.1）
+
+0.1.1 是长周期版本，覆盖 41 个内部 sprint（0.31.8–0.31.48）。期间不打中间 tag。当前进度：**0.31.24**（Soundness 阶段）。
+
+| 阶段 | Sprint | 主题 |
+|------|--------|------|
+| **A** | 0.31.8–0.31.19 | Flow 核心闭环 + 地基深修：原子 turn、Fault、Actor runs Flow、Session 线性、exactly-once、类型级线性、高阶交互闭环、证据同步、攻击审查 I |
+| **Perf** | 0.31.20–0.31.21 | Runtime Efficiency I/II：quick wins + Value clone 消减 + O1 修复 |
+| **Soundness** | 0.31.22–0.31.24 | Soundness 止血 + Runtime 架构升级 + 错误模型与 Stdlib |
+| **B** | 0.31.25–0.31.29 | 语言冻结：语法收敛、View/Mutate、Multi-target、type walker 合并、Verification IR fail-closed、VC artifact、攻击审查 II |
+| **C** | 0.31.30–0.31.38 | Component 边界：Component IR + ABI 生成器、Native ABI + 胖指针、稳定检查点、Wire Schema、Rust SDK conformance、XPU FFI 验证、SDK 加固 |
+| **D** | 0.31.39–0.31.44 | 工具与隔离：迁移、fmt/LSP/probes、Provenance/TyErr/Z3 翻译、experimental 隔离 |
+| **E** | 0.31.45–0.31.48 | 冻结：DEBUG + L1 强化 + Interpreter 瘦身、最终敌对审查 + Trap Tests、RC1、RC2 |
+
+### 关键文档
+
+| 文档 | 角色 |
+|------|------|
+| [`devdocs/v0.31/README.md`](devdocs/v0.31/README.md) | 权威路线图（31 项 requirement，退出条件） |
+| [`devdocs/v0.31/architecture-amendment-1.0.md`](devdocs/v0.31/architecture-amendment-1.0.md) | 架构修正案：13 条款 + 10 不变量（优先于白皮书） |
+| [`devdocs/pre-1.0/`](devdocs/pre-1.0/) | Pre-1.0 设计合同：核心目标、Flow-first 模型、失败代数、Verified Core、Component Boundary |
+| [`devdocs/debt-report-2026-07-25.md`](devdocs/debt-report-2026-07-25.md) | 债务全景：9 项架构债务 + 10 项工程债务 + 九轮盲审修正 |
+| [`docs/language-spec.md`](docs/language-spec.md) | 规范性语言规范（唯一入口） |
+
+### 外部盲审（2026-07-25）
+
+九轮外部盲审覆盖：Z3 验证、FFI/ABI、并发、Flow 语义、类型系统、Runtime、解释器/Comptime、标准库/错误处理、Codegen。审查结果驱动了架构修正案和债务报告。审查文件：`devdocs/blind-review-*-2026-07-25.md`。
 
 ---
 
 ## 版本历史
 
-| 版本 | 亮点 |
-|------|------|
-| **0.1.0** | **基线稳定**：CheckedProgram 语义中枢、semver 切换、runtime/resolved 架构拆分、4063 测试绿、双后端等价 |
-| **v0.30.0** | **止血清零（Hemostasis）**：0 新 Feature — 架构债务修复（sprintf→snprintf、路径安全、malloc 检查、values_equal、build_unreachable、fmt tokenization） |
-| **v0.29.41** | 白皮书冻结：全部 38 项能力完成 ✅ |
-| **v0.29.37** | Actor 生命周期：SystemKill 级联 + `spawn detached` |
-| **v0.29.34** | Session 双端运行时：send/recv/close 推进端点 |
-| **v0.29.32** | Pinned 协作式看门狗：`pinned { timeout }` |
-| **v0.29.25** | Flow 多态广播、session_pair、mutate 转发 |
-| **v0.29.18** | Protocol 接口抽象（保守投影子类型化） |
-| **v0.29.14** | Persistent 持久化负载 + `@transactional` WAL 回滚 |
-| **v0.29.9** | Flow 语言基座：`state`/`transition` 双后端 |
-| **v0.29.0–8** | 编译器内部 Flow 架构替换（Parser→Lexer→Loader→LSP→Interp→Verifier→Checker） |
-| **v0.28.37** | Feature Bugs 清零 — v0.28 最终版 |
-| **v0.28.0** | 使用驱动：7 语言 FFI、profiler、bindgen、包管理器 |
-| **v0.27** | 安全审计：P0/P1/P2/P3（arena、FFI、JSON、runtime） |
-| **v0.24** | 结构化并发状态机 |
-| **v0.20** | Future/Waker/Executor/poll codegen |
-| **v0.15** | C runtime → Rust 运行时重写 |
+| 版本 | 里程碑 |
+|------|--------|
+| **0.1.1-dev** | **当前**。41 sprint 路线图：Flow 核心闭环、地基深修、Runtime Efficiency、Soundness、语言冻结、Component 边界、工具链、RC。架构修正案（13 条款）。九轮盲审。 |
+| **0.1.0** | 基线稳定：CheckedProgram 语义中枢、Typed Resolved IR、HM 统一、CFG/ownership 分析、runtime/resolved 拆分、semver 切换、4063 测试绿 |
+| **v0.30.0** | 止血：零新特性——15 项架构债务清零（sprintf→snprintf、路径安全、malloc 检查、fmt 分词） |
+| **v0.29.0–41** | Flow 范式：编译器内部 Flow 替换（7 个模块）+ 语言级 Flow 语义 + 白皮书 38 项能力 |
+| **v0.28.0–37** | 使用驱动：7 语言 FFI、profiler、bindgen、包管理器；Feature Bugs 清零 |
+| **v0.27** | 安全审计：P0–P3（arena、FFI、JSON、runtime） |
+| **v0.20–24** | 结构化并发、Future/Waker/Executor codegen |
+| **v0.15** | C 运行时 → Rust 运行时重写 |
 | **v0.7** | Z3 验证 + FFI codegen |
 
-> 完整更新日志见 [CHANGELOG.md](CHANGELOG.md)。
+> 完整变更日志：[CHANGELOG.md](CHANGELOG.md)。Pre-0.1.0 历史：1863 commits，66 个 `mimi-v*` tag，归档于 `devdocs/archive/`。
 
 ---
 
@@ -335,4 +466,4 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 [Apache License 2.0](LICENSE)
 
-版权所有 © 2026 ontonous
+Copyright © 2026 ontonous
