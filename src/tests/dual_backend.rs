@@ -13886,3 +13886,59 @@ fn dual_defer_variable_capture() {
         "2\n2"
     );
 }
+
+#[test]
+fn dual_mutate_param_record() {
+    // v0.31.25: mutate parameter with record type — in-place modification
+    // visible to caller after function returns.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Buffer {
+            write_idx: i32,
+            gain: f64,
+        }
+        func apply_filter(buf: mutate Buffer, sample: f64) {
+            buf.write_idx = buf.write_idx + 1
+            buf.gain = buf.gain * sample
+        }
+        func main() -> i32 {
+            let mut b = Buffer { write_idx: 0, gain: 2.0 }
+            apply_filter(b, 3.0)
+            println(b.write_idx)
+            println(b.gain)
+            0
+        }
+        "#,
+        "1\n6"
+    );
+}
+
+#[test]
+fn dual_mutate_param_multiple_calls() {
+    // v0.31.25: multiple mutate calls accumulate changes.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Counter {
+            n: i32,
+        }
+        func bump(c: mutate Counter) {
+            c.n = c.n + 1
+        }
+        func main() -> i32 {
+            let mut c = Counter { n: 0 }
+            bump(c)
+            bump(c)
+            bump(c)
+            println(c.n)
+            0
+        }
+        "#,
+        "3"
+    );
+}
