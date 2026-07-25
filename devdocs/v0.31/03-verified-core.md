@@ -118,11 +118,22 @@
 
 | 延期项 | 原因 | 目标 sprint | 验收标准 |
 |--------|------|------------|---------|
-| **VIR 路径接入主验证流程** | 缺少 counterexample 提取、callee ensures 传播、old() 等式约束 | **0.31.27** | verify_func_vir 接入 verify_func，~20 个 verifier 测试通过 |
-| **Typestate 公理注入** | 需要 CheckedProgram 迁移（当前 verifier 用 raw AST） | **0.31.27** | Flow transition VIR 携带非空 TypestateAxioms，Z3 公理注入 |
+| ~~**VIR 路径接入主验证流程**~~ | ~~缺少 counterexample 提取、callee ensures 传播、old() 等式约束~~ | ~~**0.31.27**~~ | ✅ 已完成（counterexample + old() + i32 range + VC artifact） |
+| **Callee ensures propagation (VIR)** | trusted subset gate 拒绝 calls；需扩展 gate + VIR Call lowering | **post-0.31.27** | VIR 路径可验证含调用的函数（callee ensures 作为公理） |
+| **Typestate 公理注入** | 需要 CheckedProgram 迁移（当前 verifier 用 raw AST） | **post-0.31.27** | Flow transition VIR 携带非空 TypestateAxioms，Z3 公理注入 |
 | **f64 opaque sort 替换 AST 路径** | expr.rs:250-376 exact Reals 不健全，但替换影响现有测试 | **0.31.28** | f64 算术 → NotInTrustedSubset，f64 比较 → uninterpreted predicate |
 | **CFG/SSA lowering** | v1 使用 tree-based Select，loop 被 gate 拒绝 | **post-0.31.28** | VIR 支持 loop + phi 节点，gate 接受有限 loop |
 | **语义 Hash BLAKE3** | 当前 SipHash 非确定性跨 Rust 版本 | **post-0.31.28** | BLAKE3 替换 DefaultHasher，tamper detection 可用 |
+
+### 0.31.27 实际交付
+
+- **VIR 路径接入 verify_func**：trusted subset 函数优先走 VIR 路径，其余回退 AST 路径
+- **Counterexample 提取**：Z3 model → 参数值 + result 值 + violated ensures 索引
+- **old(param) == param 等式约束**：trusted subset 无 mutation，参数不变
+- **i32 参数范围约束**：MIN <= x <= MAX，使溢出检查 sound（Z3 Int 无界）
+- **f64/invariant 回退**：f64 参数/返回值、invariant 语句回退 AST 路径
+- **return_vtype 上下文推断**：i32 返回类型 → 整数字面量推断为 i32（常量溢出检查）
+- **VC artifact**：VIR semantics hash（SipHash）+ ProofArtifact 附加到每个 VerificationResult
 
 ## 0.31.26 原计划（攻击审查 II，已顺延）
 

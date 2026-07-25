@@ -553,8 +553,23 @@ version = "0.31.27"
 kind = "implementation"
 title = "VC 与 checked integer"
 requirements = ["VERIFY-CORE-001"]
-# 【从 0.31.26 继承】VIR 路径接入主验证流程（counterexample + callee ensures + old() 等式）
-# 【从 0.31.26 继承】Typestate 公理注入（CheckedProgram → Z3 公理）
+# 已交付：
+# - VIR 路径接入 verify_func（trusted subset 优先，AST 回退）
+# - Counterexample 提取（Z3 model → 参数值 + result + violated ensures）
+# - old(param) == param 等式约束
+# - i32 参数范围约束（MIN <= x <= MAX，sound overflow checking）
+# - f64/invariant 回退 AST 路径
+# - return_vtype 上下文推断（i32 返回类型 → 整数字面量推断为 i32）
+# - VC artifact（VIR semantics hash + ProofArtifact）
+#
+# 【DEFERRED → post-0.31.27】Callee ensures propagation in VIR path：
+# - 需要扩展 trusted subset gate 允许调用已验证函数
+# - 当前 calls 被 gate 拒绝；AST 路径通过 assert_callee_ensures_in_block 处理
+# - 验收标准：VIR 路径可验证含调用的函数（callee ensures 作为公理）
+#
+# 【DEFERRED → post-0.31.27】Typestate 公理注入（CheckedProgram → Z3）：
+# - 需要 CheckedProgram 访问（当前 verifier 操作 raw AST）
+# - lower_transition_to_vir 已就绪（0.31.26-4），待接入
 
 [[milestone]]
 version = "0.31.28"
