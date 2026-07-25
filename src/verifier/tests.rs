@@ -556,10 +556,13 @@ func positive(x: f64) -> f64 {
 "#;
     let results = verify_source(src).expect("src/verifier/tests.rs:343 unwrap failed");
     assert_eq!(results.len(), 1);
+    // P0-10: F64Compare encoding is semantically unsound (NaN bit-pattern
+    // breaks IEEE 754 ordering). All f64 comparisons are now fail-closed
+    // → NotInTrustedSubset until a proper uninterpreted predicate is implemented.
     assert_eq!(
         results[0].status,
-        VerifStatus::Verified,
-        "f64 ensures should be verified: {}",
+        VerifStatus::NotInTrustedSubset,
+        "f64 comparison should be NotInTrustedSubset (P0-10): {}",
         results[0].message
     );
 }

@@ -980,24 +980,36 @@ impl<'a> Checker<'a> {
                         format!("while condition must be bool, found {}", fmt_type(&ct)),
                     );
                 }
+                // P0-4: Save/restore session residuals around loop body.
+                // The loop might not execute (condition false), so residuals
+                // modified inside the body must not leak to the continuation.
+                let pre_residuals = self.session_residuals.clone();
                 self.loop_depth += 1;
                 self.check_block(body, ret, scopes);
                 self.loop_depth -= 1;
+                self.session_residuals = pre_residuals;
             }
             Stmt::WhileLet { pat, init, body } => {
                 // CG-H3: Array and Slice (with rest tail view) are supported in codegen.
                 let it = self.infer_expr(init, scopes);
                 scopes.push(HashMap::new());
                 self.check_pattern(pat, &it, scopes);
+                // P0-4: Save/restore session residuals around loop body.
+                let pre_residuals = self.session_residuals.clone();
                 self.loop_depth += 1;
                 self.check_block(body, ret, scopes);
                 self.loop_depth -= 1;
+                self.session_residuals = pre_residuals;
                 scopes.pop();
             }
             Stmt::Loop(body) => {
+                // P0-4: Save/restore session residuals around loop body.
+                // Even infinite loops may break, so residuals must be conservative.
+                let pre_residuals = self.session_residuals.clone();
                 self.loop_depth += 1;
                 self.check_block(body, ret, scopes);
                 self.loop_depth -= 1;
+                self.session_residuals = pre_residuals;
             }
             Stmt::For {
                 var,
@@ -1029,9 +1041,14 @@ impl<'a> Checker<'a> {
                 if let Some(s) = scopes.last_mut() {
                     s.insert(var.clone(), elem_ty);
                 }
+                // P0-4: Save/restore session residuals around loop body.
+                // The iterable may be empty, so residuals modified inside
+                // the body must not leak to the continuation.
+                let pre_residuals = self.session_residuals.clone();
                 self.loop_depth += 1;
                 self.check_block(body, ret, scopes);
                 self.loop_depth -= 1;
+                self.session_residuals = pre_residuals;
                 scopes.pop();
             }
             Stmt::Block(block) => {

@@ -1157,7 +1157,8 @@ impl VerifierCtx {
             crate::verifier::ctx::compute_semantic_hash(&vfunc.normalized_repr());
         let artifact = Some(crate::verifier::ctx::ProofArtifact {
             semantics_version: crate::verifier::ctx::ProofArtifact::SEMANTICS_VERSION,
-            integer_model: "checked".to_string(),
+            // P0-9: i32 checked, i64 unbounded (no definedness). See ctx.rs.
+            integer_model: "checked_i32".to_string(),
             float_model: "opaque".to_string(),
             solver_version: format!("z3 {}", z3::full_version()),
             source_hash: String::new(), // P2-12: TODO: compute from source file (needs plumbing from caller)

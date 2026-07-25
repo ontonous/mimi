@@ -89,6 +89,8 @@ impl<'a> ActionEmitter<'a> {
             // Flow states represent data that can be safely discarded at
             // scope exit, unlike Cap/SessionChan which require explicit
             // consumption.
+            // P0-5: containers of flow states (Result/Option/Tuple/Array/Slice)
+            // are also droppable iff all linear elements inside are flow states.
             let droppable: BTreeSet<ResourceId> = self
                 .resources
                 .iter()
@@ -96,20 +98,7 @@ impl<'a> ActionEmitter<'a> {
                     self.body
                         .locals
                         .get(local)
-                        .is_some_and(|l| self.is_linear(&l.ty))
-                        && self
-                            .body
-                            .locals
-                            .get(local)
-                            .map(|l| &l.ty)
-                            .and_then(|ty| self.types.get(ty))
-                            .is_some_and(|ty| {
-                                matches!(
-                                    ty,
-                                    ResolvedType::FlowStateSet { .. }
-                                        | ResolvedType::Nominal { .. }
-                                ) && self.is_flow_state_resolved(ty)
-                            })
+                        .is_some_and(|l| self.is_linear(&l.ty) && self.is_droppable_type(&l.ty))
                 })
                 .map(|(_, resource)| resource.clone())
                 .collect();
@@ -131,6 +120,33 @@ impl<'a> ActionEmitter<'a> {
         match ty {
             ResolvedType::FlowStateSet { .. } => true,
             ResolvedType::Nominal { item, .. } => item.as_str().starts_with("state:"),
+            _ => false,
+        }
+    }
+
+    /// P0-5: check whether a linear type is auto-droppable at scope exit.
+    /// Flow states are droppable; containers (Option/Result/Tuple/Array/Slice)
+    /// are droppable iff every linear element inside them is also droppable.
+    /// Cap/SessionChan are NOT droppable — they require explicit consumption.
+    fn is_droppable_type(&self, ty: &ResolvedTypeId) -> bool {
+        match self.types.get(ty) {
+            Some(ResolvedType::FlowStateSet { .. }) => true,
+            Some(ResolvedType::Nominal { .. }) => {
+                self.is_flow_state_resolved(self.types.get(ty).unwrap())
+            }
+            Some(ResolvedType::Option(inner)) => self.is_droppable_type(inner),
+            Some(ResolvedType::Result { ok, error }) => {
+                // Both branches must be droppable for the whole Result to be.
+                (!self.is_linear(ok) || self.is_droppable_type(ok))
+                    && (!self.is_linear(error) || self.is_droppable_type(error))
+            }
+            Some(ResolvedType::Tuple(elements)) => elements
+                .iter()
+                .all(|e| !self.is_linear(e) || self.is_droppable_type(e)),
+            Some(ResolvedType::Array { element, .. }) => self.is_droppable_type(element),
+            Some(ResolvedType::Slice(inner)) => self.is_droppable_type(inner),
+            Some(ResolvedType::Newtype { inner, .. }) => self.is_droppable_type(inner),
+            // Cap, SessionChan, and other non-flow-state linear types are NOT droppable.
             _ => false,
         }
     }
@@ -805,6 +821,21 @@ impl<'a> ActionEmitter<'a> {
             Some(ResolvedType::Tuple(elements)) => {
                 elements.iter().any(|element| self.is_linear(element))
             }
+            // P0-5: Recurse through container types. A linear resource
+            // inside Option/Result/Array/Slice is still linear and must
+            // be tracked (Introduce, Move, return check). Without this,
+            // `Option<cap Token>` is invisible to the analysis.
+            Some(ResolvedType::Option(inner)) => self.is_linear(inner),
+            Some(ResolvedType::Result { ok, error }) => {
+                self.is_linear(ok) || self.is_linear(error)
+            }
+            Some(ResolvedType::Array { element, .. }) => self.is_linear(element),
+            Some(ResolvedType::Slice(inner)) => self.is_linear(inner),
+            Some(ResolvedType::CBuffer(inner)) => self.is_linear(inner),
+            // P0-6: GenericParameter returns false (conservative). Without
+            // monomorphization, we cannot know if T will be instantiated
+            // with a linear type. This is a documented analysis limitation:
+            // generic functions may miss linear resource tracking.
             _ => false,
         }
     }
@@ -935,7 +966,83 @@ impl<'a> ActionEmitter<'a> {
                     self.collect_capability_places(&arm.body, places);
                 }
             }
-            _ => {}
+            // P0-7: Previously silently ignored by `_ => {}`. Linear resources
+            // inside these expressions were invisible to the analysis — no
+            // Move/TransferChild actions generated, no E0304 double-consume
+            // diagnostics.
+            ResolvedExprKind::Spawn(inner) | ResolvedExprKind::Await(inner) => {
+                self.collect_capability_places(inner, places);
+            }
+            // NOTE: Call arguments are NOT collected here — they are already
+            // handled at the call-site level (lower_expr, line ~622) which
+            // calls capability_places on each argument directly. Adding Call
+            // here would double-count and cause false E0304 diagnostics.
+            ResolvedExprKind::Map(pairs) => {
+                for (key, value) in pairs {
+                    self.collect_capability_places(key, places);
+                    self.collect_capability_places(value, places);
+                }
+            }
+            ResolvedExprKind::Comprehension {
+                value,
+                iterable,
+                guard,
+                ..
+            } => {
+                self.collect_capability_places(value, places);
+                self.collect_capability_places(iterable, places);
+                if let Some(guard) = guard {
+                    self.collect_capability_places(guard, places);
+                }
+            }
+            ResolvedExprKind::OptionalChain { receiver, .. } => {
+                self.collect_capability_places(receiver, places);
+            }
+            ResolvedExprKind::Range { start, end } => {
+                self.collect_capability_places(start, places);
+                self.collect_capability_places(end, places);
+            }
+            ResolvedExprKind::Slice {
+                target,
+                start,
+                end,
+            } => {
+                self.collect_capability_places(target, places);
+                if let Some(start) = start {
+                    self.collect_capability_places(start, places);
+                }
+                if let Some(end) = end {
+                    self.collect_capability_places(end, places);
+                }
+            }
+            ResolvedExprKind::Unary { operand, .. } => {
+                self.collect_capability_places(operand, places);
+            }
+            ResolvedExprKind::Try { value, .. }
+            | ResolvedExprKind::TypeOf(value)
+            | ResolvedExprKind::Old(value) => {
+                self.collect_capability_places(value, places);
+            }
+            ResolvedExprKind::Scope { body, .. } | ResolvedExprKind::Comptime(body) => {
+                if let Some(result) = &body.result {
+                    self.collect_capability_places(result, places);
+                }
+            }
+            // Leaf / non-place expressions: no linear resources to track.
+            // Call is handled at the call-site level (lower_expr ~line 622),
+            // NOT here — recursing into arguments would double-count.
+            ResolvedExprKind::Literal(_)
+            | ResolvedExprKind::FString(_)
+            | ResolvedExprKind::Lambda(_)
+            | ResolvedExprKind::Quote(_)
+            | ResolvedExprKind::ComptimeValue(_)
+            | ResolvedExprKind::TypeValue(_)
+            | ResolvedExprKind::Constant(_)
+            | ResolvedExprKind::Callable(_)
+            | ResolvedExprKind::DefaultArgument { .. }
+            | ResolvedExprKind::Binary { .. }
+            | ResolvedExprKind::Call(_)
+            | ResolvedExprKind::Load(_) => {}
         }
     }
 

@@ -296,10 +296,14 @@ impl UnificationTable {
                     .map(|a| self.resolve_with_depth(a, next, resolving))
                     .collect::<Result<_, _>>()?,
             ),
-            Type::ForAll(params, body) => Type::ForAll(
-                params.clone(),
-                Box::new(self.resolve_with_depth(body, next, resolving)?),
-            ),
+            // P0-1: ForAll bound variables use TypeVar(0..params.len()) which
+            // share the same ID space as inference variables. Resolving inside
+            // the ForAll body would incorrectly substitute bound variables with
+            // stale bindings from the unification table (e.g., TypeVar(0) bound
+            // to i32 from a previous inference corrupts ∀T. T→T into i32→i32).
+            // ForAll types must only be processed by instantiate(), which remaps
+            // bound variables to fresh inference variables before resolution.
+            Type::ForAll(..) => ty.clone(),
             // Leaf types — no TypeVars inside
             Type::Infer
             | Type::Nothing
