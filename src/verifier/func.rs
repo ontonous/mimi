@@ -1211,54 +1211,85 @@ impl VerifierCtx {
         }
 
         // 4. Process body statements
+        // 0.31.29 audit P1-3: all encoding failures are fail-closed (return
+        // NotInTrustedSubset instead of silently skipping).
 
         for stmt in &vfunc.body {
             match stmt {
                 VStmt::Assume(expr) => {
                     // Precondition / invariant assumption
-                    if let Some(z3_bool) = z3ctx.encode_bool(expr) {
-                        session.assert(&z3_bool);
-                        constraint_count += 1;
+                    match z3ctx.encode_bool(expr) {
+                        Some(z3_bool) => {
+                            session.assert(&z3_bool);
+                            constraint_count += 1;
+                        }
+                        None => {
+                            return Some(VerificationResult {
+                                func_name: func.name.clone(),
+                                status: VerifStatus::NotInTrustedSubset,
+                                message: "cannot encode precondition (assumption) in VIR".into(),
+                                diagnostic: None,
+                                duration_us: start.elapsed().as_micros() as u64,
+                                constraint_count,
+                                artifact: artifact.clone(),
+                                trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+                            });
+                        }
                     }
                 }
                 VStmt::Assert(expr) => {
                     // Math obligation — prove from current assumptions
-                    if let Some(z3_bool) = z3ctx.encode_bool(expr) {
-                        let (proof, _) = session.check_scope(z3_bool.not());
-                        match proof {
-                            SatResult::Unsat => {
-                                session.assert(&z3_bool);
-                                constraint_count += 1;
-                            }
-                            SatResult::Sat => {
-                                return Some(VerificationResult {
-                                    func_name: func.name.clone(),
-                                    status: VerifStatus::Disproven,
-                                    message:
-                                        "math obligation is not implied by preconditions (VIR)"
+                    match z3ctx.encode_bool(expr) {
+                        Some(z3_bool) => {
+                            let (proof, _) = session.check_scope(z3_bool.not());
+                            match proof {
+                                SatResult::Unsat => {
+                                    session.assert(&z3_bool);
+                                    constraint_count += 1;
+                                }
+                                SatResult::Sat => {
+                                    return Some(VerificationResult {
+                                        func_name: func.name.clone(),
+                                        status: VerifStatus::Disproven,
+                                        message:
+                                            "math obligation is not implied by preconditions (VIR)"
+                                                .into(),
+                                        diagnostic: Some(Diagnostic::error(
+                                            format!("unproven math obligation in '{}'", func.name),
+                                            func.meta.span,
+                                        )),
+                                        duration_us: start.elapsed().as_micros() as u64,
+                                        constraint_count,
+                                        artifact: artifact.clone(),
+                                        trusted_subset_domain: None,
+                                    });
+                                }
+                                SatResult::Unknown => {
+                                    return Some(VerificationResult {
+                                        func_name: func.name.clone(),
+                                        status: VerifStatus::SolverUnknown,
+                                        message: "solver could not prove math obligation (VIR)"
                                             .into(),
-                                    diagnostic: Some(Diagnostic::error(
-                                        format!("unproven math obligation in '{}'", func.name),
-                                        func.meta.span,
-                                    )),
-                                    duration_us: start.elapsed().as_micros() as u64,
-                                    constraint_count,
-                                    artifact: artifact.clone(),
-                                    trusted_subset_domain: None,
-                                });
+                                        diagnostic: None,
+                                        duration_us: start.elapsed().as_micros() as u64,
+                                        constraint_count,
+                                        artifact: artifact.clone(),
+                                        trusted_subset_domain: None,
+                                    });
+                                }
                             }
-                            SatResult::Unknown => {
-                                return Some(VerificationResult {
-                                    func_name: func.name.clone(),
-                                    status: VerifStatus::SolverUnknown,
-                                    message: "solver could not prove math obligation (VIR)".into(),
-                                    diagnostic: None,
-                                    duration_us: start.elapsed().as_micros() as u64,
-                                    constraint_count,
-                                    artifact: artifact.clone(),
-                                    trusted_subset_domain: None,
-                                });
-                            }
+                        }
+                        None => {
+                            return Some(VerificationResult {
+                                func_name: func.name.clone(),
+                                status: VerifStatus::NotInTrustedSubset,
+                                message: "cannot encode math obligation in VIR".into(),
+                                diagnostic: None,
+                                duration_us: start.elapsed().as_micros() as u64,
+                                constraint_count,
+                                artifact: artifact.clone(),
+                                trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+                            });
                         }
                     }
                 }
@@ -1273,10 +1304,24 @@ impl VerifierCtx {
                     // Assert the let binding: var == expr
                     match vty {
                         crate::verifier::vir::VType::Bool => {
-                            if let Some(body_z3) = z3ctx.encode_bool(expr) {
-                                if let Some(v) = z3ctx.bool_vars.get(var) {
-                                    session.assert(v.eq(&body_z3));
-                                    constraint_count += 1;
+                            match z3ctx.encode_bool(expr) {
+                                Some(body_z3) => {
+                                    if let Some(v) = z3ctx.bool_vars.get(var) {
+                                        session.assert(v.eq(&body_z3));
+                                        constraint_count += 1;
+                                    }
+                                }
+                                None => {
+                                    return Some(VerificationResult {
+                                        func_name: func.name.clone(),
+                                        status: VerifStatus::NotInTrustedSubset,
+                                        message: "cannot encode let binding (bool) in VIR".into(),
+                                        diagnostic: None,
+                                        duration_us: start.elapsed().as_micros() as u64,
+                                        constraint_count,
+                                        artifact: artifact.clone(),
+                                        trusted_subset_domain: Some(TrustedSubsetDomain::Body),
+                                    });
                                 }
                             }
                         }
@@ -1284,10 +1329,24 @@ impl VerifierCtx {
                             // f64 let: opaque, no arithmetic binding
                         }
                         _ => {
-                            if let Some(body_z3) = z3ctx.encode_int(expr) {
-                                if let Some(v) = z3ctx.int_vars.get(var) {
-                                    session.assert(v.eq(&body_z3));
-                                    constraint_count += 1;
+                            match z3ctx.encode_int(expr) {
+                                Some(body_z3) => {
+                                    if let Some(v) = z3ctx.int_vars.get(var) {
+                                        session.assert(v.eq(&body_z3));
+                                        constraint_count += 1;
+                                    }
+                                }
+                                None => {
+                                    return Some(VerificationResult {
+                                        func_name: func.name.clone(),
+                                        status: VerifStatus::NotInTrustedSubset,
+                                        message: "cannot encode let binding (int) in VIR".into(),
+                                        diagnostic: None,
+                                        duration_us: start.elapsed().as_micros() as u64,
+                                        constraint_count,
+                                        artifact: artifact.clone(),
+                                        trusted_subset_domain: Some(TrustedSubsetDomain::Body),
+                                    });
                                 }
                             }
                         }
@@ -1296,10 +1355,24 @@ impl VerifierCtx {
                 VStmt::Return(expr) => {
                     // Bind result variable to return expression
                     if returns_bool {
-                        if let Some(body_z3) = z3ctx.encode_bool(expr) {
-                            if let Some(r) = &z3ctx.result_bool {
-                                session.assert(r.eq(&body_z3));
-                                constraint_count += 1;
+                        match z3ctx.encode_bool(expr) {
+                            Some(body_z3) => {
+                                if let Some(r) = &z3ctx.result_bool {
+                                    session.assert(r.eq(&body_z3));
+                                    constraint_count += 1;
+                                }
+                            }
+                            None => {
+                                return Some(VerificationResult {
+                                    func_name: func.name.clone(),
+                                    status: VerifStatus::NotInTrustedSubset,
+                                    message: "cannot encode return expression (bool) in VIR".into(),
+                                    diagnostic: None,
+                                    duration_us: start.elapsed().as_micros() as u64,
+                                    constraint_count,
+                                    artifact: artifact.clone(),
+                                    trusted_subset_domain: Some(TrustedSubsetDomain::Body),
+                                });
                             }
                         }
                     } else if !returns_f64 {
@@ -1344,14 +1417,50 @@ impl VerifierCtx {
                             }
                         }
                         // Bind result to return expression
-                        if let Some(body_z3) = z3ctx.encode_int(expr) {
-                            if let Some(r) = &z3ctx.result_int {
-                                session.assert(r.eq(&body_z3));
-                                constraint_count += 1;
+                        match z3ctx.encode_int(expr) {
+                            Some(body_z3) => {
+                                if let Some(r) = &z3ctx.result_int {
+                                    session.assert(r.eq(&body_z3));
+                                    constraint_count += 1;
+                                }
+                            }
+                            None => {
+                                return Some(VerificationResult {
+                                    func_name: func.name.clone(),
+                                    status: VerifStatus::NotInTrustedSubset,
+                                    message: "cannot encode return expression (int) in VIR".into(),
+                                    diagnostic: None,
+                                    duration_us: start.elapsed().as_micros() as u64,
+                                    constraint_count,
+                                    artifact: artifact.clone(),
+                                    trusted_subset_domain: Some(TrustedSubsetDomain::Body),
+                                });
                             }
                         }
                     }
-                    // f64 return: opaque, no arithmetic binding
+                    // f64 return: bind result to opaque f64 variable
+                    if returns_f64 {
+                        match z3ctx.encode_f64(expr) {
+                            Some(body_z3) => {
+                                if let Some(r) = &z3ctx.result_f64 {
+                                    session.assert(r.eq(&body_z3));
+                                    constraint_count += 1;
+                                }
+                            }
+                            None => {
+                                return Some(VerificationResult {
+                                    func_name: func.name.clone(),
+                                    status: VerifStatus::NotInTrustedSubset,
+                                    message: "cannot encode return expression (f64) in VIR".into(),
+                                    diagnostic: None,
+                                    duration_us: start.elapsed().as_micros() as u64,
+                                    constraint_count,
+                                    artifact: artifact.clone(),
+                                    trusted_subset_domain: Some(TrustedSubsetDomain::Body),
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1413,21 +1522,40 @@ impl VerifierCtx {
         let mut viol_index: usize = 0;
 
         for (idx, post) in vfunc.postconditions.iter().enumerate() {
-            if let Some(z3_bool) = z3ctx.encode_bool(post) {
-                let (result, model) = session.check_scope(z3_bool.not());
-                match result {
-                    SatResult::Sat => {
-                        found_violation = true;
-                        viol_model = model;
-                        viol_index = idx;
-                        break;
+            match z3ctx.encode_bool(post) {
+                Some(z3_bool) => {
+                    let (result, model) = session.check_scope(z3_bool.not());
+                    match result {
+                        SatResult::Sat => {
+                            found_violation = true;
+                            viol_model = model;
+                            viol_index = idx;
+                            break;
+                        }
+                        SatResult::Unknown => {
+                            found_unknown = true;
+                        }
+                        SatResult::Unsat => {
+                            // This postcondition holds
+                        }
                     }
-                    SatResult::Unknown => {
-                        found_unknown = true;
-                    }
-                    SatResult::Unsat => {
-                        // This postcondition holds
-                    }
+                }
+                None => {
+                    // 0.31.29 audit P1-3: fail-closed. Cannot silently skip
+                    // a postcondition — that would produce false Proven.
+                    return Some(VerificationResult {
+                        func_name: func.name.clone(),
+                        status: VerifStatus::NotInTrustedSubset,
+                        message: format!(
+                            "cannot encode postcondition {} in VIR",
+                            idx
+                        ),
+                        diagnostic: None,
+                        duration_us: start.elapsed().as_micros() as u64,
+                        constraint_count,
+                        artifact: artifact.clone(),
+                        trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+                    });
                 }
             }
         }
