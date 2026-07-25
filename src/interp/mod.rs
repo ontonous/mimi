@@ -368,6 +368,26 @@ impl<'a> Interpreter<'a> {
                 comptime_functions.insert(function.qualified_name.clone());
             }
         }
+        // P1-27: install bare names for unique bare names so the arity guard
+        // fires for module-nested functions (FuncDef.name is always bare).
+        // Two-pass: count bare names first, only install unique ones.
+        {
+            let mut bare_counts: HashMap<&str, usize> = HashMap::new();
+            for f in program.functions().values() {
+                let bare = f.qualified_name.rsplit("::").next().unwrap_or(&f.qualified_name);
+                *bare_counts.entry(bare).or_insert(0) += 1;
+            }
+            for f in program.functions().values() {
+                let bare = f.qualified_name.rsplit("::").next().unwrap_or(&f.qualified_name);
+                if bare != f.qualified_name && bare_counts.get(bare) == Some(&1) {
+                    functions.entry(bare.to_string()).or_insert((
+                        f.params.len(),
+                        crate::core::fmt_type(&f.ret),
+                        f.effects.clone(),
+                    ));
+                }
+            }
+        }
         interp.resolved_functions = Some(functions);
         interp.resolved_function_params = Some(function_params);
         interp.resolved_comptime_functions = Some(comptime_functions);
