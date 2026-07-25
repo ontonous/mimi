@@ -134,6 +134,9 @@ requirements = ["FLOW-IDENTITY-001", "RESOURCE-LINEAR-001"]
 # - interp/codegen 适配新类型表示（0.31.9–12 路径可能需要调整）
 # - 【追加】Channel<T>/Mutex<T> guard token/AtomicI32/I64/Bool 纳入 is_linear()
 #   （与 Flow 状态同一个谓词修改，resource_lower.rs:695-707）
+#   【深度审查追加 P2】is_linear() 用 ends_with("SessionChan")/starts_with("state:")
+#   字符串匹配，命名约定变更即静默失效。迁移到 ResolvedType 结构化标记
+#   （如 ResolvedType::Capability 已有，SessionChan/FlowState 需类似处理）。
 # - 【v2 盲审】Mutex 线性 token API：lock() 返回必须消费的线性 token，
 #   废除手动 lock/unlock（不 unlock → 编译错误，绝生死锁）
 # - 【v2 盲审】Generation 混合模式：同线程同步零开销（不插入递增），
@@ -183,6 +186,12 @@ requirements = []
 # - 全量回归扫描：cargo test + real_world + Z3 + clippy + fmt，连续两次
 # - 0.31.13–15 追加项完成度确认
 # - 不新增 feature，纯证据与回归
+# 【深度审查追加 P2 文档-代码矛盾】
+# - AGENTS.md 声称"后端不能重查 AST"但 legacy_body_file() 是主要 body 来源
+#   → 修正措辞为"新 consumer 禁止回退 raw AST，迁移中的 consumer 经 legacy_body_file()"
+# - gate 注释"If only in tail position"但代码允许任意位置 → 修正注释
+# - has_cross_boundary_ops 硬编码函数名列表（方法调用语法 chan.send(x) 不检测）
+#   → 补充方法调用语法检测或标注为已知限制
 # - 【CI 防护】解释器执行步数上限（gas limit），超限测试标记 #[slow] 不阻塞 CI
 # - 【CI 防护】tests/real_world/run_suite.py 加 per-test timeout（10s），超时跳过+记录
 # 门禁：
@@ -260,12 +269,20 @@ requirements = []
 # 5. 性能基线与 CI 集成：
 #    - Criterion benchmark（benches/interp.rs）纳入 CI（continue-on-error: true）
 #    - 记录基线数据：fib(30)、list_sum(1000)、string_concat(100)、match_enum
-#    - 基线数据归档到 reports/perf-baseline-0.31.20.md
+# - 基线数据归档到 reports/perf-baseline-0.31.20.md
 #    - mimi run --profile 输出格式标准化（top-20 函数 + 总时间）
 #
 # 6. Interpreter 结构体瘦身（可选，视预算）：
 #    - 审计 Interpreter<'a> ~170 个字段，将冷路径字段（comptime_results、
 #      derive_expansion_error 等）移入 Box<InterpreterCold> 减少热路径 cache miss
+#
+# 【深度审查追加 P2 性能】CFG 邻接索引：
+# - predecessors()/successors() 每次调用 O(E) 全表扫描（无邻接索引）
+# - liveness 按字母序迭代（非拓扑序），收敛慢
+# - walk_type 对只读 folder 也完整重建类型树（应区分 consuming/inspecting）
+# - 修复：CallableCfg 构建时预计算 pred/succ 邻接表（Vec<Vec<BasicBlockId>>），
+#   liveness 改为逆拓扑序迭代，TypeVisitor trait 区分 fold（重建）和 visit（只读）。
+# - 预估 ~300-500 LOC
 #
 # 预算：≤3000 LOC 净变更（重构为主，非新增）
 # 门禁：
@@ -402,6 +419,9 @@ requirements = []
 # 4. 统一分配器：mimi_alloc()/mimi_free() 封装，#[cfg(miri)] 指向 Rust alloc，
 #    禁止直接调用 libc::malloc/free（~300 LOC）
 # 5. Drop/Transition IR 防漏网断言：生成 Drop/Transition IR 前断言资源未被二次消费（~100 LOC）
+#    【深度审查追加 P1-6】consumed_resources 字段已就位但断言被注释掉（误报）。
+#    重启条件：CFG 路径分析区分同块双消费（bug）vs 跨分支消费（合法）vs alias 重复跟踪（合法）。
+#    与 0.31.16 CFG dataflow 闭环联动。
 # 6. Spec 修正：Shadow MTE 废止、Fast-Math 禁止、O2=experimental、
 #    Comptime "完全排除"→"常量折叠"、最高优化=内联+DCE+SROA
 # 7. ARCHITECTURE.md（500 字 runtime 架构文档）
@@ -494,6 +514,10 @@ requirements = ["ERROR-ALGEBRA-001", "LANG-FUNCTION-001", "LANG-CONTRACT-001", "
 #   新增 TypeVisitor trait（谓词型 walker），将 occurs_in/is_escape_type/scan_residual/
 #   contains_infer_artifacts/contains_inference_variables/contains_unresolved_type
 #   迁移到 TypeFolder/TypeVisitor 抽象（~400 LOC 净减）
+#   【深度审查追加 P1-11/12】type_any/type_try_visit 对 ForAll 无 binder 追踪，
+#   occurs_in 可对 ForAll 绑定的 TypeVar 产生假阳性；CollectVarsFolder/RemapFolder
+#   shadowing 用位置范围（0..params.len()）不检查与实际 binder ID 的碰撞。
+#   合并到 TypeVisitor 迁移时一并修复（binder-aware walking）。
 #
 # 【架构修正案追加】（devdocs/v0.31/architecture-amendment-1.0.md）：
 # 追加 B：View/Mutate 借用（条款 6，1.0 必须）
@@ -509,6 +533,9 @@ requirements = ["ERROR-ALGEBRA-001", "LANG-FUNCTION-001", "LANG-CONTRACT-001", "
 #   - 调用方必须 match 所有目标状态
 #   - 预估 ~1000-1500 LOC
 #   - 门禁：multi-target 双后端等价 + 未穷尽 match → 编译错误
+#   【深度审查追加 P1-15】check_multi_target_transition 跨所有 from_state 聚合 target：
+#   inc(Zero)->One 和 inc(One)->Two 共存时，Counter::inc(s0) 其中 s0: Zero
+#   产生 targets [One, Two] → 假阳性 E0420。需按 from_state 过滤 target 集合。
 
 [[milestone]]
 version = "0.31.26"
@@ -562,6 +589,11 @@ requirements = ["VERIFY-CORE-001"]
 # - return_vtype 上下文推断（i32 返回类型 → 整数字面量推断为 i32）
 # - VC artifact（VIR semantics hash + ProofArtifact）
 #
+# 【深度审查追加 P1-24】ProofArtifact source_hash 和 resolved_ir_hash 永远为空：
+# 篡改检测对源码和 Resolved IR 层面不工作（VIR 层面 BLAKE3 有效）。
+# 需要从 caller（CheckedProgram）plumbing source file hash 和 Resolved IR hash
+# 到 verify_func_vir。预估 ~100 LOC。
+#
 # 【DEFERRED → post-0.31.27】Callee ensures propagation in VIR path：
 # - 需要扩展 trusted subset gate 允许调用已验证函数
 # - 当前 calls 被 gate 拒绝；AST 路径通过 assert_callee_ensures_in_block 处理
@@ -570,6 +602,9 @@ requirements = ["VERIFY-CORE-001"]
 # 【DEFERRED → post-0.31.27】Typestate 公理注入（CheckedProgram → Z3）：
 # - 需要 CheckedProgram 访问（当前 verifier 操作 raw AST）
 # - lower_transition_to_vir 已就绪（0.31.26-4），待接入
+# - 【深度审查确认 P1-28】typestate_context 当前永远为空（vir.rs:1349-1352），
+#   Z3 验证 Flow transition 时无状态不变量、无转移守卫、无目标状态义务。
+#   接入后需补充 ≥5 个 Flow transition 验证测试。
 
 [[milestone]]
 version = "0.31.28"
@@ -763,6 +798,26 @@ requirements = []
 # - 审计 Interpreter<'a> ~105 个字段，将冷路径字段（comptime_results、
 #   derive_expansion_error 等 61 个 resolved_* 桥接字段）移入 Box<InterpreterCold>
 # - 减少热路径 cache miss（前提：AD-1 body 迁移完成后 resolved_* 字段可精简）
+#
+# 【深度审查追加 P0-11/12】Actor worker / Codegen comptime 绕过 CheckedProgram：
+# - interp/value.rs:1100,1157 Actor worker 用 Interpreter::new(raw AST)，
+#   无 resolved transition 表、无函数目录、无效果追踪、无 ownership 数据。
+#   矩阵补全的 transition、fallback 注入对 worker 不可见。
+#   修复：Actor worker 改用 Interpreter::from_checked()，安装 CheckedProgram 目录。
+# - codegen/compile.rs:1263 fold_comptime_items 用 Interpreter::new(raw AST)。
+#   修复：comptime 求值改用 from_checked() 或独立 ComptimeEvaluator。
+# - 预估 ~500-800 LOC（含测试）
+#
+# 【深度审查追加 P1-19/25/26/27 + P2 死代码】死基础设施清理：
+# - P1-19: Stmt::Become 在 collect_stmt_call_sites 中缺失（_ => {}）
+# - P1-25: Call-site 目录 6 个访问器仅测试调用，执行路径从不查询（~200 行安装代码）
+# - P1-26: 效果追踪目录仅测试调用，call_func 不检查效果（零运行时牙齿）
+# - P1-27: Arity guard 键不匹配（func.name vs qualified_name），模块嵌套函数永不触发
+# - P2: pinned timeout 代码（架构修正案条款 10 已废除）仍保留
+# - P2: consumed_resources 字段 #[allow(dead_code)]（断言禁用，需 CFG 路径分析后重启）
+# - 决策：P1-25/26 二选一——要么接入执行路径（效果系统长牙齿），要么删除安装代码。
+#   P1-27 修复键匹配。P2 pinned timeout 删除。consumed_resources 保留到断言重启。
+# - 预估 ~400-600 LOC（含删除）
 
 [[milestone]]
 version = "0.31.46"
@@ -771,6 +826,16 @@ title = "最终敌对审查"
 # 【盲审追加】Trap Tests：IEEE-754 边界 + 整数溢出 + OOB，检测解释器/codegen 共享 bug
 # 【盲审追加】对抗性 Fuzzing：843 个 extern fn 随机输入 + ASan
 requirements = []
+#
+# 【深度审查追加 P2 测试覆盖缺口】
+# - type_folder 仅 2 个测试：需补充 ForAll binder 追踪、链式替换、
+#   环检测、CollectVarsFolder/RemapFolder shadowing 等场景（~15 个测试）
+# - ResolvedInterpreter 87 个 unsupported() 调用点：需逐个确认是否有
+#   用户可达路径触发 unsupported panic，补充 E2E 测试或标记为已废弃
+# - 数组类型可命名但不可用（无索引、无初始化）：需明确语言决策
+#   （1.0 支持 or 标记 experimental），补充对应测试或负测试
+# - 非确定性诊断顺序（HashMap 迭代）：诊断输出应排序后比较，
+#   或改用 BTreeMap/IndexMap 保证确定性
 
 [[milestone]]
 version = "0.31.47"
