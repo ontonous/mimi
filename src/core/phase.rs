@@ -230,76 +230,17 @@ impl From<BackendTy> for Type {
 // ---------------------------------------------------------------------------
 
 fn contains_infer_artifacts(ty: &Type) -> bool {
-    match ty {
-        Type::Located { ty, .. } => contains_infer_artifacts(ty),
+    crate::core::type_folder::type_any(ty, &|t| match t {
         Type::TypeVar(_) | Type::ForAll(..) | Type::Infer => true,
         Type::Name(n, _) if n == "_" || n == "unknown" => true,
-        Type::Name(_, args) => args.iter().any(contains_infer_artifacts),
-        Type::Option(inner) => contains_infer_artifacts(inner),
-        Type::Result(ok, err) => contains_infer_artifacts(ok) || contains_infer_artifacts(err),
-        Type::Tuple(elems) => elems.iter().any(contains_infer_artifacts),
-        Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
-            args.iter().any(contains_infer_artifacts) || contains_infer_artifacts(ret)
-        }
-        Type::Ref(_, inner)
-        | Type::RefMut(_, inner)
-        | Type::Shared(inner)
-        | Type::LocalShared(inner)
-        | Type::Weak(inner)
-        | Type::WeakLocal(inner)
-        | Type::RawPtr(inner)
-        | Type::RawPtrMut(inner)
-        | Type::CShared(inner)
-        | Type::CBorrow(inner)
-        | Type::CBorrowMut(inner)
-        | Type::CBuffer(inner)
-        | Type::Array(inner, _)
-        | Type::Slice(inner)
-        | Type::Newtype(_, inner) => contains_infer_artifacts(inner),
-        Type::Cap(_)
-        | Type::ImplTrait(_)
-        | Type::DynTrait(_)
-        | Type::Nothing
-        | Type::Allocator
-        | Type::RawString => false,
-    }
+        _ => false,
+    })
 }
 
 fn contains_inference_variables(ty: &Type) -> bool {
-    match ty {
-        Type::Located { ty, .. } => contains_inference_variables(ty),
-        Type::TypeVar(_) | Type::ForAll(..) => true,
-        Type::Name(_, args) | Type::Tuple(args) => args.iter().any(contains_inference_variables),
-        Type::Result(ok, err) => {
-            contains_inference_variables(ok) || contains_inference_variables(err)
-        }
-        Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
-            args.iter().any(contains_inference_variables) || contains_inference_variables(ret)
-        }
-        Type::Ref(_, inner)
-        | Type::RefMut(_, inner)
-        | Type::Option(inner)
-        | Type::Shared(inner)
-        | Type::LocalShared(inner)
-        | Type::Weak(inner)
-        | Type::WeakLocal(inner)
-        | Type::RawPtr(inner)
-        | Type::RawPtrMut(inner)
-        | Type::CShared(inner)
-        | Type::CBorrow(inner)
-        | Type::CBorrowMut(inner)
-        | Type::CBuffer(inner)
-        | Type::Array(inner, _)
-        | Type::Slice(inner)
-        | Type::Newtype(_, inner) => contains_inference_variables(inner),
-        Type::Infer
-        | Type::Nothing
-        | Type::Allocator
-        | Type::RawString
-        | Type::Cap(_)
-        | Type::ImplTrait(_)
-        | Type::DynTrait(_) => false,
-    }
+    crate::core::type_folder::type_any(ty, &|t| {
+        matches!(t, Type::TypeVar(_) | Type::ForAll(..))
+    })
 }
 
 fn contains_dynamic_type(ty: &Type) -> bool {

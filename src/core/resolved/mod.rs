@@ -8882,44 +8882,12 @@ fn canonicalize_declaration_member<R>(
 }
 
 fn contains_unresolved_type(ty: &Type) -> bool {
-    match ty {
-        Type::Located { ty, .. } => contains_unresolved_type(ty),
+    crate::core::type_folder::type_any(ty, &|t| match t {
         Type::Infer | Type::TypeVar(_) => true,
-        Type::Name(name, args) => {
-            name == "Any"
-                || name == "_"
-                || name == "unknown"
-                || args.iter().any(contains_unresolved_type)
-        }
-        Type::Ref(_, inner)
-        | Type::RefMut(_, inner)
-        | Type::Option(inner)
-        | Type::Shared(inner)
-        | Type::LocalShared(inner)
-        | Type::Weak(inner)
-        | Type::WeakLocal(inner)
-        | Type::Array(inner, _)
-        | Type::Slice(inner)
-        | Type::Newtype(_, inner)
-        | Type::CBuffer(inner)
-        | Type::RawPtr(inner)
-        | Type::RawPtrMut(inner)
-        | Type::CShared(inner)
-        | Type::CBorrow(inner)
-        | Type::CBorrowMut(inner) => contains_unresolved_type(inner),
         Type::ForAll(_, _) => true,
-        Type::Result(ok, err) => contains_unresolved_type(ok) || contains_unresolved_type(err),
-        Type::Tuple(items) => items.iter().any(contains_unresolved_type),
-        Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
-            args.iter().any(contains_unresolved_type) || contains_unresolved_type(ret)
-        }
-        Type::Cap(_)
-        | Type::DynTrait(_)
-        | Type::ImplTrait(_)
-        | Type::Nothing
-        | Type::Allocator
-        | Type::RawString => false,
-    }
+        Type::Name(name, _) => name == "Any" || name == "_" || name == "unknown",
+        _ => false,
+    })
 }
 
 fn qualify(module: &str, name: &str) -> String {

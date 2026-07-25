@@ -1,5 +1,116 @@
 use crate::ast::Type;
 
+// ---------------------------------------------------------------------------
+// Predicate-based type visitors (AD-5: 6 independent walkers → shared traversal)
+// ---------------------------------------------------------------------------
+
+/// Visit all sub-types of `ty`, calling `pred` on each node.
+/// Returns `true` if `pred` returns `true` for any node (short-circuit).
+///
+/// Structural traversal is shared — callers only provide the predicate.
+/// This replaces 6 independent recursive walkers that duplicated the same
+/// match structure (occurs_in, is_escape_type, contains_infer_artifacts,
+/// contains_inference_variables, contains_unresolved_type, scan_residual).
+pub fn type_any(ty: &Type, pred: &dyn Fn(&Type) -> bool) -> bool {
+    if pred(ty) {
+        return true;
+    }
+    match ty {
+        Type::Located { ty, .. } => type_any(ty, pred),
+        Type::Name(_, args) => args.iter().any(|a| type_any(a, pred)),
+        Type::Tuple(elems) => elems.iter().any(|e| type_any(e, pred)),
+        Type::Result(ok, err) => type_any(ok, pred) || type_any(err, pred),
+        Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
+            args.iter().any(|a| type_any(a, pred)) || type_any(ret, pred)
+        }
+        Type::Option(inner)
+        | Type::Ref(_, inner)
+        | Type::RefMut(_, inner)
+        | Type::Shared(inner)
+        | Type::LocalShared(inner)
+        | Type::Weak(inner)
+        | Type::WeakLocal(inner)
+        | Type::RawPtr(inner)
+        | Type::RawPtrMut(inner)
+        | Type::CShared(inner)
+        | Type::CBorrow(inner)
+        | Type::CBorrowMut(inner)
+        | Type::CBuffer(inner)
+        | Type::Array(inner, _)
+        | Type::Slice(inner)
+        | Type::Newtype(_, inner) => type_any(inner, pred),
+        Type::ForAll(_, body) => type_any(body, pred),
+        // Leaf types with no children
+        Type::Infer
+        | Type::TypeVar(_)
+        | Type::Nothing
+        | Type::Allocator
+        | Type::RawString
+        | Type::Cap(_)
+        | Type::ImplTrait(_)
+        | Type::DynTrait(_) => false,
+    }
+}
+
+/// Visit all sub-types of `ty`, calling `pred` on each node.
+/// Returns `Err` if `pred` returns `Err` for any node (short-circuit).
+///
+/// Used by `scan_residual` which needs to report *which* node failed.
+pub fn type_try_visit<E>(ty: &Type, pred: &dyn Fn(&Type) -> Result<(), E>) -> Result<(), E> {
+    pred(ty)?;
+    match ty {
+        Type::Located { ty, .. } => type_try_visit(ty, pred),
+        Type::Name(_, args) => {
+            for arg in args {
+                type_try_visit(arg, pred)?;
+            }
+            Ok(())
+        }
+        Type::Tuple(elems) => {
+            for elem in elems {
+                type_try_visit(elem, pred)?;
+            }
+            Ok(())
+        }
+        Type::Result(ok, err) => {
+            type_try_visit(ok, pred)?;
+            type_try_visit(err, pred)
+        }
+        Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
+            for arg in args {
+                type_try_visit(arg, pred)?;
+            }
+            type_try_visit(ret, pred)
+        }
+        Type::Option(inner)
+        | Type::Ref(_, inner)
+        | Type::RefMut(_, inner)
+        | Type::Shared(inner)
+        | Type::LocalShared(inner)
+        | Type::Weak(inner)
+        | Type::WeakLocal(inner)
+        | Type::RawPtr(inner)
+        | Type::RawPtrMut(inner)
+        | Type::CShared(inner)
+        | Type::CBorrow(inner)
+        | Type::CBorrowMut(inner)
+        | Type::CBuffer(inner)
+        | Type::Array(inner, _)
+        | Type::Slice(inner)
+        | Type::Newtype(_, inner) => type_try_visit(inner, pred),
+        Type::ForAll(_, body) => type_try_visit(body, pred),
+        // Leaf types with no children
+        Type::Infer
+        | Type::TypeVar(_)
+        | Type::Nothing
+        | Type::Allocator
+        | Type::RawString
+        | Type::Cap(_)
+        | Type::ImplTrait(_)
+        | Type::DynTrait(_) => Ok(()),
+    }
+}
+
 /// Walk a type with a folder, applying the folder's operations.
 pub fn walk_type(ty: Type, folder: &mut dyn TypeFolder) -> Type {
     match ty {
