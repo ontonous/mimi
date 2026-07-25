@@ -576,18 +576,13 @@ func negate(x: f64) -> f64 {
 "#;
     let results = verify_source(src).expect("src/verifier/tests.rs:359 unwrap failed");
     assert_eq!(results.len(), 1);
+    // 0.31.28: f64 negation is NOT in the trusted subset (IEEE 754 rounding
+    // is not modeled). The VIR path rejects f64 arithmetic → NotInTrustedSubset.
     assert_eq!(
         results[0].status,
-        VerifStatus::Failed,
-        "negate should fail: result = -x violates ensures result > 0.0"
-    );
-    let diag = results[0]
-        .diagnostic
-        .as_ref()
-        .expect("src/verifier/tests.rs:363 unwrap failed");
-    assert!(
-        diag.message.contains("result"),
-        "should include result in narrative"
+        VerifStatus::NotInTrustedSubset,
+        "f64 negation should be NotInTrustedSubset: {}",
+        results[0].message
     );
 }
 
@@ -803,10 +798,12 @@ func scale_add(x: f64) -> f64 {
 "#;
     let results = verify_source(src).expect("src/verifier/tests.rs: verify_f64_add_and_compare");
     assert_eq!(results.len(), 1);
+    // 0.31.28: f64 arithmetic is NOT in the trusted subset (IEEE 754 rounding
+    // is not modeled). The VIR path rejects f64 arithmetic → NotInTrustedSubset.
     assert_eq!(
         results[0].status,
-        VerifStatus::Verified,
-        "f64 add and compare should verify: {:?}",
+        VerifStatus::NotInTrustedSubset,
+        "f64 arithmetic should be NotInTrustedSubset: {:?}",
         results[0]
     );
 }
@@ -1316,6 +1313,7 @@ fn verify_f64_large_value_no_overflow() {
     // 3.1: Large f64 values should not overflow the verifier's encoding.
     // The old i64 scaling approach would overflow for values > ~9e3.
     // Test that both encoding and comparison work for positive large values.
+    // 0.31.28: f64 arithmetic is NOT in the trusted subset → NotInTrustedSubset.
     let src = r#"
 func scale(x: f64) -> f64 {
     requires: x >= 1e10
@@ -1329,8 +1327,8 @@ func main() -> f64 { 0.0 }
     assert!(s.is_some(), "scale function should be verified");
     assert_eq!(
         s.unwrap().status,
-        VerifStatus::Verified,
-        "large f64 should verify correctly: {:?}",
+        VerifStatus::NotInTrustedSubset,
+        "f64 arithmetic should be NotInTrustedSubset: {:?}",
         s.unwrap()
     );
 }
@@ -1340,6 +1338,7 @@ fn verify_f64_tiny_value_no_underflow() {
     require_z3!();
     // Tiny f64 values (< 1e-15) should not underflow (old encoding
     // used 1e15 precision denominator and overflowed for very small values).
+    // 0.31.28: f64 arithmetic is NOT in the trusted subset → NotInTrustedSubset.
     let src = r#"
 func check(x: f64) -> f64 {
     requires: x > 1e-20
@@ -1353,8 +1352,8 @@ func main() -> f64 { 0.0 }
     assert!(c.is_some(), "check function should be verified");
     assert_eq!(
         c.unwrap().status,
-        VerifStatus::Verified,
-        "tiny f64 should verify correctly: {:?}",
+        VerifStatus::NotInTrustedSubset,
+        "f64 arithmetic should be NotInTrustedSubset: {:?}",
         c.unwrap()
     );
 }

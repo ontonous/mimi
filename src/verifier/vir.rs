@@ -861,10 +861,21 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
             }
             crate::ast::Stmt::Return(expr) => {
                 if let Some(expr) = expr {
-                    if let Some(vexpr) = lower_expr_to_vir(expr, &mut ctx) {
-                        body_stmts.push(VStmt::Return(vexpr));
-                        span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
-                        stmt_index += 1;
+                    match lower_expr_to_vir(expr, &mut ctx) {
+                        Some(vexpr) => {
+                            body_stmts.push(VStmt::Return(vexpr));
+                            span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
+                            stmt_index += 1;
+                        }
+                        None => {
+                            // 0.31.28: Fail-closed. If the return expression cannot
+                            // be lowered (e.g., f64 arithmetic), the whole function
+                            // is NotInTrustedSubset.
+                            return Err(
+                                "return expression contains unsupported expression (cannot lower to VIR)"
+                                    .to_string(),
+                            );
+                        }
                     }
                 }
             }
@@ -872,10 +883,21 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                 // Only the LAST expression statement is the implicit return.
                 // Earlier expression statements have their values discarded.
                 if is_last {
-                    if let Some(vexpr) = lower_expr_to_vir(expr, &mut ctx) {
-                        body_stmts.push(VStmt::Return(vexpr));
-                        span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
-                        stmt_index += 1;
+                    match lower_expr_to_vir(expr, &mut ctx) {
+                        Some(vexpr) => {
+                            body_stmts.push(VStmt::Return(vexpr));
+                            span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
+                            stmt_index += 1;
+                        }
+                        None => {
+                            // 0.31.28: Fail-closed. If the return expression cannot
+                            // be lowered (e.g., f64 arithmetic), the whole function
+                            // is NotInTrustedSubset.
+                            return Err(
+                                "return expression contains unsupported expression (cannot lower to VIR)"
+                                    .to_string(),
+                            );
+                        }
                     }
                 }
                 // Non-tail expression statements are discarded (pure expressions
@@ -1023,10 +1045,13 @@ fn lower_expr_to_vir(expr: &crate::ast::Expr, ctx: &mut LoweringCtx) -> Option<V
             let r = lower_expr_to_vir(rhs, ctx)?;
             // Infer the arithmetic type from operands
             let arith_ty = ctx.infer_expr_type(lhs);
-            // Check if this is an f64 comparison
+            // Check if this is an f64 operation
             let is_f64 = ctx.infer_expr_type(lhs) == VType::F64Opaque
                 || ctx.infer_expr_type(rhs) == VType::F64Opaque;
             match op {
+                // f64 arithmetic is NOT in the trusted subset (IEEE 754 rounding
+                // is not modeled). Fail-closed: return None → NotInTrustedSubset.
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod if is_f64 => None,
                 BinOp::Add => Some(VExpr::CheckedArith(
                     VArithOp::Add,
                     Box::new(l),
@@ -1089,6 +1114,10 @@ fn lower_expr_to_vir(expr: &crate::ast::Expr, ctx: &mut LoweringCtx) -> Option<V
         Expr::Unary(UnOp::Neg, inner) => {
             let v = lower_expr_to_vir(inner, ctx)?;
             let neg_ty = ctx.infer_expr_type(inner);
+            // f64 negation is NOT in the trusted subset (IEEE 754 rounding).
+            if neg_ty == VType::F64Opaque {
+                return None;
+            }
             Some(VExpr::CheckedNeg(Box::new(v), neg_ty))
         }
         Expr::Unary(UnOp::Not, inner) => {
@@ -1350,7 +1379,12 @@ impl VirZ3Ctx {
             VExpr::Var(id) => self.int_vars.get(id).cloned(),
             VExpr::Old(id) => self.old_int_vars.get(id).cloned(),
             VExpr::Result => self.result_int.clone(),
-            VExpr::CheckedArith(op, lhs, rhs, _ty) => {
+            VExpr::CheckedArith(op, lhs, rhs, ty) => {
+                // f64 arithmetic is NOT encodable as Z3 Int (IEEE 754 rounding
+                // is not modeled). Fail-closed: return None.
+                if *ty == VType::F64Opaque {
+                    return None;
+                }
                 let l = self.encode_int(lhs)?;
                 let r = self.encode_int(rhs)?;
                 match op {

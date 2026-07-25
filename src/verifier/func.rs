@@ -1107,28 +1107,49 @@ impl VerifierCtx {
         }
 
         // 1b. Fall back to AST path for constructs VIR doesn't handle yet:
-        // - f64 parameters or return (VIR treats f64 as opaque, no arithmetic)
         // - invariant statements (VIR doesn't encode loop invariants)
-        let has_f64_param = func
-            .params
-            .iter()
-            .any(|p| matches!(p.ty.unlocated(), Type::Name(n, _) if n == "f64"));
-        let has_f64_return = func
-            .ret
-            .as_ref()
-            .is_some_and(|t| matches!(t.unlocated(), Type::Name(n, _) if n == "f64"));
+        //
+        // 0.31.28: f64 parameters/return are now handled by the VIR path:
+        // - f64 arithmetic → NotInTrustedSubset (lowering returns None)
+        // - f64 comparison → F64Compare (uninterpreted predicate)
         let has_invariant = func
             .body
             .iter()
             .any(|s| matches!(s.unlocated(), Stmt::Invariant(..)));
-        if has_f64_param || has_f64_return || has_invariant {
+        if has_invariant {
             return None; // Fall back to AST-based path
         }
 
         // 2. Lower to VIR
         let (vfunc, _span_table) = match vir::lower_func_to_vir(func) {
             Ok(result) => result,
-            Err(_) => return None, // Lowering failed; fall back
+            Err(reason) => {
+                // 0.31.28: Lowering failed. If the function has f64 parameters
+                // or return type, this is likely because of f64 arithmetic
+                // (which is NOT in the trusted subset). Return NotInTrustedSubset
+                // instead of falling back to the AST path.
+                let has_f64 = func.params.iter().any(|p| {
+                    matches!(p.ty.unlocated(), Type::Name(n, _) if n == "f64")
+                }) || func.ret.as_ref().is_some_and(|t| {
+                    matches!(t.unlocated(), Type::Name(n, _) if n == "f64")
+                });
+                if has_f64 {
+                    return Some(VerificationResult {
+                        func_name: func.name.clone(),
+                        status: VerifStatus::NotInTrustedSubset,
+                        message: format!(
+                            "f64 arithmetic is not in the trusted subset (IEEE 754 rounding not modeled): {}",
+                            reason
+                        ),
+                        diagnostic: None,
+                        duration_us: start.elapsed().as_micros() as u64,
+                        constraint_count: 0,
+                        artifact: None,
+                        trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+                    });
+                }
+                return None; // Lowering failed for other reasons; fall back
+            }
         };
 
         // 2b. Compute VC artifact (semantics hash for proof caching)
