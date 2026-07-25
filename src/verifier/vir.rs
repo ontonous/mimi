@@ -443,13 +443,9 @@ fn check_stmt_trusted(stmt: &crate::ast::Stmt) -> TrustedSubsetResult {
     use crate::ast::Stmt;
     match stmt.unlocated() {
         // Contracts are always allowed (they are the specification)
-        Stmt::Requires(..) | Stmt::Ensures(..) | Stmt::Invariant(..) | Stmt::Math(..) => {
-            Ok(())
-        }
+        Stmt::Requires(..) | Stmt::Ensures(..) | Stmt::Invariant(..) | Stmt::Math(..) => Ok(()),
         // Super-comments are ignored
-        Stmt::MmsBlock { .. } | Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Ellipsis => {
-            Ok(())
-        }
+        Stmt::MmsBlock { .. } | Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Ellipsis => Ok(()),
         // Let bindings: check the init expression; reject mutable bindings
         Stmt::Let { init, mut_, .. } => {
             if *mut_ {
@@ -473,11 +469,7 @@ fn check_stmt_trusted(stmt: &crate::ast::Stmt) -> TrustedSubsetResult {
         // Expression statements
         Stmt::Expr(expr) => check_expr_trusted(expr),
         // If: check condition and branches
-        Stmt::If {
-            cond,
-            then_,
-            else_,
-        } => {
+        Stmt::If { cond, then_, else_ } => {
             check_expr_trusted(cond)?;
             check_stmts_trusted(then_)?;
             if let Some(else_) = else_ {
@@ -490,21 +482,17 @@ fn check_stmt_trusted(stmt: &crate::ast::Stmt) -> TrustedSubsetResult {
             Err("loop constructs are not in the trusted subset (v1: finite branching only)".into())
         }
         // Mutation is NOT in the trusted subset
-        Stmt::Assign { .. } => Err(
-            "mutation is not in the trusted subset (v1: immutable scalars only)".into(),
-        ),
+        Stmt::Assign { .. } => {
+            Err("mutation is not in the trusted subset (v1: immutable scalars only)".into())
+        }
         // Defer is NOT in the trusted subset
-        Stmt::Defer(..) => Err(
-            "defer is not in the trusted subset".into(),
-        ),
+        Stmt::Defer(..) => Err("defer is not in the trusted subset".into()),
         // Block: recurse
         Stmt::Block(stmts) => check_stmts_trusted(stmts),
         // Do block (transition body): recurse into the block
         Stmt::Do(stmts) => check_stmts_trusted(stmts),
         // Anything else is rejected
-        _ => Err(
-            "statement is not in the trusted subset".into(),
-        ),
+        _ => Err("statement is not in the trusted subset".into()),
     }
 }
 
@@ -562,29 +550,21 @@ fn check_expr_trusted(expr: &crate::ast::Expr) -> TrustedSubsetResult {
                     return Ok(());
                 }
             }
-            Err(
-                "function calls are not in the trusted subset (v1: no calls)".into(),
-            )
+            Err("function calls are not in the trusted subset (v1: no calls)".into())
         }
         // Field access: NOT in trusted subset (heap/aggregate)
-        Expr::Field(..) => Err(
-            "field access is not in the trusted subset (v1: no heap/aggregate)".into(),
-        ),
+        Expr::Field(..) => {
+            Err("field access is not in the trusted subset (v1: no heap/aggregate)".into())
+        }
         // Tuple index: NOT in trusted subset
-        Expr::TupleIndex(..) => Err(
-            "tuple index is not in the trusted subset (v1: no aggregates)".into(),
-        ),
+        Expr::TupleIndex(..) => {
+            Err("tuple index is not in the trusted subset (v1: no aggregates)".into())
+        }
         // Spawn/Await: NOT in trusted subset
-        Expr::Spawn(..) => Err(
-            "spawn is not in the trusted subset".into(),
-        ),
-        Expr::Await(..) => Err(
-            "await is not in the trusted subset".into(),
-        ),
+        Expr::Spawn(..) => Err("spawn is not in the trusted subset".into()),
+        Expr::Await(..) => Err("await is not in the trusted subset".into()),
         // Anything else is rejected
-        _ => Err(
-            "expression is not in the trusted subset".into(),
-        ),
+        _ => Err("expression is not in the trusted subset".into()),
     }
 }
 
@@ -603,10 +583,15 @@ struct LoweringCtx {
     returns_f64: bool,
     /// Whether the return type is bool.
     returns_bool: bool,
+    /// The function's return VType (for contextual type inference).
+    /// When the return type is i32, integer literals in the body are
+    /// inferred as i32 (not i64) so that definedness checks apply.
+    return_vtype: Option<VType>,
 }
 
 impl LoweringCtx {
     fn new(func: &crate::ast::FuncDef) -> Self {
+        let return_vtype = func.ret.as_ref().map(surface_type_to_vtype);
         let mut ctx = LoweringCtx {
             next_var: 0,
             name_map: HashMap::new(),
@@ -618,6 +603,7 @@ impl LoweringCtx {
             returns_bool: func.ret.as_ref().is_some_and(
                 |t| matches!(t.unlocated(), crate::ast::Type::Name(n, _) if n == "bool" || n == "Bool"),
             ),
+            return_vtype,
         };
         // Register parameters as %0, %1, %2, ...
         for param in &func.params {
@@ -653,7 +639,15 @@ impl LoweringCtx {
         use crate::ast::Expr;
         match expr.unlocated() {
             Expr::Ident(name) => self.type_of(name).unwrap_or(VType::I64),
-            Expr::Literal(crate::ast::Lit::Int(_)) => VType::I64, // literals are i64 by default
+            Expr::Literal(crate::ast::Lit::Int(_)) => {
+                // When the function returns i32, integer literals are i32
+                // (so that definedness checks apply to constant expressions).
+                if self.return_vtype == Some(VType::I32) {
+                    VType::I32
+                } else {
+                    VType::I64
+                }
+            }
             Expr::Literal(crate::ast::Lit::Float(_)) => VType::F64Opaque,
             Expr::Literal(crate::ast::Lit::Bool(_)) => VType::Bool,
             Expr::Binary(_, lhs, rhs) => {
@@ -670,11 +664,9 @@ impl LoweringCtx {
             }
             Expr::Unary(_, inner) => self.infer_expr_type(inner),
             Expr::Old(inner) => self.infer_expr_type(inner),
-            Expr::If { then_, .. } => {
-                crate::verifier::helpers::block_tail_expr(then_)
-                    .map(|e| self.infer_expr_type(&e))
-                    .unwrap_or(VType::I64)
-            }
+            Expr::If { then_, .. } => crate::verifier::helpers::block_tail_expr(then_)
+                .map(|e| self.infer_expr_type(&e))
+                .unwrap_or(VType::I64),
             _ => VType::I64,
         }
     }
@@ -709,9 +701,7 @@ fn surface_type_to_vtype(ty: &crate::ast::Type) -> VType {
 /// If the gate was not run, this function may produce incorrect VIR.
 ///
 /// Returns `(VFunction, VirSpanTable)`.
-pub fn lower_func_to_vir(
-    func: &crate::ast::FuncDef,
-) -> Result<(VFunction, VirSpanTable), String> {
+pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSpanTable), String> {
     // Gate check (defensive — caller should have checked)
     match check_trusted_subset(func) {
         Ok(()) => {}
@@ -822,7 +812,11 @@ pub fn lower_func_to_vir(
                             if let Some(expr) = expr {
                                 if let Some(vexpr) = lower_expr_to_vir(expr, &mut ctx) {
                                     body_stmts.push(VStmt::Return(vexpr));
-                                    span_table.record_stmt(&func_id, stmt_index, stmt_span(inner_stmt));
+                                    span_table.record_stmt(
+                                        &func_id,
+                                        stmt_index,
+                                        stmt_span(inner_stmt),
+                                    );
                                     stmt_index += 1;
                                 }
                             }
@@ -836,7 +830,11 @@ pub fn lower_func_to_vir(
                                     };
                                     let var = ctx.resolve(&name);
                                     body_stmts.push(VStmt::Let(var, vexpr));
-                                    span_table.record_stmt(&func_id, stmt_index, stmt_span(inner_stmt));
+                                    span_table.record_stmt(
+                                        &func_id,
+                                        stmt_index,
+                                        stmt_span(inner_stmt),
+                                    );
                                     stmt_index += 1;
                                 }
                             }
@@ -1067,9 +1065,7 @@ fn lower_match_arms_to_vir(
 
 /// Extract the span from a statement.
 fn stmt_span(stmt: &crate::ast::Stmt) -> Span {
-    stmt.meta()
-        .map(|m| m.span)
-        .unwrap_or(Span::UNKNOWN)
+    stmt.meta().map(|m| m.span).unwrap_or(Span::UNKNOWN)
 }
 
 // ── Flow transition → VIR with typestate axioms ───────────────────────
@@ -1431,8 +1427,7 @@ impl VirZ3Ctx {
                             let zero = z3::ast::Int::from_i64(0);
                             let min = z3::ast::Int::from_i64(i32::MIN as i64);
                             let neg_one = z3::ast::Int::from_i64(-1);
-                            let min_overflow =
-                                z3::ast::Bool::and(&[&l.eq(&min), &r.eq(&neg_one)]);
+                            let min_overflow = z3::ast::Bool::and(&[&l.eq(&min), &r.eq(&neg_one)]);
                             obligations.push((
                                 z3::ast::Bool::and(&[&r.ne(&zero), &min_overflow.not()]),
                                 "integer operation is undefined (zero divisor or MIN / -1)",
@@ -1703,6 +1698,9 @@ mod tests {
         assert!(span_table.postcondition_span("add", 0).is_some());
         // VIR itself should have no spans
         let repr = vfunc.normalized_repr();
-        assert!(!repr.contains("line"), "VIR repr should not contain span info");
+        assert!(
+            !repr.contains("line"),
+            "VIR repr should not contain span info"
+        );
     }
 }

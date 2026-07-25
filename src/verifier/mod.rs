@@ -8,7 +8,9 @@ pub mod vir;
 pub mod ffi;
 
 pub(crate) use ctx::Z3VarMap;
-pub use ctx::{Counterexample, ProofArtifact, TrustedSubsetDomain, VerifStatus, VerificationResult, Verifier};
+pub use ctx::{
+    Counterexample, ProofArtifact, TrustedSubsetDomain, VerifStatus, VerificationResult, Verifier,
+};
 pub(crate) use ctx::{SolverSession, VerifierCtx};
 pub use flow::{
     flow_verify_ffi_call_sites, flow_verify_ffi_call_sites_or_mock, FlowAcc, FlowEvent,

@@ -3634,24 +3634,20 @@ impl BodyLowerer<'_> {
                 // has already validated pattern field types against the state payload.
                 let unit_ty = self.unit.clone();
                 let field_types = self.field_types;
-                let declared: Vec<(String, NodeId, ResolvedTypeId)> = def
-                    .fields
-                    .iter()
-                    .map(|(fname, _)| {
-                        let field_id = def
-                            .field_ids
-                            .get(fname)
-                            .cloned()
-                            .unwrap_or_else(|| {
+                let declared: Vec<(String, NodeId, ResolvedTypeId)> =
+                    def.fields
+                        .iter()
+                        .map(|(fname, _)| {
+                            let field_id = def.field_ids.get(fname).cloned().unwrap_or_else(|| {
                                 NodeId(format!("{}/field:{}", variant_id.0, fname))
                             });
-                        let ty_id = field_types
-                            .get(&field_id)
-                            .cloned()
-                            .unwrap_or_else(|| unit_ty.clone());
-                        (fname.clone(), field_id, ty_id)
-                    })
-                    .collect();
+                            let ty_id = field_types
+                                .get(&field_id)
+                                .cloned()
+                                .unwrap_or_else(|| unit_ty.clone());
+                            (fname.clone(), field_id, ty_id)
+                        })
+                        .collect();
                 let lowered =
                     self.lower_constructor_fields(node_id, fields, role, &declared, mutable)?;
                 return Ok(Some(ResolvedPatternKind::Constructor {

@@ -7268,8 +7268,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // When stored_ty is a pointer, the alloca holds a pointer to
                     // the actual data. Load it to pass the data pointer, not the
                     // pointer-to-pointer.
-                    let is_already_indirect =
-                        matches!(stored_ty, BasicTypeEnum::PointerType(_));
+                    let is_already_indirect = matches!(stored_ty, BasicTypeEnum::PointerType(_));
                     if is_already_indirect {
                         args[index] =
                             self.build_load(stored_ty, slot, &format!("{}_borrow_ptr", var_name))?;
