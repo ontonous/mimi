@@ -563,8 +563,8 @@ impl LspServer {
         // Check cache
         if let Some(cached) = self.verification_cache.get(&cache_key).cloned() {
             if cached.body_hash == body_hash {
-                match &cached.status {
-                    VerifStatus::Failed => {
+                match cached.status.clone() {
+                    VerifStatus::Disproven => {
                         let registry = self.source_registry.borrow();
                         if let Some(cached_diagnostic) = cached.diagnostic(&registry) {
                             diagnostics.push(diagnostic::diagnostic_to_lsp(
@@ -578,7 +578,7 @@ impl LspServer {
                         // safe location cache hit. Re-run verification instead
                         // of fabricating the function declaration range.
                     }
-                    VerifStatus::Verified | VerifStatus::Unknown => return diagnostics,
+                    _ => return diagnostics,
                 }
             }
         }

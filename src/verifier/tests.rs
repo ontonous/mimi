@@ -96,7 +96,7 @@ func preserve(xs: List<i32>) -> List<i32> {
 "#;
     let results = verify_source(src).expect("verification should parse");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].status, VerifStatus::Unknown);
+    assert!(results[0].status.is_inconclusive());
     assert!(results[0].message.contains("could not encode ensures"));
 }
 
@@ -111,7 +111,7 @@ func first(xs: List<i32>) -> i32 {
 "#;
     let results = verify_source(src).expect("verification should parse");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].status, VerifStatus::Unknown);
+    assert!(results[0].status.is_inconclusive());
     assert!(results[0].message.contains("could not encode requires"));
 }
 
@@ -350,7 +350,7 @@ func main() -> i64 { 0 }
     assert_eq!(ext.len(), 1, "extern func should be verified");
     assert_eq!(
         ext[0].status,
-        VerifStatus::Unknown, // P2.3 fix: Sat means counterexample exists, so Unknown (not Verified)
+        VerifStatus::SolverUnknown, // P2.3 fix: Sat means counterexample exists, so SolverUnknown (not Proven)
         "extern ensures should be consistent: {}",
         ext[0].message
     );
@@ -376,7 +376,7 @@ func main() -> i64 { 0 }
     assert_eq!(ext.len(), 1, "extern func should be verified");
     assert_eq!(
         ext[0].status,
-        VerifStatus::Unknown, // P2.3 fix: Sat means counterexample exists, so Unknown (not Verified)
+        VerifStatus::SolverUnknown, // P2.3 fix: Sat means counterexample exists, so SolverUnknown (not Proven)
         "extern requires+ensures should be consistent: {}",
         ext[0].message
     );
@@ -1074,8 +1074,8 @@ func main() -> i32 { 0 }
     // If Z3 IS available, we still get valid results; if not, mock returns Unknown.
     for r in results.unwrap() {
         assert!(
-            r.status == VerifStatus::Verified || r.status == VerifStatus::Unknown,
-            "status should be Verified or Unknown, got {:?}",
+            r.status == VerifStatus::Proven || r.status.is_inconclusive(),
+            "status should be Proven or inconclusive, got {:?}",
             r
         );
     }
@@ -1104,9 +1104,9 @@ func main() -> i32 { 0 }
     assert!(abs_result.is_some(), "abs function should be verified");
     // Should at least produce a deterministic status.
     assert!(
-        abs_result.unwrap().status == VerifStatus::Verified
-            || abs_result.unwrap().status == VerifStatus::Failed
-            || abs_result.unwrap().status == VerifStatus::Unknown
+        abs_result.unwrap().status == VerifStatus::Proven
+            || abs_result.unwrap().status == VerifStatus::Disproven
+            || abs_result.unwrap().status.is_inconclusive()
     );
 }
 
@@ -1402,7 +1402,7 @@ func main() -> i32 { 0 }
     let f = results.iter().find(|r| r.func_name == "categorize");
     assert!(f.is_some(), "categorize should be present");
     assert!(
-        f.unwrap().status == VerifStatus::Failed || f.unwrap().status == VerifStatus::Unknown,
+        f.unwrap().status == VerifStatus::Disproven || f.unwrap().status.is_inconclusive(),
         "match violation should be detected: {:?}",
         f.unwrap()
     );
@@ -1765,13 +1765,19 @@ func main() -> i32 { 0 }
         .expect("src/verifier/tests.rs: verify_solver_pop_after_unknown");
     let f = results.iter().find(|r| r.func_name == "complex");
     assert!(f.is_some(), "complex should be present");
-    // With 1ms timeout, this should return Unknown, not crash
+    // With 1ms timeout, this should return SolverUnknown, not crash
     assert!(
         matches!(
             f.unwrap().status,
-            VerifStatus::Verified | VerifStatus::Unknown
+            VerifStatus::Proven
+                | VerifStatus::NotInTrustedSubset
+                | VerifStatus::SolverUnknown
+                | VerifStatus::Timeout
+                | VerifStatus::InfrastructureError
+                | VerifStatus::RuntimeOnlyContract
+                | VerifStatus::NoObligations
         ),
-        "should not crash (Verified or Unknown): {:?}",
+        "should not crash (Proven or inconclusive): {:?}",
         f.unwrap().status,
     );
 }
@@ -1805,7 +1811,13 @@ func main() -> i32 { 0 }
             assert!(
                 matches!(
                     f.unwrap().status,
-                    VerifStatus::Failed | VerifStatus::Unknown
+                    VerifStatus::Disproven
+                        | VerifStatus::NotInTrustedSubset
+                        | VerifStatus::SolverUnknown
+                        | VerifStatus::Timeout
+                        | VerifStatus::InfrastructureError
+                        | VerifStatus::RuntimeOnlyContract
+                        | VerifStatus::NoObligations
                 ),
                 "non-exhaustive match should not silently pass ensures: {:?}",
                 f.unwrap().status,
@@ -1950,7 +1962,13 @@ func main() -> i32 { 0 }
     assert!(
         matches!(
             f.unwrap().status,
-            VerifStatus::Verified | VerifStatus::Unknown
+            VerifStatus::Proven
+                | VerifStatus::NotInTrustedSubset
+                | VerifStatus::SolverUnknown
+                | VerifStatus::Timeout
+                | VerifStatus::InfrastructureError
+                | VerifStatus::RuntimeOnlyContract
+                | VerifStatus::NoObligations
         ),
         "NLL cross-block should not cause false failure: {:?}",
         f.unwrap().status,
@@ -2078,11 +2096,18 @@ func main() -> i32 { 0 }
     let results = verify_source(src).expect("verify");
     let f = results.iter().find(|r| r.func_name == "bump");
     assert!(f.is_some(), "bump present: {:?}", results);
-    // Accept Verified or Unknown (if field old still incomplete) but not crash.
+    // Accept Proven or inconclusive (if field old still incomplete) but not crash.
     assert!(
         matches!(
             f.unwrap().status,
-            VerifStatus::Verified | VerifStatus::Unknown | VerifStatus::Failed
+            VerifStatus::Proven
+                | VerifStatus::Disproven
+                | VerifStatus::NotInTrustedSubset
+                | VerifStatus::SolverUnknown
+                | VerifStatus::Timeout
+                | VerifStatus::InfrastructureError
+                | VerifStatus::RuntimeOnlyContract
+                | VerifStatus::NoObligations
         ),
         "{:?}",
         f.unwrap()

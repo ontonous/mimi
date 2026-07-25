@@ -10,10 +10,10 @@ fn verification_blocks_success(
     constraint_count: usize,
     message: &str,
 ) -> bool {
-    let no_contracts = *status == VerifStatus::Unknown
+    let no_contracts = status.is_inconclusive()
         && constraint_count == 0
         && matches!(message, "no contracts" | "no contracts to verify");
-    *status == VerifStatus::Failed || (*status == VerifStatus::Unknown && !no_contracts)
+    *status == VerifStatus::Disproven || (status.is_inconclusive() && !no_contracts)
 }
 
 pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Result<(), String> {
@@ -94,10 +94,12 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
         }
 
         for r in &results {
-            let icon = match r.status {
-                VerifStatus::Verified => "\x1b[32m✓\x1b[0m",
-                VerifStatus::Failed => "\x1b[31m✗\x1b[0m",
-                VerifStatus::Unknown => "\x1b[33m?\x1b[0m",
+            let icon = if r.status == VerifStatus::Proven {
+                "\x1b[32m✓\x1b[0m"
+            } else if r.status == VerifStatus::Disproven {
+                "\x1b[31m✗\x1b[0m"
+            } else {
+                "\x1b[33m?\x1b[0m"
             };
             total_duration_us += r.duration_us;
             total_constraints += r.constraint_count;
@@ -108,10 +110,12 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
                 } else {
                     format!("{}µs", r.duration_us)
                 };
-                let status_str = match r.status {
-                    VerifStatus::Verified => "✓ pass",
-                    VerifStatus::Failed => "✗ fail",
-                    VerifStatus::Unknown => "? unknown",
+                let status_str = if r.status == VerifStatus::Proven {
+                    "✓ pass"
+                } else if r.status == VerifStatus::Disproven {
+                    "✗ fail"
+                } else {
+                    "? unknown"
                 };
                 println!(
                     "{:30} {:>10} {:>12} {:>8}",
@@ -189,12 +193,12 @@ mod tests {
     #[test]
     fn genuine_unknown_blocks_cli_success() {
         assert!(verification_blocks_success(
-            &VerifStatus::Unknown,
+            &VerifStatus::SolverUnknown,
             1,
             "could not encode ensures"
         ));
         assert!(verification_blocks_success(
-            &VerifStatus::Unknown,
+            &VerifStatus::InfrastructureError,
             0,
             "Z3 solver not available"
         ));
@@ -203,7 +207,7 @@ mod tests {
     #[test]
     fn no_contract_result_is_neutral() {
         assert!(!verification_blocks_success(
-            &VerifStatus::Unknown,
+            &VerifStatus::NoObligations,
             0,
             "no contracts to verify"
         ));

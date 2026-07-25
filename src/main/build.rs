@@ -158,19 +158,15 @@ pub(crate) fn build(
         match verifier::verify_ffi_checked(&checked_program) {
             Ok(ffi_results) => {
                 for res in &ffi_results {
-                    match res.status {
-                        verifier::VerifStatus::Failed => {
-                            eprintln!("⚠  FFI violation: {} — {}", res.func_name, res.message);
-                            if let Some(diag) = &res.diagnostic {
-                                let formatted =
-                                    format_diagnostic(diag, None, &path.display().to_string());
-                                eprint!("{}", formatted);
-                            }
+                    if res.status == verifier::VerifStatus::Disproven {
+                        eprintln!("⚠  FFI violation: {} — {}", res.func_name, res.message);
+                        if let Some(diag) = &res.diagnostic {
+                            let formatted =
+                                format_diagnostic(diag, None, &path.display().to_string());
+                            eprint!("{}", formatted);
                         }
-                        verifier::VerifStatus::Unknown => {
-                            eprintln!("ℹ  {} — {}", res.func_name, res.message);
-                        }
-                        verifier::VerifStatus::Verified => {}
+                    } else if res.status.is_inconclusive() {
+                        eprintln!("ℹ  {} — {}", res.func_name, res.message);
                     }
                 }
                 if ffi_results

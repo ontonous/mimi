@@ -36,10 +36,10 @@ impl LspServer {
                         let cache_key = format!("{}:{}", uri, f.name);
                         let verify_title =
                             if let Some(entry) = self.verification_cache.get(&cache_key) {
-                                match &entry.status {
-                                    VerifStatus::Verified => format!("✓ {}", entry.message),
-                                    VerifStatus::Failed => format!("✗ {}", entry.message),
-                                    VerifStatus::Unknown => format!("? {}", entry.message),
+                                match entry.status.clone() {
+                                    VerifStatus::Proven => format!("✓ {}", entry.message),
+                                    VerifStatus::Disproven => format!("✗ {}", entry.message),
+                                    _ => format!("? {}", entry.message),
                                 }
                             } else {
                                 "verify".to_string()

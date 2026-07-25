@@ -263,7 +263,7 @@ impl VerifierCtx {
             None => {
                 return VerificationResult {
                     func_name,
-                    status: VerifStatus::Unknown,
+                    status: VerifStatus::SolverUnknown,
                     message: "could not encode precondition in Z3".into(),
                     diagnostic: None,
                     duration_us: start.elapsed().as_micros() as u64,
@@ -307,7 +307,7 @@ impl VerifierCtx {
             }
             SatResult::Unknown => VerificationResult {
                 func_name,
-                status: VerifStatus::Unknown,
+                status: VerifStatus::SolverUnknown,
                 message: "precondition satisfiability unknown".into(),
                 diagnostic: None,
                 duration_us: start.elapsed().as_micros() as u64,

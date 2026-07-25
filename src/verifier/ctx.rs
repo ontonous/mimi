@@ -18,11 +18,61 @@ pub struct VerificationResult {
     pub constraint_count: usize,
 }
 
+/// v0.31.25: Eight-result verification algebra.
+///
+/// Replaces the 3-state Verified/Failed/Unknown with a precise taxonomy
+/// that distinguishes *why* verification did not produce a proof.
+/// All non-Proven results are fail-closed: `mimi verify` reports them,
+/// `mimi build --verify-ffi` rejects Unknown/Timeout/InfrastructureError.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifStatus {
-    Verified,
-    Failed,
-    Unknown,
+    /// Verification condition discharged — postcondition holds under precondition.
+    Proven,
+    /// Counterexample found — postcondition is violable.
+    Disproven,
+    /// Contract or body contains constructs outside the trusted subset
+    /// (heap, Flow, Actor, loop, recursion, FFI, etc.).
+    NotInTrustedSubset,
+    /// Solver returned `unknown` (incomplete theory, quantifier instantiation).
+    SolverUnknown,
+    /// Solver exceeded the time budget.
+    Timeout,
+    /// Z3 not available, solver crash, or encoding error.
+    InfrastructureError,
+    /// Contract references runtime-only state (e.g. `old(self.field)` on
+    /// mutable state, channel contents, actor mailbox depth).
+    RuntimeOnlyContract,
+    /// No verification conditions generated (pure function with no
+    /// requires/ensures, or empty body).
+    NoObligations,
+}
+
+impl VerifStatus {
+    /// Backward-compatible alias for Proven.
+    #[allow(non_upper_case_globals)]
+    pub const Verified: VerifStatus = VerifStatus::Proven;
+    /// Backward-compatible alias for Disproven.
+    #[allow(non_upper_case_globals)]
+    pub const Failed: VerifStatus = VerifStatus::Disproven;
+
+    /// True when the result is a definitive proof or disproof.
+    pub fn is_definitive(&self) -> bool {
+        matches!(self, VerifStatus::Proven | VerifStatus::Disproven)
+    }
+
+    /// True when verification did not produce a proof (fail-closed).
+    pub fn is_inconclusive(&self) -> bool {
+        !self.is_definitive()
+    }
+
+    /// True when the result indicates a solver/infrastructure limitation
+    /// (as opposed to a semantic limitation like NotInTrustedSubset).
+    pub fn is_solver_limitation(&self) -> bool {
+        matches!(
+            self,
+            VerifStatus::SolverUnknown | VerifStatus::Timeout | VerifStatus::InfrastructureError
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
