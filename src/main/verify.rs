@@ -2,18 +2,25 @@ use std::path::Path;
 
 use crate::resolve_path;
 use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
-use mimi::verifier::VerifStatus;
+use mimi::verifier::{TrustedSubsetDomain, VerifStatus};
 use mimi::{lexer, loader};
 
 fn verification_blocks_success(
     status: &VerifStatus,
     constraint_count: usize,
     message: &str,
+    domain: Option<TrustedSubsetDomain>,
 ) -> bool {
     let no_contracts = status.is_inconclusive()
         && constraint_count == 0
         && matches!(message, "no contracts" | "no contracts to verify");
-    *status == VerifStatus::Disproven || (status.is_inconclusive() && !no_contracts)
+    // v0.31.25 验证域隔离：
+    // - Contract-level NotInTrustedSubset → hard error (blocks)
+    // - Body-level NotInTrustedSubset → doesn't block (treated as SolverUnknown)
+    let body_level_not_in_subset = *status == VerifStatus::NotInTrustedSubset
+        && matches!(domain, Some(TrustedSubsetDomain::Body));
+    *status == VerifStatus::Disproven
+        || (status.is_inconclusive() && !no_contracts && !body_level_not_in_subset)
 }
 
 pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Result<(), String> {
@@ -142,7 +149,12 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
                 );
             }
 
-            if verification_blocks_success(&r.status, r.constraint_count, &r.message) {
+            if verification_blocks_success(
+                &r.status,
+                r.constraint_count,
+                &r.message,
+                r.trusted_subset_domain,
+            ) {
                 all_passed = false;
             }
         }
@@ -188,19 +200,21 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
 #[cfg(test)]
 mod tests {
     use super::verification_blocks_success;
-    use mimi::verifier::VerifStatus;
+    use mimi::verifier::{TrustedSubsetDomain, VerifStatus};
 
     #[test]
     fn genuine_unknown_blocks_cli_success() {
         assert!(verification_blocks_success(
             &VerifStatus::SolverUnknown,
             1,
-            "could not encode ensures"
+            "could not encode ensures",
+            None,
         ));
         assert!(verification_blocks_success(
             &VerifStatus::InfrastructureError,
             0,
-            "Z3 solver not available"
+            "Z3 solver not available",
+            None,
         ));
     }
 
@@ -209,7 +223,30 @@ mod tests {
         assert!(!verification_blocks_success(
             &VerifStatus::NoObligations,
             0,
-            "no contracts to verify"
+            "no contracts to verify",
+            None,
+        ));
+    }
+
+    #[test]
+    fn contract_level_not_in_trusted_subset_blocks() {
+        // v0.31.25: contract-level NotInTrustedSubset is a hard error.
+        assert!(verification_blocks_success(
+            &VerifStatus::NotInTrustedSubset,
+            1,
+            "could not encode extern requires for Z3",
+            Some(TrustedSubsetDomain::Contract),
+        ));
+    }
+
+    #[test]
+    fn body_level_not_in_trusted_subset_does_not_block() {
+        // v0.31.25: body-level NotInTrustedSubset doesn't block mimi verify.
+        assert!(!verification_blocks_success(
+            &VerifStatus::NotInTrustedSubset,
+            1,
+            "body contains unsupported constructs",
+            Some(TrustedSubsetDomain::Body),
         ));
     }
 }
