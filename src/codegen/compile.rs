@@ -482,6 +482,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.resolved_flow_protocols = Some(flow_protocols);
+        // 0.31.30: build Component IR for runtime function validation.
+        {
+            let mut gen = crate::component::AbiGenerator::new();
+            crate::component::register_core_runtime_abi(&mut gen);
+            self.component_ir = Some(gen.build());
+        }
         self.compile_file(program.legacy_body_file())
             .map_err(|error| {
                 let mut diagnostic = error.to_diagnostic();
