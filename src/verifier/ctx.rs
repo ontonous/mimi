@@ -164,7 +164,7 @@ impl ProofArtifact {
 
 /// v0.31.25: Compute a semantic hash for proof caching.
 ///
-/// TODO(post-0.31.25): Switch to BLAKE3 for cryptographic tamper detection.
+/// TODO(DEFERRED → post-0.31.28): Switch to BLAKE3 for cryptographic tamper detection.
 /// Current implementation uses SipHash (std::collections::hash_map::DefaultHasher)
 /// which is sufficient for cache invalidation but not tamper-proof.
 ///

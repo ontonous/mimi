@@ -260,10 +260,10 @@ impl VerifierCtx {
     ) -> VerificationResult {
         // 0.31.26: VIR path infrastructure is ready (vir.rs) but not yet
         // wired into the main verification flow. The VIR path needs:
-        // - Counterexample extraction
-        // - Callee ensures propagation
-        // - old() variable handling
-        // These are tracked for 0.31.27+.
+        // - Counterexample extraction (DEFERRED → 0.31.27)
+        // - Callee ensures propagation (DEFERRED → 0.31.27)
+        // - old() variable equality constraints: assert(old_x == x) (DEFERRED → 0.31.27)
+        // These are tracked in devdocs/v0.31/roadmap.toml and 03-verified-core.md.
         //
         // To enable the VIR path for testing, uncomment:
         // if let Some(vir_result) = self.verify_func_vir(session, func) {
