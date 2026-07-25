@@ -16,6 +16,9 @@ pub struct VerificationResult {
     pub diagnostic: Option<Diagnostic>,
     pub duration_us: u64,
     pub constraint_count: usize,
+    /// v0.31.25: Proof artifact binding the result to its semantic context.
+    /// None for NoObligations / InfrastructureError (no proof attempted).
+    pub artifact: Option<ProofArtifact>,
 }
 
 /// v0.31.25: Eight-result verification algebra.
@@ -82,6 +85,56 @@ pub struct Counterexample {
     pub string_assignments: Vec<(String, String)>,
     pub violated_ensures: Vec<String>,
     pub violated_indices: Vec<usize>,
+}
+
+/// v0.31.25: Proof artifact — binds a verification result to its semantic
+/// context for replay and tamper detection.
+///
+/// Cache key: `(semantics_version, solver_version, integer_model, vir_hash)`.
+/// A proof is only valid if the artifact matches the current compilation.
+#[derive(Debug, Clone)]
+pub struct ProofArtifact {
+    /// Semantic model version (bumped on any verification semantics change).
+    pub semantics_version: u32,
+    /// Integer model: "checked" (overflow/div-zero definedness) or "unbounded".
+    pub integer_model: String,
+    /// Float model: "opaque" (uninterpreted sort, no arithmetic proofs).
+    pub float_model: String,
+    /// Solver name and version (e.g. "z3-4.13.0").
+    pub solver_version: String,
+    /// BLAKE3 hash of the source file (tamper detection).
+    pub source_hash: String,
+    /// BLAKE3 hash of the Resolved IR (semantic identity).
+    pub resolved_ir_hash: String,
+    /// BLAKE3 hash of the VIR (verification-ir identity, span-free).
+    pub vir_hash: String,
+}
+
+impl ProofArtifact {
+    /// Current semantics version. Bump when verification semantics change.
+    pub const SEMANTICS_VERSION: u32 = 1;
+
+    /// Create a new artifact with the current semantics version.
+    pub fn new(solver_version: String, source_hash: String) -> Self {
+        Self {
+            semantics_version: Self::SEMANTICS_VERSION,
+            integer_model: "checked".to_string(),
+            float_model: "opaque".to_string(),
+            solver_version,
+            source_hash,
+            resolved_ir_hash: String::new(),
+            vir_hash: String::new(),
+        }
+    }
+
+    /// Check if this artifact is compatible with the current compilation.
+    pub fn is_compatible(&self, current: &ProofArtifact) -> bool {
+        self.semantics_version == current.semantics_version
+            && self.integer_model == current.integer_model
+            && self.float_model == current.float_model
+            && self.solver_version == current.solver_version
+            && self.vir_hash == current.vir_hash
+    }
 }
 
 pub(crate) struct Z3VarMap {

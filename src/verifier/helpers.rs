@@ -381,6 +381,7 @@ fn mock_verify_items(items: &[crate::ast::Item], results: &mut Vec<VerificationR
                         diagnostic: None,
                         duration_us: 0,
                         constraint_count: 0,
+                        artifact: None,
                     });
                 }
             }
@@ -395,6 +396,7 @@ fn mock_verify_items(items: &[crate::ast::Item], results: &mut Vec<VerificationR
                             diagnostic: None,
                             duration_us: 0,
                             constraint_count: 0,
+                            artifact: None,
                         });
                     }
                 }
