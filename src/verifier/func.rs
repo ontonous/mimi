@@ -263,11 +263,17 @@ impl VerifierCtx {
         // provides:
         // - Checked integer arithmetic (overflow/div-zero definedness VCs)
         // - Counterexample extraction with variable values
-        // - Span-free semantic hashing for proof caching
+        // - Span-free semantic hashing for proof caching (VC artifact)
+        // - old(param) == param equality constraints
+        // - i32 parameter range constraints (sound overflow checking)
         //
-        // Functions outside the trusted subset fall back to the AST path.
-        // DEFERRED → 0.31.27+: callee ensures propagation, old() equality
-        // constraints for non-parameter variables.
+        // Functions outside the trusted subset fall back to the AST path
+        // (which handles calls, f64, invariants, etc.).
+        //
+        // DEFERRED → post-0.31.27: Extend trusted subset to allow calls
+        // to verified functions (callee ensures propagation in VIR path).
+        // Currently calls are rejected by the gate; the AST path handles
+        // callee ensures via assert_callee_ensures_in_block.
         if let Some(vir_result) = self.verify_func_vir(session, func) {
             return vir_result;
         }
