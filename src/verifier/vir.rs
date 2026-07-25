@@ -970,6 +970,65 @@ fn stmt_span(stmt: &crate::ast::Stmt) -> Span {
         .unwrap_or(Span::UNKNOWN)
 }
 
+// ── Flow transition → VIR with typestate axioms ───────────────────────
+
+/// Lower a Flow transition to a VFunction with typestate context.
+///
+/// The typestate context carries:
+/// - Source state invariants → Z3 axioms (assert)
+/// - Transition guards → Z3 preconditions (assume)
+/// - Target state invariants → Z3 obligations (prove)
+///
+/// **Current limitation**: Typestate information comes from the Checker
+/// (CheckedProgram), but the verifier currently uses raw AST via
+/// `legacy_body_file()`. The typestate context is therefore empty until
+/// the verifier migrates to CheckedProgram (0.31.27+).
+///
+/// This function creates the VFunction infrastructure with an empty
+/// typestate context, ready for future injection.
+pub fn lower_transition_to_vir(
+    flow_name: &str,
+    transition: &crate::ast::TransitionDef,
+) -> Result<(VFunction, VirSpanTable), String> {
+    // Synthesize a FuncDef from the transition
+    let func = crate::ast::FuncDef {
+        meta: crate::ast::AstNodeMeta::inherited(
+            transition.meta.span,
+            crate::ast::AstOrigin::RuntimeSystem("verifier.transition_vir"),
+        ),
+        name: format!("{}::{}", flow_name, transition.name),
+        pub_: false,
+        params: transition.params.clone(),
+        ret: None,
+        body: transition.body.clone().unwrap_or_default(),
+        where_clause: vec![],
+        generics: vec![],
+        effects: vec![],
+        is_comptime: false,
+        is_async: false,
+        extern_abi: None,
+        has_requires: false,
+        has_ensures: false,
+        has_mutate_params: false,
+    };
+
+    // Lower to VIR
+    let (mut vfunc, span_table) = lower_func_to_vir(&func)?;
+
+    // Inject typestate context (currently empty — needs CheckedProgram)
+    // TODO(0.31.27+): Extract typestate information from CheckedProgram:
+    // - Source state invariants from flow.states[source].invariants
+    // - Transition guards from transition.guard
+    // - Target state invariants from flow.states[target].invariants
+    vfunc.typestate_context = Some(TypestateAxioms {
+        source_invariants: vec![],
+        transition_guards: vec![],
+        target_invariants: vec![],
+    });
+
+    Ok((vfunc, span_table))
+}
+
 // ── VIR → Z3 encoding ─────────────────────────────────────────────────
 
 /// Z3 encoding context for a single VFunction.
