@@ -164,19 +164,15 @@ impl ProofArtifact {
 
 /// v0.31.25: Compute a semantic hash for proof caching.
 ///
-/// TODO(DEFERRED → post-0.31.28): Switch to BLAKE3 for cryptographic tamper detection.
-/// Current implementation uses SipHash (std::collections::hash_map::DefaultHasher)
-/// which is sufficient for cache invalidation but not tamper-proof.
+/// 0.31.28: Uses BLAKE3 for cryptographic tamper detection.
+/// BLAKE3 is deterministic across Rust versions and platforms,
+/// unlike SipHash (DefaultHasher) which is randomized per-process.
 ///
 /// The input should be a span-free, variable-normalized string representation
 /// of the VIR (Verification IR). Variable normalization ensures that
 /// renaming local variables does not invalidate the cache.
 pub fn compute_semantic_hash(normalized_vir: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    normalized_vir.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    blake3::hash(normalized_vir.as_bytes()).to_hex().to_string()
 }
 
 /// Normalize a VIR string for semantic hashing:

@@ -247,31 +247,48 @@ fn field_var_name(expr: &Expr) -> String {
     }
 }
 
+/// 0.31.28: Check if an expression is f64-typed (Float literal or f64 variable).
+/// Used to reject f64 arithmetic in the AST path (NotInTrustedSubset).
+fn is_f64_expr(expr: &Expr, vars: &Z3VarMap) -> bool {
+    match expr.unlocated() {
+        Expr::Literal(Lit::Float(_)) => true,
+        Expr::Ident(name) => {
+            // A variable is f64 if it's in the Real map but NOT in the Int map.
+            // (i32 variables are in the Int map; f64 variables are in the Real map.)
+            vars.get_real(name).is_some() && vars.get_int(name).is_none()
+        }
+        Expr::Old(inner) => {
+            if let Expr::Ident(name) = inner.unlocated() {
+                let old_name = format!("old_{}", name);
+                vars.get_real(&old_name).is_some() && vars.get_int(&old_name).is_none()
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
 /// UNSOUND (DEFERRED → 0.31.28): This function encodes f64 as exact Z3 Reals,
 /// which is mathematically unsound (IEEE 754 rounding is not modeled).
 /// The VIR path (vir.rs) correctly uses f64 opaque sort (uninterpreted predicate).
-/// This AST-based path should be replaced with:
-/// - f64 arithmetic → NotInTrustedSubset
-/// - f64 comparison → uninterpreted predicate
+///
+/// 0.31.28: f64 arithmetic now returns None (NotInTrustedSubset).
+/// f64 comparisons are also rejected in the AST path (no uninterpreted predicate
+/// mechanism). The VIR path handles f64 comparisons correctly with F64Compare.
+///
 /// Tracked in devdocs/v0.31/roadmap.toml (0.31.28) and 03-verified-core.md.
 pub(crate) fn expr_to_z3_real(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Real> {
     match expr.unlocated() {
         Expr::Literal(Lit::Int(n)) => Some(Z3Real::from_int(&Z3Int::from_i64(*n))),
         Expr::Literal(Lit::Float(f)) => {
+            // 0.31.28: f64 literals are NOT in the trusted subset for arithmetic.
+            // Only 0.0 is exact (encodes to Z3 zero). All other f64 literals
+            // return None → NotInTrustedSubset.
             if *f == 0.0 {
-                // -0.0 and 0.0 both encode to the same Z3 value (zero).
-                // This is mathematically correct (0.0 == -0.0 in IEEE 754
-                // except for the sign bit), so no special handling needed.
                 Some(Z3Real::from_int(&Z3Int::from_i64(0)))
-            } else if f.is_infinite() || f.is_nan() {
-                None
             } else {
-                // Encode as exact rational via Z3Real::from_rational_str(num, den).
-                // Uses f64::to_string() which produces the shortest decimal
-                // representation that uniquely identifies the float value.
-                // This avoids the i64 overflow from the old PRECISION scaling
-                // approach (which capped out around |f| > 9e3).
-                float_to_z3_real(*f)
+                None
             }
         }
         Expr::Ident(name) => {
@@ -314,6 +331,14 @@ pub(crate) fn expr_to_z3_real(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Real
             }
         }
         Expr::Binary(op, lhs, rhs) => {
+            // 0.31.28: f64 arithmetic is NOT in the trusted subset.
+            // Check if either operand is f64 (Float literal or f64 variable).
+            let lhs_is_f64 = is_f64_expr(lhs, vars);
+            let rhs_is_f64 = is_f64_expr(rhs, vars);
+            if lhs_is_f64 || rhs_is_f64 {
+                // f64 arithmetic → NotInTrustedSubset
+                return None;
+            }
             let l = expr_to_z3_real(lhs, vars)?;
             let r = expr_to_z3_real(rhs, vars)?;
             match op {
@@ -325,6 +350,10 @@ pub(crate) fn expr_to_z3_real(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Real
             }
         }
         Expr::Unary(UnOp::Neg, inner) => {
+            // 0.31.28: f64 negation is NOT in the trusted subset.
+            if is_f64_expr(inner, vars) {
+                return None;
+            }
             let v = expr_to_z3_real(inner, vars)?;
             Some(-v)
         }
