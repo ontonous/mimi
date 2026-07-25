@@ -58,6 +58,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                 comptime_functions.insert(function.qualified_name.clone());
             }
         }
+        // P1-27: install bare names for unique bare names so the arity guard
+        // fires for module-nested functions (call-site name is always bare).
+        {
+            let mut bare_counts: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for f in program.functions().values() {
+                let bare = f.qualified_name.rsplit("::").next().unwrap_or(&f.qualified_name);
+                *bare_counts.entry(bare).or_insert(0) += 1;
+            }
+            for f in program.functions().values() {
+                let bare = f.qualified_name.rsplit("::").next().unwrap_or(&f.qualified_name);
+                if bare != f.qualified_name && bare_counts.get(bare) == Some(&1) {
+                    arity.entry(bare.to_string()).or_insert(f.params.len());
+                }
+            }
+        }
         self.resolved_function_arity = Some(arity);
         self.resolved_function_effects = Some(effects);
         self.resolved_function_returns = Some(returns);
