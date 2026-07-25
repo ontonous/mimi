@@ -145,18 +145,14 @@ impl<'a> Checker<'a> {
                         .unwrap_or_default();
                     if !field_types.is_empty() || self.types.contains_key(name.as_str()) {
                         for (field_name, pat) in pats {
-                            if let Some((_, resolved)) = field_types
-                                .iter()
-                                .find(|(n, _)| n == field_name)
+                            if let Some((_, resolved)) =
+                                field_types.iter().find(|(n, _)| n == field_name)
                             {
                                 self.check_pattern(pat, resolved, scopes);
                             } else {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0226,
-                                    format!(
-                                        "flow state '{}' has no field '{}'",
-                                        name, field_name
-                                    ),
+                                    format!("flow state '{}' has no field '{}'", name, field_name),
                                 );
                             }
                         }

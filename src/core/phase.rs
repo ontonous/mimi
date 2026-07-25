@@ -238,9 +238,7 @@ fn contains_infer_artifacts(ty: &Type) -> bool {
 }
 
 fn contains_inference_variables(ty: &Type) -> bool {
-    crate::core::type_folder::type_any(ty, &|t| {
-        matches!(t, Type::TypeVar(_) | Type::ForAll(..))
-    })
+    crate::core::type_folder::type_any(ty, &|t| matches!(t, Type::TypeVar(_) | Type::ForAll(..)))
 }
 
 fn contains_dynamic_type(ty: &Type) -> bool {

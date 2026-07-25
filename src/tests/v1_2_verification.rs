@@ -186,9 +186,7 @@ fn assert_failed(source: &str) {
 fn assert_unknown(source: &str) {
     let results = verify_source(source);
     assert!(
-        results
-            .iter()
-            .all(|r| r.status.is_inconclusive()),
+        results.iter().all(|r| r.status.is_inconclusive()),
         "expected all inconclusive results, got: {:?}",
         results
             .iter()

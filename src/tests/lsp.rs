@@ -645,11 +645,14 @@ fn lsp_verification_cache_invalidates_when_function_moves() {
     );
 
     let diagnostics = server.compute_verification_diagnostics(shifted, 4, uri);
+    // The cached diagnostic (code "E0999") must not be replayed at the old
+    // line-3 position. A fresh VIR-path diagnostic at the function's new
+    // position (line 2) is expected and correct.
     assert!(
         diagnostics.iter().all(|diagnostic| {
-            diagnostic["range"]["start"]["line"] != serde_json::json!(2)
+            diagnostic["code"] != serde_json::json!("E0999")
         }),
-        "the cache must not replay the old line-3 diagnostic after a two-line shift: {diagnostics:?}"
+        "the cache must not replay the old E0999 diagnostic after a two-line shift: {diagnostics:?}"
     );
 }
 

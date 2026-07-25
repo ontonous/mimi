@@ -258,17 +258,19 @@ impl VerifierCtx {
         session: &mut SolverSession,
         func: &FuncDef,
     ) -> VerificationResult {
-        // 0.31.26: VIR path infrastructure is ready (vir.rs) but not yet
-        // wired into the main verification flow. The VIR path needs:
-        // - Counterexample extraction (DEFERRED → 0.31.27)
-        // - Callee ensures propagation (DEFERRED → 0.31.27)
-        // - old() variable equality constraints: assert(old_x == x) (DEFERRED → 0.31.27)
-        // These are tracked in devdocs/v0.31/roadmap.toml and 03-verified-core.md.
+        // 0.31.27: VIR path is now wired in. For functions in the trusted
+        // subset (no heap, no loops, no calls, no mutation), the VIR path
+        // provides:
+        // - Checked integer arithmetic (overflow/div-zero definedness VCs)
+        // - Counterexample extraction with variable values
+        // - Span-free semantic hashing for proof caching
         //
-        // To enable the VIR path for testing, uncomment:
-        // if let Some(vir_result) = self.verify_func_vir(session, func) {
-        //     return vir_result;
-        // }
+        // Functions outside the trusted subset fall back to the AST path.
+        // DEFERRED → 0.31.27+: callee ensures propagation, old() equality
+        // constraints for non-parameter variables.
+        if let Some(vir_result) = self.verify_func_vir(session, func) {
+            return vir_result;
+        }
 
         let start = Instant::now();
 
@@ -1084,7 +1086,6 @@ impl VerifierCtx {
     /// Returns `None` if the function is not in the trusted subset
     /// (caller should fall back to the AST-based path).
     /// Returns `Some(result)` if verification was attempted via VIR.
-    #[allow(dead_code)] // Infrastructure for 0.31.27+ (needs counterexample extraction)
     pub(crate) fn verify_func_vir(
         &mut self,
         session: &mut SolverSession,
@@ -1096,6 +1097,25 @@ impl VerifierCtx {
 
         // 1. Trusted-subset gate
         if vir::check_trusted_subset(func).is_err() {
+            return None; // Fall back to AST-based path
+        }
+
+        // 1b. Fall back to AST path for constructs VIR doesn't handle yet:
+        // - f64 parameters or return (VIR treats f64 as opaque, no arithmetic)
+        // - invariant statements (VIR doesn't encode loop invariants)
+        let has_f64_param = func
+            .params
+            .iter()
+            .any(|p| matches!(p.ty.unlocated(), Type::Name(n, _) if n == "f64"));
+        let has_f64_return = func
+            .ret
+            .as_ref()
+            .is_some_and(|t| matches!(t.unlocated(), Type::Name(n, _) if n == "f64"));
+        let has_invariant = func
+            .body
+            .iter()
+            .any(|s| matches!(s.unlocated(), Stmt::Invariant(..)));
+        if has_f64_param || has_f64_return || has_invariant {
             return None; // Fall back to AST-based path
         }
 
@@ -1127,15 +1147,30 @@ impl VerifierCtx {
         let mut z3ctx = VirZ3Ctx::new(&vfunc);
         z3ctx.setup_result(returns_f64, returns_bool);
 
-        // Register parameter variables in Z3 context
-        for &(_var, _vty, ref name) in &vfunc.params {
-            // Parameters are already registered by VirZ3Ctx::new()
-            // This loop is for documentation clarity
-            let _ = name;
+        // Assert old(param) == param for all integer parameters.
+        // In the trusted subset (no mutation), parameters don't change,
+        // so old(x) is always equal to x at function entry.
+        // Also assert i32 range constraints for i32 parameters so that
+        // overflow checks are sound (Z3 Int is unbounded by default).
+        let mut constraint_count = 0usize;
+        for &(var, vty, ref _name) in &vfunc.params {
+            if let Some(param_z3) = z3ctx.int_vars.get(&var) {
+                // old(param) == param
+                if let Some(old_z3) = z3ctx.old_int_vars.get(&var) {
+                    session.assert(param_z3.eq(old_z3));
+                    constraint_count += 1;
+                }
+                // i32 range constraint: MIN <= x <= MAX
+                if vty == crate::verifier::vir::VType::I32 {
+                    let lo = z3::ast::Int::from_i64(i32::MIN as i64);
+                    let hi = z3::ast::Int::from_i64(i32::MAX as i64);
+                    session.assert(z3::ast::Bool::and(&[&param_z3.ge(&lo), &param_z3.le(&hi)]));
+                    constraint_count += 1;
+                }
+            }
         }
 
         // 4. Process body statements
-        let mut constraint_count = 0usize;
 
         for stmt in &vfunc.body {
             match stmt {
@@ -1159,8 +1194,9 @@ impl VerifierCtx {
                                 return Some(VerificationResult {
                                     func_name: func.name.clone(),
                                     status: VerifStatus::Disproven,
-                                    message: "math obligation is not implied by preconditions (VIR)"
-                                        .into(),
+                                    message:
+                                        "math obligation is not implied by preconditions (VIR)"
+                                            .into(),
                                     diagnostic: Some(Diagnostic::error(
                                         format!("unproven math obligation in '{}'", func.name),
                                         func.meta.span,
@@ -1188,7 +1224,11 @@ impl VerifierCtx {
                 }
                 VStmt::Let(var, expr) => {
                     // Register the let-bound variable and assert its value
-                    let vty = z3ctx.var_types.get(var).copied().unwrap_or(crate::verifier::vir::VType::I64);
+                    let vty = z3ctx
+                        .var_types
+                        .get(var)
+                        .copied()
+                        .unwrap_or(crate::verifier::vir::VType::I64);
                     z3ctx.register_let(*var, vty);
                     // Assert the let binding: var == expr
                     match vty {
@@ -1329,13 +1369,17 @@ impl VerifierCtx {
 
         let mut found_violation = false;
         let mut found_unknown = false;
+        let mut viol_model: Option<z3::Model> = None;
+        let mut viol_index: usize = 0;
 
-        for post in &vfunc.postconditions {
+        for (idx, post) in vfunc.postconditions.iter().enumerate() {
             if let Some(z3_bool) = z3ctx.encode_bool(post) {
-                let (result, _model) = session.check_scope(z3_bool.not());
+                let (result, model) = session.check_scope(z3_bool.not());
                 match result {
                     SatResult::Sat => {
                         found_violation = true;
+                        viol_model = model;
+                        viol_index = idx;
                         break;
                     }
                     SatResult::Unknown => {
@@ -1349,14 +1393,26 @@ impl VerifierCtx {
         }
 
         if found_violation {
+            // Extract counterexample from the Z3 model
+            let counterexample_msg =
+                Self::format_vir_counterexample(&viol_model, &z3ctx, &vfunc, viol_index);
+            let mut message = format!(
+                "verification failed for '{}' (VIR): postcondition not satisfied",
+                func.name
+            );
+            if !counterexample_msg.is_empty() {
+                message.push_str(&format!("\n{}", counterexample_msg));
+            }
+            // Build diagnostic with counterexample details
+            let mut diag_msg = format!("postcondition violated in '{}'", func.name);
+            if !counterexample_msg.is_empty() {
+                diag_msg.push_str(&format!("\n{}", counterexample_msg));
+            }
             Some(VerificationResult {
                 func_name: func.name.clone(),
                 status: VerifStatus::Disproven,
-                message: "postcondition violation found (VIR)".into(),
-                diagnostic: Some(Diagnostic::error(
-                    format!("postcondition violated in '{}'", func.name),
-                    func.meta.span,
-                )),
+                message,
+                diagnostic: Some(Diagnostic::error(diag_msg, func.meta.span)),
                 duration_us: start.elapsed().as_micros() as u64,
                 constraint_count,
                 artifact: None,
@@ -1482,6 +1538,78 @@ impl VerifierCtx {
             violated_ensures: violated,
             violated_indices,
         }
+    }
+
+    /// Format a counterexample from the VIR verification path.
+    ///
+    /// Extracts variable values from the Z3 model using the VirZ3Ctx
+    /// variable maps and the VFunction's parameter names.
+    fn format_vir_counterexample(
+        model: &Option<z3::Model>,
+        z3ctx: &crate::verifier::vir::VirZ3Ctx,
+        vfunc: &crate::verifier::vir::VFunction,
+        violated_index: usize,
+    ) -> String {
+        let model = match model {
+            Some(m) => m,
+            None => return String::new(),
+        };
+
+        let mut lines: Vec<String> = Vec::new();
+        lines.push("counterexample:".to_string());
+
+        // Extract parameter values (using original names from VFunction)
+        for &(var, _vty, ref name) in &vfunc.params {
+            // Try int vars first
+            if let Some(z3_var) = z3ctx.int_vars.get(&var) {
+                if let Some(val) = model.eval(z3_var, true) {
+                    if let Some(i) = val.as_i64() {
+                        lines.push(format!("    {} = {}", name, i));
+                        continue;
+                    }
+                }
+            }
+            // Try bool vars
+            if let Some(z3_var) = z3ctx.bool_vars.get(&var) {
+                if let Some(val) = model.eval(z3_var, true) {
+                    if let Some(b) = val.as_bool() {
+                        lines.push(format!("    {} = {}", name, b));
+                        continue;
+                    }
+                }
+            }
+            // Try f64 opaque vars (encoded as Int, no arithmetic semantics)
+            if let Some(z3_var) = z3ctx.f64_vars.get(&var) {
+                if let Some(val) = model.eval(z3_var, true) {
+                    if let Some(i) = val.as_i64() {
+                        lines.push(format!("    {} = {} (opaque f64)", name, i));
+                    }
+                }
+            }
+        }
+
+        // Extract result value
+        if let Some(ref z3_var) = z3ctx.result_int {
+            if let Some(val) = model.eval(z3_var, true) {
+                if let Some(i) = val.as_i64() {
+                    lines.push(format!("    result = {}", i));
+                }
+            }
+        }
+        if let Some(ref z3_var) = z3ctx.result_bool {
+            if let Some(val) = model.eval(z3_var, true) {
+                if let Some(b) = val.as_bool() {
+                    lines.push(format!("    result = {}", b));
+                }
+            }
+        }
+
+        // Show which postcondition was violated
+        if let Some(post) = vfunc.postconditions.get(violated_index) {
+            lines.push(format!("violated ensures[{}]: {}", violated_index, post));
+        }
+
+        lines.join("\n")
     }
 
     /// Try to resolve an expression to a concrete i64 value from the model.
