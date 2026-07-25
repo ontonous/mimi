@@ -35,13 +35,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_transitions_by_flow = Some(tables.by_flow);
         self.resolved_transitions_by_event = Some(tables.by_event);
         let mut arity = std::collections::HashMap::new();
-        let mut effects = std::collections::HashMap::new();
         let mut returns = std::collections::HashMap::new();
         let mut params = std::collections::HashMap::new();
         let mut comptime_functions = std::collections::HashSet::new();
         for function in program.functions().values() {
             arity.insert(function.qualified_name.clone(), function.params.len());
-            effects.insert(function.qualified_name.clone(), function.effects.clone());
             returns.insert(
                 function.qualified_name.clone(),
                 crate::core::fmt_type(&function.ret),
@@ -75,7 +73,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.resolved_function_arity = Some(arity);
-        self.resolved_function_effects = Some(effects);
         self.resolved_function_returns = Some(returns);
         self.resolved_function_params = Some(params);
         self.resolved_comptime_functions = Some(comptime_functions);
@@ -350,70 +347,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         self.resolved_extern_no_panic = Some(extern_no_panic);
         self.resolved_extern_unsafe = Some(extern_unsafe);
-        let mut call_sites = std::collections::HashMap::new();
-        for (node_id, site) in program.call_sites() {
-            call_sites.insert(
-                node_id.0.clone(),
-                (
-                    site.owner.clone(),
-                    site.callee.clone(),
-                    site.argc,
-                    site.expected_argc,
-                    site.effects.clone(),
-                    site.ret.clone(),
-                    match site.kind {
-                        crate::core::ResolvedCallKind::Function => "function".into(),
-                        crate::core::ResolvedCallKind::Extern => "extern".into(),
-                        crate::core::ResolvedCallKind::Builtin => "builtin".into(),
-                        crate::core::ResolvedCallKind::Method => "method".into(),
-                        crate::core::ResolvedCallKind::Unknown => "unknown".into(),
-                    },
-                ),
-            );
-        }
-        self.resolved_call_sites = Some(call_sites);
-        let mut call_sites_by_owner: std::collections::HashMap<
-            String,
-            Vec<(String, usize, String)>,
-        > = std::collections::HashMap::new();
-        if let Some(sites) = self.resolved_call_sites.as_ref() {
-            for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in sites {
-                call_sites_by_owner.entry(owner.clone()).or_default().push((
-                    callee.clone(),
-                    *argc,
-                    kind.clone(),
-                ));
-            }
-        }
-        self.resolved_call_sites_by_owner = Some(call_sites_by_owner);
-        let mut call_sites_by_callee: std::collections::HashMap<
-            String,
-            Vec<(String, usize, String)>,
-        > = std::collections::HashMap::new();
-        if let Some(sites) = self.resolved_call_sites.as_ref() {
-            for (_path, (owner, callee, argc, _expected, _effects, _ret, kind)) in sites {
-                call_sites_by_callee
-                    .entry(callee.clone())
-                    .or_default()
-                    .push((owner.clone(), *argc, kind.clone()));
-            }
-        }
-        self.resolved_call_sites_by_callee = Some(call_sites_by_callee);
         let mut actor_method_signatures = std::collections::HashMap::new();
         let mut actor_method_params = std::collections::HashMap::new();
-        let mut actor_method_effects = std::collections::HashMap::new();
         for actor in program.actors().values() {
             for method in &actor.method_signatures {
                 let key = format!("{}.{}", actor.qualified_name, method.name);
                 actor_method_signatures
                     .insert(key.clone(), (method.params.len(), method.ret.clone()));
                 actor_method_params.insert(key.clone(), method.params.clone());
-                actor_method_effects.insert(key, method.effects.clone());
             }
         }
         self.resolved_actor_method_signatures = Some(actor_method_signatures);
         self.resolved_actor_method_params = Some(actor_method_params);
-        self.resolved_actor_method_effects = Some(actor_method_effects);
         let mut actor_fields = std::collections::HashMap::new();
         for actor in program.actors().values() {
             if !actor.fields.is_empty() {
@@ -430,13 +375,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_actor_fields = Some(actor_fields);
         let mut method_signatures = std::collections::HashMap::new();
         let mut method_params = std::collections::HashMap::new();
-        let mut method_effects = std::collections::HashMap::new();
         for trait_def in program.traits().values() {
             for method in &trait_def.method_signatures {
                 let key = format!("{}.{}", trait_def.qualified_name, method.name);
                 method_signatures.insert(key.clone(), (method.params.len(), method.ret.clone()));
                 method_params.insert(key.clone(), method.params.clone());
-                method_effects.insert(key, method.effects.clone());
             }
         }
         for impl_def in program.impls().values() {
@@ -444,12 +387,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let key = format!("{}.{}", impl_def.qualified_name, method.name);
                 method_signatures.insert(key.clone(), (method.params.len(), method.ret.clone()));
                 method_params.insert(key.clone(), method.params.clone());
-                method_effects.insert(key, method.effects.clone());
             }
         }
         self.resolved_method_signatures = Some(method_signatures);
         self.resolved_method_params = Some(method_params);
-        self.resolved_method_effects = Some(method_effects);
         if let Some(max_children) = program.flows().values().find_map(|flow| flow.max_children) {
             self.max_children = Some(max_children);
         }

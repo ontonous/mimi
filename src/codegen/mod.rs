@@ -319,7 +319,6 @@ pub struct CodeGenerator<'ctx> {
     resolved_node_meta_spans: Option<HashMap<String, (usize, usize, usize, usize)>>,
     /// Function directory from CheckedProgram: qualified_name -> arity.
     resolved_function_arity: Option<HashMap<String, usize>>,
-    resolved_function_effects: Option<HashMap<String, Vec<String>>>,
     resolved_function_returns: Option<HashMap<String, String>>,
     resolved_function_params: Option<HashMap<String, Vec<(String, String)>>>,
     resolved_comptime_functions: Option<std::collections::HashSet<String>>,
@@ -336,13 +335,10 @@ pub struct CodeGenerator<'ctx> {
     resolved_actors: Option<HashMap<String, Vec<String>>>,
     resolved_actor_method_signatures: Option<HashMap<String, (usize, String)>>,
     resolved_actor_method_params: Option<HashMap<String, Vec<(String, String)>>>,
-    resolved_actor_method_effects: Option<HashMap<String, Vec<String>>>,
     resolved_actor_fields: Option<HashMap<String, Vec<(String, String, bool)>>>,
     resolved_method_signatures: Option<HashMap<String, (usize, String)>>,
     /// Trait/impl method parameter directories: "TraitName.Method" -> [(param_name, type display)].
     resolved_method_params: Option<HashMap<String, Vec<(String, String)>>>,
-    /// Trait/impl method effect directories: "TraitName.Method" -> [effect].
-    resolved_method_effects: Option<HashMap<String, Vec<String>>>,
     /// Capability names from CheckedProgram.
     resolved_capabilities: Option<std::collections::HashSet<String>>,
     resolved_capability_combined: Option<HashMap<String, String>>,
@@ -376,22 +372,6 @@ pub struct CodeGenerator<'ctx> {
     resolved_extern_params: Option<HashMap<String, Vec<(String, String)>>>,
     resolved_extern_no_panic: Option<std::collections::HashSet<String>>,
     resolved_extern_unsafe: Option<std::collections::HashSet<String>>,
-    resolved_call_sites: Option<
-        HashMap<
-            String,
-            (
-                String,
-                String,
-                usize,
-                Option<usize>,
-                Vec<String>,
-                Option<String>,
-                String,
-            ),
-        >,
-    >,
-    resolved_call_sites_by_owner: Option<HashMap<String, Vec<(String, usize, String)>>>,
-    resolved_call_sites_by_callee: Option<HashMap<String, Vec<(String, usize, String)>>>,
     /// Flow mailbox depths from CheckedProgram.
     resolved_mailbox_depths: Option<HashMap<String, usize>>,
     resolved_flow_state_payloads: Option<HashMap<String, Vec<(String, String)>>>,
@@ -525,7 +505,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_transitions_by_event: None,
             resolved_node_meta_spans: None,
             resolved_function_arity: None,
-            resolved_function_effects: None,
             resolved_function_returns: None,
             resolved_function_params: None,
             resolved_comptime_functions: None,
@@ -539,11 +518,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_actors: None,
             resolved_actor_method_signatures: None,
             resolved_actor_method_params: None,
-            resolved_actor_method_effects: None,
             resolved_actor_fields: None,
             resolved_method_signatures: None,
             resolved_method_params: None,
-            resolved_method_effects: None,
             resolved_capabilities: None,
             resolved_capability_combined: None,
             resolved_constants: None,
@@ -569,9 +546,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_extern_params: None,
             resolved_extern_no_panic: None,
             resolved_extern_unsafe: None,
-            resolved_call_sites: None,
-            resolved_call_sites_by_owner: None,
-            resolved_call_sites_by_callee: None,
             resolved_mailbox_depths: None,
             resolved_flow_state_payloads: None,
             resolved_flow_states: None,
@@ -629,12 +603,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .and_then(|map| map.get(key).cloned())
     }
 
-    pub(crate) fn resolved_method_effects(&self, key: &str) -> Option<Vec<String>> {
-        self.resolved_method_effects
-            .as_ref()
-            .and_then(|map| map.get(key).cloned())
-    }
-
     pub(crate) fn resolved_actor_method_signature(
         &self,
         actor: &str,
@@ -655,16 +623,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .and_then(|map| map.get(&format!("{actor}.{method}")).cloned())
     }
 
-    pub(crate) fn resolved_actor_method_effects(
-        &self,
-        actor: &str,
-        method: &str,
-    ) -> Option<Vec<String>> {
-        self.resolved_actor_method_effects
-            .as_ref()
-            .and_then(|map| map.get(&format!("{actor}.{method}")).cloned())
-    }
-
     pub(crate) fn resolved_extern_signature(&self, name: &str) -> Option<(usize, String)> {
         self.resolved_extern_signatures
             .as_ref()
@@ -675,41 +633,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_extern_params
             .as_ref()
             .and_then(|map| map.get(name).cloned())
-    }
-
-    pub(crate) fn resolved_call_return_type(&self, callee: &str) -> Option<String> {
-        self.resolved_call_sites.as_ref().and_then(|map| {
-            map.values()
-                .find(|(_, name, _, _, _, _, _)| name == callee)
-                .and_then(|(_, _, _, _, _, ret, _)| ret.clone())
-        })
-    }
-
-    pub(crate) fn has_resolved_call_with_effect(&self, callee: &str, effect: &str) -> bool {
-        self.resolved_call_sites.as_ref().is_some_and(|map| {
-            map.values().any(|(_, name, _, _, effects, _, _)| {
-                name == callee && effects.iter().any(|e| e == effect)
-            })
-        })
-    }
-
-    pub(crate) fn resolved_call_arity_mismatches(&self) -> usize {
-        self.resolved_call_sites
-            .as_ref()
-            .map(|map| {
-                map.values()
-                    .filter(|(_, _, argc, expected, _, _, _)| {
-                        expected.map(|exp| exp != *argc).unwrap_or(false)
-                    })
-                    .count()
-            })
-            .unwrap_or(0)
-    }
-
-    pub(crate) fn has_resolved_call_to(&self, callee: &str) -> bool {
-        self.resolved_call_sites
-            .as_ref()
-            .is_some_and(|map| map.values().any(|(_, name, _, _, _, _, _)| name == callee))
     }
 
     pub(crate) fn resolved_constant_value(&self, name: &str) -> Option<(Option<String>, String)> {
@@ -740,12 +663,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_comptime_functions
             .as_ref()
             .is_some_and(|set| set.contains(name))
-    }
-
-    pub(crate) fn resolved_function_effects(&self, name: &str) -> Option<Vec<String>> {
-        self.resolved_function_effects
-            .as_ref()
-            .and_then(|map| map.get(name).cloned())
     }
 
     pub(crate) fn resolved_transition_targets(
@@ -912,15 +829,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .and_then(|map| map.get(name).map(String::as_str))
     }
 
-    pub(crate) fn resolved_call_sites_for_owner(
-        &self,
-        owner: &str,
-    ) -> Option<Vec<(String, usize, String)>> {
-        self.resolved_call_sites_by_owner
-            .as_ref()
-            .and_then(|map| map.get(owner).cloned())
-    }
-
     pub(crate) fn resolved_ownership_actions(&self, owner: &str) -> Option<Vec<(String, String)>> {
         self.resolved_ownership_actions
             .as_ref()
@@ -943,15 +851,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_transitions_by_flow
             .as_ref()
             .and_then(|map| map.get(flow).cloned())
-    }
-
-    pub(crate) fn resolved_call_sites_for_callee(
-        &self,
-        callee: &str,
-    ) -> Option<Vec<(String, usize, String)>> {
-        self.resolved_call_sites_by_callee
-            .as_ref()
-            .and_then(|map| map.get(callee).cloned())
     }
 
     pub(crate) fn resolved_transitions_for_event(

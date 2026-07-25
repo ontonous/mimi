@@ -560,23 +560,25 @@ func main() -> i32 { 0 }
     let program = crate::core::check_program(&file).expect("check");
     let interp = crate::interp::Interpreter::from_checked(&program);
     assert_eq!(interp.resolved_function_arity("write"), Some(1));
-    let effects = interp
-        .resolved_function_effects("write")
-        .expect("write effects");
+    let effects = program
+        .function("write")
+        .expect("write function")
+        .effects
+        .clone();
     assert!(effects.iter().any(|e| e == "Io"));
     assert!(program.function("write").is_some());
     let mut verifier = crate::verifier::Verifier::new().expect("z3");
     let _ = verifier.verify_checked(&program);
     assert!(verifier.has_checked_function("write"));
-    assert!(verifier
-        .checked_function_effects("write")
-        .is_some_and(|e| e.iter().any(|x| x == "Io")));
+    assert!(program
+        .function("write")
+        .is_some_and(|f| f.effects.iter().any(|x| x == "Io")));
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "fx");
     codegen.compile_checked(&program).expect("compile");
-    assert!(codegen
-        .resolved_function_effects("write")
-        .is_some_and(|e| e.iter().any(|x| x == "Io")));
+    assert!(program
+        .function("write")
+        .is_some_and(|f| f.effects.iter().any(|x| x == "Io")));
     assert_eq!(codegen.resolved_function_return_type("write"), Some("i32"));
     assert_eq!(verifier.checked_function_return_type("write"), Some("i32"));
     assert_eq!(
@@ -713,16 +715,31 @@ func main() -> i32 { 0 }
     assert!(impl_methods.iter().any(|m| m == "close"));
     // Trait/impl method params + effects directories.
     assert_eq!(interp.resolved_method_params("Close.close"), Some(vec![]));
-    assert_eq!(interp.resolved_method_effects("Close.close"), Some(vec![]));
+    assert_eq!(
+        program
+            .trait_method_signature("Close", "close")
+            .map(|m| m.effects.clone()),
+        Some(vec![])
+    );
     let mut verifier = crate::verifier::Verifier::new().expect("z3");
     let _ = verifier.verify_checked(&program);
     assert_eq!(verifier.checked_method_params("Close.close"), Some(vec![]));
-    assert_eq!(verifier.checked_method_effects("Close.close"), Some(vec![]));
+    assert_eq!(
+        program
+            .trait_method_signature("Close", "close")
+            .map(|m| m.effects.clone()),
+        Some(vec![])
+    );
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "trait_params");
     codegen.compile_checked(&program).expect("compile");
     assert_eq!(codegen.resolved_method_params("Close.close"), Some(vec![]));
-    assert_eq!(codegen.resolved_method_effects("Close.close"), Some(vec![]));
+    assert_eq!(
+        program
+            .trait_method_signature("Close", "close")
+            .map(|m| m.effects.clone()),
+        Some(vec![])
+    );
 }
 
 #[test]
@@ -747,14 +764,21 @@ func main() -> i32 { 0 }
         interp.resolved_method_params("Writer.write"),
         Some(vec![("data".into(), "i32".into())])
     );
-    assert_eq!(interp.resolved_method_effects("Writer.write"), Some(vec![]));
+    assert_eq!(
+        program
+            .trait_method_signature("Writer", "write")
+            .map(|m| m.effects.clone()),
+        Some(vec![])
+    );
     // Impl method: params + effects (Io) materialised under impl qualified name.
     assert_eq!(
         interp.resolved_method_params("Writer:for:Buffer.write"),
         Some(vec![("data".into(), "i32".into())])
     );
     assert_eq!(
-        interp.resolved_method_effects("Writer:for:Buffer.write"),
+        program
+            .impl_method_signature("Writer", "Buffer", "write")
+            .map(|m| m.effects.clone()),
         Some(vec!["Io".to_string()])
     );
     let mut verifier = crate::verifier::Verifier::new().expect("z3");
@@ -764,7 +788,9 @@ func main() -> i32 { 0 }
         Some(vec![("data".into(), "i32".into())])
     );
     assert_eq!(
-        verifier.checked_method_effects("Writer.write"),
+        program
+            .trait_method_signature("Writer", "write")
+            .map(|m| m.effects.clone()),
         Some(vec![])
     );
     assert_eq!(
@@ -772,7 +798,9 @@ func main() -> i32 { 0 }
         Some(vec![("data".into(), "i32".into())])
     );
     assert_eq!(
-        verifier.checked_method_effects("Writer:for:Buffer.write"),
+        program
+            .impl_method_signature("Writer", "Buffer", "write")
+            .map(|m| m.effects.clone()),
         Some(vec!["Io".to_string()])
     );
     let context = inkwell::context::Context::create();
@@ -783,7 +811,9 @@ func main() -> i32 { 0 }
         Some(vec![("data".into(), "i32".into())])
     );
     assert_eq!(
-        codegen.resolved_method_effects("Writer:for:Buffer.write"),
+        program
+            .impl_method_signature("Writer", "Buffer", "write")
+            .map(|m| m.effects.clone()),
         Some(vec!["Io".to_string()])
     );
 }
@@ -1562,64 +1592,51 @@ func main() -> i32 {
             .any(|s| s.callee == "helper" && s.effects.is_empty()),
         "helper effects should be empty when unannotated"
     );
-    let interp = crate::interp::Interpreter::from_checked(&program);
-    assert!(interp.has_resolved_call_to("helper"));
-    assert!(interp.has_resolved_call_to("c_abs"));
-    let mut verifier = crate::verifier::Verifier::new().expect("z3");
-    let _ = verifier.verify_checked(&program);
-    assert!(verifier.has_checked_call_to("helper"));
-    assert!(verifier.has_checked_call_to("c_abs"));
-    let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "calls");
-    codegen.compile_checked(&program).expect("compile");
-    assert!(codegen.has_resolved_call_to("helper"));
-    assert!(codegen.has_resolved_call_to("c_abs"));
-    assert_eq!(interp.resolved_call_arity_mismatches(), 0);
-    assert_eq!(codegen.resolved_call_arity_mismatches(), 0);
-    assert_eq!(verifier.checked_call_arity_mismatches(), 0);
-    assert_eq!(
-        interp.resolved_call_return_type("helper").as_deref(),
-        Some("i32")
+    // All call-site queries go through program.call_sites() directly.
+    assert!(sites.iter().any(|s| s.callee == "helper"));
+    assert!(sites.iter().any(|s| s.callee == "c_abs"));
+    assert!(
+        sites.iter().all(|s| s.arity_matches()),
+        "no arity mismatches expected"
     );
     assert_eq!(
-        codegen.resolved_call_return_type("helper").as_deref(),
-        Some("i32")
-    );
-    assert_eq!(
-        verifier.checked_call_return_type("helper").as_deref(),
-        Some("i32")
-    );
-    let main_calls = interp
-        .resolved_call_sites_for_owner("function:main")
-        .expect("main calls");
-    assert!(main_calls
-        .iter()
-        .any(|(c, argc, kind)| c == "helper" && *argc == 1 && kind == "function"));
-    assert!(main_calls
-        .iter()
-        .any(|(c, argc, kind)| c == "c_abs" && *argc == 1 && kind == "extern"));
-    assert!(verifier
-        .checked_call_sites_for_owner("function:main")
-        .is_some_and(|calls| calls.iter().any(|(c, _, _)| c == "helper")));
-    assert!(codegen
-        .resolved_call_sites_for_owner("function:main")
-        .is_some_and(|calls| calls
+        sites
             .iter()
-            .any(|(c, _, kind)| c == "c_abs" && kind == "extern")));
-    let helper_callers = interp
-        .resolved_call_sites_for_callee("helper")
-        .expect("helper callers");
+            .find(|s| s.callee == "helper")
+            .and_then(|s| s.ret.as_deref()),
+        Some("i32")
+    );
+    let main_calls: Vec<_> = sites
+        .iter()
+        .filter(|s| s.owner == "function:main")
+        .collect();
+    assert!(main_calls
+        .iter()
+        .any(|s| s.callee == "helper"
+            && s.argc == 1
+            && s.kind == crate::core::ResolvedCallKind::Function));
+    assert!(main_calls
+        .iter()
+        .any(|s| s.callee == "c_abs"
+            && s.argc == 1
+            && s.kind == crate::core::ResolvedCallKind::Extern));
+    let helper_callers: Vec<_> = sites
+        .iter()
+        .filter(|s| s.callee == "helper")
+        .collect();
     assert!(helper_callers
         .iter()
-        .any(|(owner, argc, kind)| owner == "function:main" && *argc == 1 && kind == "function"));
-    assert!(verifier
-        .checked_call_sites_for_callee("c_abs")
-        .is_some_and(|cs| cs
-            .iter()
-            .any(|(owner, _, kind)| owner == "function:main" && kind == "extern")));
-    assert!(codegen
-        .resolved_call_sites_for_callee("helper")
-        .is_some_and(|cs| cs.iter().any(|(owner, _, _)| owner == "function:main")));
+        .any(|s| s.owner == "function:main"
+            && s.argc == 1
+            && s.kind == crate::core::ResolvedCallKind::Function));
+    let c_abs_callers: Vec<_> = sites
+        .iter()
+        .filter(|s| s.callee == "c_abs")
+        .collect();
+    assert!(c_abs_callers
+        .iter()
+        .any(|s| s.owner == "function:main"
+            && s.kind == crate::core::ResolvedCallKind::Extern));
 }
 
 #[test]
@@ -1667,7 +1684,9 @@ func main() -> i32 { 0 }
         Some(vec![("x".into(), "i32".into())])
     );
     assert_eq!(
-        interp.resolved_actor_method_effects("Worker", "run"),
+        program
+            .actor_method_signature("Worker", "run")
+            .map(|m| m.effects.clone()),
         Some(vec!["Io".into()])
     );
     let mut verifier = crate::verifier::Verifier::new().expect("z3");
@@ -1681,7 +1700,9 @@ func main() -> i32 { 0 }
         Some(vec![("x".into(), "i32".into())])
     );
     assert_eq!(
-        verifier.checked_actor_method_effects("Worker", "run"),
+        program
+            .actor_method_signature("Worker", "run")
+            .map(|m| m.effects.clone()),
         Some(vec!["Io".into()])
     );
     let context = inkwell::context::Context::create();
@@ -1696,7 +1717,9 @@ func main() -> i32 { 0 }
         Some(vec![("x".into(), "i32".into())])
     );
     assert_eq!(
-        codegen.resolved_actor_method_effects("Worker", "run"),
+        program
+            .actor_method_signature("Worker", "run")
+            .map(|m| m.effects.clone()),
         Some(vec!["Io".into()])
     );
 }
@@ -2190,15 +2213,14 @@ func main() -> i32 {
         }),
         "expected write_it Io call site"
     );
-    let interp = crate::interp::Interpreter::from_checked(&program);
-    assert!(interp.has_resolved_call_with_effect("write_it", "Io"));
-    let mut verifier = crate::verifier::Verifier::new().expect("z3");
-    let _ = verifier.verify_checked(&program);
-    assert!(verifier.has_checked_call_with_effect("write_it", "Io"));
-    let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "call_fx");
-    codegen.compile_checked(&program).expect("compile");
-    assert!(codegen.has_resolved_call_with_effect("write_it", "Io"));
+    // Effects are bound at the IR level; verify via program.call_sites() directly.
+    assert!(
+        program
+            .call_sites()
+            .values()
+            .any(|s| s.callee == "write_it" && s.effects.iter().any(|e| e == "Io")),
+        "write_it call site must carry Io effect from function directory"
+    );
 }
 
 #[test]
