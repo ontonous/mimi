@@ -3616,6 +3616,49 @@ impl BodyLowerer<'_> {
             _ => None,
         };
         let Some((variant, declared)) = builtin else {
+            // v0.31.25: Flow state constructor patterns — multi-target transitions
+            // return Value::Record(Some("StateName"), fields). The scrutinee type
+            // may be unit (checker workaround) or a record type. Accept the pattern
+            // if the constructor name matches a known record type definition.
+            let flow_variant = self.type_defs.iter().find(|(_, def)| {
+                def.kind == ResolvedTypeKind::Record
+                    && (def.qualified_name == name
+                        || def
+                            .qualified_name
+                            .rsplit_once("::")
+                            .is_some_and(|(_, short)| short == name))
+            });
+            if let Some((variant_id, def)) = flow_variant {
+                // Build declared fields from the record definition.
+                // Field types use the field_types map when available; the checker
+                // has already validated pattern field types against the state payload.
+                let unit_ty = self.unit.clone();
+                let field_types = self.field_types;
+                let declared: Vec<(String, NodeId, ResolvedTypeId)> = def
+                    .fields
+                    .iter()
+                    .map(|(fname, _)| {
+                        let field_id = def
+                            .field_ids
+                            .get(fname)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                NodeId(format!("{}/field:{}", variant_id.0, fname))
+                            });
+                        let ty_id = field_types
+                            .get(&field_id)
+                            .cloned()
+                            .unwrap_or_else(|| unit_ty.clone());
+                        (fname.clone(), field_id, ty_id)
+                    })
+                    .collect();
+                let lowered =
+                    self.lower_constructor_fields(node_id, fields, role, &declared, mutable)?;
+                return Ok(Some(ResolvedPatternKind::Constructor {
+                    variant: variant_id.clone(),
+                    fields: lowered,
+                }));
+            }
             return Ok(None);
         };
         let lowered = self.lower_constructor_fields(node_id, fields, role, &declared, mutable)?;

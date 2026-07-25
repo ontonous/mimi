@@ -21,6 +21,30 @@ impl<'a> Checker<'a> {
         }
 
         let all_variants = self.get_enum_variants(&subject_ty);
+        // v0.31.25: Multi-target flow transition results — use tracked target
+        // states for exhaustiveness checking instead of get_enum_variants
+        // (flow states are TypeDefKind::Record, not Enum).
+        let multi_target_states: Vec<String> = match subject.unlocated() {
+            Expr::Ident(name) => self
+                .multi_target_vars
+                .get(name)
+                .map(|types| {
+                    types
+                        .iter()
+                        .filter_map(|t| match t.unlocated() {
+                            Type::Name(n, _) => Some(n.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let effective_variants = if !multi_target_states.is_empty() {
+            multi_target_states.clone()
+        } else {
+            all_variants.clone()
+        };
         let mut covered_variants: Vec<String> = Vec::new();
         let mut has_catchall = false;
         let mut result_ty: Option<Type> = None;
@@ -68,8 +92,8 @@ impl<'a> Checker<'a> {
             }
         }
 
-        if !all_variants.is_empty() && !has_catchall {
-            for variant in &all_variants {
+        if !effective_variants.is_empty() && !has_catchall {
+            for variant in &effective_variants {
                 if !covered_variants.contains(variant) {
                     self.errors.push(
                         Diagnostic::error_code(
@@ -88,7 +112,18 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-        } else if all_variants.is_empty() && !has_catchall {
+            // v0.31.25: Clear multi_target_vars after exhaustive match —
+            // the variable is now safe to use (all states handled).
+            if !multi_target_states.is_empty()
+                && multi_target_states
+                    .iter()
+                    .all(|v| covered_variants.contains(v))
+            {
+                if let Expr::Ident(name) = subject.unlocated() {
+                    self.multi_target_vars.remove(name);
+                }
+            }
+        } else if effective_variants.is_empty() && !has_catchall {
             // D3: non-enum types (i32, string, etc.) without catch-all — warn
             let is_non_enum = matches!(
                 subject_ty.unlocated(),

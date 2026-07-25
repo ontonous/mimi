@@ -130,6 +130,33 @@ impl<'a> Interpreter<'a> {
                         }
                         true
                     }
+                    // v0.31.25: Flow state records match via Constructor pattern.
+                    // Multi-target transitions return Value::Record(Some("StateName"), fields).
+                    // match r { Small { v } => ..., Large { v } => ... }
+                    Value::Record(Some(rec_name), fields) if rec_name == name => {
+                        for (field_name, p) in pats.iter() {
+                            // Skip positional placeholders
+                            if field_name.starts_with('_')
+                                && field_name[1..].parse::<usize>().is_ok()
+                            {
+                                continue;
+                            }
+                            match fields.get(field_name) {
+                                Some(field_val) => {
+                                    if !self.match_pattern_inner(
+                                        p,
+                                        field_val,
+                                        allow_constructor,
+                                        bindings,
+                                    ) {
+                                        return false;
+                                    }
+                                }
+                                None => return false,
+                            }
+                        }
+                        true
+                    }
                     // Handle newtype pattern matching: UserId(v) matches Newtype(name, v)
                     Value::Newtype(_name, inner) if pats.len() == 1 => {
                         self.match_pattern_inner(&pats[0].1, inner, allow_constructor, bindings)
