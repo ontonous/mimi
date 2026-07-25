@@ -357,11 +357,19 @@ impl<'a> Interpreter<'a> {
         {
             let mut bare_counts: HashMap<&str, usize> = HashMap::new();
             for f in program.functions().values() {
-                let bare = f.qualified_name.rsplit("::").next().unwrap_or(&f.qualified_name);
+                let bare = f
+                    .qualified_name
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&f.qualified_name);
                 *bare_counts.entry(bare).or_insert(0) += 1;
             }
             for f in program.functions().values() {
-                let bare = f.qualified_name.rsplit("::").next().unwrap_or(&f.qualified_name);
+                let bare = f
+                    .qualified_name
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&f.qualified_name);
                 if bare != f.qualified_name && bare_counts.get(bare) == Some(&1) {
                     functions.entry(bare.to_string()).or_insert((
                         f.params.len(),

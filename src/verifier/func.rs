@@ -1141,7 +1141,13 @@ impl VerifierCtx {
         injected: &mut Vec<Stmt>,
     ) -> Option<Stmt> {
         match stmt.unlocated() {
-            Stmt::Let { pat, ty, init, mut_, ref_ } => {
+            Stmt::Let {
+                pat,
+                ty,
+                init,
+                mut_,
+                ref_,
+            } => {
                 let new_init = match init {
                     Some(expr) => Some(self.inline_calls_in_expr(expr, counter, injected)?),
                     None => None,
@@ -1234,10 +1240,7 @@ impl VerifierCtx {
                     // Inject as a requires statement (assumed precondition, not
                     // a postcondition to prove). The VIR lowering maps
                     // Stmt::Requires → VStmt::Assume.
-                    let span = expr
-                        .meta()
-                        .map(|m| m.span)
-                        .unwrap_or(Span::UNKNOWN);
+                    let span = expr.meta().map(|m| m.span).unwrap_or(Span::UNKNOWN);
                     injected.push(Stmt::Requires(substituted, span));
                 }
 
@@ -1334,11 +1337,14 @@ impl VerifierCtx {
                 // or return type, this is likely because of f64 arithmetic
                 // (which is NOT in the trusted subset). Return NotInTrustedSubset
                 // instead of falling back to the AST path.
-                let has_f64 = func_ref.params.iter().any(|p| {
-                    matches!(p.ty.unlocated(), Type::Name(n, _) if n == "f64")
-                }) || func_ref.ret.as_ref().is_some_and(|t| {
-                    matches!(t.unlocated(), Type::Name(n, _) if n == "f64")
-                });
+                let has_f64 = func_ref
+                    .params
+                    .iter()
+                    .any(|p| matches!(p.ty.unlocated(), Type::Name(n, _) if n == "f64"))
+                    || func_ref
+                        .ret
+                        .as_ref()
+                        .is_some_and(|t| matches!(t.unlocated(), Type::Name(n, _) if n == "f64"));
                 if has_f64 {
                     return Some(VerificationResult {
                         func_name: func.name.clone(),
@@ -1359,8 +1365,7 @@ impl VerifierCtx {
         };
 
         // 2b. Compute VC artifact (semantics hash for proof caching)
-        let vir_hash =
-            crate::verifier::ctx::compute_semantic_hash(&vfunc.normalized_repr());
+        let vir_hash = crate::verifier::ctx::compute_semantic_hash(&vfunc.normalized_repr());
         let artifact = Some(crate::verifier::ctx::ProofArtifact {
             semantics_version: crate::verifier::ctx::ProofArtifact::SEMANTICS_VERSION,
             // P0-9: i32 checked, i64 unbounded (no definedness). See ctx.rs.
@@ -1429,7 +1434,10 @@ impl VerifierCtx {
         // Scan all VStmts for VarIds and register any not yet known.
         {
             use crate::verifier::vir::VExpr;
-            fn collect_var_ids(expr: &VExpr, out: &mut Vec<(crate::verifier::vir::VarId, crate::verifier::vir::VType)>) {
+            fn collect_var_ids(
+                expr: &VExpr,
+                out: &mut Vec<(crate::verifier::vir::VarId, crate::verifier::vir::VType)>,
+            ) {
                 match expr {
                     VExpr::Var(id) => {
                         // Infer type from context: default to I64
@@ -1466,10 +1474,13 @@ impl VerifierCtx {
                     _ => {}
                 }
             }
-            let mut all_vars: Vec<(crate::verifier::vir::VarId, crate::verifier::vir::VType)> = Vec::new();
+            let mut all_vars: Vec<(crate::verifier::vir::VarId, crate::verifier::vir::VType)> =
+                Vec::new();
             for stmt in &vfunc.body {
                 match stmt {
-                    VStmt::Assume(expr) | VStmt::Assert(expr) => collect_var_ids(expr, &mut all_vars),
+                    VStmt::Assume(expr) | VStmt::Assert(expr) => {
+                        collect_var_ids(expr, &mut all_vars)
+                    }
                     VStmt::Let(var, expr) => {
                         let vty = expr.ty().unwrap_or(crate::verifier::vir::VType::I64);
                         all_vars.push((*var, vty));
@@ -1578,53 +1589,49 @@ impl VerifierCtx {
                     z3ctx.register_let(*var, vty);
                     // Assert the let binding: var == expr
                     match vty {
-                        crate::verifier::vir::VType::Bool => {
-                            match z3ctx.encode_bool(expr) {
-                                Some(body_z3) => {
-                                    if let Some(v) = z3ctx.bool_vars.get(var) {
-                                        session.assert(v.eq(&body_z3));
-                                        constraint_count += 1;
-                                    }
-                                }
-                                None => {
-                                    return Some(VerificationResult {
-                                        func_name: func.name.clone(),
-                                        status: VerifStatus::NotInTrustedSubset,
-                                        message: "cannot encode let binding (bool) in VIR".into(),
-                                        diagnostic: None,
-                                        duration_us: start.elapsed().as_micros() as u64,
-                                        constraint_count,
-                                        artifact: artifact.clone(),
-                                        trusted_subset_domain: Some(TrustedSubsetDomain::Body),
-                                    });
+                        crate::verifier::vir::VType::Bool => match z3ctx.encode_bool(expr) {
+                            Some(body_z3) => {
+                                if let Some(v) = z3ctx.bool_vars.get(var) {
+                                    session.assert(v.eq(&body_z3));
+                                    constraint_count += 1;
                                 }
                             }
-                        }
+                            None => {
+                                return Some(VerificationResult {
+                                    func_name: func.name.clone(),
+                                    status: VerifStatus::NotInTrustedSubset,
+                                    message: "cannot encode let binding (bool) in VIR".into(),
+                                    diagnostic: None,
+                                    duration_us: start.elapsed().as_micros() as u64,
+                                    constraint_count,
+                                    artifact: artifact.clone(),
+                                    trusted_subset_domain: Some(TrustedSubsetDomain::Body),
+                                });
+                            }
+                        },
                         crate::verifier::vir::VType::F64Opaque => {
                             // f64 let: opaque, no arithmetic binding
                         }
-                        _ => {
-                            match z3ctx.encode_int(expr) {
-                                Some(body_z3) => {
-                                    if let Some(v) = z3ctx.int_vars.get(var) {
-                                        session.assert(v.eq(&body_z3));
-                                        constraint_count += 1;
-                                    }
-                                }
-                                None => {
-                                    return Some(VerificationResult {
-                                        func_name: func.name.clone(),
-                                        status: VerifStatus::NotInTrustedSubset,
-                                        message: "cannot encode let binding (int) in VIR".into(),
-                                        diagnostic: None,
-                                        duration_us: start.elapsed().as_micros() as u64,
-                                        constraint_count,
-                                        artifact: artifact.clone(),
-                                        trusted_subset_domain: Some(TrustedSubsetDomain::Body),
-                                    });
+                        _ => match z3ctx.encode_int(expr) {
+                            Some(body_z3) => {
+                                if let Some(v) = z3ctx.int_vars.get(var) {
+                                    session.assert(v.eq(&body_z3));
+                                    constraint_count += 1;
                                 }
                             }
-                        }
+                            None => {
+                                return Some(VerificationResult {
+                                    func_name: func.name.clone(),
+                                    status: VerifStatus::NotInTrustedSubset,
+                                    message: "cannot encode let binding (int) in VIR".into(),
+                                    diagnostic: None,
+                                    duration_us: start.elapsed().as_micros() as u64,
+                                    constraint_count,
+                                    artifact: artifact.clone(),
+                                    trusted_subset_domain: Some(TrustedSubsetDomain::Body),
+                                });
+                            }
+                        },
                     }
                 }
                 VStmt::Return(expr) => {
@@ -1821,10 +1828,7 @@ impl VerifierCtx {
                     return Some(VerificationResult {
                         func_name: func.name.clone(),
                         status: VerifStatus::NotInTrustedSubset,
-                        message: format!(
-                            "cannot encode postcondition {} in VIR",
-                            idx
-                        ),
+                        message: format!("cannot encode postcondition {} in VIR", idx),
                         diagnostic: None,
                         duration_us: start.elapsed().as_micros() as u64,
                         constraint_count,

@@ -639,7 +639,8 @@ fn check_expr_trusted(expr: &crate::ast::Expr) -> TrustedSubsetResult {
                         return Ok(());
                     }
                     return Err(
-                        "old() in the trusted subset only accepts a single identifier argument".into(),
+                        "old() in the trusted subset only accepts a single identifier argument"
+                            .into(),
                     );
                 }
             }
@@ -834,36 +835,32 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
     for (stmt_pos, stmt) in func.body.iter().enumerate() {
         let is_last = stmt_pos == func.body.len() - 1;
         match stmt.unlocated() {
-            crate::ast::Stmt::Requires(expr, _) => {
-                match lower_expr_to_vir(expr, &mut ctx) {
-                    Some(vexpr) => {
-                        body_stmts.push(VStmt::Assume(vexpr));
-                        span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
-                        stmt_index += 1;
-                    }
-                    None => {
-                        return Err(
-                            "requires clause contains unsupported expression (cannot lower to VIR)"
-                                .to_string(),
-                        );
-                    }
+            crate::ast::Stmt::Requires(expr, _) => match lower_expr_to_vir(expr, &mut ctx) {
+                Some(vexpr) => {
+                    body_stmts.push(VStmt::Assume(vexpr));
+                    span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
+                    stmt_index += 1;
                 }
-            }
-            crate::ast::Stmt::Ensures(expr, _) => {
-                match lower_expr_to_vir(expr, &mut ctx) {
-                    Some(vexpr) => {
-                        let idx = postconditions.len();
-                        postconditions.push(vexpr);
-                        span_table.record_postcondition(&func_id, idx, stmt_span(stmt));
-                    }
-                    None => {
-                        return Err(
-                            "ensures clause contains unsupported expression (cannot lower to VIR)"
-                                .to_string(),
-                        );
-                    }
+                None => {
+                    return Err(
+                        "requires clause contains unsupported expression (cannot lower to VIR)"
+                            .to_string(),
+                    );
                 }
-            }
+            },
+            crate::ast::Stmt::Ensures(expr, _) => match lower_expr_to_vir(expr, &mut ctx) {
+                Some(vexpr) => {
+                    let idx = postconditions.len();
+                    postconditions.push(vexpr);
+                    span_table.record_postcondition(&func_id, idx, stmt_span(stmt));
+                }
+                None => {
+                    return Err(
+                        "ensures clause contains unsupported expression (cannot lower to VIR)"
+                            .to_string(),
+                    );
+                }
+            },
             crate::ast::Stmt::Invariant(expr, _) => {
                 // Invariants are assumed (established from requires)
                 match lower_expr_to_vir(expr, &mut ctx) {
@@ -913,7 +910,7 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                         }
                         None => {
                             return Err(
-                                "let binding init expression cannot be lowered to VIR".to_string(),
+                                "let binding init expression cannot be lowered to VIR".to_string()
                             );
                         }
                     }
@@ -989,7 +986,7 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                                 stmt_index += 1;
                             } else {
                                 return Err(
-                                    "Do block expression cannot be lowered to VIR".to_string(),
+                                    "Do block expression cannot be lowered to VIR".to_string()
                                 );
                             }
                         }
@@ -1028,7 +1025,7 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                                     stmt_index += 1;
                                 } else {
                                     return Err(
-                                        "Do block let binding cannot be lowered to VIR".to_string(),
+                                        "Do block let binding cannot be lowered to VIR".to_string()
                                     );
                                 }
                             }
@@ -1037,8 +1034,7 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                         crate::ast::Stmt::If { cond, then_, else_ } => {
                             if is_last {
                                 let cond_vir = lower_expr_to_vir(cond, &mut ctx);
-                                let then_tail =
-                                    crate::verifier::helpers::block_tail_expr(then_);
+                                let then_tail = crate::verifier::helpers::block_tail_expr(then_);
                                 let else_tail = else_
                                     .as_ref()
                                     .and_then(|e| crate::verifier::helpers::block_tail_expr(e));
@@ -1098,8 +1094,7 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                         .and_then(|e| crate::verifier::helpers::block_tail_expr(e));
                     if let (Some(c), Some(t)) = (cond_vir, then_tail) {
                         let then_vir = lower_expr_to_vir(&t, &mut ctx);
-                        let else_vir =
-                            else_tail.and_then(|e| lower_expr_to_vir(&e, &mut ctx));
+                        let else_vir = else_tail.and_then(|e| lower_expr_to_vir(&e, &mut ctx));
                         if let (Some(tv), Some(ev)) = (then_vir, else_vir) {
                             body_stmts.push(VStmt::Return(VExpr::Select(
                                 Box::new(c),
@@ -1109,14 +1104,10 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                             span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
                             stmt_index += 1;
                         } else {
-                            return Err(
-                                "if-else branch cannot be lowered to VIR".to_string(),
-                            );
+                            return Err("if-else branch cannot be lowered to VIR".to_string());
                         }
                     } else {
-                        return Err(
-                            "if condition/then cannot be lowered to VIR".to_string(),
-                        );
+                        return Err("if condition/then cannot be lowered to VIR".to_string());
                     }
                 } else {
                     return Err(
@@ -2122,7 +2113,10 @@ mod tests {
                 false
             }
         });
-        assert!(has_select, "Stmt::If in tail position should lower to Select");
+        assert!(
+            has_select,
+            "Stmt::If in tail position should lower to Select"
+        );
     }
 
     #[test]

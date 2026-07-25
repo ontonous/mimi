@@ -230,8 +230,7 @@ impl<'a> Checker<'a> {
         // P1-38: Validate that the target is sliceable (List, Array, Slice,
         // string, or a type variable). Previously x: i32 on x[1..2] passed.
         match target_ty.unlocated() {
-            Type::Name(n, _)
-                if n == "List" || n == "string" || n == "Array" || n == "Slice" => {}
+            Type::Name(n, _) if n == "List" || n == "string" || n == "Array" || n == "Slice" => {}
             Type::Slice(_) | Type::Array(..) => {}
             Type::TypeVar(_) => {} // will be resolved later
             _ => {

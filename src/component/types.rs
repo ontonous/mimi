@@ -56,7 +56,10 @@ impl AbiTypeRef {
             AbiTypeRef::Pointer(inner) => format!("{}*", inner.c_type_name()),
             AbiTypeRef::Slice(inner) => format!("MimiSlice/* {} */", inner.c_type_name()),
             AbiTypeRef::Opaque(name) => format!("MimiHandle/* {} */", name),
-            AbiTypeRef::FatPointer { element, has_capacity } => {
+            AbiTypeRef::FatPointer {
+                element,
+                has_capacity,
+            } => {
                 if *has_capacity {
                     format!("MimiString/* {} */", element.c_type_name())
                 } else {
@@ -260,7 +263,10 @@ mod tests {
     fn mimi_type_parsing() {
         assert_eq!(AbiPrimitive::from_mimi_type("i32"), Some(AbiPrimitive::I32));
         assert_eq!(AbiPrimitive::from_mimi_type("f64"), Some(AbiPrimitive::F64));
-        assert_eq!(AbiPrimitive::from_mimi_type("bool"), Some(AbiPrimitive::Bool));
+        assert_eq!(
+            AbiPrimitive::from_mimi_type("bool"),
+            Some(AbiPrimitive::Bool)
+        );
         assert_eq!(AbiPrimitive::from_mimi_type("string"), None);
     }
 }

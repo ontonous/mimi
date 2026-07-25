@@ -10,10 +10,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::symbol::{AbiCallConv, AbiParam, AbiSymbol, AbiSymbolKind};
-use super::types::{
-    AbiAlias, AbiEnum, AbiField, AbiOpaque, AbiPrimitive, AbiStruct, AbiTypeDef, AbiTypeRef,
-};
+use super::symbol::AbiParam;
+use super::symbol::AbiSymbol;
+use super::types::AbiField;
+use super::types::AbiTypeDef;
+use super::types::AbiTypeRef;
 use super::{ComponentIdentity, ComponentIr};
 
 /// Serialized `.mimiabi` format (JSON-compatible).
@@ -150,7 +151,10 @@ impl From<&AbiTypeRef> for MimiAbiTypeRef {
                 MimiAbiTypeRef::Slice(Box::new(MimiAbiTypeRef::from(inner.as_ref())))
             }
             AbiTypeRef::Opaque(name) => MimiAbiTypeRef::Opaque(name.clone()),
-            AbiTypeRef::FatPointer { element, has_capacity } => MimiAbiTypeRef::FatPointer {
+            AbiTypeRef::FatPointer {
+                element,
+                has_capacity,
+            } => MimiAbiTypeRef::FatPointer {
                 element: Box::new(MimiAbiTypeRef::from(element.as_ref())),
                 has_capacity: *has_capacity,
             },
@@ -231,6 +235,7 @@ impl From<&AbiField> for MimiAbiField {
 mod tests {
     use super::*;
     use crate::component::gen::{register_core_runtime_abi, AbiGenerator};
+    use crate::component::types::AbiPrimitive;
 
     #[test]
     fn serialize_deserialize_roundtrip() {

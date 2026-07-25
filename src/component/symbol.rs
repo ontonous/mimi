@@ -36,12 +36,7 @@ impl AbiSymbol {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        format!(
-            "{} {}({})",
-            self.ret.c_type_name(),
-            self.name,
-            params
-        )
+        format!("{} {}({})", self.ret.c_type_name(), self.name, params)
     }
 
     /// True if this is a runtime export (mimi_* naming convention).
@@ -77,9 +72,10 @@ pub struct AbiParam {
 }
 
 /// Calling convention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AbiCallConv {
     /// C calling convention (extern "C").
+    #[default]
     C,
     /// System V AMD64 (Linux/macOS).
     SystemV,
@@ -101,12 +97,6 @@ impl AbiCallConv {
             AbiCallConv::Fast => "fastcc",
             AbiCallConv::MimiInternal => "mimi_internal",
         }
-    }
-}
-
-impl Default for AbiCallConv {
-    fn default() -> Self {
-        AbiCallConv::C
     }
 }
 

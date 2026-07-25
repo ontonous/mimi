@@ -137,9 +137,7 @@ impl<'a> ActionEmitter<'a> {
     fn is_droppable_type(&self, ty: &ResolvedTypeId) -> bool {
         match self.types.get(ty) {
             Some(ResolvedType::FlowStateSet { .. }) => true,
-            Some(ResolvedType::Nominal { .. }) => {
-                self.is_flow_state_resolved(self.types.get(ty).unwrap())
-            }
+            Some(resolved @ ResolvedType::Nominal { .. }) => self.is_flow_state_resolved(resolved),
             Some(ResolvedType::Option(inner)) => self.is_droppable_type(inner),
             Some(ResolvedType::Result { ok, error }) => {
                 // Both branches must be droppable for the whole Result to be.
@@ -851,9 +849,7 @@ impl<'a> ActionEmitter<'a> {
             // be tracked (Introduce, Move, return check). Without this,
             // `Option<cap Token>` is invisible to the analysis.
             Some(ResolvedType::Option(inner)) => self.is_linear(inner),
-            Some(ResolvedType::Result { ok, error }) => {
-                self.is_linear(ok) || self.is_linear(error)
-            }
+            Some(ResolvedType::Result { ok, error }) => self.is_linear(ok) || self.is_linear(error),
             Some(ResolvedType::Array { element, .. }) => self.is_linear(element),
             Some(ResolvedType::Slice(inner)) => self.is_linear(inner),
             Some(ResolvedType::CBuffer(inner)) => self.is_linear(inner),
@@ -1027,11 +1023,7 @@ impl<'a> ActionEmitter<'a> {
                 self.collect_capability_places(start, places);
                 self.collect_capability_places(end, places);
             }
-            ResolvedExprKind::Slice {
-                target,
-                start,
-                end,
-            } => {
+            ResolvedExprKind::Slice { target, start, end } => {
                 self.collect_capability_places(target, places);
                 if let Some(start) = start {
                     self.collect_capability_places(start, places);

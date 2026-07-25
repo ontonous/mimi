@@ -62,9 +62,11 @@ impl VerifierState {
         resolved_ir_hash: String,
     ) -> Result<Self, String> {
         let mut session = SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS)?;
-        let mut ctx = VerifierCtx::default();
-        ctx.source_hash = source_hash;
-        ctx.resolved_ir_hash = resolved_ir_hash;
+        let mut ctx = VerifierCtx {
+            source_hash,
+            resolved_ir_hash,
+            ..VerifierCtx::default()
+        };
         ctx.collect_func_defs(&file.items);
         // V-C4 source-order independence: pre-seed func_status so callers can
         // trust callees defined later in the file.

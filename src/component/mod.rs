@@ -29,15 +29,15 @@
 //!       └──→ runtime exports ──→ AbiGenerator ──→ ComponentIr.exports
 //! ```
 
-mod types;
-mod symbol;
 mod gen;
 mod serialize;
+mod symbol;
+mod types;
 
-pub use types::*;
-pub use symbol::*;
-pub use gen::{AbiGenerator, register_core_runtime_abi};
+pub use gen::{register_core_runtime_abi, AbiGenerator};
 pub use serialize::MimiAbi;
+pub use symbol::*;
+pub use types::*;
 
 /// Component IR: the single source of truth for all component bindings.
 ///
