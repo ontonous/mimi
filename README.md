@@ -2,81 +2,154 @@
 
 # Mimi Language
 
-**A Typestate-Oriented system programming language — Flow state machines, contract verification, and structured concurrency**
+**A Flow-first, Typestate-Oriented system programming language**
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.1.1--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-4063%20total-brightgreen.svg)](#)
-[![Flow](https://img.shields.io/badge/flow-v0.29%20complete-orange.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-4100%2B-brightgreen.svg)](#)
+[![Semantics](https://img.shields.io/badge/semantics-Pre--1.0-orange.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
-Interpreter + LLVM 18 Codegen Dual Backend · Z3 Formal Verification · Typestate-Oriented · Flow State Machines · Protocol/Session Types · Actor Model
+Interpreter + LLVM 18 Codegen Dual Backend · Z3 Formal Verification · Sparse Flow State Machines · Linear Resources · Actor Model · Session Types · Component Boundary
 
 ---
+
 </div>
-
----
 
 ## What is Mimi?
 
-Mimi is a **Typestate-Oriented** system programming language. Its core insight: **replace lifetime annotations and `&mut self` with business-logic state machines (Flow)**. Every resource's lifecycle is bound to a business state — the compiler guarantees safety through state transitions, not borrow checking.
+Mimi is a **Flow-first, Typestate-Oriented** system programming language. Its core insight: **replace lifetime annotations and `&mut self` with business-logic state machines (Flow)**. Every resource's lifecycle is bound to a business state — the compiler guarantees safety through state transitions, not borrow checking.
+
+Mimi answers five questions from source code and types alone:
+
+1. **What state** is this business object in?
+2. **What events** are allowed in the current state?
+3. **How do resources and ownership transfer** on state change?
+4. **Is this failure** a local return, a state Fault, or a concurrent PeerFault?
+5. **Which errors** can be rejected before the program runs?
 
 ```mimi
-flow Door {
-    state Open   { opened_at: i64 }
-    state Closed { locked: bool }
+flow Order {
+    state Pending
+    state Paid
+    state Shipped
 
-    transition open(Closed) -> Open {
-        do { return Open { opened_at: timestamp() } }
-    }
-    transition close(Open { opened_at }) -> Closed {
-        do { return Closed { locked: false } }
-    }
-    transition lock(Closed) -> Closed {
-        do { return Closed { locked: true } }
-    }
+    transition pay(Pending, payment: Payment) -> Paid { ... }
+    transition ship(Paid, tracking: Tracking) -> Shipped { ... }
 }
 ```
 
-The compiler auto-completes the transition matrix — every undefined (state, event) pair gets `→ Fault`. No dangling states, no forgotten transitions.
+**Sparse, not dense.** You don't declare `pay(Paid)` or `ship(Pending)`. These combinations aren't missing matrix cells that auto-fill to Fault — **they don't exist at the type level**. Calling `ship` on a `Pending` order is a compile error, not a runtime fallback. Dynamic boundaries (network, FFI, deserialization) produce typed `UnexpectedEvent` errors, not fake business edges.
+
+### Minimal Mental Model
+
+| Construct | Sole Responsibility |
+|-----------|-------------------|
+| `func` | Stateless synchronous computation and composition |
+| `flow` | Business state across time and its legal transitions |
+| `actor` | Mailbox, scheduling, isolation, supervision; business state lives in Flow |
+| `protocol` | Static state-topology projection of a Flow |
+| `session` | Message ordering between two linear endpoints |
+| `Result<T, E>` | Synchronous, recoverable failure |
+| `Fault` | Flow invariant violation or unrecoverable state failure |
+| `view / mutate / consume` | Read-only, in-place modification, and ownership transfer permissions |
+| `requires / ensures` | Dynamically checked or statically proven contracts |
+| `component / foreign` | Cross-language boundary with typed ownership, errors, and effects |
+
+Mimi is the production compilation backend. Intent-level design lives in **MimiSpec** (`.mms`), which promotes to Mimi via `mimi promote`.
+
+---
+
+## Design Invariants
+
+The [Architecture Amendment (2026-07-25)](devdocs/v0.31/architecture-amendment-1.0.md) established 10 irreversible invariants after nine rounds of external blind review:
+
+| # | Invariant | Meaning |
+|---|-----------|---------|
+| 1 | **Sparse is irreversible** | No dense mode. Undeclared `(state, event)` pairs are compile errors. |
+| 2 | **No nested Flow** | Flow payload holds plain data only — handles, primitives, `shared`/`weak` refs. Never another Flow instance. |
+| 3 | **No WAL** | The compiler does not generate transaction logs. Consistency is business logic. |
+| 4 | **Recover = in-place reuse** | Recover preserves memory handles (XPU tensor reallocation is a disaster). Not transaction rollback. |
+| 5 | **Generation by escape analysis** | No explicit syntax. Local handles: zero overhead. Cross-boundary handles: compiler packs generation automatically. |
+| 6 | **View/Mutate is a 1.0 requirement** | `view`/`mutate` borrowing for pure function parameters. Not nice-to-have. |
+| 7 | **Multi-target is a 1.0 requirement** | `transition parse(Pending) -> Connected \| Rejected` with nominal state tags. |
+| 8 | **FFI failure = Fault** | Cross-FFI failure must enter Fault, never Rejected. Cannot undo C's side effects. |
+| 9 | **No linear consumption before `?`** | Checker statically rejects consuming linear resources before a fallible operation. |
+| 10 | **No synchronous pinned timeout** | Hanging C functions go to ForeignTask (async). No synchronous watchdog. |
+
+> Full amendment: 13 clauses + 10 invariants. Supersedes the white paper (`devdocs/Mimi语言特性设计研究.md`) where they conflict.
 
 ---
 
 ## Features
 
-| Category | Feature | Status |
-|----------|---------|--------|
-| **Flow** | `flow`/`state`/`transition` declarations, state payloads, transfer dispatch | ✅ v0.29.9 |
-| **Flow** | Transition matrix auto-completion (+1 fallback to Fault) | ✅ v0.29.10 |
-| **Flow** | Fault absorbing state + automatic resource drop | ✅ v0.29.11 |
-| **Flow** | SystemTrace provenance (`last_state`, `unexpected_event`, snapshot) | ✅ v0.29.12 |
-| **Flow** | Reset / Recover system verbs (Fault → root state, persistent keep) | ✅ v0.29.13 |
-| **Flow** | Persistent payload + `@transactional` WAL rollback | ✅ v0.29.14 |
-| **Flow** | `delegate view/mutate/consume` (3-level permission delegation) | ✅ v0.29.15 |
-| **Flow** | `pinned { timeout }` FFI memory anchor | ✅ v0.29.16 |
-| **Flow** | Subflow synchronous nesting (depth-first drop) | ✅ v0.29.17 |
-| **Flow** | Protocol interface abstraction (conservative projection subtyping) | ✅ v0.29.18 |
-| **Flow** | Session types: `session`/`dual`/`end`, compile-time linearity | ✅ v0.29.19 |
-| **Flow** | PeerFault cross-Actor propagation | ✅ v0.29.20 |
-| **Flow** | Mailbox backpressure auto-governance | ✅ v0.29.21 |
-| **Flow** | Progressive typestate (script → implicit `flow Main { state Single }`) | ✅ v0.29.22 |
-| **Flow** | `view`/`mutate` local borrowing (zero-overhead GEP pass) | ✅ v0.29.23 |
-| **Flow** | Spawn quota control (`@max_children(N)`) | ✅ v0.29.24 |
-| **Flow** | Polymorphic broadcast (`Vec<Protocol>`) | ✅ v0.29.25 |
-| **Flow** | Protocol methods, session_pair, lifecycle | ✅ v0.29.27–31 |
-| **Contract** | `requires:` / `ensures:` / `invariant:` in function bodies | ✅ |
-| **Contract** | Z3 SMT solver integration (`mimi verify`) | ✅ |
-| **Contract** | Runtime contract assertions (`mimi build --verify-contracts`) | ✅ |
-| **Actor** | `actor` keyword, mutable fields, mailbox dispatch, worker thread | ✅ |
-| **Dual Backend** | Interpreter (fast dev) + LLVM 18 codegen (native binary) | ✅ |
-| **Generics** | `<T: Bound>` type parameters, recursive types | ✅ |
-| **ADT** | Enums / records / tuples, `match` exhaustiveness, `while let` | ✅ |
-| **Option/Result** | `Option<T>` / `Result<T, E>` / `?` operator | ✅ |
-| **FFI** | `extern "C"`, `repr(C)`, multi-language bindgen (C/C++/Rust/Go/Node.js/Java/Python) | ✅ |
-| **Comptime** | `comptime func` + `quote!` AST generation | ✅ |
-| **LSP** | Completion, hover, goto-definition, contract lens | ✅ |
-| **Package** | `mimi.toml` manifest, registry, git deps, dependency tree | ✅ |
-| **Cross-compile** | `--target` flag, shared library `.so` output | ✅ |
+### Flow Core
+
+| Feature | Status |
+|---------|--------|
+| `flow` / `state` / `transition` declarations, state payloads, transfer dispatch | ✅ |
+| Sparse transition graph — undeclared `(state, event)` = compile error (`@sparse`) | ✅ |
+| Typed Fault — per-flow `fault ErrorType` declaration | ✅ |
+| `become` / `stay` explicit terminal keywords | ✅ |
+| `fails E` rollback path — `?` returns `Err((source, error))`, source generation restored | ✅ |
+| Reset / Recover system verbs (user-overridable) | ✅ |
+| SystemTrace provenance (`last_state`, `unexpected_event`, snapshot) | ✅ |
+| Progressive mode — script `main()` via shell injection (true lowering: post-1.0) | ✅ |
+| Multi-target transition (`-> A \| B` with state tags) | 📋 0.31.25 |
+
+### Linear Safety & Ownership
+
+| Feature | Status |
+|---------|--------|
+| Flow state use-after-move rejection (E0423) | ✅ |
+| Alias chain, closure capture, collection/tuple insertion rejection (E0427) | ✅ |
+| CFG-level linearity — `is_linear()` for Flow states in dataflow analysis | ✅ |
+| Session endpoint linearity — scope exit (E0425), use-after-alias (E0426) | ✅ |
+| Shared/weak wrapping of linear resources rejected | ✅ |
+| View/mutate borrowing (pure function parameter passing) | 📋 0.31.25 |
+| Cross-turn exactly-once resource tracking | 📋 |
+| Channel/Mutex/Atomic type-level linearity | 📋 (known limitation: builtin integer handles) |
+
+### Concurrency
+
+| Feature | Status |
+|---------|--------|
+| `actor Name runs FlowName` — Actor business state carried by Flow | ✅ (interp; codegen pending) |
+| Session types: `session` / `dual` / `end`, compile-time residual checking | ✅ |
+| Protocol interface abstraction (conservative projection subtyping) | ✅ |
+| PeerFault cross-Actor propagation | ✅ |
+| Mailbox backpressure auto-governance | ✅ |
+| Spawn quota control (`@max_children(N)`) | ✅ |
+| Polymorphic broadcast (`Vec<Protocol>`) | ✅ |
+
+### Contracts & Verification
+
+| Feature | Status |
+|---------|--------|
+| `requires:` / `ensures:` / `invariant:` in function bodies | ✅ |
+| Z3 SMT solver integration (`mimi verify`) | ✅ |
+| Runtime contract assertions (`mimi build --verify-contracts`) | ✅ |
+
+### Dual Backend & Type System
+
+| Feature | Status |
+|---------|--------|
+| Interpreter (fast dev) + LLVM 18 codegen (native binary) — L1 equivalence tested | ✅ |
+| Hindley-Milner type inference (undo trail + TypeScheme + zonk) | ✅ |
+| Generics `<T: Bound>`, recursive types | ✅ |
+| Enums / records / tuples, `match` exhaustiveness, `while let` | ✅ |
+| `Option<T>` / `Result<T, E>` / `?` operator | ✅ |
+
+### FFI, Comptime & Tooling
+
+| Feature | Status |
+|---------|--------|
+| `extern "C"`, `repr(C)`, multi-language bindgen (C/C++/Rust/Go/Node.js/Java/Python) | ✅ |
+| `comptime func` + `quote!` AST generation | ✅ |
+| LSP: completion, hover, goto-definition, contract lens | ✅ |
+| Package manager: `mimi.toml`, registry, git deps, dependency tree | ✅ |
+| Cross-compilation: `--target` flag, shared library `.so` output | ✅ |
+| Component IR + Native ABI + Wire Schema | 📋 Phase C |
 
 ---
 
@@ -126,6 +199,8 @@ func main() -> i32 {
 # => 0
 ```
 
+`Counter::inc(s0)` **consumes** `s0` — using `s0` after the transition is a compile error (E0423). Each transition produces a new generation of the state.
+
 ### Run Tests
 
 ```bash
@@ -134,32 +209,82 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
 
 ---
 
+## Architecture
+
+### CheckedProgram: The Semantic Hub
+
+All backends (interpreter, LLVM codegen, Z3 verifier) consume a single source of truth: **CheckedProgram**. No backend re-parses AST or re-guesses types.
+
+```
+Source → Lexer → Parser → AST
+  → HM Inference → Type Checker → CheckedProgram
+    → Typed Resolved IR (canonical signatures, catalogs, materialized types)
+    → CFG (per-callable control flow graph)
+    → Ownership Ledger (linear resource analysis)
+      ↓
+  ┌───────────┼───────────┐
+  Interpreter   Codegen     Verifier
+  (from_checked) (compile_checked) (verify_checked)
+```
+
+**Iron rule**: backends cannot fall back to raw AST. `CheckedProgram::file()` is crate-internal `legacy_body_file()` — function body migration to Resolved IR is tracked per body class through 0.1.1 sprints.
+
+### Dependency Chain
+
+```
+Span/Origin → HM → CFG/ownership → CheckedProgram/Resolved IR
+  → Flow generation/turn → Actor/Session/resource → semantic trace
+  → Verified Core
+  → Component IR → Native ABI → Wire → Rust SDK / XPU FFI
+```
+
+### Core Abstractions
+
+| Abstraction | Location | Role |
+|-------------|----------|------|
+| **CheckedProgram** | `src/core/checker/` | Single semantic hub: canonical signatures, catalogs, materialized types |
+| **Typed Resolved IR** | `src/core/resolved/` | ResolvedFunction / ResolvedFlow / ResolvedTransition / ResolvedActor |
+| **HM Unification** | `src/core/unification.rs` | Undo trail + TypeScheme + zonk; generic call fresh instantiation |
+| **TypeFolder** | `src/core/type_folder.rs` | Binder-aware type folding (SurfaceTy / InferTy / ZonkedTy / BackendTy) |
+| **CFG** | `src/core/cfg/` | Per-callable control flow graph, stable-ID CallableCfg |
+| **Ownership Ledger** | `src/core/ownership.rs` | Linear resource Introduce / Move / Drop / Return + borrow analysis |
+| **AstNodeMeta** | `src/span.rs` | SourceId + Span + AstOrigin; NodeIdBuilder stable identity |
+
+### Compiler Internal Flow Paradigm
+
+The compiler itself is built on the Flow paradigm — each front-end module is a state machine with `fn transition(self, event) -> Self`. Five rules: no `&mut self`, no `Arc<Mutex<T>>`, no `unsafe`, no `transmute`/lifetime annotations, no bare `panic!`/`unwrap()`. Parser, Lexer, Loader, LSP, Verifier: strict Flow. Interpreter, Core Checker: relaxed Flow. Codegen, Runtime, FFI: non-Flow (LLVM API / C-style / text generation).
+
+---
+
 ## Standard Library (24 modules)
 
-| Module | File | Description |
-|--------|------|-------------|
-| `prelude` | `prelude.mimi` | identity, clamp, lerp, compose, pipe, fail, assert_msg |
-| `io` | `io.mimi` | print_line, input_line, print_format, IoOps trait |
-| `fs` | `fs.mimi` | read, write, exists, read_lines, write_lines, file_size |
-| `strings` | `strings.mimi` | split, join, replace_all, capitalize, reverse, truncate, pad |
-| `collections` | `collections.mimi` | sort, map, filter, reduce, partition, group_by, chunks, dedup |
-| `maps` | `maps.mimi` | get, set, merge, pick, omit, has_key, from_list, filter_keys |
-| `set` | `set.mimi` | contains, insert, remove, to_list, is_empty |
-| `json` | `json.mimi` | to_json, from_json, get_int, get_bool, get_string, JsonExt trait |
-| `net` | `net.mimi` | TCP socket, HTTP fetch/fetch_post, NetError |
-| `csv` | `csv.mimi` | parse_csv, serialize_csv |
-| `crypto` | `crypto.mimi` | sha256, base64_encode/decode, hex_encode/decode |
-| `template` | `template.mimi` | render_template |
-| `regex` | (builtins) | regex_match, regex_find, regex_replace |
-| `time` / `datetime` | `time.mimi` / `datetime.mimi` | timestamp, sleep_ms, duration, days_from_now, time_since |
-| `env` | `env.mimi` | get_var, cli_args, has_var, get_int, get_float |
-| `mymath` | `mymath.mimi` | gcd, lcm, factorial, fibonacci, is_prime, is_power_of_two |
-| `array` | `array.mimi` | fill, slice, rotate, binary_search |
-| `iter` | `iter.mimi` | range, zip, enumerate, take, drop, chain |
-| `random` | `random.mimi` | random_int, random_float, random_range |
-| `text` | `text.mimi` | slugify, indent, wrap |
-| `result` | `result.mimi` | unwrap, map, map_err, and_then, or_else |
-| `testing` | `testing.mimi` | assert_eq_int, assert_true, assert_approx_eq_float |
+| Module | Description |
+|--------|-------------|
+| `prelude` | identity, clamp, lerp, compose, pipe, fail, assert_msg |
+| `io` | print_line, input_line, print_format, IoOps trait |
+| `fs` | read, write, exists, read_lines, write_lines, file_size |
+| `strings` | split, join, replace_all, capitalize, reverse, truncate, pad |
+| `collections` | sort, map, filter, reduce, partition, group_by, chunks, dedup |
+| `maps` | get, set, merge, pick, omit, has_key, from_list, filter_keys |
+| `set` | contains, insert, remove, to_list, is_empty |
+| `json` | to_json, from_json, get_int, get_bool, get_string, JsonExt trait |
+| `net` | TCP socket, HTTP fetch/fetch_post, `Result<T, NetError>` |
+| `csv` | parse_csv, serialize_csv |
+| `crypto` | sha256, base64_encode/decode, hex_encode/decode |
+| `template` | render_template |
+| `time` / `datetime` | timestamp, sleep_ms, duration, days_from_now, time_since |
+| `env` | get_var, cli_args, has_var, get_int, get_float |
+| `mymath` | gcd, lcm, factorial, fibonacci, is_prime, is_power_of_two |
+| `array` | fill, slice, rotate, binary_search |
+| `iter` | range, zip, enumerate, take, drop, chain |
+| `random` | random_int, random_float, random_range |
+| `text` | slugify, indent, wrap |
+| `result` | unwrap, map, map_err, and_then, or_else |
+| `testing` | assert_eq_int, assert_true, assert_approx_eq_float |
+| `effects` | Stdlib effect annotations (purity constraints for type checker) |
+| `errors` | Typed error enums (FsError, JsonError, CollectionError) + From protocol |
+
+Built-in regex (always available): `regex_match`, `regex_find`, `regex_replace`.
 
 Built-in concurrency primitives (always available): `Mutex<T>`, `AtomicI32`/`AtomicI64`/`AtomicBool`, `Channel<T>`, `broadcast`.
 
@@ -192,7 +317,7 @@ Built-in concurrency primitives (always available): `Mutex<T>`, `AtomicI32`/`Ato
 | `mimi stats <path>` | Usage statistics |
 | `mimi stat <path>` | Directory analysis |
 | `mimi bindgen <path>` | Generate multi-language FFI bindings |
-| `mimi emit-c-headers` / `emit-py-bindings` / `emit-rust-bindings` / `emit-go-bindings` / `emit-node-bindings` / `emit-cpp-bindings` / `emit-java-bindings` | Language-specific FFI binding generation |
+| `mimi emit-*-bindings` | Language-specific FFI binding generation (C/C++/Rust/Go/Node.js/Java/Python) |
 
 ---
 
@@ -200,64 +325,49 @@ Built-in concurrency primitives (always available): `Mutex<T>`, `AtomicI32`/`Ato
 
 ```
 mimi/
-├── src/                       # Rust compiler (323 files, ~172k LOC)
-│   ├── main.rs                # CLI entry point (clap derive)
-│   ├── lib.rs                 # Library entry point
-│   ├── ast.rs                 # AST: FlowDef, StateDef, TransitionDef, ProtocolDef, ...
-│   ├── flow_matrix.rs         # Transition matrix + Fault auto-completion (+1 fallback)
-│   ├── session.rs             # Session type duality + sequencing check
-│   ├── progressive.rs         # Script → implicit flow Main { state Single }
-│   ├── parser/                # Flow parser (strict Flow state machine)       ✅ v0.29.0
-│   ├── lexer/                 # Flow lexer (strict Flow state machine)        ✅ v0.29.1
-│   ├── core/                  # Type inference & checking (relaxed Flow)      ✅ v0.29.8
-│   ├── interp/                # Interpreter (relaxed Flow)                    ✅ v0.29.6
-│   ├── codegen/               # LLVM 18 codegen via inkwell
-│   │   └── builtins/          # Builtin function codegen (io, string, json, ...)
-│   ├── verifier/              # Z3 contract verifier (strict Flow)            ✅ v0.29.7
-│   │   └── flow.rs            # Verifier as Flow state machine
-│   ├── ffi/                   # Multi-language binding generation (7 langs)
-│   ├── lsp/                   # LSP server (strict Flow)                     ✅ v0.29.5
-│   ├── loader/                # Module loader (strict Flow)                   ✅ v0.29.4
-│   ├── runtime/               # Rust runtime + actor mailbox + profiler
-│   ├── fmt.rs                 # Code formatter
-│   ├── lint.rs                # Static linter
-│   ├── main/                  # CLI subcommand implementations
-│   ├── diagnostic/            # Error codes & formatting
-│   └── tests/                 # 3100+ tests across 96 modules
-├── std/                       # Standard library (24 modules)
-├── examples/                  # Example programs (28+)
-├── demos/                     # Demo programs (23+)
-├── devdocs/                   # Design docs: white paper, flow drafts, ADRs
-├── scripts/                   # Build & CI scripts
+├── src/                        # Rust compiler (360 files, ~278k LOC)
+│   ├── main.rs                 # CLI entry point (clap derive)
+│   ├── lib.rs                  # Library entry point
+│   ├── ast.rs                  # AST: FlowDef, StateDef, TransitionDef, ProtocolDef, ...
+│   ├── span.rs                 # SourceId / Span / AstNodeMeta — stable node identity
+│   ├── flow_matrix.rs          # Transition matrix + Fault injection
+│   ├── session.rs              # Session type duality + sequencing check
+│   ├── progressive.rs          # Script → implicit flow Main { state Single }
+│   ├── trace.rs                # Canonical semantic trace (Transition / Fault / OwnershipTransfer)
+│   ├── path_safety.rs          # Unified path validation
+│   ├── source_scan.rs          # Shared SourceScanner (fmt/lint)
+│   ├── parser/                 # Flow parser (strict Flow state machine)
+│   ├── lexer/                  # Flow lexer (strict Flow state machine)
+│   ├── core/                   # Type inference & checking → CheckedProgram
+│   │   ├── checker/            # Type checker → CheckedProgram semantic hub
+│   │   ├── resolved/           # Typed Resolved IR (canonical declarations)
+│   │   ├── unification.rs      # HM unification (undo trail + TypeScheme)
+│   │   ├── type_folder.rs      # Binder-aware type folding
+│   │   ├── cfg/                # Per-callable control flow graph
+│   │   ├── ownership.rs        # Linear resource ledger (analysis)
+│   │   └── infer/              # HM type inference + contract derivation
+│   ├── interp/                 # Interpreter (from_checked)
+│   ├── codegen/                # LLVM 18 codegen (compile_checked)
+│   │   └── builtins/           # Builtin function codegen (io, string, json, ...)
+│   ├── verifier/               # Z3 contract verifier (verify_checked)
+│   ├── ffi/                    # Multi-language binding generation (7 langs)
+│   ├── lsp/                    # LSP server (strict Flow)
+│   ├── loader/                 # Module loader (strict Flow)
+│   ├── runtime/                # Rust runtime + actor mailbox + profiler
+│   ├── fmt.rs                  # Code formatter
+│   ├── lint.rs                 # Static linter
+│   ├── main/                   # CLI subcommand implementations (24 commands)
+│   ├── diagnostic/             # Error codes & formatting
+│   └── tests/                  # 4100+ tests
+├── std/                        # Standard library (24 modules)
+├── examples/                   # Example programs (32)
+├── demos/                      # Demo programs (30)
+├── tests/real_world/           # MCDD real-world dual-backend suite (70 programs)
+├── devdocs/                    # Design docs, blind reviews, amendment, roadmap
+├── scripts/                    # Build & CI scripts
 ├── Cargo.toml
 └── CHANGELOG.md
 ```
-
----
-
-## Architecture: Flow Paradigm
-
-The compiler itself is built on the same Flow paradigm it compiles — each module is a state machine:
-
-| Module | Flow Degree | Status |
-|--------|-------------|--------|
-| Parser | Strict Flow | ✅ v0.29.0 (454 LOC) |
-| Lexer | Strict Flow | ✅ v0.29.1 (970 LOC) |
-| Loader | Strict Flow | ✅ v0.29.4 |
-| LSP | Strict Flow | ✅ v0.29.5 |
-| Verifier | Strict Flow | ✅ v0.29.7 |
-| Core Checker | Relaxed Flow | ✅ v0.29.8 |
-| Interpreter | Relaxed Flow | ✅ v0.29.6 |
-| Codegen | Non-Flow (LLVM API) | N/A |
-| Runtime | Non-Flow (C-style unsafe) | N/A |
-| FFI | Non-Flow (text generator) | N/A |
-
-**Five rules** of the Flow paradigm:
-1. No `&mut self` — use `fn transition(self, event) -> Self`
-2. No `Arc<Mutex<T>>` — use `enum + transition`
-3. No `unsafe` in Flow modules
-4. No `transmute` or lifetime annotations
-5. No bare `panic!`/`unwrap()`/`expect()` — return `Result<Self, Error>`
 
 ---
 
@@ -270,7 +380,7 @@ The compiler itself is built on the same Flow paradigm it compiles — each modu
 - **libffi** (FFI support)
 - **Z3** (contract verification; handled by `cargo build`)
 
-### Testing Tiers
+### Testing Tiers (IDD)
 
 | Tier | Test | Meaning |
 |------|------|---------|
@@ -304,30 +414,51 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ---
 
+## Roadmap (0.1.1)
+
+0.1.1 is a long-cycle release covering 41 internal sprints (0.31.8–0.31.48). No intermediate tags. Current: **0.31.24** (Soundness block).
+
+| Phase | Sprints | Theme |
+|-------|---------|-------|
+| **A** | 0.31.8–0.31.19 | Flow core closure + foundation repair: atomic turn, Fault, Actor runs Flow, Session linearity, exactly-once, type-level linearity, higher-order interaction, evidence sync, attack audit I |
+| **Perf** | 0.31.20–0.31.21 | Runtime Efficiency I/II: quick wins + Value clone reduction + O1 fix |
+| **Soundness** | 0.31.22–0.31.24 | Soundness hemostasis + Runtime architecture + Error model & Stdlib |
+| **B** | 0.31.25–0.31.29 | Language freeze: syntax convergence, View/Mutate, Multi-target, type walker merge, Verification IR fail-closed, VC artifact, attack audit II |
+| **C** | 0.31.30–0.31.38 | Component boundary: Component IR + ABI generator, Native ABI + fat pointers, stable checkpoint, Wire Schema, Rust SDK conformance, XPU FFI validation, SDK hardening |
+| **D** | 0.31.39–0.31.44 | Tooling & isolation: migration, fmt/LSP/probes, Provenance/TyErr/Z3 translation, experimental isolation |
+| **E** | 0.31.45–0.31.48 | Freeze: DEBUG + L1 hardening + Interpreter slimming, final hostile audit + Trap Tests, RC1, RC2 |
+
+### Key References
+
+| Document | Role |
+|----------|------|
+| [`devdocs/v0.31/README.md`](devdocs/v0.31/README.md) | Authoritative roadmap (31 requirements, exit conditions) |
+| [`devdocs/v0.31/architecture-amendment-1.0.md`](devdocs/v0.31/architecture-amendment-1.0.md) | Architecture Amendment: 13 clauses + 10 invariants (supersedes white paper) |
+| [`devdocs/pre-1.0/`](devdocs/pre-1.0/) | Pre-1.0 design contract: core goals, Flow-first model, error algebra, Verified Core, Component Boundary |
+| [`devdocs/debt-report-2026-07-25.md`](devdocs/debt-report-2026-07-25.md) | Debt panorama: 9 architecture + 10 engineering debts + 9-round blind review corrections |
+| [`docs/language-spec.md`](docs/language-spec.md) | Normative language specification (single entry point) |
+
+### External Blind Reviews (2026-07-25)
+
+Nine rounds of external blind review covered: Z3 verification, FFI/ABI, concurrency, Flow semantics, type system, runtime, interpreter/comptime, stdlib/error handling, and codegen. Results drove the Architecture Amendment and the debt report. Review files: `devdocs/blind-review-*-2026-07-25.md`.
+
+---
+
 ## Version History
 
 | Version | Highlight |
 |---------|-----------|
-| **0.1.0** | **Baseline stability**: CheckedProgram semantic hub, semver switch, runtime/resolved architecture split, 4063 tests green, dual-backend equivalence |
-| **v0.30.0** | **止血 (Hemostasis)**: Zero new features — architecture debt repair (sprintf→snprintf, path safety, malloc checks, values_equal, build_unreachable, fmt tokenization) |
-| **v0.29.41** | White paper freeze: all 38 capabilities complete ✅ |
-| **v0.29.37** | Actor lifecycle: SystemKill cascade + `spawn detached` |
-| **v0.29.34** | Session dual-end runtime: send/recv/close push endpoints |
-| **v0.29.32** | Pinned collaborative watchdog: `pinned { timeout }` |
-| **v0.29.25** | Flow polymorphic broadcast, session_pair, mutate forwarding |
-| **v0.29.18** | Protocol interface abstraction (conservative projection subtyping) |
-| **v0.29.14** | Persistent payload + `@transactional` WAL rollback |
-| **v0.29.9** | Flow language baseline: `state`/`transition` dual-backend |
-| **v0.29.0–8** | Compiler internal Flow architecture replacement (Parser→Lexer→Loader→LSP→Interp→Verifier→Checker) |
-| **v0.28.37** | Feature bugs zero — last v0.28 release |
-| **v0.28.0** | Use-driven: 7-lang FFI, profiler, bindgen, package manager |
-| **v0.27** | Safety audit: P0/P1/P2/P3 (arena, FFI, JSON, runtime) |
-| **v0.24** | Structured concurrency state machine |
-| **v0.20** | Future/Waker/Executor/poll codegen |
+| **0.1.1-dev** | **Current**. 41-sprint roadmap: Flow core closure, foundation repair, Runtime Efficiency, Soundness, language freeze, Component boundary, tooling, RC. Architecture Amendment (13 clauses). Nine blind reviews. |
+| **0.1.0** | Baseline stability: CheckedProgram semantic hub, Typed Resolved IR, HM unification, CFG/ownership analysis, runtime/resolved split, semver switch, 4063 tests green |
+| **v0.30.0** | Hemostasis: zero new features — 15 architecture debts cleared (sprintf→snprintf, path safety, malloc checks, fmt tokenization) |
+| **v0.29.0–41** | Flow paradigm: compiler internal Flow replacement (7 modules) + language-level Flow semantics + 38 white paper capabilities |
+| **v0.28.0–37** | Use-driven: 7-lang FFI, profiler, bindgen, package manager; Feature Bugs zero |
+| **v0.27** | Safety audit: P0–P3 (arena, FFI, JSON, runtime) |
+| **v0.20–24** | Structured concurrency, Future/Waker/Executor codegen |
 | **v0.15** | C runtime → Rust runtime rewrite |
 | **v0.7** | Z3 verification + FFI codegen |
 
-> Full changelog in [CHANGELOG.md](CHANGELOG.md).
+> Full changelog: [CHANGELOG.md](CHANGELOG.md). Pre-0.1.0 history: 1863 commits, 66 `mimi-v*` tags, archived in `devdocs/archive/`.
 
 ---
 
