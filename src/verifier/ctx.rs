@@ -171,7 +171,6 @@ impl ProofArtifact {
 /// The input should be a span-free, variable-normalized string representation
 /// of the VIR (Verification IR). Variable normalization ensures that
 /// renaming local variables does not invalidate the cache.
-#[allow(dead_code)] // Infrastructure for proof cache (0.31.25-6 门禁)
 pub fn compute_semantic_hash(normalized_vir: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
