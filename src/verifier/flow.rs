@@ -52,8 +52,19 @@ impl VerifierState {
     /// Create initial Ready state from a parsed File AST.
     /// Collects func_defs and flattens all items into the verification queue.
     pub fn new(file: &File) -> Result<Self, String> {
+        Self::with_hashes(file, String::new(), String::new())
+    }
+
+    /// Create initial Ready state with proof hashes for ProofArtifact (P1-24).
+    pub fn with_hashes(
+        file: &File,
+        source_hash: String,
+        resolved_ir_hash: String,
+    ) -> Result<Self, String> {
         let mut session = SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS)?;
         let mut ctx = VerifierCtx::default();
+        ctx.source_hash = source_hash;
+        ctx.resolved_ir_hash = resolved_ir_hash;
         ctx.collect_func_defs(&file.items);
         // V-C4 source-order independence: pre-seed func_status so callers can
         // trust callees defined later in the file.
@@ -146,9 +157,13 @@ impl VerifierState {
     }
 }
 
-/// Driver: run the verifier to completion.
-pub fn flow_verify_file(file: &File) -> Result<Vec<VerificationResult>, String> {
-    let state = VerifierState::new(file)?;
+/// Driver: run the verifier to completion with proof hashes (P1-24).
+pub fn flow_verify_file_with_hashes(
+    file: &File,
+    source_hash: String,
+    resolved_ir_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    let state = VerifierState::with_hashes(file, source_hash, resolved_ir_hash)?;
     let state = run_to_done(state)?;
     Ok(state.into_output().results)
 }
@@ -267,9 +282,13 @@ pub(crate) fn flow_verify_ffi_call_sites_with_externs_or_mock(
 
 /// Entry for external callers that already have a file (e.g. build pipeline).
 /// Falls back to mock verification if Z3 is unavailable.
-pub fn flow_verify_file_or_mock(file: &File) -> Result<Vec<VerificationResult>, String> {
+pub fn flow_verify_file_or_mock(
+    file: &File,
+    source_hash: String,
+    resolved_ir_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
     if SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS).is_ok() {
-        flow_verify_file(file)
+        flow_verify_file_with_hashes(file, source_hash, resolved_ir_hash)
     } else {
         Ok(helpers::mock_verify_file(file))
     }
@@ -278,7 +297,7 @@ pub fn flow_verify_file_or_mock(file: &File) -> Result<Vec<VerificationResult>, 
 #[cfg(test)]
 fn flow_verify_source_unchecked(source: &str) -> Result<Vec<VerificationResult>, String> {
     let file = super::parse_memory_source(source, "flow-unchecked-tests")?;
-    flow_verify_file_or_mock(&file)
+    flow_verify_file_or_mock(&file, String::new(), String::new())
 }
 
 #[cfg(test)]
