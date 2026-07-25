@@ -22,6 +22,8 @@ pub struct AbiSymbol {
     pub is_unsafe: bool,
     /// Calling convention.
     pub call_conv: AbiCallConv,
+    /// 0.31.33: Callback category (only for kind == Callback).
+    pub callback_category: Option<AbiCallbackCategory>,
 }
 
 impl AbiSymbol {
@@ -58,6 +60,50 @@ pub enum AbiSymbolKind {
     Constructor,
     /// Destructor.
     Destructor,
+    /// 0.31.33: Callback function (invoked by the runtime, defined by the consumer).
+    Callback,
+}
+
+/// 0.31.33: Callback category (blind review: 5 categories).
+///
+/// Determines lifetime, thread affinity, and cancellation semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbiCallbackCategory {
+    /// Synchronous, same-thread. Caller blocks until callback returns.
+    /// Example: comparator for sort, predicate for filter.
+    SyncSameThread,
+    /// Synchronous, cross-thread. Caller blocks, callback runs on another thread.
+    /// Example: FFI callback from C library thread.
+    SyncCrossThread,
+    /// Asynchronous, one-shot. Callback fires once, then is destroyed.
+    /// Example: on_complete for async operation.
+    AsyncOneShot,
+    /// Asynchronous, multi-shot. Callback fires multiple times.
+    /// Example: on_data for event stream.
+    AsyncMultiShot,
+    /// Asynchronous, subscription. Long-lived, explicitly cancelled.
+    /// Example: on_event for event bus.
+    AsyncSubscription,
+}
+
+impl AbiCallbackCategory {
+    /// Whether this callback is synchronous (caller blocks).
+    pub fn is_sync(&self) -> bool {
+        matches!(
+            self,
+            AbiCallbackCategory::SyncSameThread | AbiCallbackCategory::SyncCrossThread
+        )
+    }
+
+    /// Whether this callback is one-shot (fires exactly once).
+    pub fn is_one_shot(&self) -> bool {
+        matches!(self, AbiCallbackCategory::AsyncOneShot)
+    }
+
+    /// Whether this callback requires explicit cancellation.
+    pub fn needs_cancellation(&self) -> bool {
+        matches!(self, AbiCallbackCategory::AsyncSubscription)
+    }
 }
 
 /// ABI parameter.
@@ -126,6 +172,7 @@ mod tests {
             effects: vec![],
             is_unsafe: false,
             call_conv: AbiCallConv::C,
+            callback_category: None,
         };
 
         assert_eq!(
@@ -145,6 +192,7 @@ mod tests {
             effects: vec!["io".to_string()],
             is_unsafe: false,
             call_conv: AbiCallConv::C,
+            callback_category: None,
         };
 
         assert_eq!(sym.c_decl(), "int64_t mimi_timestamp(void)");

@@ -134,6 +134,7 @@ mod tests {
                 effects: vec![],
                 is_unsafe: false,
                 call_conv: AbiCallConv::C,
+                callback_category: None,
             }],
             imports: vec![],
             types: vec![],

@@ -90,6 +90,9 @@ pub struct MimiAbiSymbol {
     pub effects: Vec<String>,
     pub is_unsafe: bool,
     pub call_conv: String,
+    /// 0.31.33: Callback category (null for non-callbacks).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_category: Option<String>,
 }
 
 impl From<&AbiSymbol> for MimiAbiSymbol {
@@ -102,6 +105,7 @@ impl From<&AbiSymbol> for MimiAbiSymbol {
             effects: sym.effects.clone(),
             is_unsafe: sym.is_unsafe,
             call_conv: format!("{:?}", sym.call_conv),
+            callback_category: sym.callback_category.map(|c| format!("{:?}", c)),
         }
     }
 }
