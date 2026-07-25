@@ -2246,3 +2246,77 @@ func divide(x: i32, y: i32) -> i32 {
         results[0].message
     );
 }
+
+/// P1-24: ProofArtifact source_hash and resolved_ir_hash must be non-empty
+/// when verification goes through verify_source (which has source text and
+/// CheckedProgram).
+#[test]
+fn proof_artifact_hashes_populated() {
+    require_z3!();
+    let src = r#"
+func double(x: i32) -> i32 {
+    requires: x >= -1073741824 && x <= 1073741823
+    ensures: result == x * 2
+    x * 2
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    assert!(!results.is_empty(), "should have at least one result");
+    let r = &results[0];
+    assert_eq!(r.status, VerifStatus::Verified, "{}", r.message);
+    let artifact = r
+        .artifact
+        .as_ref()
+        .expect("VIR-path result should have artifact");
+    assert!(
+        !artifact.source_hash.is_empty(),
+        "source_hash should be non-empty (P1-24)"
+    );
+    assert!(
+        !artifact.resolved_ir_hash.is_empty(),
+        "resolved_ir_hash should be non-empty (P1-24)"
+    );
+    assert!(
+        !artifact.vir_hash.is_empty(),
+        "vir_hash should be non-empty"
+    );
+    // source_hash should be a valid BLAKE3 hex string (64 chars).
+    assert_eq!(
+        artifact.source_hash.len(),
+        64,
+        "source_hash should be BLAKE3 hex (64 chars)"
+    );
+    assert_eq!(
+        artifact.resolved_ir_hash.len(),
+        64,
+        "resolved_ir_hash should be BLAKE3 hex (64 chars)"
+    );
+}
+
+/// P1-24: Different source text produces different source_hash.
+#[test]
+fn proof_artifact_source_hash_changes_with_source() {
+    require_z3!();
+    let src1 = r#"
+func f(x: i32) -> i32 {
+    requires: x >= -1073741824 && x <= 1073741823
+    ensures: result == x + 1
+    x + 1
+}
+"#;
+    let src2 = r#"
+func f(x: i32) -> i32 {
+    requires: x >= -1073741824 && x <= 1073741823
+    ensures: result == x + 2
+    x + 2
+}
+"#;
+    let r1 = verify_source(src1).expect("src1 should verify");
+    let r2 = verify_source(src2).expect("src2 should verify");
+    let a1 = r1[0].artifact.as_ref().expect("artifact");
+    let a2 = r2[0].artifact.as_ref().expect("artifact");
+    assert_ne!(
+        a1.source_hash, a2.source_hash,
+        "different source text should produce different source_hash"
+    );
+}

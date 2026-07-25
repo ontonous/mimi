@@ -29,7 +29,9 @@ fn parse_memory_source(source: &str, label: &str) -> Result<crate::ast::File, St
 pub fn verify_source(source: &str) -> Result<Vec<VerificationResult>, String> {
     let file = parse_memory_source(source, "contracts")?;
     let program = crate::core::check_program(&file).map_err(format_check_errors)?;
-    verify_checked(&program)
+    // P1-24: compute source hash for tamper detection in ProofArtifact.
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    verify_checked(&program, source_hash)
 }
 
 /// Verify contracts using a caller-provided verifier (for timeout/config tests).
@@ -39,17 +41,26 @@ pub fn verify_source_with(
 ) -> Result<Vec<VerificationResult>, String> {
     let file = parse_memory_source(source, "contracts")?;
     let program = crate::core::check_program(&file).map_err(format_check_errors)?;
+    // P1-24: compute source hash for tamper detection in ProofArtifact.
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    verifier.set_source_hash(source_hash);
     Ok(verifier.verify_checked(&program))
 }
 
 /// Verify contracts in a type-checked program (supports pre-merged imports).
+///
+/// `source_hash` is the BLAKE3 hash of the source text (for ProofArtifact
+/// tamper detection). Pass an empty string if source text is unavailable.
 pub fn verify_checked(
     program: &crate::core::CheckedProgram,
+    source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
     program
         .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(format_check_errors)?;
-    flow::flow_verify_file_or_mock(program.legacy_body_file())
+    // P1-24: compute Resolved IR hash from CheckedProgram signatures.
+    let resolved_ir_hash = ctx::compute_resolved_ir_hash(program);
+    flow::flow_verify_file_or_mock(program.legacy_body_file(), source_hash, resolved_ir_hash)
 }
 
 /// Parse source and verify extern call sites using Z3.

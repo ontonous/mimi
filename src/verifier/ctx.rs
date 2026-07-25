@@ -178,6 +178,37 @@ pub fn compute_semantic_hash(normalized_vir: &str) -> String {
     blake3::hash(normalized_vir.as_bytes()).to_hex().to_string()
 }
 
+/// P1-24: Compute a deterministic BLAKE3 hash of the Resolved IR from
+/// CheckedProgram. Covers all ResolvedFunction signatures (name, params,
+/// return type, effects) — the semantic identity of the program.
+///
+/// This hash changes when function signatures change, enabling tamper
+/// detection at the Resolved IR level (complementing `vir_hash` which
+/// covers the VIR level and `source_hash` which covers the source text).
+pub fn compute_resolved_ir_hash(program: &crate::core::CheckedProgram) -> String {
+    use std::fmt::Write;
+    let mut repr = String::new();
+    // Sort by qualified_name for deterministic ordering (HashMap iteration
+    // order is non-deterministic).
+    let mut funcs: Vec<_> = program.functions().values().collect();
+    funcs.sort_by(|a, b| a.qualified_name.cmp(&b.qualified_name));
+    for f in funcs {
+        let _ = write!(repr, "fn {}(", f.qualified_name);
+        for (i, (name, ty)) in f.params.iter().enumerate() {
+            if i > 0 {
+                repr.push(',');
+            }
+            let _ = write!(repr, "{}:{}", name, crate::core::fmt_type(ty));
+        }
+        let _ = write!(repr, ")->{}", crate::core::fmt_type(&f.ret));
+        if !f.effects.is_empty() {
+            let _ = write!(repr, " @{}", f.effects.join(","));
+        }
+        repr.push('\n');
+    }
+    blake3::hash(repr.as_bytes()).to_hex().to_string()
+}
+
 /// Normalize a VIR string for semantic hashing:
 /// - Strip span annotations (line:col references)
 /// - Canonicalize variable names (%0, %1, %2, ...)
@@ -595,6 +626,13 @@ pub struct VerifierCtx {
     /// V-C4: status of each verified function. Callee ensures are only
     /// admitted as axioms when the callee status is `Verified`.
     pub(crate) func_status: HashMap<String, VerifStatus>,
+    /// P1-24: BLAKE3 hash of the source file (tamper detection).
+    /// Computed at the verify_source / verify_checked entry point.
+    /// Empty when source text is unavailable (e.g. LSP path).
+    pub(crate) source_hash: String,
+    /// P1-24: BLAKE3 hash of the Resolved IR (semantic identity).
+    /// Computed from CheckedProgram ResolvedFunction signatures.
+    pub(crate) resolved_ir_hash: String,
     /// Mapping from let-variable names to their init expressions.
     /// Populated during verify_func to enable substitution of local variables
     /// when encoding body-return expressions. Fixes P0.1 for let-binding calls:
@@ -741,6 +779,12 @@ impl Verifier {
             ctx: VerifierCtx::default(),
             session,
         })
+    }
+
+    /// P1-24: Set the source hash for ProofArtifact tamper detection.
+    /// Call before `verify_checked` when source text is available.
+    pub fn set_source_hash(&mut self, hash: String) {
+        self.ctx.source_hash = hash;
     }
 
     pub fn verify_checked(
@@ -1340,6 +1384,8 @@ impl Verifier {
         }
         self.ctx.checked_transitions_by_flow = transitions_by_flow;
         self.ctx.checked_transitions_by_event = transitions_by_event;
+        // P1-24: compute Resolved IR hash from CheckedProgram signatures.
+        self.ctx.resolved_ir_hash = compute_resolved_ir_hash(program);
         self.verify_file(program.legacy_body_file())
     }
 

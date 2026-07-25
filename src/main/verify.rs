@@ -68,10 +68,14 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
         }
     };
 
+    // P1-24: compute source hash for ProofArtifact tamper detection.
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
     let results = if dump_z3 {
         // --dump-z3 needs access to Verifier::dump_smt2 after verification,
         // which the Flow state machine doesn't expose. Keep direct for this case.
         let mut verifier = mimi::verifier::Verifier::new()?;
+        verifier.set_source_hash(source_hash);
         eprintln!("; Z3 SMT-LIB2 dump for {}", path.display());
         eprintln!("; (verification will proceed after dump)");
         let results = verifier.verify_checked(&checked_program);
@@ -82,7 +86,7 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
         }
         results
     } else {
-        mimi::verifier::verify_checked(&checked_program)?
+        mimi::verifier::verify_checked(&checked_program, source_hash)?
     };
 
     if results.is_empty() {

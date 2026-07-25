@@ -1161,8 +1161,9 @@ impl VerifierCtx {
             integer_model: "checked_i32".to_string(),
             float_model: "opaque".to_string(),
             solver_version: format!("z3 {}", z3::full_version()),
-            source_hash: String::new(), // P2-12: TODO: compute from source file (needs plumbing from caller)
-            resolved_ir_hash: String::new(), // P2-12: TODO: compute from CheckedProgram Resolved IR (needs plumbing)
+            // P1-24: hashes plumbed from verify_source / verify_checked entry.
+            source_hash: self.source_hash.clone(),
+            resolved_ir_hash: self.resolved_ir_hash.clone(),
             vir_hash,
         });
 
