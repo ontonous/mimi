@@ -284,19 +284,13 @@ impl<'a> Checker<'a> {
                         return true;
                     }
                 }
-                Stmt::While { body, .. } => {
-                    if self.block_returns_on_all_paths(body) {
-                        return true;
-                    }
-                }
-                Stmt::WhileLet { body, .. } => {
-                    if self.block_returns_on_all_paths(body) {
-                        return true;
-                    }
-                }
-                Stmt::For { body, .. } if self.block_returns_on_all_paths(body) => {
-                    return true;
-                }
+                // P0-3: While/WhileLet/For loops do NOT guarantee a return
+                // even if the body returns on all paths — the loop condition
+                // may be false / the iterable may be empty, so execution can
+                // skip the body entirely. Only Loop (infinite) guarantees
+                // the body executes. `while false { return 1 }` must NOT
+                // count as returning on all paths.
+                Stmt::While { .. } | Stmt::WhileLet { .. } | Stmt::For { .. } => {}
                 _ => {}
             }
         }

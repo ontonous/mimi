@@ -157,6 +157,26 @@ pub enum VExpr {
 }
 
 impl VExpr {
+    /// Check if this expression tree contains any CheckedArith or CheckedNeg
+    /// node. Used by P0-8 to detect non-tail expressions with potential
+    /// div-by-zero / overflow that would be silently discarded.
+    pub fn contains_checked_arith(&self) -> bool {
+        match self {
+            VExpr::CheckedArith(..) | VExpr::CheckedNeg(..) => true,
+            VExpr::Compare(_, l, r) | VExpr::F64Compare(_, l, r) => {
+                l.contains_checked_arith() || r.contains_checked_arith()
+            }
+            VExpr::Boolean(_, exprs) => exprs.iter().any(|e| e.contains_checked_arith()),
+            VExpr::Not(inner) => inner.contains_checked_arith(),
+            VExpr::Select(c, t, e) => {
+                c.contains_checked_arith()
+                    || t.contains_checked_arith()
+                    || e.contains_checked_arith()
+            }
+            _ => false,
+        }
+    }
+
     /// The type of this expression, if statically known.
     pub fn ty(&self) -> Option<VType> {
         match self {
@@ -939,9 +959,23 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                             );
                         }
                     }
+                } else {
+                    // P0-8: Non-tail expression statements are NOT necessarily
+                    // pure. Division/modulo can crash at runtime (div-by-zero).
+                    // If the expression contains checked arithmetic, the function
+                    // is NotInTrustedSubset (fail-closed) — we cannot verify the
+                    // definedness of a discarded expression.
+                    if let Some(vexpr) = lower_expr_to_vir(expr, &mut ctx) {
+                        if vexpr.contains_checked_arith() {
+                            return Err(
+                                "non-tail expression contains checked arithmetic (div/mod/neg overflow) — cannot verify definedness of discarded value"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    // If lowering fails, the expression is not in the trusted
+                    // subset but its value is discarded, so we can safely skip it.
                 }
-                // Non-tail expression statements are discarded (pure expressions
-                // in the trusted subset have no side effects).
             }
             // Skip super-comments and other non-semantic statements
             crate::ast::Stmt::Do(stmts) => {
@@ -1597,19 +1631,16 @@ impl VirZ3Ctx {
                     VCmpOp::Ge => Some(l.ge(&r)),
                 }
             }
-            VExpr::F64Compare(op, lhs, rhs) => {
-                // f64 comparison — uninterpreted predicate
-                // Encode as Int comparison on opaque f64 variables
-                let l = self.encode_f64(lhs)?;
-                let r = self.encode_f64(rhs)?;
-                match op {
-                    VCmpOp::Eq => Some(l.eq(&r)),
-                    VCmpOp::Ne => Some(l.ne(&r)),
-                    VCmpOp::Lt => Some(l.lt(&r)),
-                    VCmpOp::Gt => Some(l.gt(&r)),
-                    VCmpOp::Le => Some(l.le(&r)),
-                    VCmpOp::Ge => Some(l.ge(&r)),
-                }
+            VExpr::F64Compare(_op, _lhs, _rhs) => {
+                // P0-10: F64Compare encoding is semantically unsound.
+                // encode_f64 maps f64 literals to bit-pattern Ints and uses
+                // Z3 Int comparison. This gives NaN a large positive integer
+                // value, making `NaN > 1.0` true in Z3 but false in IEEE 754.
+                // Equality is also wrong: NaN != NaN in IEEE 754 but bit-equal
+                // in Z3; +0.0 == -0.0 in IEEE 754 but bit-different.
+                // Until a proper uninterpreted predicate encoding is implemented,
+                // all f64 comparisons are NotInTrustedSubset (fail-closed).
+                None
             }
             VExpr::Boolean(op, exprs) => {
                 let encoded: Vec<z3::ast::Bool> =
@@ -2096,10 +2127,13 @@ mod tests {
 
     #[test]
     fn test_lower_multiple_expr_stmts_only_last_is_return() {
-        // P1-1: Only the last Stmt::Expr should become Return
+        // P1-1: Only the last Stmt::Expr should become Return.
+        // P0-8: Non-tail expressions with checked arithmetic (x + 1) are
+        // now rejected (fail-closed) because their definedness obligations
+        // would be silently discarded. Use a pure variable reference instead.
         let func = parse_func(
             "func f(x: i32) -> i32 {
-                x + 1;
+                x;
                 x + 2
             }",
         );
@@ -2113,6 +2147,23 @@ mod tests {
             return_count, 1,
             "only the last expression statement should become Return, got {}",
             return_count
+        );
+    }
+
+    #[test]
+    fn test_lower_non_tail_checked_arith_rejected() {
+        // P0-8: Non-tail expression with checked arithmetic must be rejected
+        // (fail-closed) — definedness obligations cannot be verified for
+        // discarded values.
+        let func = parse_func(
+            "func f(x: i32, y: i32) -> i32 {
+                x / y;
+                x + 1
+            }",
+        );
+        assert!(
+            lower_func_to_vir(&func).is_err(),
+            "non-tail div must be rejected by VIR lowering"
         );
     }
 

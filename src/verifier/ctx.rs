@@ -134,7 +134,10 @@ impl ProofArtifact {
     pub fn new(solver_version: String, source_hash: String) -> Self {
         Self {
             semantics_version: Self::SEMANTICS_VERSION,
-            integer_model: "checked".to_string(),
+            // P0-9: i32 has checked overflow/div-zero definedness; i64 is
+            // modeled as unbounded integers with NO definedness checks.
+            // "checked" was a lie for i64 — use "checked_i32" to be precise.
+            integer_model: "checked_i32".to_string(),
             float_model: "opaque".to_string(),
             solver_version,
             source_hash,
