@@ -1125,6 +1125,19 @@ impl VerifierCtx {
             Err(_) => return None, // Lowering failed; fall back
         };
 
+        // 2b. Compute VC artifact (semantics hash for proof caching)
+        let vir_hash =
+            crate::verifier::ctx::compute_semantic_hash(&vfunc.normalized_repr());
+        let artifact = Some(crate::verifier::ctx::ProofArtifact {
+            semantics_version: crate::verifier::ctx::ProofArtifact::SEMANTICS_VERSION,
+            integer_model: "checked".to_string(),
+            float_model: "opaque".to_string(),
+            solver_version: "z3".to_string(), // TODO: extract from z3-sys when available
+            source_hash: String::new(), // Computed by caller (file-level)
+            resolved_ir_hash: String::new(), // Computed by caller (Resolved IR)
+            vir_hash,
+        });
+
         // Check if there are any contracts to verify
         let has_requires = vfunc.body.iter().any(|s| matches!(s, VStmt::Assume(_)));
         let has_ensures = !vfunc.postconditions.is_empty();
@@ -1203,7 +1216,7 @@ impl VerifierCtx {
                                     )),
                                     duration_us: start.elapsed().as_micros() as u64,
                                     constraint_count,
-                                    artifact: None,
+                                    artifact: artifact.clone(),
                                     trusted_subset_domain: None,
                                 });
                             }
@@ -1215,7 +1228,7 @@ impl VerifierCtx {
                                     diagnostic: None,
                                     duration_us: start.elapsed().as_micros() as u64,
                                     constraint_count,
-                                    artifact: None,
+                                    artifact: artifact.clone(),
                                     trusted_subset_domain: None,
                                 });
                             }
@@ -1282,7 +1295,7 @@ impl VerifierCtx {
                                         )),
                                         duration_us: start.elapsed().as_micros() as u64,
                                         constraint_count,
-                                        artifact: None,
+                                        artifact: artifact.clone(),
                                         trusted_subset_domain: None,
                                     });
                                 }
@@ -1297,7 +1310,7 @@ impl VerifierCtx {
                                         diagnostic: None,
                                         duration_us: start.elapsed().as_micros() as u64,
                                         constraint_count,
-                                        artifact: None,
+                                        artifact: artifact.clone(),
                                         trusted_subset_domain: None,
                                     });
                                 }
@@ -1332,7 +1345,7 @@ impl VerifierCtx {
                     ),
                     duration_us: start.elapsed().as_micros() as u64,
                     constraint_count,
-                    artifact: None,
+                    artifact: artifact.clone(),
                     trusted_subset_domain: None,
                 });
             }
@@ -1344,7 +1357,7 @@ impl VerifierCtx {
                     diagnostic: None,
                     duration_us: start.elapsed().as_micros() as u64,
                     constraint_count,
-                    artifact: None,
+                    artifact: artifact.clone(),
                     trusted_subset_domain: None,
                 });
             }
@@ -1362,7 +1375,7 @@ impl VerifierCtx {
                 diagnostic: None,
                 duration_us: start.elapsed().as_micros() as u64,
                 constraint_count,
-                artifact: None,
+                artifact: artifact.clone(),
                 trusted_subset_domain: None,
             });
         }
@@ -1415,7 +1428,7 @@ impl VerifierCtx {
                 diagnostic: Some(Diagnostic::error(diag_msg, func.meta.span)),
                 duration_us: start.elapsed().as_micros() as u64,
                 constraint_count,
-                artifact: None,
+                artifact: artifact.clone(),
                 trusted_subset_domain: None,
             })
         } else if found_unknown {
@@ -1426,7 +1439,7 @@ impl VerifierCtx {
                 diagnostic: None,
                 duration_us: start.elapsed().as_micros() as u64,
                 constraint_count,
-                artifact: None,
+                artifact: artifact.clone(),
                 trusted_subset_domain: None,
             })
         } else {
@@ -1437,7 +1450,7 @@ impl VerifierCtx {
                 diagnostic: None,
                 duration_us: start.elapsed().as_micros() as u64,
                 constraint_count,
-                artifact: None,
+                artifact: artifact.clone(),
                 trusted_subset_domain: None,
             })
         }
