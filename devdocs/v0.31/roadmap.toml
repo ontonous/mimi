@@ -805,24 +805,42 @@ requirements = []
 # - 减少热路径 cache miss（前提：AD-1 body 迁移完成后 resolved_* 字段可精简）
 #
 # 【深度审查追加 P0-11/12】Actor worker / Codegen comptime 绕过 CheckedProgram：
-# - interp/value.rs:1100,1157 Actor worker 用 Interpreter::new(raw AST)，
-#   无 resolved transition 表、无函数目录、无效果追踪、无 ownership 数据。
-#   矩阵补全的 transition、fallback 注入对 worker 不可见。
-#   修复：Actor worker 改用 Interpreter::from_checked()，安装 CheckedProgram 目录。
-# - codegen/compile.rs:1263 fold_comptime_items 用 Interpreter::new(raw AST)。
-#   修复：comptime 求值改用 from_checked() 或独立 ComptimeEvaluator。
-# - 预估 ~500-800 LOC（含测试）
 #
-# 【深度审查追加 P1-19/25/26/27 + P2 死代码】死基础设施清理：
-# - P1-19: Stmt::Become 在 collect_stmt_call_sites 中缺失（_ => {}）
-# - P1-25: Call-site 目录 6 个访问器仅测试调用，执行路径从不查询（~200 行安装代码）
-# - P1-26: 效果追踪目录仅测试调用，call_func 不检查效果（零运行时牙齿）
-# - P1-27: Arity guard 键不匹配（func.name vs qualified_name），模块嵌套函数永不触发
-# - P2: pinned timeout 代码（架构修正案条款 10 已废除）仍保留
-# - P2: consumed_resources 字段 #[allow(dead_code)]（断言禁用，需 CFG 路径分析后重启）
-# - 决策：P1-25/26 二选一——要么接入执行路径（效果系统长牙齿），要么删除安装代码。
-#   P1-27 修复键匹配。P2 pinned timeout 删除。consumed_resources 保留到断言重启。
-# - 预估 ~400-600 LOC（含删除）
+# ✅ P0-11 dispatch 层（58aeef42）：Actor worker Flow dispatch 接入
+#   Arc<TransitionTables>（Send+Sync），存在性 + arity 验证。
+#   Interpreter 新增 resolved_transition_tables 字段，from_checked() 设置。
+#
+# ⬜ P0-11 body 层：eval_flow_transition 仍需 raw AST TransitionDef.body
+#   （ResolvedTransition 无 body 字段）。需 body 迁移完成后，
+#   Actor worker 改用 Interpreter::from_checked() 完整安装目录。
+#   同时修复：parasteps worker (stmt.rs:896)、spawn worker (stmt.rs:953)、
+#   FFI callback (callback.rs:160)、poll_deferred (value.rs:66) 的
+#   Interpreter::new(raw AST) 绕过（共 5 处额外调用点）。
+#
+# ⬜ P0-12 Codegen comptime 绕过：
+#   codegen/compile.rs:1279 fold_comptime_items 用 Interpreter::new(raw AST)。
+#   codegen/expr.rs:1125/1245/1287 fold_comptime_block/quote_block/quote_interpolate
+#   同样用 Interpreter::new(raw AST)（共 4 处）。
+#   阻断点：CodeGenerator 不持有 CheckedProgram 引用（生命周期不匹配）。
+#   修复方案：
+#   a) CodeGenerator 加 CheckedProgram 生命周期参数（侵入性大）
+#   b) 提取 comptime 所需目录为 Send+Sync 快照（函数目录 + comptime 集合），
+#      传入 Interpreter::from_snapshot()（新增轻量构造器）
+#   c) 独立 ComptimeEvaluator（不依赖 Interpreter，直接求值 comptime 子集）
+#   推荐方案 b：最小侵入，复用 from_checked() 基础设施。
+#   预估 ~300-500 LOC（含测试）
+#
+# ✅ P1-25/26 死基础设施清理（ff0c6708）：−469 行。
+#   3 后端 × 19 个仅测试调用的 call-site/effects accessor + 安装代码删除。
+#   测试改用 CheckedProgram.call_sites() / .function() 直接查询。
+#
+# ✅ P1-27 Arity guard 键不匹配（82ababb0）：
+#   interp + codegen 安装时两 pass 注册唯一 bare name。
+#   resolved IR call-site 目录不注册 bare name（IR lowering 需 qualified_name）。
+#
+# ⬜ P1-19: Stmt::Become 在 collect_stmt_call_sites 中缺失（_ => {}）
+# ⬜ P2: pinned timeout 代码（架构修正案条款 10 已废除）仍保留
+# ⬜ P2: consumed_resources 字段 #[allow(dead_code)]（断言禁用，需 CFG 路径分析后重启）
 
 [[milestone]]
 version = "0.31.46"
