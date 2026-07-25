@@ -2117,7 +2117,7 @@ func main() -> i32 {
 fn flow_matrix_injects_fault_and_fallback() {
     // Only Zero+inc is user-defined. Positive+inc and Fault+inc are auto-filled.
     let src = r#"
-flow Counter {
+flow Counter @dense {
     state Zero { count: i32 }
     state Positive { count: i32 }
 
@@ -2171,7 +2171,7 @@ flow Counter {
 #[test]
 fn flow_matrix_preserves_user_fault_shape() {
     let src = r#"
-flow Tolerant {
+flow Tolerant @dense {
     state Active { data: i32 }
     state Fault { trace: string }
 
@@ -2203,7 +2203,7 @@ flow Tolerant {
 fn flow_matrix_undefined_event_returns_fault_interp() {
     // Calling inc on Positive (not user-defined) hits the auto fallback → Fault.
     let src = r#"
-flow Counter {
+flow Counter @dense {
     state Zero { count: i32 }
     state Positive { count: i32 }
 
@@ -2234,7 +2234,7 @@ func main() -> i32 {
     // for interp we verify field values by returning a sentinel after side-effect println.
     // Use a pure return for field checks:
     let src2 = r#"
-flow Counter {
+flow Counter @dense {
     state Zero { count: i32 }
     state Positive { count: i32 }
 
@@ -2263,7 +2263,7 @@ func main() -> i32 {
 #[test]
 fn flow_codegen_undefined_event_returns_fault() {
     let src = r#"
-flow Counter {
+flow Counter @dense {
     state Zero { count: i32 }
     state Positive { count: i32 }
 
@@ -2335,7 +2335,7 @@ fn flow_fault_absorption_drop_nested_record() {
     // Entering Fault via fallback must succeed and leave a readable Fault payload.
     // Nested payload resources are walked for drop (actors short-circuited).
     let src = r#"
-flow Holder {
+flow Holder @dense {
     state Live { tag: string, n: i32 }
     state Dead { tag: string }
 
@@ -2415,7 +2415,7 @@ func main() -> i32 {
 #[test]
 fn flow_fault_absorption_codegen() {
     let src = r#"
-flow F {
+flow F @dense {
     state A { v: i32 }
     state B { v: i32 }
 
@@ -2452,7 +2452,7 @@ fn flow_system_trace_fields_on_fallback() {
     // Auto-fallback fills flat fields + structured trace.
     // (Uses println + return 0 so dual-backend / compile_and_run works.)
     let src = r#"
-flow C {
+flow C @dense {
     state Zero { n: i32 }
     state Pos { n: i32 }
 
@@ -2492,7 +2492,7 @@ func main() -> i32 {
 #[test]
 fn flow_system_trace_codegen_print() {
     let src = r#"
-flow C {
+flow C @dense {
     state Zero { n: i32 }
     state Pos { n: i32 }
 
@@ -2705,7 +2705,7 @@ flow C {
 fn flow_reset_rebuilds_root() {
     // Fall into Fault, then reset → root with default payload (n=0).
     let src = r#"
-flow C {
+flow C @dense {
     state Zero { n: i32 }
     state Pos { n: i32 }
 
@@ -2737,7 +2737,7 @@ func main() -> i32 {
 fn flow_recover_preserves_persistent() {
     // persistent Config.max_retries survives Fault and is restored by recover.
     let src = r#"
-flow Svc {
+flow Svc @dense {
     persistent state Config { max_retries: i32 }
     state Active { max_retries: i32, req: i32 }
 
@@ -2774,7 +2774,7 @@ func main() -> i32 {
 fn flow_reset_discards_persistent() {
     // reset always zeros non-default fields — even if persistent was shadowed.
     let src = r#"
-flow Svc {
+flow Svc @dense {
     persistent state Config { max_retries: i32 }
     state Active { max_retries: i32 }
 
@@ -2856,7 +2856,7 @@ func main() -> i32 {
 fn flow_user_reset_not_overridden() {
     // User-defined reset body wins over the injected system verb.
     let src = r#"
-flow C {
+flow C @dense {
     state Zero { n: i32 }
     state Pos { n: i32 }
 
@@ -6068,7 +6068,7 @@ type MyError {
     code: i32,
 }
 
-flow Svc {
+flow Svc @dense {
     state Idle { n: i32 }
     state Running { n: i32 }
     fault MyError
@@ -6149,7 +6149,7 @@ fn flow_explicit_reset_overrides_system_verb() {
     // v0.31.10: User-defined reset(Fault) -> State overrides the auto-injected
     // system verb. The user body is used instead of the default rebuild-root.
     let src = r#"
-flow Counter {
+flow Counter @dense {
     state Zero { n: i32 }
     state Positive { n: i32 }
     transition inc(Zero) -> Positive {
@@ -6180,7 +6180,7 @@ fn flow_explicit_recover_overrides_system_verb() {
     // v0.31.10: User-defined recover(Fault) -> State overrides the auto-injected
     // system verb. The user body is used instead of the default rebuild-root.
     let src = r#"
-flow Svc {
+flow Svc @dense {
     persistent state Config { retries: i32 }
     state Running { n: i32 }
     transition start(Config) -> Running {

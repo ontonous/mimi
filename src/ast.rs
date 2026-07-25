@@ -1102,7 +1102,13 @@ pub enum FlowAnnotationKind {
     /// v0.31.10: Sparse transition graph — skip fallback injection for
     /// missing (state, event) pairs. Undefined events are compile-time errors
     /// instead of auto-routing to Fault.
+    /// v0.31.25: Now the DEFAULT behavior. Kept for backward compatibility
+    /// (accepted but redundant).
     Sparse,
+    /// v0.31.25: Dense transition graph — opt-in for N×M auto-completion.
+    /// Missing (state, event) pairs are filled with implicit `→ Fault` fallbacks.
+    /// This was the default before 0.31.25.
+    Dense,
 }
 
 #[derive(Debug, Clone)]
@@ -1127,10 +1133,9 @@ pub struct TransitionDef {
     pub fails: Option<Type>,
     /// Transition body — requires a `do { }` block
     pub body: Option<Block>,
-    /// DEAD: 架构修正案条款 1 废止转移矩阵自动补全（强制 Sparse）。
-    /// 0.31.25 翻转 @sparse 为默认后删除。
-    /// True when this transition was injected by transfer-matrix auto-completion
-    /// (`(state, event) → Fault`). User-written transitions always have `false`.
+    /// True when this transition was injected by the compiler (system verbs:
+    /// reset/recover/peer_fault/ffi_crash, or N×M fallback in @dense mode).
+    /// User-written transitions always have `false`.
     pub is_fallback: bool,
     /// v0.29.42: True for injected FFI_Pinned enter/exit/crash transitions.
     /// User-written transitions always have `false`.
