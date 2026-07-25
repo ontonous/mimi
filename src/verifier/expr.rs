@@ -274,8 +274,8 @@ fn is_f64_expr(expr: &Expr, vars: &Z3VarMap) -> bool {
 /// The VIR path (vir.rs) correctly uses f64 opaque sort (uninterpreted predicate).
 ///
 /// 0.31.28: f64 arithmetic now returns None (NotInTrustedSubset).
-/// f64 comparisons are also rejected in the AST path (no uninterpreted predicate
-/// mechanism). The VIR path handles f64 comparisons correctly with F64Compare.
+/// 0.31.29: f64 comparisons also return None (NotInTrustedSubset) in the AST path.
+/// The VIR path handles f64 comparisons correctly with F64Compare.
 ///
 /// Tracked in devdocs/v0.31/roadmap.toml (0.31.28) and 03-verified-core.md.
 pub(crate) fn expr_to_z3_real(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Real> {
@@ -487,6 +487,16 @@ pub(crate) fn expr_to_z3_bool(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Bool
             }
 
             let use_real = is_real_expr(lhs, vars) || is_real_expr(rhs, vars);
+
+            // 0.31.29 audit P0-2: f64 comparisons must NOT be encoded as exact
+            // Z3 Reals (IEEE 754 rounding is not modeled). The VIR path handles
+            // f64 comparisons correctly with F64Compare (uninterpreted predicate).
+            // In the AST path, reject f64 comparisons → NotInTrustedSubset.
+            let lhs_is_f64 = is_f64_expr(lhs, vars);
+            let rhs_is_f64 = is_f64_expr(rhs, vars);
+            if lhs_is_f64 || rhs_is_f64 {
+                return None;
+            }
 
             match op {
                 BinOp::EqCmp if use_real => {

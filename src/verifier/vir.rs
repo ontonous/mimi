@@ -846,16 +846,23 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
             }
             crate::ast::Stmt::Let { pat, init, .. } => {
                 if let Some(init) = init {
-                    if let Some(vexpr) = lower_expr_to_vir(init, &mut ctx) {
-                        // Extract variable name from pattern
-                        let name = match &pat.kind {
-                            crate::ast::PatternKind::Variable(n) => n.clone(),
-                            _ => format!("_let{}", stmt_index),
-                        };
-                        let var = ctx.resolve(&name);
-                        body_stmts.push(VStmt::Let(var, vexpr));
-                        span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
-                        stmt_index += 1;
+                    match lower_expr_to_vir(init, &mut ctx) {
+                        Some(vexpr) => {
+                            // Extract variable name from pattern
+                            let name = match &pat.kind {
+                                crate::ast::PatternKind::Variable(n) => n.clone(),
+                                _ => format!("_let{}", stmt_index),
+                            };
+                            let var = ctx.resolve(&name);
+                            body_stmts.push(VStmt::Let(var, vexpr));
+                            span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
+                            stmt_index += 1;
+                        }
+                        None => {
+                            return Err(
+                                "let binding init expression cannot be lowered to VIR".to_string(),
+                            );
+                        }
                     }
                 }
             }
@@ -913,6 +920,10 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                                 body_stmts.push(VStmt::Return(vexpr));
                                 span_table.record_stmt(&func_id, stmt_index, stmt_span(inner_stmt));
                                 stmt_index += 1;
+                            } else {
+                                return Err(
+                                    "Do block expression cannot be lowered to VIR".to_string(),
+                                );
                             }
                         }
                         crate::ast::Stmt::Return(expr) => {
@@ -925,6 +936,11 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                                         stmt_span(inner_stmt),
                                     );
                                     stmt_index += 1;
+                                } else {
+                                    return Err(
+                                        "Do block return expression cannot be lowered to VIR"
+                                            .to_string(),
+                                    );
                                 }
                             }
                         }
@@ -943,22 +959,80 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                                         stmt_span(inner_stmt),
                                     );
                                     stmt_index += 1;
+                                } else {
+                                    return Err(
+                                        "Do block let binding cannot be lowered to VIR".to_string(),
+                                    );
                                 }
                             }
+                        }
+                        // If statement in tail position: lower as Select.
+                        crate::ast::Stmt::If { cond, then_, else_ } => {
+                            if is_last {
+                                let cond_vir = lower_expr_to_vir(cond, &mut ctx);
+                                let then_tail =
+                                    crate::verifier::helpers::block_tail_expr(then_);
+                                let else_tail = else_
+                                    .as_ref()
+                                    .and_then(|e| crate::verifier::helpers::block_tail_expr(e));
+                                if let (Some(c), Some(t)) = (cond_vir, then_tail) {
+                                    let then_vir = lower_expr_to_vir(&t, &mut ctx);
+                                    let else_vir =
+                                        else_tail.and_then(|e| lower_expr_to_vir(&e, &mut ctx));
+                                    if let (Some(tv), Some(ev)) = (then_vir, else_vir) {
+                                        body_stmts.push(VStmt::Return(VExpr::Select(
+                                            Box::new(c),
+                                            Box::new(tv),
+                                            Box::new(ev),
+                                        )));
+                                        span_table.record_stmt(
+                                            &func_id,
+                                            stmt_index,
+                                            stmt_span(inner_stmt),
+                                        );
+                                        stmt_index += 1;
+                                    } else {
+                                        return Err(
+                                            "Do block if-else branch cannot be lowered to VIR"
+                                                .to_string(),
+                                        );
+                                    }
+                                } else {
+                                    return Err(
+                                        "Do block if condition/then cannot be lowered to VIR"
+                                            .to_string(),
+                                    );
+                                }
+                            } else {
+                                return Err(
+                                    "non-tail if statement in Do block is not in the trusted subset"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        _ => {
+                            return Err(format!(
+                                "statement {:?} in Do block is not in the trusted subset",
+                                std::mem::discriminant(inner_stmt.unlocated())
+                            ));
+                        }
+                    }
+                }
             }
-            // If statement in tail position: lower as Select.
-            // Only the last Stmt::If becomes a Return; earlier ones are discarded.
-            // Branches with early returns (Stmt::Return inside) will fail lowering
-            // because extract_block_tail returns None for blocks with non-tail returns.
+            // Stmt::If at the top level: handle in tail position, reject otherwise.
+            // 0.31.29 audit P0-1: previously fell through to _ => {} and was
+            // silently discarded, causing gate-lowering desync.
             crate::ast::Stmt::If { cond, then_, else_ } => {
                 if is_last {
-                    // Build an Expr::If and lower it as a Select
                     let cond_vir = lower_expr_to_vir(cond, &mut ctx);
                     let then_tail = crate::verifier::helpers::block_tail_expr(then_);
-                    let else_tail = else_.as_ref().and_then(|e| crate::verifier::helpers::block_tail_expr(e));
+                    let else_tail = else_
+                        .as_ref()
+                        .and_then(|e| crate::verifier::helpers::block_tail_expr(e));
                     if let (Some(c), Some(t)) = (cond_vir, then_tail) {
                         let then_vir = lower_expr_to_vir(&t, &mut ctx);
-                        let else_vir = else_tail.and_then(|e| lower_expr_to_vir(&e, &mut ctx));
+                        let else_vir =
+                            else_tail.and_then(|e| lower_expr_to_vir(&e, &mut ctx));
                         if let (Some(tv), Some(ev)) = (then_vir, else_vir) {
                             body_stmts.push(VStmt::Return(VExpr::Select(
                                 Box::new(c),
@@ -967,16 +1041,29 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                             )));
                             span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
                             stmt_index += 1;
+                        } else {
+                            return Err(
+                                "if-else branch cannot be lowered to VIR".to_string(),
+                            );
                         }
+                    } else {
+                        return Err(
+                            "if condition/then cannot be lowered to VIR".to_string(),
+                        );
                     }
+                } else {
+                    return Err(
+                        "non-tail if statement is not in the trusted subset (v1: flat body only)"
+                            .to_string(),
+                    );
                 }
-                // Non-tail Stmt::If is discarded (no side effects in trusted subset)
             }
-            _ => {}
-                    }
-                }
+            _ => {
+                return Err(format!(
+                    "statement {:?} is not in the trusted subset",
+                    std::mem::discriminant(stmt.unlocated())
+                ));
             }
-            _ => {}
         }
     }
 
@@ -1286,6 +1373,8 @@ pub(crate) struct VirZ3Ctx {
     /// The `result` variable (Int or Bool depending on return type).
     pub(crate) result_int: Option<z3::ast::Int>,
     pub(crate) result_bool: Option<z3::ast::Bool>,
+    /// f64 result variable (opaque, encoded as Int for equality/comparison only).
+    pub(crate) result_f64: Option<z3::ast::Int>,
     /// Parameter types for type-directed encoding.
     pub(crate) var_types: HashMap<VarId, VType>,
     /// Whether the function returns f64 (opaque).
@@ -1305,6 +1394,7 @@ impl VirZ3Ctx {
             old_int_vars: HashMap::new(),
             result_int: None,
             result_bool: None,
+            result_f64: None,
             var_types: HashMap::new(),
             returns_f64: false,
             returns_bool: false,
@@ -1365,10 +1455,12 @@ impl VirZ3Ctx {
         self.returns_bool = returns_bool;
         if returns_bool {
             self.result_bool = Some(z3::ast::Bool::new_const("result"));
-        } else if !returns_f64 {
+        } else if returns_f64 {
+            // f64 result: opaque Int (no arithmetic, only equality/comparison)
+            self.result_f64 = Some(z3::ast::Int::new_const("result"));
+        } else {
             self.result_int = Some(z3::ast::Int::new_const("result"));
         }
-        // f64 result: opaque, no Z3 variable needed for arithmetic
     }
 
     /// Encode a VExpr as a Z3 Int term.
@@ -1521,6 +1613,7 @@ impl VirZ3Ctx {
                 }
                 None
             }
+            VExpr::Result => self.result_f64.clone(),
             _ => None,
         }
     }
