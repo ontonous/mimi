@@ -151,6 +151,90 @@ impl ProofArtifact {
             && self.solver_version == current.solver_version
             && self.vir_hash == current.vir_hash
     }
+
+    /// Proof cache key: `(semantics_version, solver_version, integer_model, vir_hash)`.
+    /// Two proofs with the same key are interchangeable.
+    pub fn cache_key(&self) -> String {
+        format!(
+            "v{}:{}:{}:{}",
+            self.semantics_version, self.solver_version, self.integer_model, self.vir_hash
+        )
+    }
+}
+
+/// v0.31.25: Compute a semantic hash for proof caching.
+///
+/// TODO(post-0.31.25): Switch to BLAKE3 for cryptographic tamper detection.
+/// Current implementation uses SipHash (std::collections::hash_map::DefaultHasher)
+/// which is sufficient for cache invalidation but not tamper-proof.
+///
+/// The input should be a span-free, variable-normalized string representation
+/// of the VIR (Verification IR). Variable normalization ensures that
+/// renaming local variables does not invalidate the cache.
+#[allow(dead_code)] // Infrastructure for proof cache (0.31.25-6 门禁)
+pub fn compute_semantic_hash(normalized_vir: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    normalized_vir.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Normalize a VIR string for semantic hashing:
+/// - Strip span annotations (line:col references)
+/// - Canonicalize variable names (%0, %1, %2, ...)
+/// - Remove comments and whitespace variations
+///
+/// This ensures that cosmetically different but semantically identical
+/// VIRs produce the same hash.
+#[allow(dead_code)] // Infrastructure for proof cache (0.31.25-6 门禁)
+pub fn normalize_vir_for_hash(vir: &str) -> String {
+    let mut result = String::with_capacity(vir.len());
+    let mut var_counter = 0u32;
+    let mut var_map = HashMap::new();
+    for line in vir.lines() {
+        let trimmed = line.trim();
+        // Skip empty lines and comments
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with(';') {
+            continue;
+        }
+        // Strip span annotations (e.g., @span:12:5)
+        let cleaned: String = trimmed
+            .chars()
+            .collect::<String>()
+            .split("@span:")
+            .next()
+            .unwrap_or(trimmed)
+            .trim()
+            .to_string();
+        // Canonicalize variable names: %name → %N
+        let mut normalized = String::new();
+        let mut chars = cleaned.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '%' {
+                let mut name = String::new();
+                while let Some(&nc) = chars.peek() {
+                    if nc.is_alphanumeric() || nc == '_' || nc == '.' {
+                        name.push(nc);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                let canonical = var_map.entry(name).or_insert_with(|| {
+                    let id = var_counter;
+                    var_counter += 1;
+                    id
+                });
+                normalized.push_str(&format!("%{}", canonical));
+            } else {
+                normalized.push(c);
+            }
+        }
+        result.push_str(&normalized);
+        result.push('\n');
+    }
+    result
 }
 
 pub(crate) struct Z3VarMap {
