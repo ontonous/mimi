@@ -4654,3 +4654,28 @@ fn e2e_borrowed_index_mut() {
     .expect("borrowed index mut codegen failed");
     assert_eq!(stdout.trim(), "20\n10");
 }
+
+/// 0.31.36: XPU FFI 验证 — 调用真实 C 库函数（libc abs）。
+/// 验证：整数传递、整数返回全链路。
+#[test]
+fn e2e_xpu_ffi_libc_abs() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = compile_and_run(
+        r#"
+        extern "C" {
+            func abs(x: i32) -> i32
+        }
+        func main() -> i32 {
+            println(abs(-42))
+            println(abs(17))
+            println(abs(0))
+            0
+        }
+    "#,
+    )
+    .expect("XPU FFI libc abs failed");
+    assert_eq!(stdout.trim(), "42\n17\n0");
+}
