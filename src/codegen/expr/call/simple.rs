@@ -6572,6 +6572,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         for (i, arg) in compiled_args.iter_mut().enumerate() {
             if i < fdef.params.len() {
+                // v0.31.25: skip view/mutate params — they use the reference ABI
+                // (pointer to caller's storage). Loading the struct value here
+                // would destroy the pointer before prepare_borrowed_user_args runs.
+                if fdef.params[i].borrow.is_some() {
+                    continue;
+                }
                 if let Type::Name(tn, _) = fdef.params[i].ty.unlocated() {
                     if tn != "List" && self.type_defs.contains_key(tn) {
                         if let BasicValueEnum::PointerValue(pv) = arg {
@@ -7257,12 +7263,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // stayed false, and the else branch passed the var *slot*
                     // (a pointer-to-pointer) instead of loading the authoritative
                     // list pointer. push then realloc'd a garbage data field.
-                    let list_is_already_indirect = matches!(
-                        (param.ty.unlocated(), stored_ty),
-                        (Type::Name(type_name, _), BasicTypeEnum::PointerType(_))
-                            if type_name == "List"
-                    );
-                    if list_is_already_indirect {
+                    //
+                    // v0.31.25: extend to ALL indirect vars (records, lists, etc.).
+                    // When stored_ty is a pointer, the alloca holds a pointer to
+                    // the actual data. Load it to pass the data pointer, not the
+                    // pointer-to-pointer.
+                    let is_already_indirect =
+                        matches!(stored_ty, BasicTypeEnum::PointerType(_));
+                    if is_already_indirect {
                         args[index] =
                             self.build_load(stored_ty, slot, &format!("{}_borrow_ptr", var_name))?;
                     } else {
