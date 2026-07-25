@@ -247,6 +247,13 @@ fn field_var_name(expr: &Expr) -> String {
     }
 }
 
+/// UNSOUND (DEFERRED → 0.31.28): This function encodes f64 as exact Z3 Reals,
+/// which is mathematically unsound (IEEE 754 rounding is not modeled).
+/// The VIR path (vir.rs) correctly uses f64 opaque sort (uninterpreted predicate).
+/// This AST-based path should be replaced with:
+/// - f64 arithmetic → NotInTrustedSubset
+/// - f64 comparison → uninterpreted predicate
+/// Tracked in devdocs/v0.31/roadmap.toml (0.31.28) and 03-verified-core.md.
 pub(crate) fn expr_to_z3_real(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Real> {
     match expr.unlocated() {
         Expr::Literal(Lit::Int(n)) => Some(Z3Real::from_int(&Z3Int::from_i64(*n))),

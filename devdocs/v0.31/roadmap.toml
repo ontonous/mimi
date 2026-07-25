@@ -515,18 +515,54 @@ version = "0.31.26"
 kind = "implementation"
 title = "Verification IR"
 requirements = ["VERIFY-CORE-001"]
+# 已交付：
+# - VIR 类型定义（VType/VExpr/VStmt/VFunction/TypestateAxioms/VirSpanTable）
+# - trusted-subset gate（SMT 前拒绝 heap/loop/call/mutation/let mut/未知类型）
+# - FuncDef → VIR lowering（canonical VarId，span side table，infer_expr_type）
+# - VIR → Z3 encoding（CheckedArith + definedness，f64 opaque sort，F64Compare）
+# - verify_func_vir 基础设施（未接入主流程）
+# - lower_transition_to_vir（Flow transition typestate 基础设施）
+# - 代码审查修复 6 项（P0: old_ 变量/Let 处理，P1: 算术类型/f64 比较，P2: Do/let mut）
+#
+# 【DEFERRED → 0.31.27】VIR 路径接入主验证流程：
+# - counterexample 提取（当前 verify_func_vir 无 counterexample，测试期望 narrative）
+# - callee ensures 传播（当前 VIR 路径不处理函数调用）
+# - old() 变量等式约束（old_x == x 在 session 中 assert）
+# - 接入后需更新 ~20 个 verifier 测试的断言
+#
+# 【DEFERRED → 0.31.27】Typestate 公理注入：
+# - 从 CheckedProgram 提取状态 invariant / transition guard / payload 类型
+# - 注入 Z3 公理（source → assert, guard → assume, target → prove）
+# - 替换 flow.rs:207-226 的 ret=None 合成
+#
+# 【DEFERRED → 0.31.28】f64 opaque sort 替换 AST 路径 exact Reals：
+# - expr.rs:250-376 的 expr_to_z3_real 使用 exact Reals（不健全）
+# - 替换为 NotInTrustedSubset（f64 算术）+ uninterpreted predicate（f64 比较）
+# - 影响现有 f64 验证测试（sqrt 等），需独立 sprint 处理
+#
+# 【DEFERRED → post-0.31.28】CFG/SSA lowering：
+# - v1 使用 tree-based Select（ite chain），未实现 CFG/SSA
+# - 需要处理 loop（当前 gate 拒绝）和 phi 节点
+#
+# 【DEFERRED → post-0.31.28】语义 Hash BLAKE3：
+# - 当前使用 SipHash（DefaultHasher），非确定性跨 Rust 版本
+# - 需切换到 BLAKE3 用于 tamper detection
 
 [[milestone]]
 version = "0.31.27"
 kind = "implementation"
 title = "VC 与 checked integer"
 requirements = ["VERIFY-CORE-001"]
+# 【从 0.31.26 继承】VIR 路径接入主验证流程（counterexample + callee ensures + old() 等式）
+# 【从 0.31.26 继承】Typestate 公理注入（CheckedProgram → Z3 公理）
 
 [[milestone]]
 version = "0.31.28"
 kind = "implementation"
 title = "Verifier artifact 与 fail-closed"
 requirements = ["VERIFY-CORE-001"]
+# 【从 0.31.26 继承】f64 opaque sort 替换 AST 路径 exact Reals（expr.rs:250-376）
+# 【从 0.31.26 继承】语义 Hash BLAKE3（替换 SipHash）
 
 [[milestone]]
 version = "0.31.29"

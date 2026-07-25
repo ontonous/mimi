@@ -102,7 +102,29 @@
 - 合约级 NotInTrustedSubset 阻断 `mimi verify`；body 级不阻断
 - 证明缓存命中率 > 80%（变量重命名、注释变更不失效）
 
-## 0.31.26 交付（攻击审查 II）
+## 0.31.26 交付（Verification IR）
+
+> 实际交付（roadmap.toml 权威，03-verified-core.md 原 0.31.23–26 编号已顺延）：
+
+- VIR 类型定义：VType / VExpr / VStmt / VFunction / TypestateAxioms / VirSpanTable / VarId
+- trusted-subset gate：SMT 前拒绝 heap / loop / call / mutation / let mut / 未知类型
+- FuncDef → VIR lowering：canonical VarId（%0, %1, …）、span side table、infer_expr_type
+- VIR → Z3 encoding：CheckedArith + definedness obligations、f64 opaque sort、F64Compare
+- verify_func_vir 基础设施（未接入主验证流程）
+- lower_transition_to_vir（Flow transition typestate 基础设施）
+- 代码审查修复 6 项（P0×2 + P1×2 + P2×2）
+
+### 从 0.31.26 延期的工作（显式追踪）
+
+| 延期项 | 原因 | 目标 sprint | 验收标准 |
+|--------|------|------------|---------|
+| **VIR 路径接入主验证流程** | 缺少 counterexample 提取、callee ensures 传播、old() 等式约束 | **0.31.27** | verify_func_vir 接入 verify_func，~20 个 verifier 测试通过 |
+| **Typestate 公理注入** | 需要 CheckedProgram 迁移（当前 verifier 用 raw AST） | **0.31.27** | Flow transition VIR 携带非空 TypestateAxioms，Z3 公理注入 |
+| **f64 opaque sort 替换 AST 路径** | expr.rs:250-376 exact Reals 不健全，但替换影响现有测试 | **0.31.28** | f64 算术 → NotInTrustedSubset，f64 比较 → uninterpreted predicate |
+| **CFG/SSA lowering** | v1 使用 tree-based Select，loop 被 gate 拒绝 | **post-0.31.28** | VIR 支持 loop + phi 节点，gate 接受有限 loop |
+| **语义 Hash BLAKE3** | 当前 SipHash 非确定性跨 Rust 版本 | **post-0.31.28** | BLAKE3 替换 DefaultHasher，tamper detection 可用 |
+
+## 0.31.26 原计划（攻击审查 II，已顺延）
 
 - 验证 0.31.23-24 修复
 - f64 opaque sort 不泄漏算术证明
