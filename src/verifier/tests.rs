@@ -2320,3 +2320,69 @@ func f(x: i32) -> i32 {
         "different source text should produce different source_hash"
     );
 }
+
+/// 0.31.27+: Callee ensures propagation in VIR path.
+/// A function that calls a verified function should be verifiable via VIR
+/// (callee ensures inlined as assumptions).
+#[test]
+fn verify_callee_ensures_propagation_vir() {
+    require_z3!();
+    let src = r#"
+func double(x: i32) -> i32 {
+    requires: x >= -1073741824 && x <= 1073741823
+    ensures: result == x * 2
+    x * 2
+}
+
+func quadruple(x: i32) -> i32 {
+    requires: x >= -536870912 && x <= 536870911
+    ensures: result == x * 4
+    let y = double(x)
+    double(y)
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    // Both functions should be verified
+    assert!(results.len() >= 2, "should have at least 2 results: {:?}", results);
+    for r in &results {
+        assert_eq!(
+            r.status,
+            VerifStatus::Verified,
+            "{}: {}",
+            r.func_name,
+            r.message
+        );
+    }
+}
+
+/// 0.31.27+: Callee ensures propagation — disproven case.
+/// If the caller's ensures contradicts the callee's ensures, verification
+/// should fail (Disproven).
+#[test]
+fn verify_callee_ensures_propagation_disproven() {
+    require_z3!();
+    let src = r#"
+func double(x: i32) -> i32 {
+    requires: x >= -1073741824 && x <= 1073741823
+    ensures: result == x * 2
+    x * 2
+}
+
+func wrong_quadruple(x: i32) -> i32 {
+    requires: x >= -536870912 && x <= 536870911
+    ensures: result == x * 5
+    let y = double(x)
+    double(y)
+}
+"#;
+    let results = verify_source(src).expect("verification should parse");
+    // double should be Verified, wrong_quadruple should be Disproven
+    let wrong = results.iter().find(|r| r.func_name == "wrong_quadruple");
+    assert!(wrong.is_some(), "should have result for wrong_quadruple");
+    assert_eq!(
+        wrong.unwrap().status,
+        VerifStatus::Disproven,
+        "wrong_quadruple should be Disproven: {}",
+        wrong.unwrap().message
+    );
+}
