@@ -589,10 +589,11 @@ requirements = ["VERIFY-CORE-001"]
 # - return_vtype 上下文推断（i32 返回类型 → 整数字面量推断为 i32）
 # - VC artifact（VIR semantics hash + ProofArtifact）
 #
-# 【深度审查追加 P1-24】ProofArtifact source_hash 和 resolved_ir_hash 永远为空：
-# 篡改检测对源码和 Resolved IR 层面不工作（VIR 层面 BLAKE3 有效）。
-# 需要从 caller（CheckedProgram）plumbing source file hash 和 Resolved IR hash
-# 到 verify_func_vir。预估 ~100 LOC。
+# ✅【深度审查追加 P1-24】ProofArtifact source_hash/resolved_ir_hash 填充（6a7c4b80）：
+# VerifierCtx 新增 source_hash/resolved_ir_hash 字段，verify_source 计算
+# blake3(source_text)，verify_checked 计算 compute_resolved_ir_hash(program)，
+# 通过 flow_verify_file_or_mock / VerifierState::with_hashes 传递到 verify_func_vir。
+# 新增 2 个测试验证 hash 非空且不同源码产生不同 hash。
 #
 # 【DEFERRED → post-0.31.27】Callee ensures propagation in VIR path：
 # - 需要扩展 trusted subset gate 允许调用已验证函数
@@ -605,6 +606,9 @@ requirements = ["VERIFY-CORE-001"]
 # - 【深度审查确认 P1-28】typestate_context 当前永远为空（vir.rs:1349-1352），
 #   Z3 验证 Flow transition 时无状态不变量、无转移守卫、无目标状态义务。
 #   接入后需补充 ≥5 个 Flow transition 验证测试。
+# - 【深度审查发现】ResolvedState 无 invariants 字段，TransitionDef 无 guard 字段。
+#   TODO 引用的 flow.states[source].invariants 和 transition.guard 不存在。
+#   需要语言层新增 invariant/guard 字段或从 payload 类型推导结构不变量。
 
 [[milestone]]
 version = "0.31.28"
@@ -613,11 +617,11 @@ title = "Verifier artifact 与 fail-closed"
 requirements = ["VERIFY-CORE-001"]
 # ✅ 已交付（2026-07-26）：
 # - f64 opaque sort（VIR path）：f64 arithmetic → NotInTrustedSubset，f64 comparison → F64Compare
-# - f64 opaque sort（AST path fallback）：f64 literals/arithmetic → None，f64 comparison → exact Reals（unsound）
+# - f64 opaque sort（AST path fallback）：f64 literals/arithmetic → None，f64 comparison → None
 # - BLAKE3 hash：compute_semantic_hash 使用 blake3 替换 SipHash
 # - VIR lowering fail-closed：return expression 无法 lower → Err
 # - verify_func_vir：f64 函数 lowering 失败 → NotInTrustedSubset
-# 【DEFERRED → post-0.31.28】AST path f64 comparison uninterpreted predicate（当前 exact Reals，unsound）
+# ✅ AST path f64 comparison → None（0.31.29 P0-2 修复，expr.rs:491-499）
 
 [[milestone]]
 version = "0.31.29"

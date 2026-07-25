@@ -269,15 +269,14 @@ fn is_f64_expr(expr: &Expr, vars: &Z3VarMap) -> bool {
     }
 }
 
-/// UNSOUND (DEFERRED → 0.31.28): This function encodes f64 as exact Z3 Reals,
-/// which is mathematically unsound (IEEE 754 rounding is not modeled).
-/// The VIR path (vir.rs) correctly uses f64 opaque sort (uninterpreted predicate).
+/// Encode an expression as a Z3 Real (for i32 values only).
 ///
-/// 0.31.28: f64 arithmetic now returns None (NotInTrustedSubset).
+/// 0.31.28: f64 arithmetic returns None (NotInTrustedSubset).
 /// 0.31.29: f64 comparisons also return None (NotInTrustedSubset) in the AST path.
-/// The VIR path handles f64 comparisons correctly with F64Compare.
+/// The VIR path handles f64 correctly with opaque sort + F64Compare.
 ///
-/// Tracked in devdocs/v0.31/roadmap.toml (0.31.28) and 03-verified-core.md.
+/// This function is now sound: only i32 values (exact integers) are encoded
+/// as Z3 Reals. All f64 paths return None → NotInTrustedSubset.
 pub(crate) fn expr_to_z3_real(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3Real> {
     match expr.unlocated() {
         Expr::Literal(Lit::Int(n)) => Some(Z3Real::from_int(&Z3Int::from_i64(*n))),
