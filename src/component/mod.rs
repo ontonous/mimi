@@ -33,11 +33,13 @@ mod gen;
 mod serialize;
 mod symbol;
 mod types;
+mod wire;
 
 pub use gen::{register_core_runtime_abi, AbiGenerator};
 pub use serialize::MimiAbi;
 pub use symbol::*;
 pub use types::*;
+pub use wire::*;
 
 /// Component IR: the single source of truth for all component bindings.
 ///
