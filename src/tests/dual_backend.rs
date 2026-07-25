@@ -19,9 +19,18 @@ fn can_cc() -> bool {
 macro_rules! dual_assert {
     ($src:expr, $expected:expr) => {{
         // TC-C1: compare interpreter captured stdout with codegen stdout.
-        // Typecheck is soft (not a hard gate) — many dual fixtures predate
-        // strict i32/i64 field-init rules and still exercise codegen correctly.
-        let _ = check_source($src);
+        // Typecheck is a hard gate — tests that bypass the checker inflate
+        // stable evidence (0.31.29 止血线 §7).
+        check_source($src).unwrap_or_else(|diags| {
+            panic!(
+                "checker rejected dual_assert source:\n{}",
+                diags
+                    .iter()
+                    .map(|d| format!("{}", d))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        });
         let __interp_run = std::panic::catch_unwind(|| run_source_with_stdout($src));
         assert!(
             __interp_run.is_ok(),
@@ -39,6 +48,49 @@ macro_rules! dual_assert {
         // When the program produced stdout, require interp == codegen == expected.
         // Programs that only return a value (no print) leave interp stdout empty —
         // those still gate on non-panic + codegen match (historical fixtures).
+        if !__interp_stdout.trim().is_empty() || !$expected.trim().is_empty() {
+            assert_eq!(
+                __interp_stdout.trim(),
+                $expected,
+                "interpreter stdout mismatch\ninterp: {}\nexpected: {}",
+                __interp_stdout.trim(),
+                $expected
+            );
+            assert_eq!(
+                __interp_stdout.trim(),
+                __codegen.trim(),
+                "dual-backend stdout diverge\ninterp: {}\ncodegen: {}",
+                __interp_stdout.trim(),
+                __codegen.trim()
+            );
+        }
+    }};
+}
+
+/// Soft-typecheck variant of `dual_assert!` for tests that exercise features
+/// the checker does not yet support (0.31.29 止血线 §7: tests that bypass
+/// CheckedProgram must be explicitly marked, not silently counted as stable
+/// evidence). Each call site must carry a `// CHECKER-GAP: <reason>` comment.
+///
+/// When the checker gap is fixed, migrate the call site to `dual_assert!`.
+macro_rules! dual_assert_soft {
+    ($src:expr, $expected:expr) => {{
+        // Soft typecheck — checker gap, see call-site comment.
+        let _ = check_source($src);
+        let __interp_run = std::panic::catch_unwind(|| run_source_with_stdout($src));
+        assert!(
+            __interp_run.is_ok(),
+            "interpreter panicked for dual_assert_soft source"
+        );
+        let (_interp_val, __interp_stdout) = __interp_run.unwrap();
+        let __codegen = compile_and_run($src).expect("codegen failed");
+        assert_eq!(
+            __codegen.trim(),
+            $expected,
+            "codegen mismatch\ncodegen: {}\nexpected: {}",
+            __codegen.trim(),
+            $expected
+        );
         if !__interp_stdout.trim().is_empty() || !$expected.trim().is_empty() {
             assert_eq!(
                 __interp_stdout.trim(),
@@ -686,7 +738,8 @@ fn dual_for_range() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: typed body lowering does not support binary sugar (for range)
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let mut s = 0
@@ -703,7 +756,8 @@ fn dual_for_track() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: typed body lowering does not support binary sugar (for track)
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let mut s = 0
@@ -801,7 +855,8 @@ fn dual_let_shadow() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker rejects variable shadowing (E0403)
+    dual_assert_soft!(
         "func main() -> i32 { let x = 1; let x = x + 10; println(x); 0 }",
         "11"
     );
@@ -824,7 +879,8 @@ fn dual_block_expr() {
         return;
     }
     // Use a closure to create an inner scope
-    dual_assert!(
+    // CHECKER-GAP: checker rejects variable shadowing in closure scope (E0403)
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let x = 1
@@ -1031,8 +1087,7 @@ fn dual_enum_f64_payload() {
     if !can_link() {
         return;
     }
-    let interp = run_source(
-        r#"
+    let src = r#"
         type Wrap { Box(f64) }
         func main() -> i32 {
             let b = Box(5.0)
@@ -1042,23 +1097,16 @@ fn dual_enum_f64_payload() {
             }
             0
         }
-    "#,
-    );
+    "#;
+    check_source(src).unwrap_or_else(|diags| {
+        panic!(
+            "checker rejected dual_enum_f64_payload source:\n{}",
+            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+        )
+    });
+    let interp = run_source(src);
     let interp_str = format!("{:?}", interp);
-    let codegen = compile_and_run(
-        r#"
-        type Wrap { Box(f64) }
-        func main() -> i32 {
-            let b = Box(5.0)
-            match b {
-                Box(v) => println(v)
-                _ => println(-1.0)
-            }
-            0
-        }
-    "#,
-    )
-    .expect("codegen failed");
+    let codegen = compile_and_run(src).expect("codegen failed");
     let parsed: f64 = codegen
         .trim()
         .parse()
@@ -1079,8 +1127,7 @@ fn dual_enum_multi_payload() {
     if !can_link() {
         return;
     }
-    let codegen = compile_and_run(
-        r#"
+    let src = r#"
         type Pair { Pt(f64, f64) }
         func main() -> i32 {
             let p = Pt(3.0, 4.0)
@@ -1096,9 +1143,14 @@ fn dual_enum_multi_payload() {
             }
             0
         }
-    "#,
-    )
-    .expect("codegen failed");
+    "#;
+    check_source(src).unwrap_or_else(|diags| {
+        panic!(
+            "checker rejected dual_enum_multi_payload source:\n{}",
+            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+        )
+    });
+    let codegen = compile_and_run(src).expect("codegen failed");
     let lines: Vec<&str> = codegen.trim().lines().collect();
     assert_eq!(lines.len(), 2, "expected 2 lines, got: {}", codegen);
     let a: f64 = lines[0].trim().parse().expect("first line must be f64");
@@ -2381,7 +2433,8 @@ fn dual_shared_field_access() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: field projection on non-nominal type not supported
+    dual_assert_soft!(
         r#"
         type Point { x: i32, y: i32 }
         func main() -> i32 {
@@ -2590,7 +2643,8 @@ fn dual_quote_eval_literal() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: quote!/comptime not fully resolved
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let ast = quote! { 42 };
@@ -2931,7 +2985,8 @@ fn dual_generic_bounds_clone_int() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: generic bound T: Clone not resolved for method call
+    dual_assert_soft!(
         r#"
 func clone_it<T: Clone>(x: T) -> T { x.clone() }
 func main() -> i32 {
@@ -3364,7 +3419,7 @@ fn dual_actor_i32_return_via_truncate() {
     dual_assert!(
         r#"
         actor Box {
-            mut big: i64 = 0;
+            mut big: i32 = 0;
             func set_big(v: i32) { self.big = v + 0; }
             func get_i32() -> i32 { return 42; }
         }
@@ -3560,7 +3615,8 @@ fn dual_cap_split_returns_tuple() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not resolve capability alias (FullAccess)
+    dual_assert_soft!(
         r#"
         cap FileReadCap;
         cap FileWriteCap;
@@ -3762,7 +3818,8 @@ fn dual_extern_with_cap() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: cap type not allowed across C ABI boundary (E0231)
+    dual_assert_soft!(
         r#"
         cap FileReadCap;
         extern "C" {
@@ -4216,6 +4273,12 @@ fn dual_codegen_regex_capture_groups() {
             0
         }
     "#;
+    check_source(src).unwrap_or_else(|diags| {
+        panic!(
+            "checker rejected dual_codegen_regex_capture_groups source:\n{}",
+            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+        )
+    });
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "[\"2024\",\"01\",\"15\"]");
 }
@@ -4368,6 +4431,12 @@ fn dual_ffi_reprc_struct() {
             0
         }
     "#;
+    check_source(src).unwrap_or_else(|diags| {
+        panic!(
+            "checker rejected FFI struct-by-val source:\n{}",
+            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+        )
+    });
     // Interpreter should run without error
     let _interp = run_source(src);
     // Codegen: compile and run, capture stdout
@@ -4404,6 +4473,12 @@ fn dual_ffi_struct_multiple_fields() {
             0
         }
     "#;
+    check_source(src).unwrap_or_else(|diags| {
+        panic!(
+            "checker rejected FFI mixed struct source:\n{}",
+            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+        )
+    });
     let _interp = run_source(src);
     let codegen_stdout = compile_and_run(src).expect("codegen failed");
     std::env::remove_var("MIMI_FFI_LIB");
@@ -4443,6 +4518,12 @@ fn dual_ffi_struct_return_complex() {
             0
         }
     "#;
+    check_source(src).unwrap_or_else(|diags| {
+        panic!(
+            "checker rejected FFI struct return source:\n{}",
+            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+        )
+    });
     let _interp = run_source(src);
     // Keep MIMI_FFI_LIB set; the codegen binary is statically linked and ignores it.
     let codegen_stdout = compile_and_run(src);
@@ -4493,7 +4574,8 @@ fn dual_async_future_basic() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker cannot resolve Future<T> return type for async fn
+    dual_assert_soft!(
         r#"
         async func foo() -> i32 {
             42
@@ -4513,7 +4595,8 @@ fn dual_async_future_with_args() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker cannot resolve Future<T> return type for async fn
+    dual_assert_soft!(
         r#"
         async func add(a: i32, b: i32) -> i32 {
             a + b
@@ -4533,7 +4616,8 @@ fn dual_async_future_multiple_await() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker cannot resolve Future<T> return type for async fn
+    dual_assert_soft!(
         r#"
         async func double(x: i32) -> i32 {
             x * 2
@@ -4555,7 +4639,8 @@ fn dual_async_nested_await() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker cannot resolve Future<T> return type for async fn
+    dual_assert_soft!(
         r#"
         async func step1(x: i32) -> i32 {
             x + 1
@@ -4581,7 +4666,8 @@ fn dual_async_future_cooperative() {
     // Multiple async fns spawned and awaited — executor runs them cooperatively.
     // Note: without actual yielding, each async fn evaluates completely on first poll.
     // This test verifies that the executor correctly handles multiple deferred futures.
-    dual_assert!(
+    // CHECKER-GAP: checker cannot resolve Future<T> return type for async fn
+    dual_assert_soft!(
         r#"
         async func compute(n: i32) -> i32 {
             n * 2
@@ -4603,7 +4689,8 @@ fn dual_async_future_string() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker cannot resolve Future<T> return type for async fn
+    dual_assert_soft!(
         r#"
         async func greet(name: string) -> string {
             "Hello, " + name
@@ -4734,7 +4821,8 @@ fn dual_exec_safe_multi_arg() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: ExecResult has no unique field catalog
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let r = exec_safe("printf", "hi%s", "!")
@@ -4752,7 +4840,8 @@ fn dual_exec_safe_no_args() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: ExecResult has no unique field catalog
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let r = exec_safe("true")
@@ -6043,27 +6132,35 @@ fn dual_mimi_opt_cache_varied() {
         return;
     }
     // First: compile and run, verify correct output
-    let r1 = compile_and_run(
-        r#"
+    let src1 = r#"
         func main() -> i32 {
             println(1 + 2)
             0
         }
-    "#,
-    )
-    .expect("first compile failed");
+    "#;
+    check_source(src1).unwrap_or_else(|diags| {
+        panic!(
+            "checker rejected dual_mimi_opt_cache_varied src1:\n{}",
+            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+        )
+    });
+    let r1 = compile_and_run(src1).expect("first compile failed");
     assert_eq!(r1.trim(), "3", "first compile output mismatch");
 
     // Second: compile again — cached MIMI_OPT must not cause inconsistency
-    let r2 = compile_and_run(
-        r#"
+    let src2 = r#"
         func main() -> i32 {
             println(4 + 5)
             0
         }
-    "#,
-    )
-    .expect("second compile failed");
+    "#;
+    check_source(src2).unwrap_or_else(|diags| {
+        panic!(
+            "checker rejected dual_mimi_opt_cache_varied src2:\n{}",
+            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+        )
+    });
+    let r2 = compile_and_run(src2).expect("second compile failed");
     assert_eq!(
         r2.trim(),
         "9",
@@ -6088,6 +6185,8 @@ fn dual_quote_interpolate_snapshot() {
         0
     }
     "#;
+    // CHECKER-GAP: quote!/comptime not fully resolved by checker
+    let _ = check_source(src);
     // Both evaluations must succeed without panic (double-free would abort).
     let v1 = run_source(src);
     let v2 = run_source(src);
@@ -6712,6 +6811,12 @@ fn dual_lexer_builtin_codegen() {
             0
         }
     "#;
+    check_source(src).unwrap_or_else(|diags| {
+        panic!(
+            "checker rejected dual_lexer_builtin_codegen source:\n{}",
+            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+        )
+    });
     let _ = run_source(src);
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(
@@ -6732,6 +6837,12 @@ fn dual_parse_builtin_codegen() {
             0
         }
     "#;
+    check_source(src).unwrap_or_else(|diags| {
+        panic!(
+            "checker rejected dual_parse_builtin_codegen source:\n{}",
+            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+        )
+    });
     let _ = run_source(src);
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(
@@ -7603,7 +7714,8 @@ fn dual_option_list_pair_alias() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: Option implicit conversion not resolved
+    dual_assert_soft!(
         r#"
         type Pair = (i32, i32)
         func main() -> i32 {
@@ -8047,7 +8159,8 @@ fn dual_result_map_println() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, i32>>("{\"a\":1}")
@@ -8187,7 +8300,8 @@ fn dual_result_option_map_println() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, i32>>("{\"x\":9}")
@@ -8263,7 +8377,8 @@ fn dual_list_result_map_println() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, i32>>("{\"a\":1}")
@@ -8467,7 +8582,8 @@ fn dual_result_map_string_println() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, string>>("{\"a\":\"hi\"}")
@@ -8789,7 +8905,8 @@ fn dual_to_json_result_map() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, i32>>("{\"a\":1}")
@@ -9359,7 +9476,8 @@ fn dual_to_json_list_result_map() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, i32>>("{\"a\":1}")
@@ -9378,7 +9496,8 @@ fn dual_to_json_option_result_map() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, i32>>("{\"a\":1}")
@@ -9651,7 +9770,8 @@ fn dual_map_println() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let m: Map<string, i32> = from_json::<Map<string, i32>>("{\"a\":1}")
@@ -10024,7 +10144,8 @@ fn dual_exec_basic() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: ExecResult has no unique field catalog
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let r = exec("echo hello")
@@ -10041,7 +10162,8 @@ fn dual_exec_stdout() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: ExecResult has no unique field catalog
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let r = exec("echo hello")
@@ -10058,7 +10180,8 @@ fn dual_exec_exit_code() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: ExecResult has no unique field catalog
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let r = exec("exit 42")
@@ -10075,7 +10198,8 @@ fn dual_file_stat_file() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: StatResult has no unique field catalog
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             write_file("/tmp/mimi_stat_test.txt", "hello world")
@@ -10095,7 +10219,8 @@ fn dual_file_stat_dir() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: StatResult has no unique field catalog
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             mkdir_p("/tmp/mimi_stat_dir_test")
@@ -10325,7 +10450,8 @@ fn dual_multiline_slice() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: slice expression typed as [List<i32>] not List<i32> (E0242)
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let xs = [1, 2, 3, 4, 5]
@@ -10505,7 +10631,8 @@ fn dual_atomic_bool_load_store() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: atomic_bool_load returns i64, not bool (E0205)
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let c = atomic_bool_new(true)
@@ -10633,7 +10760,7 @@ fn dual_channel_many_messages() {
                 channel_send(ch, i * 10)
                 i = i + 1
             }
-            let mut sum = 0
+            let mut sum: i64 = 0
             let mut j = 0
             while j < 5 {
                 let v = channel_recv(ch)
@@ -10753,7 +10880,8 @@ fn dual_comptime_block_let() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: comptime block let bindings not resolved (E0400)
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let v = comptime {
@@ -10834,7 +10962,8 @@ fn dual_quote_literal_fold() {
         return;
     }
     // quote! { 42 } folds to Value::Int(42) at codegen time.
-    dual_assert!(
+    // CHECKER-GAP: checker: quote!/comptime not fully resolved
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let v = ast_eval(quote! { 42 })
@@ -10852,7 +10981,8 @@ fn dual_quote_arith_fold() {
         return;
     }
     // quote! { 10 + 20 } folds to Value::Int(30).
-    dual_assert!(
+    // CHECKER-GAP: checker: quote!/comptime not fully resolved
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let v = ast_eval(quote! { 10 + 20 })
@@ -10881,7 +11011,8 @@ fn dual_quote_comptime_ident_fold() {
     // Comptime call result is interpolated into a quote! block; the
     // fold path runs the call through the interpreter and emits the
     // sum as a constant.
-    dual_assert!(
+    // CHECKER-GAP: checker: quote!/comptime not fully resolved
+    dual_assert_soft!(
         r#"
         comptime func seven() -> i32 { 7 }
         func main() -> i32 {
@@ -10900,7 +11031,8 @@ fn dual_quote_nested_comptime() {
         return;
     }
     // Two comptime funcs combined inside a quote! block.
-    dual_assert!(
+    // CHECKER-GAP: checker: quote!/comptime not fully resolved
+    dual_assert_soft!(
         r#"
         comptime func base() -> i32 { 100 }
         comptime func step() -> i32 { 23 }
@@ -10921,7 +11053,8 @@ fn dual_quote_comptime_let_fold() {
     }
     // A let-binding inside a quote! block, with the rhs supplied by a
     // comptime call (folded into a constant).
-    dual_assert!(
+    // CHECKER-GAP: checker: quote!/comptime not fully resolved
+    dual_assert_soft!(
         r#"
         comptime func make_sum() -> i32 { 30 + 12 }
         func main() -> i32 {
@@ -10963,7 +11096,8 @@ fn dual_quote_cast() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker: quote!/comptime not fully resolved
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             println(ast_eval(quote! { 41.9 as i32 }) + 1)
@@ -10982,7 +11116,8 @@ fn dual_quote_interpolate_in_comptime() {
     // Top-level $(expr) interpolation inside a quote! block that is
     // wrapped in a comptime block — exercises Expr::QuoteInterpolate
     // resolution through both quote and comptime fold paths.
-    dual_assert!(
+    // CHECKER-GAP: checker: quote!/comptime not fully resolved
+    dual_assert_soft!(
         r#"
         comptime func k() -> i32 { 5 }
         func main() -> i32 {
@@ -11003,7 +11138,8 @@ fn dual_quote_with_comptime_conditional() {
     // An `if` inside a quote! block whose branch values are both
     // comptime-foldable, ensuring the If arm of QuotedAst::eval
     // participates in the codegen fold.
-    dual_assert!(
+    // CHECKER-GAP: checker: quote!/comptime not fully resolved
+    dual_assert_soft!(
         r#"
         comptime func flag() -> bool { true }
         func main() -> i32 {
@@ -11633,7 +11769,8 @@ fn dual_list_map_product_tuple() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, (i32, i32)>>("{\"a\":[1,2]}")
@@ -11673,7 +11810,8 @@ fn dual_option_map_product_tuple() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let m = from_json::<Map<string, (i32, i32)>>("{\"a\":[1,2]}")
@@ -11712,7 +11850,8 @@ fn dual_list_option_map_product_tuple() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let xs: List<Option<Map<string, (i32, i32)>>> = [
@@ -11734,7 +11873,8 @@ fn dual_list_result_map_product_tuple() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let xs: List<Result<Map<string, (i32, i32)>, string>> = [
@@ -11775,7 +11915,8 @@ fn dual_option_list_map_product_tuple() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let o: Option<List<Map<string, (i32, i32)>>> = Some([from_json::<Map<string, (i32, i32)>>("{\"a\":[1,2]}")])
@@ -11833,7 +11974,8 @@ fn dual_result_list_map_product_tuple() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let r: Result<List<Map<string, (i32, i32)>>, string> = Ok([from_json::<Map<string, (i32, i32)>>("{\"a\":[1,2]}")])
@@ -11992,7 +12134,8 @@ fn dual_result_option_map_product_tuple() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let r: Result<Option<Map<string, (i32, i32)>>, string> = Ok(Some(from_json::<Map<string, (i32, i32)>>("{\"a\":[1,2]}")))
@@ -12030,7 +12173,8 @@ fn dual_option_map_map_product_tuple() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let o: Option<Map<string, Map<string, (i32, i32)>>> = Some(from_json::<Map<string, Map<string, (i32, i32)>>>("{\"outer\":{\"a\":[1,2]}}"))
@@ -12049,7 +12193,8 @@ fn dual_list_map_set_product_tuple() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let xs: List<Map<string, Set<(i32, i32)>>> = [from_json::<Map<string, Set<(i32, i32)>>>("{\"a\":[[1,2]]}")]
@@ -12068,7 +12213,8 @@ fn dual_result_map_list_product_tuple() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let r: Result<Map<string, List<(i32, i32)>>, string> = Ok(from_json::<Map<string, List<(i32, i32)>>>("{\"a\":[[1,2],[3,4]]}"))
@@ -12147,7 +12293,8 @@ fn dual_option_result_map_product_tuple() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let o: Option<Result<Map<string, (i32, i32)>, string>> = Some(Ok(from_json::<Map<string, (i32, i32)>>("{\"a\":[1,2]}")))
@@ -12166,7 +12313,8 @@ fn dual_list_option_map_list_product_tuple() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let xs: List<Option<Map<string, List<(i32, i32)>>>> = [
@@ -12188,7 +12336,8 @@ fn dual_result_option_map_set_product_tuple() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    // CHECKER-GAP: checker does not recognize 'Map' type annotation in let binding
+    dual_assert_soft!(
         r#"
         func main() -> i32 {
             let r: Result<Option<Map<string, Set<(i32, i32)>>>, string> = Ok(Some(from_json::<Map<string, Set<(i32, i32)>>>("{\"a\":[[1,2]]}")))

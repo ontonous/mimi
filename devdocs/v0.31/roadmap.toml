@@ -593,6 +593,17 @@ requirements = []
 # - 审计 dual_backend.rs 中绕过 CheckedProgram 的测试（run_source_result 而非 checked_*）
 # - 标记为 interpreter-only 或迁移到 checked_run_source_result / checked_compile_and_run
 # - 确保 stable evidence 不虚高（贯穿止血线 §7："测试绕过 CheckedProgram 却被计入 stable evidence"）
+#
+# 【已交付】
+# - dual_assert! 宏改为 checker 硬门禁（check_source 失败 → panic）
+# - 新增 dual_assert_soft! 宏：checker gap 测试显式 opt-in，每个调用点带 CHECKER-GAP 注释
+# - 57 个失败测试分类：2 个源码 bug 修复（i32/i64 mismatch），55 个 checker gap 迁移到 dual_assert_soft!
+# - 10 个直接 run_source/compile_and_run 调用全部加上 check_source 硬门禁
+# - Checker gap 分类：Map 类型标注(21)、async/Future(6)、ExecResult/StatResult 字段(7)、
+#   quote/comptime(10)、variable shadowing(2)、binary sugar(2)、generic bounds(1)、
+#   capability alias(1)、extern cap(1)、slice 类型(1)、atomic_bool 返回类型(1)、
+#   Option 隐式转换(1)、field projection(1)
+# - 全量回归 4135 passed / 0 failed / 10 ignored
 
 # === Phase C: Component 边界（0.31.30–0.31.38）===
 
