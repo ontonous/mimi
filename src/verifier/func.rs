@@ -1825,16 +1825,20 @@ impl VerifierCtx {
             Expr::Binary(op, lhs, rhs) => {
                 let l = Self::resolve_to_i64(lhs, model, vars)?;
                 let r = Self::resolve_to_i64(rhs, model, vars)?;
+                // P1-22: Use checked arithmetic to avoid panic on
+                // overflow/div-by-zero from unconstrained Z3 model values.
                 match op {
-                    BinOp::Add => Some(l + r),
-                    BinOp::Sub => Some(l - r),
-                    BinOp::Mul => Some(l * r),
-                    BinOp::Div => Some(l / r),
-                    BinOp::Mod => Some(l % r),
+                    BinOp::Add => l.checked_add(r),
+                    BinOp::Sub => l.checked_sub(r),
+                    BinOp::Mul => l.checked_mul(r),
+                    BinOp::Div => l.checked_div(r),
+                    BinOp::Mod => l.checked_rem(r),
                     _ => None,
                 }
             }
-            Expr::Unary(UnOp::Neg, inner) => Self::resolve_to_i64(inner, model, vars).map(|v| -v),
+            Expr::Unary(UnOp::Neg, inner) => {
+                Self::resolve_to_i64(inner, model, vars).and_then(|v| v.checked_neg())
+            }
             Expr::Spawn(inner) => Self::resolve_to_i64(inner, model, vars),
             Expr::Await(inner) => Self::resolve_to_i64(inner, model, vars),
             _ => None,

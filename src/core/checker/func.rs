@@ -229,6 +229,14 @@ impl<'a> Checker<'a> {
         if block.is_empty() {
             return false;
         }
+        // P1-16: If any statement before the last is a break/continue,
+        // subsequent statements (including the last) are unreachable.
+        // `loop { break; return 1 }` must NOT count as returning.
+        for stmt in block.iter().rev().skip(1) {
+            if matches!(stmt.unlocated(), Stmt::Break(_) | Stmt::Continue) {
+                return false;
+            }
+        }
         // Check if the last statement is an implicit return (expression statement)
         if let Some(last) = block.last() {
             match last.unlocated() {
