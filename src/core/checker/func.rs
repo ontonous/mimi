@@ -229,9 +229,13 @@ impl<'a> Checker<'a> {
         if block.is_empty() {
             return false;
         }
-        // P1-16: If any statement before the last is a break/continue,
+        // P1-16: If any statement before the last is a bare break/continue,
         // subsequent statements (including the last) are unreachable.
         // `loop { break; return 1 }` must NOT count as returning.
+        // LIMITATION: Only detects bare break/continue at the top level
+        // of the block. Conditional breaks (`if cond { break }`) require
+        // CFG analysis and are NOT detected — the loop body may still
+        // incorrectly report as returning on all paths.
         for stmt in block.iter().rev().skip(1) {
             if matches!(stmt.unlocated(), Stmt::Break(_) | Stmt::Continue) {
                 return false;

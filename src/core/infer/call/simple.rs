@@ -2518,20 +2518,28 @@ impl<'a> Checker<'a> {
 
 /// 0.31.24: Check if a builtin function is impure (I/O, FFI, or allocation).
 /// Comptime functions cannot call these.
+///
+/// ⚠ SYNC REQUIRED: This list must be kept in sync with the builtin
+/// registry in src/codegen/builtins/mod.rs (compile_builtin_call dispatch).
+/// When adding a new I/O/net/fs/env/time/process builtin to codegen,
+/// add it here too. See test `comptime_purity_covers_codegen_builtins`.
 fn is_impure_builtin(name: &str) -> bool {
-    // I/O operations
     matches!(
         name,
+        // ── I/O operations ──
         "println"
+            | "print"
             | "print_line"
             | "print_raw"
             | "print_format"
             | "print_err"
+            | "eprintln"
+            | "input"
             | "input_line"
             | "input_int"
             | "input_float"
             | "input_bool"
-            // File system operations
+            // ── File system operations ──
             | "fs_exists"
             | "fs_read"
             | "fs_write"
@@ -2540,7 +2548,24 @@ fn is_impure_builtin(name: &str) -> bool {
             | "fs_file_size"
             | "fs_listdir"
             | "fs_walk_dir"
-            // Network operations
+            // Legacy/alias fs names (codegen registers both)
+            | "read_file"
+            | "write_file"
+            | "file_exists"
+            | "listdir"
+            | "is_dir"
+            | "is_file"
+            | "walk_dir"
+            | "mkdir_p"
+            | "remove_file"
+            | "file_stat"
+            | "append_file"
+            | "read_file_partial"
+            | "read_file_bytes"
+            | "write_file_bytes"
+            | "read_lines_json"
+            | "read_lines_json_builtin"
+            // ── Network operations ──
             | "tcp_socket"
             | "tcp_connect"
             | "tcp_listen"
@@ -2549,21 +2574,34 @@ fn is_impure_builtin(name: &str) -> bool {
             | "tcp_recv"
             | "fetch"
             | "fetch_post"
-            // Allocation
+            // Legacy/alias net names
+            | "socket"
+            | "connect"
+            | "listen"
+            | "accept"
+            | "send"
+            | "recv"
+            | "http_get"
+            | "http_post"
+            // ── Allocation ──
             | "alloc"
             | "arena_alloc"
-            // Time (side-effect: reads system clock)
+            // ── Time (side-effect: reads system clock) ──
             | "timestamp"
             | "timestamp_ms"
             | "sleep_ms"
-            // Random (side-effect: reads RNG state)
+            // Alias time names (codegen registers both)
+            | "now"
+            | "now_ms"
+            | "sleep"
+            // ── Random (side-effect: reads RNG state) ──
             | "random_int"
             | "random"
             | "random_normal"
             | "random_uniform"
             | "random_exponential"
             | "random_bernoulli"
-            // Environment (side-effect: reads process state)
+            // ── Environment (side-effect: reads/modifies process state) ──
             | "get_var"
             | "cli_args"
             | "get_var_or"
@@ -2572,19 +2610,63 @@ fn is_impure_builtin(name: &str) -> bool {
             | "get_float"
             | "arg_count"
             | "first_arg"
-            // Process control
-            | "exit"
-            // P1-37: Previously missing impure builtins.
-            // exec: arbitrary command execution
-            | "exec"
-            // Legacy I/O names (stdlib wrappers use fs_* but raw builtins
-            // use these shorter names).
-            | "read_file"
-            | "write_file"
-            | "file_exists"
-            // Legacy env/network names
             | "getenv"
-            | "http_get"
-            | "http_post"
+            | "set_env"
+            // ── Process control / execution ──
+            | "exit"
+            | "exec"
+            | "exec_safe"
+            | "exec_pipe"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_impure_builtin;
+
+    /// P1-37: Cross-check that all known impure codegen builtins are
+    /// covered by is_impure_builtin. When adding a new I/O/net/fs/env/
+    /// time/process builtin to codegen/builtins/mod.rs, add it here too.
+    #[test]
+    fn comptime_purity_covers_codegen_builtins() {
+        // All impure builtins registered in codegen/builtins/mod.rs
+        // (compile_builtin_call dispatch table).
+        let known_impure: &[&str] = &[
+            // I/O
+            "println", "print", "eprintln", "input",
+            "print_line", "print_raw", "print_format", "print_err",
+            "input_line", "input_int", "input_float", "input_bool",
+            // File system
+            "file_exists", "read_file", "write_file", "listdir",
+            "is_dir", "is_file", "walk_dir", "mkdir_p", "remove_file",
+            "file_stat", "append_file", "read_file_partial",
+            "read_file_bytes", "write_file_bytes", "read_lines_json",
+            "fs_exists", "fs_read", "fs_write", "fs_read_lines",
+            "fs_write_lines", "fs_file_size", "fs_listdir", "fs_walk_dir",
+            // Network
+            "socket", "connect", "listen", "accept", "send", "recv",
+            "tcp_socket", "tcp_connect", "tcp_listen", "tcp_accept",
+            "tcp_send", "tcp_recv", "fetch", "fetch_post",
+            "http_get", "http_post",
+            // Time
+            "now", "now_ms", "sleep", "timestamp", "timestamp_ms", "sleep_ms",
+            // Random
+            "random", "random_int", "random_normal", "random_uniform",
+            "random_exponential", "random_bernoulli",
+            // Environment
+            "getenv", "set_env", "get_var", "cli_args", "get_var_or",
+            "has_var", "get_int", "get_float", "arg_count", "first_arg",
+            // Process
+            "exit", "exec", "exec_safe", "exec_pipe",
+            // Allocation
+            "alloc", "arena_alloc",
+        ];
+        for name in known_impure {
+            assert!(
+                is_impure_builtin(name),
+                "comptime purity gate misses impure builtin '{}'",
+                name
+            );
+        }
+    }
 }
