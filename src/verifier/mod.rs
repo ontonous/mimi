@@ -3,6 +3,7 @@ mod expr;
 mod flow;
 mod func;
 mod helpers;
+pub mod vir;
 
 pub mod ffi;
 
