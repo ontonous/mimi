@@ -1,16 +1,12 @@
-//! DEAD: 架构修正案条款 1 废止转移矩阵自动补全（强制 Sparse）。
-//! 0.31.25 翻转 @sparse 为默认后删除此模块的补全逻辑。
+//! Flow transition expansion: system verbs + optional N×M completion.
 //!
-//! Flow transfer-matrix auto-completion (+1 Fault fallback).
+//! v0.31.25: Sparse is now the DEFAULT. Without annotation, undefined
+//! (state, event) pairs are compile-time errors. `@dense` opts into
+//! N×M auto-completion (missing pairs → implicit Fault fallback).
+//! `@sparse` is accepted but redundant (backward compatibility).
 //!
-//! For every user-defined flow, the compiler expands the N×M matrix of
-//! (state, event) pairs. Any combination not written by the programmer is
-//! filled with an implicit `transition event(State) -> Fault` that returns a
-//! Fault payload (or the user-defined Fault shape with field defaults).
-//!
-//! This is the v0.29.10 foundation for the Fault absorbing state. Later
-//! versions (0.29.11+) deepen Fault semantics (auto-drop, mailbox short-circuit,
-//! SystemTrace, Reset/Recover).
+//! System verbs (reset/recover/peer_fault/ffi_crash) are always injected
+//! regardless of sparse/dense mode.
 
 use crate::ast::*;
 use crate::span::Span;
@@ -164,13 +160,12 @@ fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
     // Always ensure Fault exists so recovery verbs have a source state.
     ensure_fault_state(flow);
 
-    // v0.31.10: @sparse flows skip N×M fallback injection.
-    // Undefined (state, event) pairs are compile-time errors instead of
-    // auto-routing to Fault.
-    let is_sparse = flow
+    // v0.31.25: Sparse is the DEFAULT. @dense opts into N×M fallback injection.
+    // @sparse is accepted but redundant (backward compatibility).
+    let is_dense = flow
         .annotations
         .iter()
-        .any(|a| matches!(a.kind, FlowAnnotationKind::Sparse));
+        .any(|a| matches!(a.kind, FlowAnnotationKind::Dense));
 
     // Event name → params (first definition wins; overloads should share params).
     // Exclude system verbs from the N×M matrix:
@@ -195,7 +190,7 @@ fn expand_flow_with_shapes(flow: &mut FlowDef, shapes: &HashMap<String, Vec<Fiel
 
     let state_names: Vec<String> = flow.states.iter().map(|s| s.name.clone()).collect();
 
-    if !is_sparse {
+    if is_dense {
         let mut fallbacks: Vec<TransitionDef> = Vec::new();
         for state in &state_names {
             for (event, params) in &events {
@@ -1113,7 +1108,10 @@ mod tests {
             name: "Counter".to_string(),
             pub_: false,
             generics: vec![],
-            annotations: vec![],
+            annotations: vec![FlowAnnotation::synthetic(
+                FlowAnnotationKind::Dense,
+                AstOrigin::User,
+            )],
             states: vec![
                 StateDef {
                     meta: user_meta(2),

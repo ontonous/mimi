@@ -65,7 +65,10 @@ fn make_implicit_main_flow(parent_meta: AstNodeMeta) -> FlowDef {
         name: "Main".to_string(),
         pub_: false,
         generics: vec![],
-        annotations: vec![],
+        annotations: vec![FlowAnnotation::synthetic(
+            FlowAnnotationKind::Dense,
+            AstOrigin::RuntimeSystem("progressive.main"),
+        )],
         states: vec![StateDef {
             meta: AstNodeMeta::inherited(span, AstOrigin::RuntimeSystem("progressive.single")),
             name: "Single".to_string(),
@@ -199,7 +202,11 @@ mod tests {
             AstOrigin::RuntimeSystem("progressive.run")
         );
         assert_eq!(flow.transitions[0].meta.parent, AstParentHint::Enclosing);
-        assert!(flow.annotations.is_empty());
+        assert_eq!(flow.annotations.len(), 1);
+        assert!(matches!(
+            flow.annotations[0].kind,
+            FlowAnnotationKind::Dense
+        ));
 
         let Item::Func(main) = &file.items[1] else {
             panic!("original main")

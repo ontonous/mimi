@@ -886,10 +886,16 @@ impl Parser {
             self.advance();
             let ann_name = self.expect_ident()?;
             // v0.31.10: @sparse is a bare annotation (no parentheses).
-            if ann_name == "sparse" {
+            // v0.31.25: @sparse is now the default; @dense opts into N×M completion.
+            if ann_name == "sparse" || ann_name == "dense" {
+                let kind = if ann_name == "sparse" {
+                    FlowAnnotationKind::Sparse
+                } else {
+                    FlowAnnotationKind::Dense
+                };
                 annotations.push(FlowAnnotation::new(
                     self.consumed_meta(annotation_start, AstOrigin::User),
-                    FlowAnnotationKind::Sparse,
+                    kind,
                 ));
                 self.skip_newlines();
                 continue;
@@ -1106,7 +1112,7 @@ impl Parser {
                             let tok = self.peek();
                             return Err(ParseError::new(
                         format!(
-                            "unknown flow annotation '@{}' — expected @mailbox(...), @max_children(...), or bare @sparse",
+                            "unknown flow annotation '@{}' — expected @mailbox(...), @max_children(...), @sparse, or @dense",
                             ann_name
                         ),
                         tok.line,
