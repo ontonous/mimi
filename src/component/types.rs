@@ -7,19 +7,27 @@
 /// ABI type reference: a reference to a type in the Component IR.
 ///
 /// Types can be primitives, struct references, pointers, slices,
-/// opaque handles, or void.
+/// opaque handles, fat pointers, or void.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AbiTypeRef {
     /// Primitive scalar type.
     Primitive(AbiPrimitive),
     /// Reference to a named struct/enum/alias definition.
     Named(String),
-    /// Pointer to another type.
+    /// Thin pointer to another type (*mut T).
     Pointer(Box<AbiTypeRef>),
     /// Fat pointer slice: { data: *mut T, len: usize }.
     Slice(Box<AbiTypeRef>),
     /// Opaque handle (generational, kind-tagged).
     Opaque(String),
+    /// 0.31.31: Fat pointer with explicit layout.
+    /// Used for String ({ data, len, capacity }) and buffer types.
+    FatPointer {
+        /// Element type.
+        element: Box<AbiTypeRef>,
+        /// Whether this includes a capacity field (String) or not (slice).
+        has_capacity: bool,
+    },
     /// Void (no value).
     Void,
 }
@@ -48,6 +56,13 @@ impl AbiTypeRef {
             AbiTypeRef::Pointer(inner) => format!("{}*", inner.c_type_name()),
             AbiTypeRef::Slice(inner) => format!("MimiSlice/* {} */", inner.c_type_name()),
             AbiTypeRef::Opaque(name) => format!("MimiHandle/* {} */", name),
+            AbiTypeRef::FatPointer { element, has_capacity } => {
+                if *has_capacity {
+                    format!("MimiString/* {} */", element.c_type_name())
+                } else {
+                    format!("MimiSlice/* {} */", element.c_type_name())
+                }
+            }
             AbiTypeRef::Void => "void".to_string(),
         }
     }

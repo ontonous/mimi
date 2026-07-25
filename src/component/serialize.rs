@@ -131,6 +131,10 @@ pub enum MimiAbiTypeRef {
     Pointer(Box<MimiAbiTypeRef>),
     Slice(Box<MimiAbiTypeRef>),
     Opaque(String),
+    FatPointer {
+        element: Box<MimiAbiTypeRef>,
+        has_capacity: bool,
+    },
     Void,
 }
 
@@ -146,6 +150,10 @@ impl From<&AbiTypeRef> for MimiAbiTypeRef {
                 MimiAbiTypeRef::Slice(Box::new(MimiAbiTypeRef::from(inner.as_ref())))
             }
             AbiTypeRef::Opaque(name) => MimiAbiTypeRef::Opaque(name.clone()),
+            AbiTypeRef::FatPointer { element, has_capacity } => MimiAbiTypeRef::FatPointer {
+                element: Box::new(MimiAbiTypeRef::from(element.as_ref())),
+                has_capacity: *has_capacity,
+            },
             AbiTypeRef::Void => MimiAbiTypeRef::Void,
         }
     }
