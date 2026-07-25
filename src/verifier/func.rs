@@ -1159,9 +1159,9 @@ impl VerifierCtx {
             semantics_version: crate::verifier::ctx::ProofArtifact::SEMANTICS_VERSION,
             integer_model: "checked".to_string(),
             float_model: "opaque".to_string(),
-            solver_version: "z3".to_string(), // TODO: extract from z3-sys when available
-            source_hash: String::new(), // Computed by caller (file-level)
-            resolved_ir_hash: String::new(), // Computed by caller (Resolved IR)
+            solver_version: format!("z3 {}", z3::full_version()),
+            source_hash: String::new(), // P2-12: TODO: compute from source file (needs plumbing from caller)
+            resolved_ir_hash: String::new(), // P2-12: TODO: compute from CheckedProgram Resolved IR (needs plumbing)
             vir_hash,
         });
 
