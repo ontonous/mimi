@@ -966,6 +966,342 @@ fn stmt_span(stmt: &crate::ast::Stmt) -> Span {
         .unwrap_or(Span::UNKNOWN)
 }
 
+// ── VIR → Z3 encoding ─────────────────────────────────────────────────
+
+/// Z3 encoding context for a single VFunction.
+///
+/// Maps canonical VarIds to Z3 variables. Separate maps for Int, Bool,
+/// and opaque F64 (uninterpreted sort).
+#[allow(dead_code)] // Wired into verify_func in 0.31.26-5
+pub(crate) struct VirZ3Ctx {
+    /// Int variables (i32/i64 encoded as unbounded Z3 Int).
+    int_vars: HashMap<VarId, z3::ast::Int>,
+    /// Bool variables.
+    bool_vars: HashMap<VarId, z3::ast::Bool>,
+    /// Opaque f64 variables (uninterpreted sort — no arithmetic).
+    f64_vars: HashMap<VarId, z3::ast::Int>,
+    /// The `result` variable (Int or Bool depending on return type).
+    result_int: Option<z3::ast::Int>,
+    result_bool: Option<z3::ast::Bool>,
+    /// Parameter types for type-directed encoding.
+    var_types: HashMap<VarId, VType>,
+    /// Whether the function returns f64 (opaque).
+    returns_f64: bool,
+    /// Whether the function returns bool.
+    returns_bool: bool,
+}
+
+#[allow(dead_code)] // Wired into verify_func in 0.31.26-5
+impl VirZ3Ctx {
+    /// Create a new Z3 encoding context from a VFunction's parameters.
+    pub(crate) fn new(vfunc: &VFunction) -> Self {
+        let mut ctx = VirZ3Ctx {
+            int_vars: HashMap::new(),
+            bool_vars: HashMap::new(),
+            f64_vars: HashMap::new(),
+            result_int: None,
+            result_bool: None,
+            var_types: HashMap::new(),
+            returns_f64: false,
+            returns_bool: false,
+        };
+
+        // Register parameters
+        for &(var, vty, ref _name) in &vfunc.params {
+            ctx.var_types.insert(var, vty);
+            let name = var.to_string();
+            match vty {
+                VType::Bool => {
+                    ctx.bool_vars
+                        .insert(var, z3::ast::Bool::new_const(name.as_str()));
+                }
+                VType::I32 | VType::I64 => {
+                    ctx.int_vars
+                        .insert(var, z3::ast::Int::new_const(name.as_str()));
+                }
+                VType::F64Opaque => {
+                    // f64 as uninterpreted sort — encoded as opaque Int
+                    // (no arithmetic semantics; only equality/comparison)
+                    ctx.f64_vars
+                        .insert(var, z3::ast::Int::new_const(name.as_str()));
+                }
+            }
+        }
+
+        ctx
+    }
+
+    /// Set up the result variable based on return type.
+    pub(crate) fn setup_result(&mut self, returns_f64: bool, returns_bool: bool) {
+        self.returns_f64 = returns_f64;
+        self.returns_bool = returns_bool;
+        if returns_bool {
+            self.result_bool = Some(z3::ast::Bool::new_const("result"));
+        } else if !returns_f64 {
+            self.result_int = Some(z3::ast::Int::new_const("result"));
+        }
+        // f64 result: opaque, no Z3 variable needed for arithmetic
+    }
+
+    /// Encode a VExpr as a Z3 Int term.
+    /// Returns None if the expression is not Int-typed.
+    pub(crate) fn encode_int(&self, expr: &VExpr) -> Option<z3::ast::Int> {
+        match expr {
+            VExpr::IntConst(n) => Some(z3::ast::Int::from_i64(*n)),
+            VExpr::Var(id) => self.int_vars.get(id).cloned(),
+            VExpr::Old(id) => {
+                // old(param) — look up the old_ prefixed variable
+                let old_name = format!("old_{}", id);
+                self.int_vars
+                    .values()
+                    .find(|_| false) // placeholder — old vars registered separately
+                    .cloned()
+                    .or_else(|| {
+                        // Fall back to creating a fresh old_ variable
+                        Some(z3::ast::Int::new_const(old_name.as_str()))
+                    })
+            }
+            VExpr::Result => self.result_int.clone(),
+            VExpr::CheckedArith(op, lhs, rhs, _ty) => {
+                let l = self.encode_int(lhs)?;
+                let r = self.encode_int(rhs)?;
+                match op {
+                    VArithOp::Add => Some(z3::ast::Int::add(&[&l, &r])),
+                    VArithOp::Sub => Some(z3::ast::Int::sub(&[&l, &r])),
+                    VArithOp::Mul => Some(z3::ast::Int::mul(&[&l, &r])),
+                    VArithOp::Div => {
+                        // Truncating division (C semantics)
+                        let zero = z3::ast::Int::from_i64(0);
+                        let aa = l.ge(&zero).ite(&l, &l.unary_minus());
+                        let ab = r.ge(&zero).ite(&r, &r.unary_minus());
+                        let abs_q = aa.div(&ab);
+                        let same_sign = l.ge(&zero).eq(&r.ge(&zero));
+                        Some(same_sign.ite(&abs_q, &abs_q.unary_minus()))
+                    }
+                    VArithOp::Mod => {
+                        // Truncating modulo (C semantics)
+                        let zero = z3::ast::Int::from_i64(0);
+                        let aa = l.ge(&zero).ite(&l, &l.unary_minus());
+                        let ab = r.ge(&zero).ite(&r, &r.unary_minus());
+                        let abs_mod = aa.modulo(&ab);
+                        Some(l.ge(&zero).ite(&abs_mod, &abs_mod.unary_minus()))
+                    }
+                }
+            }
+            VExpr::CheckedNeg(inner, _ty) => {
+                let v = self.encode_int(inner)?;
+                Some(v.unary_minus())
+            }
+            VExpr::Select(cond, then_, else_) => {
+                let c = self.encode_bool(cond)?;
+                let t = self.encode_int(then_)?;
+                let e = self.encode_int(else_)?;
+                Some(c.ite(&t, &e))
+            }
+            _ => None,
+        }
+    }
+
+    /// Encode a VExpr as a Z3 Bool term.
+    pub(crate) fn encode_bool(&self, expr: &VExpr) -> Option<z3::ast::Bool> {
+        match expr {
+            VExpr::BoolConst(b) => Some(z3::ast::Bool::from_bool(*b)),
+            VExpr::Var(id) => {
+                // Try bool first, then int != 0
+                if let Some(b) = self.bool_vars.get(id) {
+                    return Some(b.clone());
+                }
+                self.int_vars
+                    .get(id)
+                    .map(|v| v.ne(&z3::ast::Int::from_i64(0)))
+            }
+            VExpr::Old(id) => {
+                let old_name = format!("old_{}", id);
+                Some(z3::ast::Int::new_const(old_name.as_str()).ne(&z3::ast::Int::from_i64(0)))
+            }
+            VExpr::Result => {
+                if let Some(b) = &self.result_bool {
+                    return Some(b.clone());
+                }
+                self.result_int
+                    .as_ref()
+                    .map(|v| v.ne(&z3::ast::Int::from_i64(0)))
+            }
+            VExpr::Compare(op, lhs, rhs) => {
+                let l = self.encode_int(lhs)?;
+                let r = self.encode_int(rhs)?;
+                match op {
+                    VCmpOp::Eq => Some(l.eq(&r)),
+                    VCmpOp::Ne => Some(l.ne(&r)),
+                    VCmpOp::Lt => Some(l.lt(&r)),
+                    VCmpOp::Gt => Some(l.gt(&r)),
+                    VCmpOp::Le => Some(l.le(&r)),
+                    VCmpOp::Ge => Some(l.ge(&r)),
+                }
+            }
+            VExpr::F64Compare(op, lhs, rhs) => {
+                // f64 comparison — uninterpreted predicate
+                // Encode as Int comparison on opaque f64 variables
+                let l = self.encode_f64(lhs)?;
+                let r = self.encode_f64(rhs)?;
+                match op {
+                    VCmpOp::Eq => Some(l.eq(&r)),
+                    VCmpOp::Ne => Some(l.ne(&r)),
+                    VCmpOp::Lt => Some(l.lt(&r)),
+                    VCmpOp::Gt => Some(l.gt(&r)),
+                    VCmpOp::Le => Some(l.le(&r)),
+                    VCmpOp::Ge => Some(l.ge(&r)),
+                }
+            }
+            VExpr::Boolean(op, exprs) => {
+                let encoded: Vec<z3::ast::Bool> =
+                    exprs.iter().filter_map(|e| self.encode_bool(e)).collect();
+                if encoded.len() != exprs.len() {
+                    return None;
+                }
+                let refs: Vec<&z3::ast::Bool> = encoded.iter().collect();
+                match op {
+                    VBoolOp::And => Some(z3::ast::Bool::and(&refs)),
+                    VBoolOp::Or => Some(z3::ast::Bool::or(&refs)),
+                }
+            }
+            VExpr::Not(inner) => {
+                let v = self.encode_bool(inner)?;
+                Some(v.not())
+            }
+            VExpr::Select(cond, then_, else_) => {
+                let c = self.encode_bool(cond)?;
+                let t = self.encode_bool(then_)?;
+                let e = self.encode_bool(else_)?;
+                Some(c.ite(&t, &e))
+            }
+            _ => None,
+        }
+    }
+
+    /// Encode a VExpr as an opaque f64 Z3 Int (uninterpreted sort).
+    /// No arithmetic semantics — only equality/ordering.
+    pub(crate) fn encode_f64(&self, expr: &VExpr) -> Option<z3::ast::Int> {
+        match expr {
+            VExpr::F64Const(f) => {
+                // Encode f64 literal as opaque Int (bit-pattern hash)
+                // This is NOT arithmetic — just identity for equality checks
+                let bits = f.to_bits() as i64;
+                Some(z3::ast::Int::from_i64(bits))
+            }
+            VExpr::OpaqueF64(id) => self.f64_vars.get(id).cloned(),
+            VExpr::Var(id) => {
+                // Check if this var is f64-typed
+                if self.var_types.get(id) == Some(&VType::F64Opaque) {
+                    return self.f64_vars.get(id).cloned();
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Generate definedness obligations for checked arithmetic.
+    /// Returns (condition, failure_message) pairs.
+    pub(crate) fn definedness_obligations(
+        &self,
+        expr: &VExpr,
+    ) -> Vec<(z3::ast::Bool, &'static str)> {
+        let mut obligations = Vec::new();
+        self.collect_definedness(expr, &mut obligations);
+        obligations
+    }
+
+    fn collect_definedness(
+        &self,
+        expr: &VExpr,
+        obligations: &mut Vec<(z3::ast::Bool, &'static str)>,
+    ) {
+        match expr {
+            VExpr::CheckedArith(op, lhs, rhs, ty) => {
+                // Recurse into operands first
+                self.collect_definedness(lhs, obligations);
+                self.collect_definedness(rhs, obligations);
+
+                // Only generate obligations for i32 (checked)
+                if *ty != VType::I32 {
+                    return;
+                }
+
+                if let (Some(l), Some(r)) = (self.encode_int(lhs), self.encode_int(rhs)) {
+                    match op {
+                        VArithOp::Add | VArithOp::Sub | VArithOp::Mul => {
+                            let result = match op {
+                                VArithOp::Add => z3::ast::Int::add(&[&l, &r]),
+                                VArithOp::Sub => z3::ast::Int::sub(&[&l, &r]),
+                                VArithOp::Mul => z3::ast::Int::mul(&[&l, &r]),
+                                _ => unreachable!(),
+                            };
+                            let lo = z3::ast::Int::from_i64(i32::MIN as i64);
+                            let hi = z3::ast::Int::from_i64(i32::MAX as i64);
+                            obligations.push((
+                                z3::ast::Bool::and(&[&result.ge(&lo), &result.le(&hi)]),
+                                "integer overflow is not excluded by preconditions",
+                            ));
+                        }
+                        VArithOp::Div | VArithOp::Mod => {
+                            let zero = z3::ast::Int::from_i64(0);
+                            let min = z3::ast::Int::from_i64(i32::MIN as i64);
+                            let neg_one = z3::ast::Int::from_i64(-1);
+                            let min_overflow =
+                                z3::ast::Bool::and(&[&l.eq(&min), &r.eq(&neg_one)]);
+                            obligations.push((
+                                z3::ast::Bool::and(&[&r.ne(&zero), &min_overflow.not()]),
+                                "integer operation is undefined (zero divisor or MIN / -1)",
+                            ));
+                        }
+                    }
+                }
+            }
+            VExpr::CheckedNeg(inner, ty) => {
+                self.collect_definedness(inner, obligations);
+                if *ty == VType::I32 {
+                    if let Some(v) = self.encode_int(inner) {
+                        let min = z3::ast::Int::from_i64(i32::MIN as i64);
+                        obligations.push((
+                            v.ne(&min),
+                            "integer overflow is not excluded by preconditions",
+                        ));
+                    }
+                }
+            }
+            VExpr::Select(cond, then_, else_) => {
+                // Conditional obligations: guard with condition
+                if let Some(c) = self.encode_bool(cond) {
+                    let mut then_obligs = Vec::new();
+                    self.collect_definedness(then_, &mut then_obligs);
+                    for (cond_oblig, msg) in then_obligs {
+                        obligations.push((c.implies(&cond_oblig), msg));
+                    }
+                    let mut else_obligs = Vec::new();
+                    self.collect_definedness(else_, &mut else_obligs);
+                    let not_c = c.not();
+                    for (cond_oblig, msg) in else_obligs {
+                        obligations.push((not_c.implies(&cond_oblig), msg));
+                    }
+                }
+            }
+            // Recurse into other compound expressions
+            VExpr::Boolean(_, exprs) => {
+                for e in exprs {
+                    self.collect_definedness(e, obligations);
+                }
+            }
+            VExpr::Not(inner) => self.collect_definedness(inner, obligations),
+            VExpr::Compare(_, lhs, rhs) | VExpr::F64Compare(_, lhs, rhs) => {
+                self.collect_definedness(lhs, obligations);
+                self.collect_definedness(rhs, obligations);
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
