@@ -2343,7 +2343,11 @@ func quadruple(x: i32) -> i32 {
 "#;
     let results = verify_source(src).expect("verification should parse");
     // Both functions should be verified
-    assert!(results.len() >= 2, "should have at least 2 results: {:?}", results);
+    assert!(
+        results.len() >= 2,
+        "should have at least 2 results: {:?}",
+        results
+    );
     for r in &results {
         assert_eq!(
             r.status,

@@ -1101,7 +1101,11 @@ fn dual_enum_f64_payload() {
     check_source(src).unwrap_or_else(|diags| {
         panic!(
             "checker rejected dual_enum_f64_payload source:\n{}",
-            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+            diags
+                .iter()
+                .map(|d| format!("{}", d))
+                .collect::<Vec<_>>()
+                .join("\n")
         )
     });
     let interp = run_source(src);
@@ -1147,7 +1151,11 @@ fn dual_enum_multi_payload() {
     check_source(src).unwrap_or_else(|diags| {
         panic!(
             "checker rejected dual_enum_multi_payload source:\n{}",
-            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+            diags
+                .iter()
+                .map(|d| format!("{}", d))
+                .collect::<Vec<_>>()
+                .join("\n")
         )
     });
     let codegen = compile_and_run(src).expect("codegen failed");
@@ -4276,7 +4284,11 @@ fn dual_codegen_regex_capture_groups() {
     check_source(src).unwrap_or_else(|diags| {
         panic!(
             "checker rejected dual_codegen_regex_capture_groups source:\n{}",
-            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+            diags
+                .iter()
+                .map(|d| format!("{}", d))
+                .collect::<Vec<_>>()
+                .join("\n")
         )
     });
     let out = compile_and_run(src).expect("codegen failed");
@@ -4434,7 +4446,11 @@ fn dual_ffi_reprc_struct() {
     check_source(src).unwrap_or_else(|diags| {
         panic!(
             "checker rejected FFI struct-by-val source:\n{}",
-            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+            diags
+                .iter()
+                .map(|d| format!("{}", d))
+                .collect::<Vec<_>>()
+                .join("\n")
         )
     });
     // Interpreter should run without error
@@ -4476,7 +4492,11 @@ fn dual_ffi_struct_multiple_fields() {
     check_source(src).unwrap_or_else(|diags| {
         panic!(
             "checker rejected FFI mixed struct source:\n{}",
-            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+            diags
+                .iter()
+                .map(|d| format!("{}", d))
+                .collect::<Vec<_>>()
+                .join("\n")
         )
     });
     let _interp = run_source(src);
@@ -4521,7 +4541,11 @@ fn dual_ffi_struct_return_complex() {
     check_source(src).unwrap_or_else(|diags| {
         panic!(
             "checker rejected FFI struct return source:\n{}",
-            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+            diags
+                .iter()
+                .map(|d| format!("{}", d))
+                .collect::<Vec<_>>()
+                .join("\n")
         )
     });
     let _interp = run_source(src);
@@ -6141,7 +6165,11 @@ fn dual_mimi_opt_cache_varied() {
     check_source(src1).unwrap_or_else(|diags| {
         panic!(
             "checker rejected dual_mimi_opt_cache_varied src1:\n{}",
-            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+            diags
+                .iter()
+                .map(|d| format!("{}", d))
+                .collect::<Vec<_>>()
+                .join("\n")
         )
     });
     let r1 = compile_and_run(src1).expect("first compile failed");
@@ -6157,7 +6185,11 @@ fn dual_mimi_opt_cache_varied() {
     check_source(src2).unwrap_or_else(|diags| {
         panic!(
             "checker rejected dual_mimi_opt_cache_varied src2:\n{}",
-            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+            diags
+                .iter()
+                .map(|d| format!("{}", d))
+                .collect::<Vec<_>>()
+                .join("\n")
         )
     });
     let r2 = compile_and_run(src2).expect("second compile failed");
@@ -6814,7 +6846,11 @@ fn dual_lexer_builtin_codegen() {
     check_source(src).unwrap_or_else(|diags| {
         panic!(
             "checker rejected dual_lexer_builtin_codegen source:\n{}",
-            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+            diags
+                .iter()
+                .map(|d| format!("{}", d))
+                .collect::<Vec<_>>()
+                .join("\n")
         )
     });
     let _ = run_source(src);
@@ -6840,7 +6876,11 @@ fn dual_parse_builtin_codegen() {
     check_source(src).unwrap_or_else(|diags| {
         panic!(
             "checker rejected dual_parse_builtin_codegen source:\n{}",
-            diags.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("\n")
+            diags
+                .iter()
+                .map(|d| format!("{}", d))
+                .collect::<Vec<_>>()
+                .join("\n")
         )
     });
     let _ = run_source(src);

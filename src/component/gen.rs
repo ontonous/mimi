@@ -186,6 +186,7 @@ pub fn ptr(inner: AbiTypeRef) -> AbiTypeRef {
 }
 
 /// Convenience: void type reference.
+#[allow(dead_code)] // Infrastructure for future bindgen backends.
 pub fn void() -> AbiTypeRef {
     AbiTypeRef::Void
 }
@@ -196,6 +197,7 @@ pub fn handle(name: &str) -> AbiTypeRef {
 }
 
 /// 0.31.31: Convenience: fat pointer type reference (String-like with capacity).
+#[allow(dead_code)] // Infrastructure for 0.31.31 fat pointer migration.
 pub fn fat_string() -> AbiTypeRef {
     AbiTypeRef::FatPointer {
         element: Box::new(AbiTypeRef::Primitive(AbiPrimitive::U8)),
@@ -204,6 +206,7 @@ pub fn fat_string() -> AbiTypeRef {
 }
 
 /// 0.31.31: Convenience: fat pointer slice type reference (no capacity).
+#[allow(dead_code)] // Infrastructure for 0.31.31 fat pointer migration.
 pub fn fat_slice(element: AbiTypeRef) -> AbiTypeRef {
     AbiTypeRef::FatPointer {
         element: Box::new(element),
@@ -216,6 +219,7 @@ pub fn fat_slice(element: AbiTypeRef) -> AbiTypeRef {
 /// 0.31.31: These replace the opaque handle types for String/List/Map/Set.
 /// Fat pointers carry { data, len, capacity } directly, eliminating the
 /// global handle registry lookup.
+#[allow(dead_code)] // Infrastructure for 0.31.31 fat pointer migration.
 pub fn register_fat_pointer_types(gen: &mut AbiGenerator) {
     use super::types::{AbiField, AbiStruct};
     use AbiPrimitive::*;
@@ -276,11 +280,11 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
 
     // ── RC / Allocation ──
     gen.export("mimi_rc_alloc", |f| {
-        f.param("size", prim(UIntPtr)).returns(prim(IntPtr)).effect("alloc")
+        f.param("size", prim(UIntPtr))
+            .returns(prim(IntPtr))
+            .effect("alloc")
     });
-    gen.export("mimi_rc_retain", |f| {
-        f.param("ptr", prim(IntPtr))
-    });
+    gen.export("mimi_rc_retain", |f| f.param("ptr", prim(IntPtr)));
     gen.export("mimi_rc_release", |f| {
         f.param("ptr", prim(IntPtr)).effect("dealloc")
     });
@@ -291,16 +295,15 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     });
     gen.export("mimi_list_push_i64", |f| {
         f.param("list", handle("ListHandle"))
-         .param("value", prim(I64))
+            .param("value", prim(I64))
     });
     gen.export("mimi_list_get_i64", |f| {
         f.param("list", handle("ListHandle"))
-         .param("index", prim(UIntPtr))
-         .returns(prim(I64))
+            .param("index", prim(UIntPtr))
+            .returns(prim(I64))
     });
     gen.export("mimi_list_len", |f| {
-        f.param("list", handle("ListHandle"))
-         .returns(prim(UIntPtr))
+        f.param("list", handle("ListHandle")).returns(prim(UIntPtr))
     });
     gen.export("mimi_list_free", |f| {
         f.param("list", handle("ListHandle")).effect("dealloc")
@@ -312,13 +315,13 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     });
     gen.export("mimi_map_set_i64", |f| {
         f.param("map", handle("MapHandle"))
-         .param("key", ptr(prim(U8)))
-         .param("value", prim(I64))
+            .param("key", ptr(prim(U8)))
+            .param("value", prim(I64))
     });
     gen.export("mimi_map_get_i64", |f| {
         f.param("map", handle("MapHandle"))
-         .param("key", ptr(prim(U8)))
-         .returns(prim(I64))
+            .param("key", ptr(prim(U8)))
+            .returns(prim(I64))
     });
     gen.export("mimi_map_free", |f| {
         f.param("map", handle("MapHandle")).effect("dealloc")
@@ -330,12 +333,12 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     });
     gen.export("mimi_set_insert_i64", |f| {
         f.param("set", handle("SetHandle"))
-         .param("value", prim(I64))
+            .param("value", prim(I64))
     });
     gen.export("mimi_set_contains_i64", |f| {
         f.param("set", handle("SetHandle"))
-         .param("value", prim(I64))
-         .returns(prim(Bool))
+            .param("value", prim(I64))
+            .returns(prim(Bool))
     });
     gen.export("mimi_set_free", |f| {
         f.param("set", handle("SetHandle")).effect("dealloc")
@@ -344,13 +347,12 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     // ── String ──
     gen.export("mimi_string_new", |f| {
         f.param("data", ptr(prim(U8)))
-         .param("len", prim(UIntPtr))
-         .returns(handle("StringHandle"))
-         .effect("alloc")
+            .param("len", prim(UIntPtr))
+            .returns(handle("StringHandle"))
+            .effect("alloc")
     });
     gen.export("mimi_string_len", |f| {
-        f.param("s", handle("StringHandle"))
-         .returns(prim(UIntPtr))
+        f.param("s", handle("StringHandle")).returns(prim(UIntPtr))
     });
     gen.export("mimi_string_free", |f| {
         f.param("s", handle("StringHandle")).effect("dealloc")
@@ -359,28 +361,28 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     // ── I/O ──
     gen.export("mimi_print_line", |f| {
         f.param("data", ptr(prim(U8)))
-         .param("len", prim(UIntPtr))
-         .effect("io")
+            .param("len", prim(UIntPtr))
+            .effect("io")
     });
     gen.export("mimi_print_err", |f| {
         f.param("data", ptr(prim(U8)))
-         .param("len", prim(UIntPtr))
-         .effect("io")
+            .param("len", prim(UIntPtr))
+            .effect("io")
     });
 
     // ── Runtime control ──
     gen.export("mimi_runtime_abort", |f| {
         f.param("msg", ptr(prim(U8)))
-         .param("len", prim(UIntPtr))
-         .unsafe_fn()
+            .param("len", prim(UIntPtr))
+            .unsafe_fn()
     });
-    gen.export("mimi_wall_clock_ms", |f| {
-        f.returns(prim(I64)).effect("io")
-    });
+    gen.export("mimi_wall_clock_ms", |f| f.returns(prim(I64)).effect("io"));
 
     // ── Concurrency: Atomic ──
     gen.export("mimi_atomic_i32_new", |f| {
-        f.param("value", prim(I32)).returns(prim(I64)).effect("alloc")
+        f.param("value", prim(I32))
+            .returns(prim(I64))
+            .effect("alloc")
     });
     gen.export("mimi_atomic_i32_load", |f| {
         f.param("handle", prim(I64)).returns(prim(I32))
@@ -389,13 +391,17 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
         f.param("handle", prim(I64)).param("value", prim(I32))
     });
     gen.export("mimi_atomic_i32_fetch_add", |f| {
-        f.param("handle", prim(I64)).param("delta", prim(I32)).returns(prim(I32))
+        f.param("handle", prim(I64))
+            .param("delta", prim(I32))
+            .returns(prim(I32))
     });
     gen.export("mimi_atomic_i32_drop", |f| {
         f.param("handle", prim(I64)).effect("dealloc")
     });
     gen.export("mimi_atomic_i64_new", |f| {
-        f.param("value", prim(I64)).returns(prim(I64)).effect("alloc")
+        f.param("value", prim(I64))
+            .returns(prim(I64))
+            .effect("alloc")
     });
     gen.export("mimi_atomic_i64_load", |f| {
         f.param("handle", prim(I64)).returns(prim(I64))
@@ -404,13 +410,17 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
         f.param("handle", prim(I64)).param("value", prim(I64))
     });
     gen.export("mimi_atomic_i64_fetch_add", |f| {
-        f.param("handle", prim(I64)).param("delta", prim(I64)).returns(prim(I64))
+        f.param("handle", prim(I64))
+            .param("delta", prim(I64))
+            .returns(prim(I64))
     });
     gen.export("mimi_atomic_i64_drop", |f| {
         f.param("handle", prim(I64)).effect("dealloc")
     });
     gen.export("mimi_atomic_bool_new", |f| {
-        f.param("value", prim(I32)).returns(prim(I64)).effect("alloc")
+        f.param("value", prim(I32))
+            .returns(prim(I64))
+            .effect("alloc")
     });
     gen.export("mimi_atomic_bool_load", |f| {
         f.param("handle", prim(I64)).returns(prim(I32))
@@ -424,10 +434,14 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
 
     // ── Concurrency: Mutex ──
     gen.export("mimi_mutex_new", |f| {
-        f.param("value", prim(I64)).returns(prim(I64)).effect("alloc")
+        f.param("value", prim(I64))
+            .returns(prim(I64))
+            .effect("alloc")
     });
     gen.export("mimi_mutex_lock", |f| {
-        f.param("handle", prim(I64)).returns(prim(I64)).effect("blocking")
+        f.param("handle", prim(I64))
+            .returns(prim(I64))
+            .effect("blocking")
     });
     gen.export("mimi_mutex_get", |f| {
         f.param("guard_handle", prim(I64)).returns(prim(I64))
@@ -435,22 +449,22 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     gen.export("mimi_mutex_set", |f| {
         f.param("guard_handle", prim(I64)).param("value", prim(I64))
     });
-    gen.export("mimi_mutex_unlock", |f| {
-        f.param("guard_handle", prim(I64))
-    });
+    gen.export("mimi_mutex_unlock", |f| f.param("guard_handle", prim(I64)));
     gen.export("mimi_mutex_drop", |f| {
         f.param("handle", prim(I64)).effect("dealloc")
     });
 
     // ── Concurrency: Channel ──
-    gen.export("mimi_channel_new", |f| {
-        f.returns(prim(I64)).effect("alloc")
-    });
+    gen.export("mimi_channel_new", |f| f.returns(prim(I64)).effect("alloc"));
     gen.export("mimi_channel_send", |f| {
-        f.param("handle", prim(I64)).param("value", prim(I64)).effect("blocking")
+        f.param("handle", prim(I64))
+            .param("value", prim(I64))
+            .effect("blocking")
     });
     gen.export("mimi_channel_recv", |f| {
-        f.param("handle", prim(I64)).returns(prim(I64)).effect("blocking")
+        f.param("handle", prim(I64))
+            .returns(prim(I64))
+            .effect("blocking")
     });
     gen.export("mimi_channel_try_recv", |f| {
         f.param("handle", prim(I64)).returns(prim(I64))
@@ -472,33 +486,38 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
 
     // ── File I/O ──
     gen.export("mimi_is_dir", |f| {
-        f.param("path", ptr(prim(U8))).returns(prim(I64)).effect("io")
+        f.param("path", ptr(prim(U8)))
+            .returns(prim(I64))
+            .effect("io")
     });
     gen.export("mimi_is_file", |f| {
-        f.param("path", ptr(prim(U8))).returns(prim(I64)).effect("io")
+        f.param("path", ptr(prim(U8)))
+            .returns(prim(I64))
+            .effect("io")
     });
     gen.export("mimi_mkdir_p", |f| {
-        f.param("path", ptr(prim(U8))).returns(prim(I64)).effect("io")
+        f.param("path", ptr(prim(U8)))
+            .returns(prim(I64))
+            .effect("io")
     });
     gen.export("mimi_remove_file", |f| {
-        f.param("path", ptr(prim(U8))).returns(prim(I64)).effect("io")
+        f.param("path", ptr(prim(U8)))
+            .returns(prim(I64))
+            .effect("io")
     });
 
     // ── Time ──
     gen.export("mimi_sleep_ms", |f| {
         f.param("ms", prim(I64)).effect("io").effect("blocking")
     });
-    gen.export("mimi_timestamp", |f| {
-        f.returns(prim(I64)).effect("io")
-    });
-    gen.export("mimi_timestamp_ms", |f| {
-        f.returns(prim(I64)).effect("io")
-    });
+    gen.export("mimi_timestamp", |f| f.returns(prim(I64)).effect("io"));
+    gen.export("mimi_timestamp_ms", |f| f.returns(prim(I64)).effect("io"));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::types::AbiPrimitive;
 
     #[test]
     fn generator_builds_component_ir() {
@@ -523,8 +542,8 @@ mod tests {
         let mut gen = AbiGenerator::new();
         gen.export("mimi_list_push_i64", |f| {
             f.param("list", handle("ListHandle"))
-             .param("value", prim(AbiPrimitive::I64))
-             .returns(void())
+                .param("value", prim(AbiPrimitive::I64))
+                .returns(void())
         });
         let ir = gen.build();
         let sym = ir.export("mimi_list_push_i64").expect("should exist");
@@ -598,8 +617,7 @@ mod tests {
     fn unsafe_flag() {
         let mut gen = AbiGenerator::new();
         gen.export("mimi_runtime_abort", |f| {
-            f.param("msg", ptr(prim(AbiPrimitive::U8)))
-             .unsafe_fn()
+            f.param("msg", ptr(prim(AbiPrimitive::U8))).unsafe_fn()
         });
         let ir = gen.build();
         let sym = ir.export("mimi_runtime_abort").expect("should exist");

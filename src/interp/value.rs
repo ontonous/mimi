@@ -1007,7 +1007,13 @@ impl ActorHandle {
         stdout_buf: Option<std::sync::Arc<std::sync::Mutex<String>>>,
         transition_tables: Option<std::sync::Arc<crate::core::TransitionTables>>,
     ) -> Self {
-        Self::new_with_depth(instance, program, DEFAULT_MAILBOX_DEPTH, stdout_buf, transition_tables)
+        Self::new_with_depth(
+            instance,
+            program,
+            DEFAULT_MAILBOX_DEPTH,
+            stdout_buf,
+            transition_tables,
+        )
     }
 
     /// Create actor with explicit mailbox high-water depth (v0.29.21).

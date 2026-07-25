@@ -232,9 +232,9 @@ impl<'a> Checker<'a> {
             Type::LocalShared(inner) => Type::LocalShared(Box::new(
                 Self::replace_generic_names_with_typevars(inner, names),
             )),
-            Type::Weak(inner) => Type::Weak(Box::new(
-                Self::replace_generic_names_with_typevars(inner, names),
-            )),
+            Type::Weak(inner) => Type::Weak(Box::new(Self::replace_generic_names_with_typevars(
+                inner, names,
+            ))),
             Type::WeakLocal(inner) => Type::WeakLocal(Box::new(
                 Self::replace_generic_names_with_typevars(inner, names),
             )),

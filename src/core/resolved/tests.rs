@@ -1610,33 +1610,20 @@ func main() -> i32 {
         .iter()
         .filter(|s| s.owner == "function:main")
         .collect();
-    assert!(main_calls
-        .iter()
-        .any(|s| s.callee == "helper"
-            && s.argc == 1
-            && s.kind == crate::core::ResolvedCallKind::Function));
-    assert!(main_calls
-        .iter()
-        .any(|s| s.callee == "c_abs"
-            && s.argc == 1
-            && s.kind == crate::core::ResolvedCallKind::Extern));
-    let helper_callers: Vec<_> = sites
-        .iter()
-        .filter(|s| s.callee == "helper")
-        .collect();
-    assert!(helper_callers
-        .iter()
-        .any(|s| s.owner == "function:main"
-            && s.argc == 1
-            && s.kind == crate::core::ResolvedCallKind::Function));
-    let c_abs_callers: Vec<_> = sites
-        .iter()
-        .filter(|s| s.callee == "c_abs")
-        .collect();
+    assert!(main_calls.iter().any(|s| s.callee == "helper"
+        && s.argc == 1
+        && s.kind == crate::core::ResolvedCallKind::Function));
+    assert!(main_calls.iter().any(|s| s.callee == "c_abs"
+        && s.argc == 1
+        && s.kind == crate::core::ResolvedCallKind::Extern));
+    let helper_callers: Vec<_> = sites.iter().filter(|s| s.callee == "helper").collect();
+    assert!(helper_callers.iter().any(|s| s.owner == "function:main"
+        && s.argc == 1
+        && s.kind == crate::core::ResolvedCallKind::Function));
+    let c_abs_callers: Vec<_> = sites.iter().filter(|s| s.callee == "c_abs").collect();
     assert!(c_abs_callers
         .iter()
-        .any(|s| s.owner == "function:main"
-            && s.kind == crate::core::ResolvedCallKind::Extern));
+        .any(|s| s.owner == "function:main" && s.kind == crate::core::ResolvedCallKind::Extern));
 }
 
 #[test]
