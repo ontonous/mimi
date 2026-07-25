@@ -71,15 +71,26 @@ impl UnificationTable {
     }
 
     /// Find the root TypeVar ID for a given variable (with path compression).
+    /// P1-1: Iterative to avoid stack overflow on adversarial parent chains.
     pub fn find(&mut self, id: u32) -> u32 {
-        let parent = *self.parent.get(&id).unwrap_or(&id);
-        if parent == id {
-            id
-        } else {
-            let root = self.find(parent);
-            self.set_parent(id, root);
-            root
+        // Phase 1: walk to root.
+        let mut current = id;
+        loop {
+            let parent = *self.parent.get(&current).unwrap_or(&current);
+            if parent == current {
+                break;
+            }
+            current = parent;
         }
+        let root = current;
+        // Phase 2: path compression — point every node on the path to root.
+        let mut current = id;
+        while current != root {
+            let parent = *self.parent.get(&current).unwrap_or(&current);
+            self.set_parent(current, root);
+            current = parent;
+        }
+        root
     }
 
     /// Get the binding for a resolved TypeVar root, if any.

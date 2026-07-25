@@ -223,6 +223,43 @@ impl<'a> Checker<'a> {
                 params.clone(),
                 Box::new(Self::replace_generic_names_with_typevars(body, names)),
             ),
+            // P1-14: Ownership/pointer wrapper types must recurse into
+            // their inner type. Without this, `Shared[T]`, `CBuffer[T]`,
+            // etc. lose generic parameter substitution.
+            Type::Shared(inner) => Type::Shared(Box::new(
+                Self::replace_generic_names_with_typevars(inner, names),
+            )),
+            Type::LocalShared(inner) => Type::LocalShared(Box::new(
+                Self::replace_generic_names_with_typevars(inner, names),
+            )),
+            Type::Weak(inner) => Type::Weak(Box::new(
+                Self::replace_generic_names_with_typevars(inner, names),
+            )),
+            Type::WeakLocal(inner) => Type::WeakLocal(Box::new(
+                Self::replace_generic_names_with_typevars(inner, names),
+            )),
+            Type::RawPtr(inner) => Type::RawPtr(Box::new(
+                Self::replace_generic_names_with_typevars(inner, names),
+            )),
+            Type::RawPtrMut(inner) => Type::RawPtrMut(Box::new(
+                Self::replace_generic_names_with_typevars(inner, names),
+            )),
+            Type::CShared(inner) => Type::CShared(Box::new(
+                Self::replace_generic_names_with_typevars(inner, names),
+            )),
+            Type::CBorrow(inner) => Type::CBorrow(Box::new(
+                Self::replace_generic_names_with_typevars(inner, names),
+            )),
+            Type::CBorrowMut(inner) => Type::CBorrowMut(Box::new(
+                Self::replace_generic_names_with_typevars(inner, names),
+            )),
+            Type::CBuffer(inner) => Type::CBuffer(Box::new(
+                Self::replace_generic_names_with_typevars(inner, names),
+            )),
+            Type::Newtype(name, inner) => Type::Newtype(
+                name.clone(),
+                Box::new(Self::replace_generic_names_with_typevars(inner, names)),
+            ),
             other => other.clone(),
         }
     }

@@ -285,12 +285,22 @@ impl<'a> ActionEmitter<'a> {
             .unwrap_or_default();
         let mut bindings = Vec::new();
         self.linear_bindings(pattern, &mut bindings);
-        for (index, local) in bindings.into_iter().enumerate() {
-            let resource = sources
-                .get(index)
-                .map(|source| self.resource_for_place(source))
-                .unwrap_or_else(|| ResourceId(local.0.clone()));
-            self.resources.insert(local, resource);
+        // P1-10: Positional matching only works when sources and bindings
+        // have the same length. For tuple destructuring of a single source
+        // (e.g., `let (a, b) = some_linear_tuple`), sources=[tuple] (1)
+        // vs bindings=[a,b] (2) — positional matching gives b a wrong
+        // ResourceId. When counts mismatch, each binding gets its own
+        // ResourceId (conservative but correct).
+        if sources.len() == bindings.len() {
+            for (index, local) in bindings.into_iter().enumerate() {
+                let resource = self.resource_for_place(&sources[index]);
+                self.resources.insert(local, resource);
+            }
+        } else {
+            for local in bindings {
+                self.resources
+                    .insert(local.clone(), ResourceId(local.0.clone()));
+            }
         }
     }
 
@@ -464,6 +474,15 @@ impl<'a> ActionEmitter<'a> {
             ResolvedStmtKind::Break(value) => {
                 if let Some(value) = value {
                     self.visit_expr(value, None);
+                    // P1-4: break value must emit consume actions, symmetric
+                    // with Return. `loop { break token }` must track token
+                    // as consumed.
+                    self.emit_consumes(
+                        CanonicalActionKind::Move,
+                        self.capability_places(value),
+                        &statement.node_id,
+                        &statement.origin,
+                    );
                 }
             }
             ResolvedStmtKind::Continue | ResolvedStmtKind::NestedCallable(_) => {}

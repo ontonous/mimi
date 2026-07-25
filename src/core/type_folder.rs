@@ -386,6 +386,8 @@ impl TypeFolder for RemapFolder {
 pub struct NamedSubstitutionFolder {
     mapping: std::collections::HashMap<String, Type>,
     shadowed: Vec<std::collections::HashSet<String>>,
+    /// P1-13: cycle detection for chain substitutions ({T→U, U→T}).
+    substituting: std::collections::HashSet<String>,
 }
 
 impl NamedSubstitutionFolder {
@@ -393,6 +395,7 @@ impl NamedSubstitutionFolder {
         Self {
             mapping,
             shadowed: Vec::new(),
+            substituting: std::collections::HashSet::new(),
         }
     }
 }
@@ -413,9 +416,17 @@ impl TypeFolder for NamedSubstitutionFolder {
                 .iter()
                 .rev()
                 .any(|scope| scope.contains(&name))
+            && !self.substituting.contains(&name)
         {
             if let Some(replacement) = self.mapping.get(&name) {
-                return replacement.clone();
+                // P1-13: Re-traverse the replacement to handle chain
+                // substitutions ({T→U, U→i32} → T resolves to i32).
+                // Cycle detection via `substituting` set prevents
+                // infinite loops on cyclic mappings ({T→U, U→T}).
+                self.substituting.insert(name.clone());
+                let result = walk_type(replacement.clone(), self);
+                self.substituting.remove(&name);
+                return result;
             }
         }
         Type::Name(name, args)
