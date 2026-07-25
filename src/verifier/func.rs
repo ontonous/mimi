@@ -258,6 +258,18 @@ impl VerifierCtx {
         session: &mut SolverSession,
         func: &FuncDef,
     ) -> VerificationResult {
+        // 0.31.26: VIR path infrastructure is ready (vir.rs) but not yet
+        // wired into the main verification flow. The VIR path needs:
+        // - Counterexample extraction
+        // - Callee ensures propagation
+        // - old() variable handling
+        // These are tracked for 0.31.27+.
+        //
+        // To enable the VIR path for testing, uncomment:
+        // if let Some(vir_result) = self.verify_func_vir(session, func) {
+        //     return vir_result;
+        // }
+
         let start = Instant::now();
 
         // Shared parameters use abstract heap encoding:
@@ -1058,6 +1070,297 @@ impl VerifierCtx {
                     trusted_subset_domain: None,
                 }
             }
+        }
+    }
+
+    /// VIR-based verification path (0.31.26).
+    ///
+    /// Attempts to verify a function using the Verification IR:
+    /// 1. Check trusted-subset gate
+    /// 2. Lower FuncDef → VFunction
+    /// 3. Encode VFunction → Z3
+    /// 4. Check verification conditions
+    ///
+    /// Returns `None` if the function is not in the trusted subset
+    /// (caller should fall back to the AST-based path).
+    /// Returns `Some(result)` if verification was attempted via VIR.
+    #[allow(dead_code)] // Infrastructure for 0.31.27+ (needs counterexample extraction)
+    pub(crate) fn verify_func_vir(
+        &mut self,
+        session: &mut SolverSession,
+        func: &FuncDef,
+    ) -> Option<VerificationResult> {
+        use crate::verifier::vir::{self, VStmt, VirZ3Ctx};
+
+        let start = Instant::now();
+
+        // 1. Trusted-subset gate
+        if vir::check_trusted_subset(func).is_err() {
+            return None; // Fall back to AST-based path
+        }
+
+        // 2. Lower to VIR
+        let (vfunc, _span_table) = match vir::lower_func_to_vir(func) {
+            Ok(result) => result,
+            Err(_) => return None, // Lowering failed; fall back
+        };
+
+        // Check if there are any contracts to verify
+        let has_requires = vfunc.body.iter().any(|s| matches!(s, VStmt::Assume(_)));
+        let has_ensures = !vfunc.postconditions.is_empty();
+        let has_math = vfunc.body.iter().any(|s| matches!(s, VStmt::Assert(_)));
+
+        if !has_requires && !has_ensures && !has_math {
+            // No contracts at all — fall back to AST path (which checks call sites)
+            return None;
+        }
+
+        // 3. Set up Z3 encoding context
+        let returns_f64 = func
+            .ret
+            .as_ref()
+            .is_some_and(|t| matches!(t.unlocated(), Type::Name(n, _) if n == "f64"));
+        let returns_bool = func.ret.as_ref().is_some_and(
+            |t| matches!(t.unlocated(), Type::Name(n, _) if n == "bool" || n == "Bool"),
+        );
+
+        let mut z3ctx = VirZ3Ctx::new(&vfunc);
+        z3ctx.setup_result(returns_f64, returns_bool);
+
+        // Register parameter variables in Z3 context
+        for &(_var, _vty, ref name) in &vfunc.params {
+            // Parameters are already registered by VirZ3Ctx::new()
+            // This loop is for documentation clarity
+            let _ = name;
+        }
+
+        // 4. Process body statements
+        let mut constraint_count = 0usize;
+
+        for stmt in &vfunc.body {
+            match stmt {
+                VStmt::Assume(expr) => {
+                    // Precondition / invariant assumption
+                    if let Some(z3_bool) = z3ctx.encode_bool(expr) {
+                        session.assert(&z3_bool);
+                        constraint_count += 1;
+                    }
+                }
+                VStmt::Assert(expr) => {
+                    // Math obligation — prove from current assumptions
+                    if let Some(z3_bool) = z3ctx.encode_bool(expr) {
+                        let (proof, _) = session.check_scope(z3_bool.not());
+                        match proof {
+                            SatResult::Unsat => {
+                                session.assert(&z3_bool);
+                                constraint_count += 1;
+                            }
+                            SatResult::Sat => {
+                                return Some(VerificationResult {
+                                    func_name: func.name.clone(),
+                                    status: VerifStatus::Disproven,
+                                    message: "math obligation is not implied by preconditions (VIR)"
+                                        .into(),
+                                    diagnostic: Some(Diagnostic::error(
+                                        format!("unproven math obligation in '{}'", func.name),
+                                        func.meta.span,
+                                    )),
+                                    duration_us: start.elapsed().as_micros() as u64,
+                                    constraint_count,
+                                    artifact: None,
+                                    trusted_subset_domain: None,
+                                });
+                            }
+                            SatResult::Unknown => {
+                                return Some(VerificationResult {
+                                    func_name: func.name.clone(),
+                                    status: VerifStatus::SolverUnknown,
+                                    message: "solver could not prove math obligation (VIR)".into(),
+                                    diagnostic: None,
+                                    duration_us: start.elapsed().as_micros() as u64,
+                                    constraint_count,
+                                    artifact: None,
+                                    trusted_subset_domain: None,
+                                });
+                            }
+                        }
+                    }
+                }
+                VStmt::Let(_var, _expr) => {
+                    // Let bindings are handled by the encoding context
+                    // (variables are resolved by name)
+                }
+                VStmt::Return(expr) => {
+                    // Bind result variable to return expression
+                    if returns_bool {
+                        if let Some(body_z3) = z3ctx.encode_bool(expr) {
+                            if let Some(r) = &z3ctx.result_bool {
+                                session.assert(r.eq(&body_z3));
+                                constraint_count += 1;
+                            }
+                        }
+                    } else if !returns_f64 {
+                        // Check definedness obligations first
+                        let obligations = z3ctx.definedness_obligations(expr);
+                        for (condition, failure) in obligations {
+                            let (proof, _) = session.check_scope(condition.not());
+                            match proof {
+                                SatResult::Unsat => {
+                                    session.assert(&condition);
+                                }
+                                SatResult::Sat => {
+                                    return Some(VerificationResult {
+                                        func_name: func.name.clone(),
+                                        status: VerifStatus::Disproven,
+                                        message: failure.to_string(),
+                                        diagnostic: Some(Diagnostic::error(
+                                            failure.to_string(),
+                                            func.meta.span,
+                                        )),
+                                        duration_us: start.elapsed().as_micros() as u64,
+                                        constraint_count,
+                                        artifact: None,
+                                        trusted_subset_domain: None,
+                                    });
+                                }
+                                SatResult::Unknown => {
+                                    return Some(VerificationResult {
+                                        func_name: func.name.clone(),
+                                        status: VerifStatus::SolverUnknown,
+                                        message: format!(
+                                            "solver could not prove integer definedness (VIR): {}",
+                                            failure
+                                        ),
+                                        diagnostic: None,
+                                        duration_us: start.elapsed().as_micros() as u64,
+                                        constraint_count,
+                                        artifact: None,
+                                        trusted_subset_domain: None,
+                                    });
+                                }
+                            }
+                        }
+                        // Bind result to return expression
+                        if let Some(body_z3) = z3ctx.encode_int(expr) {
+                            if let Some(r) = &z3ctx.result_int {
+                                session.assert(r.eq(&body_z3));
+                                constraint_count += 1;
+                            }
+                        }
+                    }
+                    // f64 return: opaque, no arithmetic binding
+                }
+            }
+        }
+
+        // 5. Check preconditions satisfiability
+        match session.check() {
+            SatResult::Unsat => {
+                return Some(VerificationResult {
+                    func_name: func.name.clone(),
+                    status: VerifStatus::Disproven,
+                    message: "preconditions are unsatisfiable (VIR)".into(),
+                    diagnostic: Some(
+                        Diagnostic::error(
+                            format!("preconditions are unsatisfiable for '{}'", func.name),
+                            func.meta.span,
+                        )
+                        .with_help("check that your requires conditions can actually be satisfied"),
+                    ),
+                    duration_us: start.elapsed().as_micros() as u64,
+                    constraint_count,
+                    artifact: None,
+                    trusted_subset_domain: None,
+                });
+            }
+            SatResult::Unknown => {
+                return Some(VerificationResult {
+                    func_name: func.name.clone(),
+                    status: VerifStatus::SolverUnknown,
+                    message: "precondition satisfiability unknown (VIR)".into(),
+                    diagnostic: None,
+                    duration_us: start.elapsed().as_micros() as u64,
+                    constraint_count,
+                    artifact: None,
+                    trusted_subset_domain: None,
+                });
+            }
+            SatResult::Sat => {
+                // Preconditions satisfiable; check postconditions
+            }
+        }
+
+        // 6. Check postconditions (ensures)
+        if vfunc.postconditions.is_empty() {
+            return Some(VerificationResult {
+                func_name: func.name.clone(),
+                status: VerifStatus::Proven,
+                message: "preconditions satisfiable, no postconditions (VIR)".into(),
+                diagnostic: None,
+                duration_us: start.elapsed().as_micros() as u64,
+                constraint_count,
+                artifact: None,
+                trusted_subset_domain: None,
+            });
+        }
+
+        let mut found_violation = false;
+        let mut found_unknown = false;
+
+        for post in &vfunc.postconditions {
+            if let Some(z3_bool) = z3ctx.encode_bool(post) {
+                let (result, _model) = session.check_scope(z3_bool.not());
+                match result {
+                    SatResult::Sat => {
+                        found_violation = true;
+                        break;
+                    }
+                    SatResult::Unknown => {
+                        found_unknown = true;
+                    }
+                    SatResult::Unsat => {
+                        // This postcondition holds
+                    }
+                }
+            }
+        }
+
+        if found_violation {
+            Some(VerificationResult {
+                func_name: func.name.clone(),
+                status: VerifStatus::Disproven,
+                message: "postcondition violation found (VIR)".into(),
+                diagnostic: Some(Diagnostic::error(
+                    format!("postcondition violated in '{}'", func.name),
+                    func.meta.span,
+                )),
+                duration_us: start.elapsed().as_micros() as u64,
+                constraint_count,
+                artifact: None,
+                trusted_subset_domain: None,
+            })
+        } else if found_unknown {
+            Some(VerificationResult {
+                func_name: func.name.clone(),
+                status: VerifStatus::SolverUnknown,
+                message: "verification inconclusive (VIR)".into(),
+                diagnostic: None,
+                duration_us: start.elapsed().as_micros() as u64,
+                constraint_count,
+                artifact: None,
+                trusted_subset_domain: None,
+            })
+        } else {
+            Some(VerificationResult {
+                func_name: func.name.clone(),
+                status: VerifStatus::Proven,
+                message: "postconditions verified (VIR)".into(),
+                diagnostic: None,
+                duration_us: start.elapsed().as_micros() as u64,
+                constraint_count,
+                artifact: None,
+                trusted_subset_domain: None,
+            })
         }
     }
 

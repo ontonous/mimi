@@ -807,6 +807,10 @@ fn lower_expr_to_vir(expr: &crate::ast::Expr, ctx: &mut LoweringCtx) -> Option<V
         Expr::Literal(Lit::Bool(b)) => Some(VExpr::BoolConst(*b)),
         Expr::Literal(Lit::Float(f)) => Some(VExpr::F64Const(*f)),
         Expr::Ident(name) => {
+            // Special-case `result` — the implicit return variable in postconditions
+            if name == "result" {
+                return Some(VExpr::Result);
+            }
             let var = ctx.resolve(name);
             // Check if this is an f64 parameter
             if ctx.type_of(name) == Some(VType::F64Opaque) {
@@ -975,14 +979,14 @@ fn stmt_span(stmt: &crate::ast::Stmt) -> Span {
 #[allow(dead_code)] // Wired into verify_func in 0.31.26-5
 pub(crate) struct VirZ3Ctx {
     /// Int variables (i32/i64 encoded as unbounded Z3 Int).
-    int_vars: HashMap<VarId, z3::ast::Int>,
+    pub(crate) int_vars: HashMap<VarId, z3::ast::Int>,
     /// Bool variables.
-    bool_vars: HashMap<VarId, z3::ast::Bool>,
+    pub(crate) bool_vars: HashMap<VarId, z3::ast::Bool>,
     /// Opaque f64 variables (uninterpreted sort — no arithmetic).
-    f64_vars: HashMap<VarId, z3::ast::Int>,
+    pub(crate) f64_vars: HashMap<VarId, z3::ast::Int>,
     /// The `result` variable (Int or Bool depending on return type).
-    result_int: Option<z3::ast::Int>,
-    result_bool: Option<z3::ast::Bool>,
+    pub(crate) result_int: Option<z3::ast::Int>,
+    pub(crate) result_bool: Option<z3::ast::Bool>,
     /// Parameter types for type-directed encoding.
     var_types: HashMap<VarId, VType>,
     /// Whether the function returns f64 (opaque).
