@@ -119,7 +119,17 @@ impl<'a> Checker<'a> {
         else_: Option<&Block>,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        self.infer_expr(cond, scopes);
+        // P1-29: Validate that the condition is bool. Previously the
+        // condition type was inferred and discarded, allowing `if 42 { ... }`.
+        let cond_ty = self.infer_expr(cond, scopes);
+        if !matches!(cond_ty.unlocated(), Type::Name(n, _) if n == "bool")
+            && !matches!(cond_ty.unlocated(), Type::TypeVar(_))
+        {
+            self.emit_code(
+                crate::diagnostic::codes::E0206,
+                format!("if condition must be bool, found {}", fmt_type(&cond_ty)),
+            );
+        }
         let then_ty = self.infer_block_expr(then_, scopes);
         if let Some(eb) = else_ {
             let else_ty = self.infer_block_expr(eb, scopes);
@@ -217,6 +227,23 @@ impl<'a> Checker<'a> {
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
         let target_ty = self.infer_expr(target, scopes);
+        // P1-38: Validate that the target is sliceable (List, Array, Slice,
+        // string, or a type variable). Previously x: i32 on x[1..2] passed.
+        match target_ty.unlocated() {
+            Type::Name(n, _)
+                if n == "List" || n == "string" || n == "Array" || n == "Slice" => {}
+            Type::Slice(_) | Type::Array(..) => {}
+            Type::TypeVar(_) => {} // will be resolved later
+            _ => {
+                self.emit_code(
+                    crate::diagnostic::codes::E0212,
+                    format!(
+                        "slice target must be a List, Array, Slice, or string, found {}",
+                        fmt_type(&target_ty)
+                    ),
+                );
+            }
+        }
         if let Some(s) = start {
             let _ = self.infer_expr(s, scopes);
         }
@@ -303,9 +330,21 @@ impl<'a> Checker<'a> {
                 if let Some(tdef) = self.types.get(name) {
                     match &tdef.kind {
                         TypeDefKind::Enum(variants) if variants.len() == 2 => {
-                            // Try to find Ok/Err or Some/None pattern
-                            let first_variant = &variants[0];
-                            match &first_variant.payload {
+                            // P1-34: Search for the "success" variant by name
+                            // convention (Ok/Some/Success/Right) instead of
+                            // blindly taking variants[0]. For custom enums like
+                            // `Res { Bad(i32) | Good(string) }`, the first
+                            // variant might be the error case.
+                            let success_variant = variants
+                                .iter()
+                                .find(|v| {
+                                    matches!(
+                                        v.name.as_str(),
+                                        "Ok" | "Some" | "Success" | "Right" | "Yes"
+                                    )
+                                })
+                                .unwrap_or(&variants[0]);
+                            match &success_variant.payload {
                                 Some(VariantPayload::Tuple(types)) if !types.is_empty() => {
                                     types[0].clone()
                                 }
@@ -373,6 +412,20 @@ impl<'a> Checker<'a> {
                 Stmt::Return(Some(e)) => {
                     result_type = self.infer_expr(e, scopes);
                     break;
+                }
+                // P1-36: Handle let bindings so `comptime { let x = 41; x + 1 }`
+                // works. Previously only Expr/Return were handled.
+                Stmt::Let {
+                    pat,
+                    init: Some(init),
+                    ..
+                } => {
+                    let ty = self.infer_expr(init, scopes);
+                    if let crate::ast::PatternKind::Variable(name) = &pat.kind {
+                        if let Some(scope) = scopes.last_mut() {
+                            scope.insert(name.clone(), ty);
+                        }
+                    }
                 }
                 _ => {}
             }

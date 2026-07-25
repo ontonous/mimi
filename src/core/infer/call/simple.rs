@@ -526,7 +526,17 @@ impl<'a> Checker<'a> {
                     let closure_ty = self.infer_expr(&args[1], scopes);
                     let ret_ty = match closure_ty.unlocated() {
                         Type::Func(_, ret) => ret.as_ref().clone(),
-                        _ => elem_ty.clone(),
+                        // P1-30: Non-function second argument is an error.
+                        _ => {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "map expects a function as second argument, found {}",
+                                    fmt_type(&closure_ty)
+                                ),
+                            );
+                            elem_ty.clone()
+                        }
                     };
                     return Type::Name("List".into(), vec![ret_ty]);
                 }
@@ -544,7 +554,17 @@ impl<'a> Checker<'a> {
                         Type::Name(_, args) if args.len() == 1 => args[0].clone(),
                         _ => Type::Name("unknown".into(), vec![]),
                     };
-                    self.infer_expr(&args[1], scopes);
+                    // P1-31: Validate that the predicate is a function.
+                    let pred_ty = self.infer_expr(&args[1], scopes);
+                    if !matches!(pred_ty.unlocated(), Type::Func(..)) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!(
+                                "filter expects a predicate function as second argument, found {}",
+                                fmt_type(&pred_ty)
+                            ),
+                        );
+                    }
                     return Type::Name("List".into(), vec![elem_ty]);
                 }
                 return Type::Name("unknown".into(), vec![]);
@@ -668,7 +688,16 @@ impl<'a> Checker<'a> {
                 if args.len() != 1 {
                     self.emit_code(crate::diagnostic::codes::E0242, "sum expects 1 argument");
                 } else {
-                    self.infer_expr(&args[0], scopes);
+                    // P1-32: Infer element type from the list instead of
+                    // always returning i32. sum([1.5, 2.5]) should be f64.
+                    let list_ty = self.infer_expr(&args[0], scopes);
+                    let elem_ty = match list_ty.unlocated() {
+                        Type::Name(_, type_args) if type_args.len() == 1 => {
+                            type_args[0].clone()
+                        }
+                        _ => Type::Name("i32".into(), vec![]),
+                    };
+                    return elem_ty;
                 }
                 return Type::Name("i32".into(), vec![]);
             }
@@ -1474,8 +1503,29 @@ impl<'a> Checker<'a> {
                     );
                     return Type::Name("unknown".into(), vec![]);
                 }
-                self.infer_expr(&args[0], scopes);
-                return self.infer_expr(&args[1], scopes);
+                // P1-33: Relate Option payload type with default type.
+                // Previously the Option was inferred and discarded, allowing
+                // option_value_or(Some(1), "not an int").
+                let opt_ty = self.infer_expr(&args[0], scopes);
+                let default_ty = self.infer_expr(&args[1], scopes);
+                let payload_ty = match opt_ty.unlocated() {
+                    Type::Option(inner) => inner.as_ref().clone(),
+                    Type::Name(n, type_args) if n == "Option" && type_args.len() == 1 => {
+                        type_args[0].clone()
+                    }
+                    _ => default_ty.clone(),
+                };
+                if self.unification.unify(&payload_ty, &default_ty).is_err() {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        format!(
+                            "option_value_or: Option payload type {} doesn't match default type {}",
+                            fmt_type(&payload_ty),
+                            fmt_type(&default_ty)
+                        ),
+                    );
+                }
+                return default_ty;
             }
             "str_parse_int" => {
                 if args.len() != 1 {
@@ -2524,5 +2574,17 @@ fn is_impure_builtin(name: &str) -> bool {
             | "first_arg"
             // Process control
             | "exit"
+            // P1-37: Previously missing impure builtins.
+            // exec: arbitrary command execution
+            | "exec"
+            // Legacy I/O names (stdlib wrappers use fs_* but raw builtins
+            // use these shorter names).
+            | "read_file"
+            | "write_file"
+            | "file_exists"
+            // Legacy env/network names
+            | "getenv"
+            | "http_get"
+            | "http_post"
     )
 }
