@@ -87,6 +87,7 @@ pub mod macros;
 
 pub mod ast;
 pub mod codegen;
+pub mod component;
 pub mod flow_matrix;
 pub mod progressive;
 pub mod session;
