@@ -139,11 +139,10 @@ fn dual_verify_skips_comptime_block() {
     "#;
     let results = crate::verifier::verify_source(src).expect("verify should check and run");
     assert!(
-        results.iter().all(|r| matches!(
-            r.status,
-            crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::Unknown
-        )),
-        "expected all results verified/unknown (comptime not evaluated as obligation): {:?}",
+        results.iter().all(|r|
+            r.status == crate::verifier::VerifStatus::Proven || r.status.is_inconclusive()
+        ),
+        "expected all results proven/inconclusive (comptime not evaluated as obligation): {:?}",
         results
     );
 }

@@ -336,9 +336,15 @@ impl LspServer {
         }
         for (key, entry) in &cache.entries {
             let status = match entry.status.as_str() {
-                "Verified" => VerifStatus::Verified,
-                "Failed" => VerifStatus::Failed,
-                _ => VerifStatus::Unknown,
+                "Verified" | "Proven" => VerifStatus::Proven,
+                "Failed" | "Disproven" => VerifStatus::Disproven,
+                "NotInTrustedSubset" => VerifStatus::NotInTrustedSubset,
+                "SolverUnknown" => VerifStatus::SolverUnknown,
+                "Timeout" => VerifStatus::Timeout,
+                "InfrastructureError" => VerifStatus::InfrastructureError,
+                "RuntimeOnlyContract" => VerifStatus::RuntimeOnlyContract,
+                "NoObligations" => VerifStatus::NoObligations,
+                _ => VerifStatus::SolverUnknown,
             };
             self.verification_cache.insert(
                 key.clone(),
@@ -362,10 +368,15 @@ impl LspServer {
             .verification_cache
             .iter()
             .map(|(key, entry)| {
-                let status_str = match &entry.status {
-                    VerifStatus::Verified => "Verified",
-                    VerifStatus::Failed => "Failed",
-                    VerifStatus::Unknown => "Unknown",
+                let status_str = match entry.status.clone() {
+                    VerifStatus::Proven => "Verified",
+                    VerifStatus::Disproven => "Failed",
+                    VerifStatus::NotInTrustedSubset => "NotInTrustedSubset",
+                    VerifStatus::SolverUnknown => "SolverUnknown",
+                    VerifStatus::Timeout => "Timeout",
+                    VerifStatus::InfrastructureError => "InfrastructureError",
+                    VerifStatus::RuntimeOnlyContract => "RuntimeOnlyContract",
+                    VerifStatus::NoObligations => "NoObligations",
                 };
                 (
                     key.clone(),

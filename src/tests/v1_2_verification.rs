@@ -188,8 +188,8 @@ fn assert_unknown(source: &str) {
     assert!(
         results
             .iter()
-            .all(|r| r.status == crate::verifier::VerifStatus::Unknown),
-        "expected all Unknown results, got: {:?}",
+            .all(|r| r.status.is_inconclusive()),
+        "expected all inconclusive results, got: {:?}",
         results
             .iter()
             .map(|r| (&r.func_name, &r.status))

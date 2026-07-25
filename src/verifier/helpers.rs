@@ -371,7 +371,7 @@ fn mock_verify_items(items: &[crate::ast::Item], results: &mut Vec<VerificationR
                     });
                     results.push(VerificationResult {
                         func_name: f.name.clone(),
-                        status: VerifStatus::Unknown,
+                        status: VerifStatus::InfrastructureError,
                         message: if has_contracts {
                             "Z3 solver not available"
                         } else {
@@ -390,7 +390,7 @@ fn mock_verify_items(items: &[crate::ast::Item], results: &mut Vec<VerificationR
                     if func.requires.is_some() || func.ensures.is_some() {
                         results.push(VerificationResult {
                             func_name: format!("extern {}", func.name),
-                            status: VerifStatus::Unknown,
+                            status: VerifStatus::InfrastructureError,
                             message: "Z3 solver not available".into(),
                             diagnostic: None,
                             duration_us: 0,

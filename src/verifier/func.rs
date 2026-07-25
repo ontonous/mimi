@@ -135,7 +135,7 @@ impl VerifierCtx {
                 None => {
                     return VerificationResult {
                         func_name: format!("extern {}", func.name),
-                        status: VerifStatus::Unknown,
+                        status: VerifStatus::NotInTrustedSubset,
                         message: "could not encode extern requires for Z3".into(),
                         diagnostic: None,
                         duration_us: start.elapsed().as_micros() as u64,
@@ -176,7 +176,7 @@ impl VerifierCtx {
                 };
                 VerificationResult {
                     func_name: format!("extern {}", func.name),
-                    status: VerifStatus::Unknown,
+                    status: VerifStatus::SolverUnknown,
                     message: msg,
                     diagnostic: None,
                     duration_us: elapsed.as_micros() as u64,
@@ -205,7 +205,7 @@ impl VerifierCtx {
                                 },
                                 SatResult::Sat | SatResult::Unknown => VerificationResult {
                                     func_name: format!("extern {}", func.name),
-                                    status: VerifStatus::Unknown,
+                                    status: VerifStatus::SolverUnknown,
                                     message:
                                         "extern contracts are consistent (preconditions do not statically guarantee postconditions; runtime verification required)"
                                             .into(),
@@ -217,7 +217,7 @@ impl VerifierCtx {
                         }
                         None => VerificationResult {
                             func_name: format!("extern {}", func.name),
-                            status: VerifStatus::Unknown,
+                            status: VerifStatus::SolverUnknown,
                             message: "could not encode ensures for Z3".into(),
                             diagnostic: None,
                             duration_us: start.elapsed().as_micros() as u64,
@@ -340,7 +340,7 @@ impl VerifierCtx {
             };
             return VerificationResult {
                 func_name: func.name.clone(),
-                status: VerifStatus::Unknown,
+                status: VerifStatus::InfrastructureError,
                 message: msg,
                 diagnostic: None,
                 duration_us: start.elapsed().as_micros() as u64,
@@ -508,7 +508,7 @@ impl VerifierCtx {
             let Some(z3_bool) = expr::expr_to_z3_bool(math, &mut vars) else {
                 return VerificationResult {
                     func_name: func.name.clone(),
-                    status: VerifStatus::Unknown,
+                    status: VerifStatus::SolverUnknown,
                     message: format!("could not encode math obligation: {}", format_expr(math)),
                     diagnostic: None,
                     duration_us: start.elapsed().as_micros() as u64,
@@ -545,7 +545,7 @@ impl VerifierCtx {
                 SatResult::Unknown => {
                     return VerificationResult {
                         func_name: func.name.clone(),
-                        status: VerifStatus::Unknown,
+                        status: VerifStatus::SolverUnknown,
                         message: format!(
                             "solver could not prove math obligation: {}",
                             format_expr(math)
@@ -713,7 +713,7 @@ impl VerifierCtx {
                         SatResult::Unknown => {
                             return VerificationResult {
                                 func_name: func.name.clone(),
-                                status: VerifStatus::Unknown,
+                                status: VerifStatus::SolverUnknown,
                                 message: format!(
                                     "solver could not prove integer definedness: {}",
                                     obligation.failure
@@ -728,7 +728,7 @@ impl VerifierCtx {
                 let Some(body_z3) = expr::expr_to_z3_int(return_expr, &mut vars) else {
                     return VerificationResult {
                         func_name: func.name.clone(),
-                        status: VerifStatus::Unknown,
+                        status: VerifStatus::SolverUnknown,
                         message: "could not encode return expression — result may be unconstrained"
                             .into(),
                         diagnostic: None,
@@ -914,7 +914,7 @@ impl VerifierCtx {
                         };
                         VerificationResult {
                             func_name: func.name.clone(),
-                            status: VerifStatus::Unknown,
+                            status: VerifStatus::SolverUnknown,
                             message: msg,
                             diagnostic: annotate_parse_errors(None, &parse_errors),
                             duration_us: elapsed.as_micros() as u64,
@@ -933,7 +933,7 @@ impl VerifierCtx {
                         } else {
                             VerificationResult {
                                 func_name: func.name.clone(),
-                                status: VerifStatus::Unknown,
+                                status: VerifStatus::SolverUnknown,
                                 message: format!(
                                     "verification incomplete for '{}': {}",
                                     func.name,
@@ -958,7 +958,7 @@ impl VerifierCtx {
                     } else {
                         VerificationResult {
                             func_name: func.name.clone(),
-                            status: VerifStatus::Unknown,
+                            status: VerifStatus::SolverUnknown,
                             message: format!(
                                 "verification incomplete for '{}': {}",
                                 func.name,
@@ -1000,7 +1000,7 @@ impl VerifierCtx {
                 };
                 VerificationResult {
                     func_name: func.name.clone(),
-                    status: VerifStatus::Unknown,
+                    status: VerifStatus::SolverUnknown,
                     message: msg,
                     diagnostic: annotate_parse_errors(None, &parse_errors),
                     duration_us: elapsed.as_micros() as u64,

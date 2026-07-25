@@ -1163,7 +1163,7 @@ fn lsp_code_lens_verify_status_unknown() {
     server.insert_verification_cache(
         format!("{}:unk", uri),
         0u64,
-        crate::verifier::VerifStatus::Unknown,
+        crate::verifier::VerifStatus::SolverUnknown,
         "verification inconclusive".to_string(),
     );
     let text = "func unk(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    x\n}";
