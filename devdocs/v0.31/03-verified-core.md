@@ -121,9 +121,18 @@
 | ~~**VIR 路径接入主验证流程**~~ | ~~缺少 counterexample 提取、callee ensures 传播、old() 等式约束~~ | ~~**0.31.27**~~ | ✅ 已完成（counterexample + old() + i32 range + VC artifact） |
 | **Callee ensures propagation (VIR)** | trusted subset gate 拒绝 calls；需扩展 gate + VIR Call lowering | **post-0.31.27** | VIR 路径可验证含调用的函数（callee ensures 作为公理） |
 | **Typestate 公理注入** | 需要 CheckedProgram 迁移（当前 verifier 用 raw AST） | **post-0.31.27** | Flow transition VIR 携带非空 TypestateAxioms，Z3 公理注入 |
-| **f64 opaque sort 替换 AST 路径** | expr.rs:250-376 exact Reals 不健全，但替换影响现有测试 | **0.31.28** | f64 算术 → NotInTrustedSubset，f64 比较 → uninterpreted predicate |
+| ~~**f64 opaque sort 替换 AST 路径**~~ | ~~expr.rs:250-376 exact Reals 不健全~~ | ~~**0.31.28**~~ | ✅ 已完成（VIR: f64 arithmetic → NotInTrustedSubset, f64 comparison → F64Compare; AST: f64 literals/arithmetic → None） |
 | **CFG/SSA lowering** | v1 使用 tree-based Select，loop 被 gate 拒绝 | **post-0.31.28** | VIR 支持 loop + phi 节点，gate 接受有限 loop |
-| **语义 Hash BLAKE3** | 当前 SipHash 非确定性跨 Rust 版本 | **post-0.31.28** | BLAKE3 替换 DefaultHasher，tamper detection 可用 |
+| ~~**语义 Hash BLAKE3**~~ | ~~当前 SipHash 非确定性跨 Rust 版本~~ | ~~**0.31.28**~~ | ✅ 已完成（blake3 替换 DefaultHasher，tamper detection 可用） |
+| **AST path f64 comparison uninterpreted predicate** | AST path 当前用 exact Reals（unsound），VIR path 已正确处理 | **post-0.31.28** | AST path f64 comparison → uninterpreted predicate（需 Z3 uninterpreted sort 机制） |
+
+### 0.31.28 实际交付
+
+- **f64 opaque sort（VIR path）**：f64 arithmetic (+, -, *, /, %) → NotInTrustedSubset（lowering fail-closed），f64 comparison → F64Compare（uninterpreted predicate）
+- **f64 opaque sort（AST path fallback）**：f64 literals（除 0.0）→ None，f64 arithmetic → None（is_f64_expr 检测），f64 comparison → exact Reals（unsound，VIR path 已正确处理）
+- **VIR lowering fail-closed**：return expression 无法 lower → Err（非静默跳过）
+- **verify_func_vir**：f64 函数 lowering 失败 → NotInTrustedSubset（非 fallback AST）
+- **BLAKE3 hash**：compute_semantic_hash 使用 blake3 替换 SipHash（DefaultHasher），确定性跨 Rust 版本和平台
 
 ### 0.31.27 实际交付
 

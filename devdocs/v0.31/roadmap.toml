@@ -576,8 +576,13 @@ version = "0.31.28"
 kind = "implementation"
 title = "Verifier artifact 与 fail-closed"
 requirements = ["VERIFY-CORE-001"]
-# 【从 0.31.26 继承】f64 opaque sort 替换 AST 路径 exact Reals（expr.rs:250-376）
-# 【从 0.31.26 继承】语义 Hash BLAKE3（替换 SipHash）
+# ✅ 已交付（2026-07-26）：
+# - f64 opaque sort（VIR path）：f64 arithmetic → NotInTrustedSubset，f64 comparison → F64Compare
+# - f64 opaque sort（AST path fallback）：f64 literals/arithmetic → None，f64 comparison → exact Reals（unsound）
+# - BLAKE3 hash：compute_semantic_hash 使用 blake3 替换 SipHash
+# - VIR lowering fail-closed：return expression 无法 lower → Err
+# - verify_func_vir：f64 函数 lowering 失败 → NotInTrustedSubset
+# 【DEFERRED → post-0.31.28】AST path f64 comparison uninterpreted predicate（当前 exact Reals，unsound）
 
 [[milestone]]
 version = "0.31.29"
