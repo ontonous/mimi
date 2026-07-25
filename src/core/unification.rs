@@ -109,12 +109,15 @@ impl UnificationTable {
     }
 
     /// Allocate a fresh type variable.
+    /// P2: Guard against u32 overflow on adversarial inputs.
     pub fn fresh_var(&mut self) -> u32 {
         let id = self.next_var;
         if self.transaction_depth > 0 {
             self.trail.push(Undo::NextVar(self.next_var));
         }
-        self.next_var += 1;
+        self.next_var = self.next_var.checked_add(1).unwrap_or_else(|| {
+            panic!("UnificationTable: type variable ID space exhausted (u32 overflow)")
+        });
         self.set_parent(id, id);
         id
     }

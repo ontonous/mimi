@@ -35,7 +35,13 @@ struct ActionEmitter<'a> {
     errors: Vec<Diagnostic>,
     /// 0.31.22 Drop/Transition IR 防漏网断言：跟踪已消费的资源
     /// 用于 debug_assert 检测二次消费 bug
-    /// TODO: 当前断言被禁用（误报），保留字段供后续完善
+    /// P2/P1-6: Double-consumption debug assertion infrastructure.
+    /// Currently disabled (false positives on alias/branch scenarios).
+    /// Re-enabling requires CFG path analysis to distinguish:
+    /// - Same resource consumed twice in one basic block (real bug)
+    /// - Same resource consumed in different branches (legal)
+    /// - Alias-induced duplicate tracking (legal)
+    /// Kept for future use; do not remove without re-enabling the assertion.
     #[cfg(debug_assertions)]
     #[allow(dead_code)]
     consumed_resources: BTreeSet<ResourceId>,
