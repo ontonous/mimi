@@ -168,6 +168,11 @@ pub struct Interpreter<'a> {
         Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
     pub(in crate::interp) resolved_transitions_by_event:
         Option<HashMap<String, Vec<(String, String, String, bool, bool, usize)>>>,
+    /// P0-11: Send+Sync snapshot of transition tables for actor worker threads.
+    /// Set in from_checked(); passed to ActorHandle::new so the worker can
+    /// validate transitions against the CheckedProgram directory.
+    pub(in crate::interp) resolved_transition_tables:
+        Option<std::sync::Arc<crate::core::TransitionTables>>,
     pub(in crate::interp) resolved_node_meta_spans:
         Option<HashMap<String, (usize, usize, usize, usize)>>,
     /// Function signatures from CheckedProgram: qualified_name -> (param_count, ret_fmt, effects).
@@ -336,14 +341,16 @@ impl<'a> Interpreter<'a> {
     pub fn from_checked(program: &'a crate::core::CheckedProgram) -> Self {
         let mut interp = Self::new(program.legacy_body_file());
         // AD-6: transition tables built once in CheckedProgram, shared by both backends.
-        let tables = program.build_transition_tables();
-        interp.resolved_transitions = Some(tables.resolved);
-        interp.resolved_fallback_transitions = Some(tables.fallbacks);
-        interp.resolved_ffi_pinned_transitions = Some(tables.pinned);
-        interp.resolved_transition_param_arity = Some(tables.param_arity);
-        interp.resolved_transitions_by_flow = Some(tables.by_flow);
-        interp.resolved_transitions_by_event = Some(tables.by_event);
-        interp.resolved_transition_params = Some(tables.param_lists);
+        let tables = std::sync::Arc::new(program.build_transition_tables());
+        interp.resolved_transitions = Some(tables.resolved.clone());
+        interp.resolved_fallback_transitions = Some(tables.fallbacks.clone());
+        interp.resolved_ffi_pinned_transitions = Some(tables.pinned.clone());
+        interp.resolved_transition_param_arity = Some(tables.param_arity.clone());
+        interp.resolved_transitions_by_flow = Some(tables.by_flow.clone());
+        interp.resolved_transitions_by_event = Some(tables.by_event.clone());
+        interp.resolved_transition_params = Some(tables.param_lists.clone());
+        // P0-11: keep Arc for actor worker threads (Send+Sync).
+        interp.resolved_transition_tables = Some(tables);
         let mut functions = HashMap::new();
         let mut function_params = HashMap::new();
         let mut comptime_functions = std::collections::HashSet::new();
@@ -1529,6 +1536,7 @@ impl<'a> Interpreter<'a> {
             resolved_transition_params: None,
             resolved_transitions_by_flow: None,
             resolved_transitions_by_event: None,
+            resolved_transition_tables: None,
             resolved_node_meta_spans: None,
             resolved_functions: None,
             resolved_function_params: None,

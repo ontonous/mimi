@@ -1005,8 +1005,9 @@ impl ActorHandle {
         instance: ActorInstance,
         program: std::sync::Arc<crate::ast::File>,
         stdout_buf: Option<std::sync::Arc<std::sync::Mutex<String>>>,
+        transition_tables: Option<std::sync::Arc<crate::core::TransitionTables>>,
     ) -> Self {
-        Self::new_with_depth(instance, program, DEFAULT_MAILBOX_DEPTH, stdout_buf)
+        Self::new_with_depth(instance, program, DEFAULT_MAILBOX_DEPTH, stdout_buf, transition_tables)
     }
 
     /// Create actor with explicit mailbox high-water depth (v0.29.21).
@@ -1015,6 +1016,7 @@ impl ActorHandle {
         program: std::sync::Arc<crate::ast::File>,
         depth_limit: usize,
         stdout_buf: Option<std::sync::Arc<std::sync::Mutex<String>>>,
+        transition_tables: Option<std::sync::Arc<crate::core::TransitionTables>>,
     ) -> Self {
         let id = ACTOR_HANDLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let (mailbox_tx, mailbox_rx) = std::sync::mpsc::channel::<ActorMailboxMsg>();
@@ -1026,6 +1028,8 @@ impl ActorHandle {
         let worker_program = program.clone();
         let worker_bp = bp.clone();
         let worker_stdout = stdout_buf.clone();
+        // P0-11: pass CheckedProgram transition tables to worker thread.
+        let worker_tables = transition_tables;
         let worker_spawn = std::thread::Builder::new()
             .name(format!("actor-{}", id))
             .spawn(move || {
@@ -1086,6 +1090,32 @@ impl ActorHandle {
                                 }
                             };
                             // Find matching transition: (from_state == current, name == msg.method).
+                            // P0-11: validate against CheckedProgram transition tables first.
+                            // Matrix-completed/fallback transitions exist in the tables but
+                            // not in the raw AST; raw AST scan is the body-execution fallback.
+                            if let Some(ref tables) = worker_tables {
+                                let key = (flow_name.clone(), msg.method.clone(), state_name.clone());
+                                if !tables.resolved.contains_key(&key)
+                                    && !tables.fallbacks.contains(&key)
+                                {
+                                    let _ = msg.response.send(Err(InterpError::new(format!(
+                                        "no transition '{}' from state '{}' in flow '{}' (checked directory)",
+                                        msg.method, state_name, flow_name
+                                    ))));
+                                    continue;
+                                }
+                                // Arity check (defense-in-depth, mirrors eval/expr.rs:725-736).
+                                if let Some(arity) = tables.param_arity.get(&key) {
+                                    let event_argc = msg.args.len();
+                                    if event_argc != *arity {
+                                        let _ = msg.response.send(Err(InterpError::new(format!(
+                                            "flow transition '{}::{}' expects {} event argument(s), got {} (checked directory)",
+                                            flow_name, msg.method, arity, event_argc
+                                        ))));
+                                        continue;
+                                    }
+                                }
+                            }
                             let transition = flow_def.transitions.iter().find(|t| {
                                 t.from_state == state_name && t.name == msg.method
                             }).cloned();
