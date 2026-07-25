@@ -169,10 +169,19 @@ pub(crate) fn build(
                         eprintln!("ℹ  {} — {}", res.func_name, res.message);
                     }
                 }
-                if ffi_results
-                    .iter()
-                    .any(|r| r.status == verifier::VerifStatus::Failed)
-                {
+                // v0.31.25: --verify-ffi fails closed on Disproven or
+                // solver/infrastructure limitations (不放行 Unknown).
+                // Body-level NotInTrustedSubset and NoObligations are exempt.
+                let ffi_failed = ffi_results.iter().any(|r| {
+                    r.status == verifier::VerifStatus::Disproven
+                        || (r.status.is_inconclusive()
+                            && r.status != verifier::VerifStatus::NoObligations
+                            && !matches!(
+                                r.trusted_subset_domain,
+                                Some(verifier::TrustedSubsetDomain::Body)
+                            ))
+                });
+                if ffi_failed {
                     return Err("FFI contract verification failed".into());
                 }
             }

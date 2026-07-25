@@ -11,6 +11,10 @@ fn verification_blocks_success(
     message: &str,
     domain: Option<TrustedSubsetDomain>,
 ) -> bool {
+    // NoObligations never blocks — no proof was attempted.
+    if *status == VerifStatus::NoObligations {
+        return false;
+    }
     let no_contracts = status.is_inconclusive()
         && constraint_count == 0
         && matches!(message, "no contracts" | "no contracts to verify");
