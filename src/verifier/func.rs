@@ -1186,9 +1186,32 @@ impl VerifierCtx {
                         }
                     }
                 }
-                VStmt::Let(_var, _expr) => {
-                    // Let bindings are handled by the encoding context
-                    // (variables are resolved by name)
+                VStmt::Let(var, expr) => {
+                    // Register the let-bound variable and assert its value
+                    let vty = z3ctx.var_types.get(var).copied().unwrap_or(crate::verifier::vir::VType::I64);
+                    z3ctx.register_let(*var, vty);
+                    // Assert the let binding: var == expr
+                    match vty {
+                        crate::verifier::vir::VType::Bool => {
+                            if let Some(body_z3) = z3ctx.encode_bool(expr) {
+                                if let Some(v) = z3ctx.bool_vars.get(var) {
+                                    session.assert(v.eq(&body_z3));
+                                    constraint_count += 1;
+                                }
+                            }
+                        }
+                        crate::verifier::vir::VType::F64Opaque => {
+                            // f64 let: opaque, no arithmetic binding
+                        }
+                        _ => {
+                            if let Some(body_z3) = z3ctx.encode_int(expr) {
+                                if let Some(v) = z3ctx.int_vars.get(var) {
+                                    session.assert(v.eq(&body_z3));
+                                    constraint_count += 1;
+                                }
+                            }
+                        }
+                    }
                 }
                 VStmt::Return(expr) => {
                     // Bind result variable to return expression

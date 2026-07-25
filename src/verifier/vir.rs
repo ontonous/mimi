@@ -450,8 +450,14 @@ fn check_stmt_trusted(stmt: &crate::ast::Stmt) -> TrustedSubsetResult {
         Stmt::MmsBlock { .. } | Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Ellipsis => {
             Ok(())
         }
-        // Let bindings: check the init expression
-        Stmt::Let { init, .. } => {
+        // Let bindings: check the init expression; reject mutable bindings
+        Stmt::Let { init, mut_, .. } => {
+            if *mut_ {
+                return Err(
+                    "mutable let binding is not in the trusted subset (v1: immutable bindings only)"
+                        .into(),
+                );
+            }
             if let Some(init) = init {
                 check_expr_trusted(init)?;
             }
@@ -493,6 +499,8 @@ fn check_stmt_trusted(stmt: &crate::ast::Stmt) -> TrustedSubsetResult {
         ),
         // Block: recurse
         Stmt::Block(stmts) => check_stmts_trusted(stmts),
+        // Do block (transition body): recurse into the block
+        Stmt::Do(stmts) => check_stmts_trusted(stmts),
         // Anything else is rejected
         _ => Err(
             "statement is not in the trusted subset".into(),
@@ -639,6 +647,38 @@ impl LoweringCtx {
         self.param_types.get(name).copied()
     }
 
+    /// Infer the VType of an expression from its structure.
+    /// Used to determine the correct arithmetic type (i32 vs i64).
+    fn infer_expr_type(&self, expr: &crate::ast::Expr) -> VType {
+        use crate::ast::Expr;
+        match expr.unlocated() {
+            Expr::Ident(name) => self.type_of(name).unwrap_or(VType::I64),
+            Expr::Literal(crate::ast::Lit::Int(_)) => VType::I64, // literals are i64 by default
+            Expr::Literal(crate::ast::Lit::Float(_)) => VType::F64Opaque,
+            Expr::Literal(crate::ast::Lit::Bool(_)) => VType::Bool,
+            Expr::Binary(_, lhs, rhs) => {
+                let lt = self.infer_expr_type(lhs);
+                let rt = self.infer_expr_type(rhs);
+                // If either operand is i32, result is i32 (checked arithmetic)
+                if lt == VType::I32 || rt == VType::I32 {
+                    VType::I32
+                } else if lt == VType::F64Opaque || rt == VType::F64Opaque {
+                    VType::F64Opaque
+                } else {
+                    VType::I64
+                }
+            }
+            Expr::Unary(_, inner) => self.infer_expr_type(inner),
+            Expr::Old(inner) => self.infer_expr_type(inner),
+            Expr::If { then_, .. } => {
+                crate::verifier::helpers::block_tail_expr(then_)
+                    .map(|e| self.infer_expr_type(&e))
+                    .unwrap_or(VType::I64)
+            }
+            _ => VType::I64,
+        }
+    }
+
     /// Allocate a fresh local variable.
     #[allow(dead_code)] // Infrastructure for future let-binding lowering
     fn fresh_local(&mut self) -> VarId {
@@ -767,6 +807,44 @@ pub fn lower_func_to_vir(
                 }
             }
             // Skip super-comments and other non-semantic statements
+            crate::ast::Stmt::Do(stmts) => {
+                // Do block (transition body): recurse into the block
+                for inner_stmt in stmts {
+                    match inner_stmt.unlocated() {
+                        crate::ast::Stmt::Expr(expr) => {
+                            if let Some(vexpr) = lower_expr_to_vir(expr, &mut ctx) {
+                                body_stmts.push(VStmt::Return(vexpr));
+                                span_table.record_stmt(&func_id, stmt_index, stmt_span(inner_stmt));
+                                stmt_index += 1;
+                            }
+                        }
+                        crate::ast::Stmt::Return(expr) => {
+                            if let Some(expr) = expr {
+                                if let Some(vexpr) = lower_expr_to_vir(expr, &mut ctx) {
+                                    body_stmts.push(VStmt::Return(vexpr));
+                                    span_table.record_stmt(&func_id, stmt_index, stmt_span(inner_stmt));
+                                    stmt_index += 1;
+                                }
+                            }
+                        }
+                        crate::ast::Stmt::Let { pat, init, .. } => {
+                            if let Some(init) = init {
+                                if let Some(vexpr) = lower_expr_to_vir(init, &mut ctx) {
+                                    let name = match &pat.kind {
+                                        crate::ast::PatternKind::Variable(n) => n.clone(),
+                                        _ => format!("_let{}", stmt_index),
+                                    };
+                                    let var = ctx.resolve(&name);
+                                    body_stmts.push(VStmt::Let(var, vexpr));
+                                    span_table.record_stmt(&func_id, stmt_index, stmt_span(inner_stmt));
+                                    stmt_index += 1;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -834,37 +912,60 @@ fn lower_expr_to_vir(expr: &crate::ast::Expr, ctx: &mut LoweringCtx) -> Option<V
         Expr::Binary(op, lhs, rhs) => {
             let l = lower_expr_to_vir(lhs, ctx)?;
             let r = lower_expr_to_vir(rhs, ctx)?;
+            // Infer the arithmetic type from operands
+            let arith_ty = ctx.infer_expr_type(lhs);
+            // Check if this is an f64 comparison
+            let is_f64 = ctx.infer_expr_type(lhs) == VType::F64Opaque
+                || ctx.infer_expr_type(rhs) == VType::F64Opaque;
             match op {
                 BinOp::Add => Some(VExpr::CheckedArith(
                     VArithOp::Add,
                     Box::new(l),
                     Box::new(r),
-                    VType::I64,
+                    arith_ty,
                 )),
                 BinOp::Sub => Some(VExpr::CheckedArith(
                     VArithOp::Sub,
                     Box::new(l),
                     Box::new(r),
-                    VType::I64,
+                    arith_ty,
                 )),
                 BinOp::Mul => Some(VExpr::CheckedArith(
                     VArithOp::Mul,
                     Box::new(l),
                     Box::new(r),
-                    VType::I64,
+                    arith_ty,
                 )),
                 BinOp::Div => Some(VExpr::CheckedArith(
                     VArithOp::Div,
                     Box::new(l),
                     Box::new(r),
-                    VType::I64,
+                    arith_ty,
                 )),
                 BinOp::Mod => Some(VExpr::CheckedArith(
                     VArithOp::Mod,
                     Box::new(l),
                     Box::new(r),
-                    VType::I64,
+                    arith_ty,
                 )),
+                BinOp::EqCmp if is_f64 => {
+                    Some(VExpr::F64Compare(VCmpOp::Eq, Box::new(l), Box::new(r)))
+                }
+                BinOp::NeCmp if is_f64 => {
+                    Some(VExpr::F64Compare(VCmpOp::Ne, Box::new(l), Box::new(r)))
+                }
+                BinOp::Lt if is_f64 => {
+                    Some(VExpr::F64Compare(VCmpOp::Lt, Box::new(l), Box::new(r)))
+                }
+                BinOp::Gt if is_f64 => {
+                    Some(VExpr::F64Compare(VCmpOp::Gt, Box::new(l), Box::new(r)))
+                }
+                BinOp::Le if is_f64 => {
+                    Some(VExpr::F64Compare(VCmpOp::Le, Box::new(l), Box::new(r)))
+                }
+                BinOp::Ge if is_f64 => {
+                    Some(VExpr::F64Compare(VCmpOp::Ge, Box::new(l), Box::new(r)))
+                }
                 BinOp::EqCmp => Some(VExpr::Compare(VCmpOp::Eq, Box::new(l), Box::new(r))),
                 BinOp::NeCmp => Some(VExpr::Compare(VCmpOp::Ne, Box::new(l), Box::new(r))),
                 BinOp::Lt => Some(VExpr::Compare(VCmpOp::Lt, Box::new(l), Box::new(r))),
@@ -878,7 +979,8 @@ fn lower_expr_to_vir(expr: &crate::ast::Expr, ctx: &mut LoweringCtx) -> Option<V
         }
         Expr::Unary(UnOp::Neg, inner) => {
             let v = lower_expr_to_vir(inner, ctx)?;
-            Some(VExpr::CheckedNeg(Box::new(v), VType::I64))
+            let neg_ty = ctx.infer_expr_type(inner);
+            Some(VExpr::CheckedNeg(Box::new(v), neg_ty))
         }
         Expr::Unary(UnOp::Not, inner) => {
             let v = lower_expr_to_vir(inner, ctx)?;
@@ -1043,11 +1145,13 @@ pub(crate) struct VirZ3Ctx {
     pub(crate) bool_vars: HashMap<VarId, z3::ast::Bool>,
     /// Opaque f64 variables (uninterpreted sort — no arithmetic).
     pub(crate) f64_vars: HashMap<VarId, z3::ast::Int>,
+    /// Old snapshot variables for postconditions: `old(param)`.
+    pub(crate) old_int_vars: HashMap<VarId, z3::ast::Int>,
     /// The `result` variable (Int or Bool depending on return type).
     pub(crate) result_int: Option<z3::ast::Int>,
     pub(crate) result_bool: Option<z3::ast::Bool>,
     /// Parameter types for type-directed encoding.
-    var_types: HashMap<VarId, VType>,
+    pub(crate) var_types: HashMap<VarId, VType>,
     /// Whether the function returns f64 (opaque).
     returns_f64: bool,
     /// Whether the function returns bool.
@@ -1062,6 +1166,7 @@ impl VirZ3Ctx {
             int_vars: HashMap::new(),
             bool_vars: HashMap::new(),
             f64_vars: HashMap::new(),
+            old_int_vars: HashMap::new(),
             result_int: None,
             result_bool: None,
             var_types: HashMap::new(),
@@ -1081,6 +1186,10 @@ impl VirZ3Ctx {
                 VType::I32 | VType::I64 => {
                     ctx.int_vars
                         .insert(var, z3::ast::Int::new_const(name.as_str()));
+                    // Also register old_ snapshot for postconditions
+                    let old_name = format!("old_{}", var);
+                    ctx.old_int_vars
+                        .insert(var, z3::ast::Int::new_const(old_name.as_str()));
                 }
                 VType::F64Opaque => {
                     // f64 as uninterpreted sort — encoded as opaque Int
@@ -1092,6 +1201,26 @@ impl VirZ3Ctx {
         }
 
         ctx
+    }
+
+    /// Register a let-bound variable in the Z3 context.
+    pub(crate) fn register_let(&mut self, var: VarId, vty: VType) {
+        self.var_types.insert(var, vty);
+        let name = var.to_string();
+        match vty {
+            VType::Bool => {
+                self.bool_vars
+                    .insert(var, z3::ast::Bool::new_const(name.as_str()));
+            }
+            VType::I32 | VType::I64 => {
+                self.int_vars
+                    .insert(var, z3::ast::Int::new_const(name.as_str()));
+            }
+            VType::F64Opaque => {
+                self.f64_vars
+                    .insert(var, z3::ast::Int::new_const(name.as_str()));
+            }
+        }
     }
 
     /// Set up the result variable based on return type.
@@ -1112,18 +1241,7 @@ impl VirZ3Ctx {
         match expr {
             VExpr::IntConst(n) => Some(z3::ast::Int::from_i64(*n)),
             VExpr::Var(id) => self.int_vars.get(id).cloned(),
-            VExpr::Old(id) => {
-                // old(param) — look up the old_ prefixed variable
-                let old_name = format!("old_{}", id);
-                self.int_vars
-                    .values()
-                    .find(|_| false) // placeholder — old vars registered separately
-                    .cloned()
-                    .or_else(|| {
-                        // Fall back to creating a fresh old_ variable
-                        Some(z3::ast::Int::new_const(old_name.as_str()))
-                    })
-            }
+            VExpr::Old(id) => self.old_int_vars.get(id).cloned(),
             VExpr::Result => self.result_int.clone(),
             VExpr::CheckedArith(op, lhs, rhs, _ty) => {
                 let l = self.encode_int(lhs)?;
@@ -1179,8 +1297,10 @@ impl VirZ3Ctx {
                     .map(|v| v.ne(&z3::ast::Int::from_i64(0)))
             }
             VExpr::Old(id) => {
-                let old_name = format!("old_{}", id);
-                Some(z3::ast::Int::new_const(old_name.as_str()).ne(&z3::ast::Int::from_i64(0)))
+                // old(param) in bool context: old_int != 0
+                self.old_int_vars
+                    .get(id)
+                    .map(|v| v.ne(&z3::ast::Int::from_i64(0)))
             }
             VExpr::Result => {
                 if let Some(b) = &self.result_bool {
