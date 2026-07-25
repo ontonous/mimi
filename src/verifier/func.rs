@@ -2,7 +2,8 @@ use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use crate::verifier::ctx::{
-    Counterexample, SolverSession, VerifStatus, VerificationResult, VerifierCtx, Z3VarMap,
+    Counterexample, SolverSession, TrustedSubsetDomain, VerifStatus, VerificationResult,
+    VerifierCtx, Z3VarMap,
 };
 use crate::verifier::expr;
 use crate::verifier::helpers::{
@@ -141,6 +142,7 @@ impl VerifierCtx {
                         duration_us: start.elapsed().as_micros() as u64,
                         constraint_count,
                         artifact: None,
+                        trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
                     };
                 }
             }
@@ -161,6 +163,7 @@ impl VerifierCtx {
                 duration_us: start.elapsed().as_micros() as u64,
                 constraint_count,
                 artifact: None,
+                trusted_subset_domain: None,
             },
             SatResult::Unknown => {
                 let elapsed = start.elapsed();
@@ -184,6 +187,7 @@ impl VerifierCtx {
                     duration_us: elapsed.as_micros() as u64,
                     constraint_count,
                     artifact: None,
+                    trusted_subset_domain: None,
                 }
             }
             SatResult::Sat => {
@@ -206,6 +210,7 @@ impl VerifierCtx {
                                     duration_us: start.elapsed().as_micros() as u64,
                                     constraint_count,
                                     artifact: None,
+                                    trusted_subset_domain: None,
                                 },
                                 SatResult::Sat | SatResult::Unknown => VerificationResult {
                                     func_name: format!("extern {}", func.name),
@@ -217,6 +222,7 @@ impl VerifierCtx {
                                     duration_us: start.elapsed().as_micros() as u64,
                                     constraint_count,
                                     artifact: None,
+                                    trusted_subset_domain: None,
                                 },
                             }
                         }
@@ -228,6 +234,7 @@ impl VerifierCtx {
                             duration_us: start.elapsed().as_micros() as u64,
                             constraint_count,
                             artifact: None,
+                            trusted_subset_domain: None,
                         },
                     }
                 } else {
@@ -239,6 +246,7 @@ impl VerifierCtx {
                         duration_us: start.elapsed().as_micros() as u64,
                         constraint_count,
                         artifact: None,
+                        trusted_subset_domain: None,
                     }
                 }
             }
@@ -339,6 +347,7 @@ impl VerifierCtx {
                     duration_us: start.elapsed().as_micros() as u64,
                     constraint_count: 0,
                     artifact: None,
+                    trusted_subset_domain: None,
                 };
             }
             let msg = if parse_errors.is_empty() {
@@ -354,6 +363,7 @@ impl VerifierCtx {
                 duration_us: start.elapsed().as_micros() as u64,
                 constraint_count: 0,
                 artifact: None,
+                trusted_subset_domain: None,
             };
         }
 
@@ -523,6 +533,7 @@ impl VerifierCtx {
                     duration_us: start.elapsed().as_micros() as u64,
                     constraint_count: requires_exprs.len() + math_exprs.len(),
                     artifact: None,
+                    trusted_subset_domain: None,
                 };
             };
             let (proof, _) = session.check_scope(z3_bool.not());
@@ -551,6 +562,7 @@ impl VerifierCtx {
                         duration_us: start.elapsed().as_micros() as u64,
                         constraint_count: requires_exprs.len() + math_exprs.len(),
                         artifact: None,
+                        trusted_subset_domain: None,
                     };
                 }
                 SatResult::Unknown => {
@@ -565,6 +577,7 @@ impl VerifierCtx {
                         duration_us: start.elapsed().as_micros() as u64,
                         constraint_count: requires_exprs.len() + math_exprs.len(),
                         artifact: None,
+                        trusted_subset_domain: None,
                     };
                 }
             }
@@ -633,6 +646,7 @@ impl VerifierCtx {
                         duration_us: start.elapsed().as_micros() as u64,
                         constraint_count: requires_exprs.len() + invariant_exprs.len(),
                         artifact: None,
+                        trusted_subset_domain: None,
                     };
                 }
                 SatResult::Unknown => {
@@ -722,6 +736,7 @@ impl VerifierCtx {
                                 duration_us: start.elapsed().as_micros() as u64,
                                 constraint_count: requires_exprs.len() + 1,
                                 artifact: None,
+                                trusted_subset_domain: None,
                             };
                         }
                         SatResult::Unknown => {
@@ -736,6 +751,7 @@ impl VerifierCtx {
                                 duration_us: start.elapsed().as_micros() as u64,
                                 constraint_count: requires_exprs.len() + 1,
                                 artifact: None,
+                                trusted_subset_domain: None,
                             };
                         }
                     }
@@ -750,6 +766,7 @@ impl VerifierCtx {
                         duration_us: start.elapsed().as_micros() as u64,
                         constraint_count: requires_exprs.len(),
                         artifact: None,
+                        trusted_subset_domain: None,
                     };
                 };
                 if let Some(i) = vars.get_int("result") {
@@ -826,6 +843,7 @@ impl VerifierCtx {
                 duration_us: start.elapsed().as_micros() as u64,
                 constraint_count: 0,
                 artifact: None,
+                trusted_subset_domain: None,
             };
         }
 
@@ -920,6 +938,7 @@ impl VerifierCtx {
                             duration_us: start.elapsed().as_micros() as u64,
                             constraint_count,
                             artifact: None,
+                            trusted_subset_domain: None,
                         }
                     } else if found_unknown {
                         let elapsed = start.elapsed();
@@ -938,6 +957,7 @@ impl VerifierCtx {
                             duration_us: elapsed.as_micros() as u64,
                             constraint_count,
                             artifact: None,
+                            trusted_subset_domain: None,
                         }
                     } else {
                         if parse_errors.is_empty() {
@@ -949,6 +969,7 @@ impl VerifierCtx {
                                 duration_us: start.elapsed().as_micros() as u64,
                                 constraint_count,
                                 artifact: None,
+                                trusted_subset_domain: None,
                             }
                         } else {
                             VerificationResult {
@@ -963,6 +984,7 @@ impl VerifierCtx {
                                 duration_us: start.elapsed().as_micros() as u64,
                                 constraint_count,
                                 artifact: None,
+                                trusted_subset_domain: None,
                             }
                         }
                     }
@@ -976,6 +998,7 @@ impl VerifierCtx {
                             duration_us: start.elapsed().as_micros() as u64,
                             constraint_count,
                             artifact: None,
+                            trusted_subset_domain: None,
                         }
                     } else {
                         VerificationResult {
@@ -990,6 +1013,7 @@ impl VerifierCtx {
                             duration_us: start.elapsed().as_micros() as u64,
                             constraint_count,
                             artifact: None,
+                            trusted_subset_domain: None,
                         }
                     }
                 }
@@ -1009,6 +1033,7 @@ impl VerifierCtx {
                     duration_us: start.elapsed().as_micros() as u64,
                     constraint_count,
                     artifact: None,
+                    trusted_subset_domain: None,
                 }
             }
             SatResult::Unknown => {
@@ -1030,6 +1055,7 @@ impl VerifierCtx {
                     duration_us: elapsed.as_micros() as u64,
                     constraint_count,
                     artifact: None,
+                    trusted_subset_domain: None,
                 }
             }
         }

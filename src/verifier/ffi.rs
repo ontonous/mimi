@@ -253,6 +253,7 @@ impl VerifierCtx {
                     duration_us: start.elapsed().as_micros() as u64,
                     constraint_count: 0,
                     artifact: None,
+                    trusted_subset_domain: None,
                 };
             }
         };
@@ -270,6 +271,7 @@ impl VerifierCtx {
                     duration_us: start.elapsed().as_micros() as u64,
                     constraint_count: 1,
                     artifact: None,
+                    trusted_subset_domain: None,
                 };
             }
         };
@@ -286,6 +288,7 @@ impl VerifierCtx {
                 duration_us: start.elapsed().as_micros() as u64,
                 constraint_count,
                 artifact: None,
+                trusted_subset_domain: None,
             },
             SatResult::Sat => {
                 let diag = Diagnostic::error(
@@ -307,6 +310,7 @@ impl VerifierCtx {
                     duration_us: start.elapsed().as_micros() as u64,
                     constraint_count,
                     artifact: None,
+                    trusted_subset_domain: None,
                 }
             }
             SatResult::Unknown => VerificationResult {
@@ -317,6 +321,7 @@ impl VerifierCtx {
                 duration_us: start.elapsed().as_micros() as u64,
                 constraint_count,
                 artifact: None,
+                trusted_subset_domain: None,
             },
         }
     }

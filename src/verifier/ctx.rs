@@ -19,6 +19,22 @@ pub struct VerificationResult {
     /// v0.31.25: Proof artifact binding the result to its semantic context.
     /// None for NoObligations / InfrastructureError (no proof attempted).
     pub artifact: Option<ProofArtifact>,
+    /// v0.31.25: When status is NotInTrustedSubset, indicates whether the
+    /// unsupported construct is in the contract (requires/ensures) or the body.
+    /// Contract-level → `mimi verify` hard error.
+    /// Body-level → SolverUnknown (doesn't block unless `#[verified]`).
+    pub trusted_subset_domain: Option<TrustedSubsetDomain>,
+}
+
+/// v0.31.25: Verification domain isolation — where the unsupported construct lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustedSubsetDomain {
+    /// The contract expression (requires/ensures) contains unsupported constructs.
+    /// `mimi verify` treats this as a hard error.
+    Contract,
+    /// The function body contains unsupported constructs, but contracts are scalar.
+    /// Produces SolverUnknown; doesn't block `mimi verify` (blocks `#[verified]`).
+    Body,
 }
 
 /// v0.31.25: Eight-result verification algebra.
