@@ -306,6 +306,123 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     gen.export("mimi_wall_clock_ms", |f| {
         f.returns(prim(I64)).effect("io")
     });
+
+    // ── Concurrency: Atomic ──
+    gen.export("mimi_atomic_i32_new", |f| {
+        f.param("value", prim(I32)).returns(prim(I64)).effect("alloc")
+    });
+    gen.export("mimi_atomic_i32_load", |f| {
+        f.param("handle", prim(I64)).returns(prim(I32))
+    });
+    gen.export("mimi_atomic_i32_store", |f| {
+        f.param("handle", prim(I64)).param("value", prim(I32))
+    });
+    gen.export("mimi_atomic_i32_fetch_add", |f| {
+        f.param("handle", prim(I64)).param("delta", prim(I32)).returns(prim(I32))
+    });
+    gen.export("mimi_atomic_i32_drop", |f| {
+        f.param("handle", prim(I64)).effect("dealloc")
+    });
+    gen.export("mimi_atomic_i64_new", |f| {
+        f.param("value", prim(I64)).returns(prim(I64)).effect("alloc")
+    });
+    gen.export("mimi_atomic_i64_load", |f| {
+        f.param("handle", prim(I64)).returns(prim(I64))
+    });
+    gen.export("mimi_atomic_i64_store", |f| {
+        f.param("handle", prim(I64)).param("value", prim(I64))
+    });
+    gen.export("mimi_atomic_i64_fetch_add", |f| {
+        f.param("handle", prim(I64)).param("delta", prim(I64)).returns(prim(I64))
+    });
+    gen.export("mimi_atomic_i64_drop", |f| {
+        f.param("handle", prim(I64)).effect("dealloc")
+    });
+    gen.export("mimi_atomic_bool_new", |f| {
+        f.param("value", prim(I32)).returns(prim(I64)).effect("alloc")
+    });
+    gen.export("mimi_atomic_bool_load", |f| {
+        f.param("handle", prim(I64)).returns(prim(I32))
+    });
+    gen.export("mimi_atomic_bool_store", |f| {
+        f.param("handle", prim(I64)).param("value", prim(I32))
+    });
+    gen.export("mimi_atomic_bool_drop", |f| {
+        f.param("handle", prim(I64)).effect("dealloc")
+    });
+
+    // ── Concurrency: Mutex ──
+    gen.export("mimi_mutex_new", |f| {
+        f.param("value", prim(I64)).returns(prim(I64)).effect("alloc")
+    });
+    gen.export("mimi_mutex_lock", |f| {
+        f.param("handle", prim(I64)).returns(prim(I64)).effect("blocking")
+    });
+    gen.export("mimi_mutex_get", |f| {
+        f.param("guard_handle", prim(I64)).returns(prim(I64))
+    });
+    gen.export("mimi_mutex_set", |f| {
+        f.param("guard_handle", prim(I64)).param("value", prim(I64))
+    });
+    gen.export("mimi_mutex_unlock", |f| {
+        f.param("guard_handle", prim(I64))
+    });
+    gen.export("mimi_mutex_drop", |f| {
+        f.param("handle", prim(I64)).effect("dealloc")
+    });
+
+    // ── Concurrency: Channel ──
+    gen.export("mimi_channel_new", |f| {
+        f.returns(prim(I64)).effect("alloc")
+    });
+    gen.export("mimi_channel_send", |f| {
+        f.param("handle", prim(I64)).param("value", prim(I64)).effect("blocking")
+    });
+    gen.export("mimi_channel_recv", |f| {
+        f.param("handle", prim(I64)).returns(prim(I64)).effect("blocking")
+    });
+    gen.export("mimi_channel_try_recv", |f| {
+        f.param("handle", prim(I64)).returns(prim(I64))
+    });
+    gen.export("mimi_channel_drop", |f| {
+        f.param("handle", prim(I64)).effect("dealloc")
+    });
+
+    // ── Concurrency: Session ──
+    gen.export("mimi_session_pair", |f| {
+        f.returns(prim(I64)).effect("alloc")
+    });
+    gen.export("mimi_session_lo", |f| {
+        f.param("pair", prim(I64)).returns(prim(I64))
+    });
+    gen.export("mimi_session_hi", |f| {
+        f.param("pair", prim(I64)).returns(prim(I64))
+    });
+
+    // ── File I/O ──
+    gen.export("mimi_is_dir", |f| {
+        f.param("path", ptr(prim(U8))).returns(prim(I64)).effect("io")
+    });
+    gen.export("mimi_is_file", |f| {
+        f.param("path", ptr(prim(U8))).returns(prim(I64)).effect("io")
+    });
+    gen.export("mimi_mkdir_p", |f| {
+        f.param("path", ptr(prim(U8))).returns(prim(I64)).effect("io")
+    });
+    gen.export("mimi_remove_file", |f| {
+        f.param("path", ptr(prim(U8))).returns(prim(I64)).effect("io")
+    });
+
+    // ── Time ──
+    gen.export("mimi_sleep_ms", |f| {
+        f.param("ms", prim(I64)).effect("io").effect("blocking")
+    });
+    gen.export("mimi_timestamp", |f| {
+        f.returns(prim(I64)).effect("io")
+    });
+    gen.export("mimi_timestamp_ms", |f| {
+        f.returns(prim(I64)).effect("io")
+    });
 }
 
 #[cfg(test)]
@@ -377,6 +494,25 @@ mod tests {
             "mimi_print_err",
             "mimi_runtime_abort",
             "mimi_wall_clock_ms",
+            // Concurrency
+            "mimi_atomic_i32_new",
+            "mimi_atomic_i32_load",
+            "mimi_mutex_new",
+            "mimi_mutex_lock",
+            "mimi_mutex_unlock",
+            "mimi_channel_new",
+            "mimi_channel_send",
+            "mimi_channel_recv",
+            "mimi_session_pair",
+            // File I/O
+            "mimi_is_dir",
+            "mimi_is_file",
+            "mimi_mkdir_p",
+            "mimi_remove_file",
+            // Time
+            "mimi_sleep_ms",
+            "mimi_timestamp",
+            "mimi_timestamp_ms",
         ];
         for name in &critical {
             assert!(
