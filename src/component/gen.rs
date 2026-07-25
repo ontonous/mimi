@@ -195,6 +195,77 @@ pub fn handle(name: &str) -> AbiTypeRef {
     AbiTypeRef::Opaque(name.to_string())
 }
 
+/// 0.31.31: Convenience: fat pointer type reference (String-like with capacity).
+pub fn fat_string() -> AbiTypeRef {
+    AbiTypeRef::FatPointer {
+        element: Box::new(AbiTypeRef::Primitive(AbiPrimitive::U8)),
+        has_capacity: true,
+    }
+}
+
+/// 0.31.31: Convenience: fat pointer slice type reference (no capacity).
+pub fn fat_slice(element: AbiTypeRef) -> AbiTypeRef {
+    AbiTypeRef::FatPointer {
+        element: Box::new(element),
+        has_capacity: false,
+    }
+}
+
+/// Register standard fat pointer type definitions.
+///
+/// 0.31.31: These replace the opaque handle types for String/List/Map/Set.
+/// Fat pointers carry { data, len, capacity } directly, eliminating the
+/// global handle registry lookup.
+pub fn register_fat_pointer_types(gen: &mut AbiGenerator) {
+    use super::types::{AbiField, AbiStruct};
+    use AbiPrimitive::*;
+
+    // MimiString: { data: *mut u8, len: usize, capacity: usize }
+    gen.type_def(super::types::AbiTypeDef::Struct(AbiStruct {
+        name: "MimiString".to_string(),
+        fields: vec![
+            AbiField {
+                name: "data".to_string(),
+                ty: ptr(prim(U8)),
+                offset: Some(0),
+            },
+            AbiField {
+                name: "len".to_string(),
+                ty: prim(UIntPtr),
+                offset: Some(8),
+            },
+            AbiField {
+                name: "capacity".to_string(),
+                ty: prim(UIntPtr),
+                offset: Some(16),
+            },
+        ],
+        is_repr_c: true,
+        size: Some(24),
+        align: Some(8),
+    }));
+
+    // MimiSlice: { data: *mut T, len: usize }
+    gen.type_def(super::types::AbiTypeDef::Struct(AbiStruct {
+        name: "MimiSlice".to_string(),
+        fields: vec![
+            AbiField {
+                name: "data".to_string(),
+                ty: ptr(prim(U8)),
+                offset: Some(0),
+            },
+            AbiField {
+                name: "len".to_string(),
+                ty: prim(UIntPtr),
+                offset: Some(8),
+            },
+        ],
+        is_repr_c: true,
+        size: Some(16),
+        align: Some(8),
+    }));
+}
+
 /// Register the core runtime ABI surface.
 ///
 /// This is the v1 manual registry. It covers the most critical runtime
@@ -533,5 +604,40 @@ mod tests {
         let ir = gen.build();
         let sym = ir.export("mimi_runtime_abort").expect("should exist");
         assert!(sym.is_unsafe);
+    }
+
+    #[test]
+    fn fat_pointer_types() {
+        let mut gen = AbiGenerator::new();
+        register_fat_pointer_types(&mut gen);
+        let ir = gen.build();
+
+        // MimiString: { data, len, capacity } = 24 bytes
+        let string_ty = ir.type_def("MimiString").expect("MimiString should exist");
+        if let super::super::types::AbiTypeDef::Struct(s) = string_ty {
+            assert_eq!(s.fields.len(), 3);
+            assert_eq!(s.size, Some(24));
+            assert!(s.is_repr_c);
+        } else {
+            panic!("MimiString should be a struct");
+        }
+
+        // MimiSlice: { data, len } = 16 bytes
+        let slice_ty = ir.type_def("MimiSlice").expect("MimiSlice should exist");
+        if let super::super::types::AbiTypeDef::Struct(s) = slice_ty {
+            assert_eq!(s.fields.len(), 2);
+            assert_eq!(s.size, Some(16));
+        } else {
+            panic!("MimiSlice should be a struct");
+        }
+    }
+
+    #[test]
+    fn fat_pointer_type_refs() {
+        let s = fat_string();
+        assert_eq!(s.c_type_name(), "MimiString/* uint8_t */");
+
+        let sl = fat_slice(prim(AbiPrimitive::I64));
+        assert_eq!(sl.c_type_name(), "MimiSlice/* int64_t */");
     }
 }
