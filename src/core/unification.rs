@@ -164,43 +164,7 @@ impl UnificationTable {
     /// parameters; it does not interact with TypeVar (integer) ID space.
     /// Type::ForAll body uses TypeVar(i) for bound parameters, not Name(i).
     pub(crate) fn occurs_in(var: u32, ty: &Type) -> bool {
-        match ty {
-            Type::Located { ty, .. } => Self::occurs_in(var, ty),
-            Type::TypeVar(id) => *id == var,
-            Type::ForAll(_, body) => Self::occurs_in(var, body),
-            Type::Option(inner) => Self::occurs_in(var, inner),
-            Type::Result(ok, err) => Self::occurs_in(var, ok) || Self::occurs_in(var, err),
-            Type::Tuple(elems) => elems.iter().any(|e| Self::occurs_in(var, e)),
-            Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
-                args.iter().any(|a| Self::occurs_in(var, a)) || Self::occurs_in(var, ret)
-            }
-            Type::Ref(_, inner)
-            | Type::RefMut(_, inner)
-            | Type::Shared(inner)
-            | Type::LocalShared(inner)
-            | Type::Weak(inner)
-            | Type::WeakLocal(inner)
-            | Type::RawPtr(inner)
-            | Type::RawPtrMut(inner)
-            | Type::CShared(inner)
-            | Type::CBorrow(inner)
-            | Type::CBorrowMut(inner)
-            | Type::CBuffer(inner)
-            | Type::Array(inner, _)
-            | Type::Slice(inner) => Self::occurs_in(var, inner),
-            Type::Newtype(_, inner) => Self::occurs_in(var, inner),
-            // Type::Name is string-based; TypeVar is integer-based — no cross-check needed.
-            // ForAll params are stored as strings in ForAll but referenced as TypeVar(i)
-            // in the body after remap. instantiate() handles TypeVar substitution correctly.
-            Type::Name(_, args) => args.iter().any(|a| Self::occurs_in(var, a)),
-            Type::Infer
-            | Type::Nothing
-            | Type::Allocator
-            | Type::RawString
-            | Type::Cap(_)
-            | Type::ImplTrait(_)
-            | Type::DynTrait(_) => false,
-        }
+        crate::core::type_folder::type_any(ty, &|t| matches!(t, Type::TypeVar(id) if *id == var))
     }
 
     /// Resolve a type for inference while preserving unbound variables.
@@ -611,42 +575,12 @@ impl UnificationTable {
 }
 
 fn is_escape_type(ty: &Type) -> bool {
-    match ty {
-        Type::Located { ty, .. } => is_escape_type(ty),
+    crate::core::type_folder::type_any(ty, &|t| match t {
         Type::Infer => true,
-        Type::Name(name, args) => {
-            name == "Any" || name == "_" || name == "unknown" || args.iter().any(is_escape_type)
-        }
-        Type::Ref(_, inner)
-        | Type::RefMut(_, inner)
-        | Type::Option(inner)
-        | Type::Shared(inner)
-        | Type::LocalShared(inner)
-        | Type::Weak(inner)
-        | Type::WeakLocal(inner)
-        | Type::Array(inner, _)
-        | Type::Slice(inner)
-        | Type::Newtype(_, inner)
-        | Type::CBuffer(inner)
-        | Type::RawPtr(inner)
-        | Type::RawPtrMut(inner)
-        | Type::CShared(inner)
-        | Type::CBorrow(inner)
-        | Type::CBorrowMut(inner) => is_escape_type(inner),
         Type::ForAll(_, _) => true,
-        Type::Result(ok, err) => is_escape_type(ok) || is_escape_type(err),
-        Type::Tuple(items) => items.iter().any(is_escape_type),
-        Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
-            args.iter().any(is_escape_type) || is_escape_type(ret)
-        }
-        Type::TypeVar(_)
-        | Type::Cap(_)
-        | Type::DynTrait(_)
-        | Type::ImplTrait(_)
-        | Type::Nothing
-        | Type::Allocator
-        | Type::RawString => false,
-    }
+        Type::Name(name, _) => name == "Any" || name == "_" || name == "unknown",
+        _ => false,
+    })
 }
 
 /// Error produced when a type cannot be fully resolved.
@@ -676,8 +610,7 @@ impl std::error::Error for ResolveError {}
 /// Scan a type for residual inference artifacts (TypeVar, ForAll, Infer, `_`).
 /// Returns Err(ResolveError) if any are found.
 pub fn scan_residual(ty: &Type) -> Result<(), ResolveError> {
-    match ty {
-        Type::Located { ty, .. } => scan_residual(ty),
+    crate::core::type_folder::type_try_visit(ty, &|t| match t {
         Type::TypeVar(id) => Err(ResolveError::UnboundVar(*id)),
         Type::ForAll(_, _) => Err(ResolveError::ResidualType(
             "unresolved ForAll quantifier".into(),
@@ -686,51 +619,8 @@ pub fn scan_residual(ty: &Type) -> Result<(), ResolveError> {
         Type::Name(name, _) if name == "_" || name == "unknown" => Err(ResolveError::ResidualType(
             format!("non-final type name '{name}'"),
         )),
-        Type::Name(_, args) => {
-            for arg in args {
-                scan_residual(arg)?;
-            }
-            Ok(())
-        }
-        Type::Option(inner) => scan_residual(inner),
-        Type::Result(ok, err) => {
-            scan_residual(ok)?;
-            scan_residual(err)
-        }
-        Type::Tuple(elems) => {
-            for elem in elems {
-                scan_residual(elem)?;
-            }
-            Ok(())
-        }
-        Type::Func(args, ret) | Type::ExternFunc(args, ret) => {
-            for arg in args {
-                scan_residual(arg)?;
-            }
-            scan_residual(ret)
-        }
-        Type::Ref(_, inner)
-        | Type::RefMut(_, inner)
-        | Type::Shared(inner)
-        | Type::LocalShared(inner)
-        | Type::Weak(inner)
-        | Type::WeakLocal(inner)
-        | Type::RawPtr(inner)
-        | Type::RawPtrMut(inner)
-        | Type::CShared(inner)
-        | Type::CBorrow(inner)
-        | Type::CBorrowMut(inner)
-        | Type::CBuffer(inner)
-        | Type::Array(inner, _)
-        | Type::Slice(inner)
-        | Type::Newtype(_, inner) => scan_residual(inner),
-        Type::Nothing
-        | Type::Allocator
-        | Type::RawString
-        | Type::Cap(_)
-        | Type::ImplTrait(_)
-        | Type::DynTrait(_) => Ok(()),
-    }
+        _ => Ok(()),
+    })
 }
 
 #[cfg(test)]
