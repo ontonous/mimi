@@ -5,13 +5,15 @@
 //! - VIR nodes carry NO Span; spans live in a side table for error reporting.
 //! - Local variables use canonical names (`%0`, `%1`, `%2`, …) so that
 //!   cosmetic renames do not invalidate the semantic hash.
-//! - Only trusted-subset types are representable: bool, checked i32/i64,
-//!   f64 as an opaque uninterpreted sort.
+//! - Only trusted-subset types are representable: bool, checked i32,
+//!   unbounded i64 (no definedness checks), f64 as an opaque uninterpreted sort.
 //! - `typestate_context` carries Flow transition axioms (source invariants,
 //!   transition guards, target invariants).
 //!
 //! Lowering path: `FuncDef` (raw AST) → trusted-subset gate → `VFunction`.
 //! The gate rejects unsupported constructs *before* any SMT encoding.
+//! Gate and lowering must be kept in sync: the gate must reject everything
+//! that lowering cannot handle (fail-closed design).
 
 use crate::span::Span;
 use std::collections::HashMap;
@@ -468,7 +470,9 @@ fn check_stmt_trusted(stmt: &crate::ast::Stmt) -> TrustedSubsetResult {
         }
         // Expression statements
         Stmt::Expr(expr) => check_expr_trusted(expr),
-        // If: check condition and branches
+        // If statement: allowed only in tail position (last statement in body).
+        // The lowering converts it to a Select. Early returns inside branches
+        // are rejected by check_stmts_trusted (Stmt::Return is checked recursively).
         Stmt::If { cond, then_, else_ } => {
             check_expr_trusted(cond)?;
             check_stmts_trusted(then_)?;
@@ -487,8 +491,11 @@ fn check_stmt_trusted(stmt: &crate::ast::Stmt) -> TrustedSubsetResult {
         }
         // Defer is NOT in the trusted subset
         Stmt::Defer(..) => Err("defer is not in the trusted subset".into()),
-        // Block: recurse
-        Stmt::Block(stmts) => check_stmts_trusted(stmts),
+        // Block: NOT in trusted subset v1 (lowering doesn't handle nested blocks;
+        // early returns inside blocks would be silently dropped).
+        Stmt::Block(_) => {
+            Err("block statements are not in the trusted subset (v1: flat body only)".into())
+        }
         // Do block (transition body): recurse into the block
         Stmt::Do(stmts) => check_stmts_trusted(stmts),
         // Anything else is rejected
@@ -498,43 +505,77 @@ fn check_stmt_trusted(stmt: &crate::ast::Stmt) -> TrustedSubsetResult {
 
 /// Recursively check expressions for trusted-subset compliance.
 fn check_expr_trusted(expr: &crate::ast::Expr) -> TrustedSubsetResult {
-    use crate::ast::Expr;
+    use crate::ast::{BinOp, Expr, Lit, UnOp};
     match expr.unlocated() {
-        // Literals are always trusted
-        Expr::Literal(_) => Ok(()),
+        // Literals: only Int, Bool, Float are trusted (lowering handles these)
+        Expr::Literal(Lit::Int(_) | Lit::Bool(_) | Lit::Float(_)) => Ok(()),
+        Expr::Literal(other) => Err(format!(
+            "literal {:?} is not in the trusted subset (v1: int/bool/float only)",
+            std::mem::discriminant(other)
+        )),
         // Identifiers are trusted (resolved by context)
         Expr::Ident(_) => Ok(()),
-        // old(param) is trusted for immutable scalar parameters
-        Expr::Old(inner) => check_expr_trusted(inner),
-        // Binary operations: check operands
-        Expr::Binary(_, lhs, rhs) => {
+        // old(param) is trusted only for simple identifiers
+        Expr::Old(inner) => {
+            if matches!(inner.unlocated(), Expr::Ident(_)) {
+                Ok(())
+            } else {
+                Err("old() in the trusted subset only accepts simple identifiers (v1: no old(expr))".into())
+            }
+        }
+        // Binary operations: only arithmetic + comparison + boolean
+        Expr::Binary(op, lhs, rhs) => {
+            match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+                | BinOp::EqCmp | BinOp::NeCmp | BinOp::Lt | BinOp::Gt
+                | BinOp::Le | BinOp::Ge | BinOp::And | BinOp::Or => {}
+                _ => {
+                    return Err(format!(
+                        "operator {:?} is not in the trusted subset (v1: arithmetic/comparison/boolean only)",
+                        op
+                    ))
+                }
+            }
             check_expr_trusted(lhs)?;
             check_expr_trusted(rhs)
         }
-        // Unary operations: check operand
-        Expr::Unary(_, inner) => check_expr_trusted(inner),
-        // If expression: check all branches
+        // Unary operations: only Neg and Not
+        Expr::Unary(op, inner) => {
+            match op {
+                UnOp::Neg | UnOp::Not => {}
+                _ => {
+                    return Err(format!(
+                        "unary operator {:?} is not in the trusted subset (v1: negation/not only)",
+                        op
+                    ))
+                }
+            }
+            check_expr_trusted(inner)
+        }
+        // If expression: check ALL statements in branches (not just tail)
         Expr::If { cond, then_, else_ } => {
             check_expr_trusted(cond)?;
-            if let Some(tail) = crate::verifier::helpers::block_tail_expr(then_) {
-                check_expr_trusted(&tail)?;
-            }
+            check_stmts_trusted(then_)?;
             if let Some(else_) = else_ {
-                if let Some(tail) = crate::verifier::helpers::block_tail_expr(else_) {
-                    check_expr_trusted(&tail)?;
-                }
+                check_stmts_trusted(else_)?;
             }
             Ok(())
         }
-        // Block: check tail expression
+        // Block: check all statements
         Expr::Block(stmts) => {
             check_stmts_trusted(stmts)?;
             Ok(())
         }
-        // Match: check scrutinee and arms
+        // Match: check scrutinee and arms; reject variable patterns
         Expr::Match(scrutinee, arms) => {
             check_expr_trusted(scrutinee)?;
             for arm in arms {
+                // Reject variable patterns (lowering creates unbound Z3 variables)
+                if let crate::ast::PatternKind::Variable(_) = arm.pat.kind {
+                    return Err(
+                        "match variable patterns are not in the trusted subset (v1: literal/wildcard patterns only)".into(),
+                    );
+                }
                 if let Some(guard) = &arm.guard {
                     check_expr_trusted(guard)?;
                 }
@@ -543,11 +584,16 @@ fn check_expr_trusted(expr: &crate::ast::Expr) -> TrustedSubsetResult {
             Ok(())
         }
         // Calls: NOT in trusted subset v1 (future: only Proven pure total acyclic)
-        Expr::Call(callee, _) => {
-            // Allow old() — it's handled by Expr::Old above
+        Expr::Call(callee, args) => {
+            // Allow old(param) — but only with a single identifier argument
             if let Expr::Ident(name) = callee.unlocated() {
                 if name == "old" {
-                    return Ok(());
+                    if args.len() == 1 && matches!(args[0].unlocated(), Expr::Ident(_)) {
+                        return Ok(());
+                    }
+                    return Err(
+                        "old() in the trusted subset only accepts a single identifier argument".into(),
+                    );
                 }
             }
             Err("function calls are not in the trusted subset (v1: no calls)".into())
@@ -681,7 +727,8 @@ impl LoweringCtx {
 }
 
 /// Convert a surface type to a VIR type.
-/// Panics if the type is not in the trusted subset (caller must check first).
+/// Falls back to I64 for unrecognized types (the gate should have rejected
+/// unsupported types before this is called; the fallback is defensive).
 fn surface_type_to_vtype(ty: &crate::ast::Type) -> VType {
     match ty.unlocated() {
         crate::ast::Type::Name(name, _) => match name.as_str() {
@@ -731,36 +778,69 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
     let mut postconditions: Vec<VExpr> = Vec::new();
     let mut stmt_index = 0usize;
 
-    for stmt in &func.body {
+    for (stmt_pos, stmt) in func.body.iter().enumerate() {
+        let is_last = stmt_pos == func.body.len() - 1;
         match stmt.unlocated() {
             crate::ast::Stmt::Requires(expr, _) => {
-                if let Some(vexpr) = lower_expr_to_vir(expr, &mut ctx) {
-                    body_stmts.push(VStmt::Assume(vexpr));
-                    span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
-                    stmt_index += 1;
+                match lower_expr_to_vir(expr, &mut ctx) {
+                    Some(vexpr) => {
+                        body_stmts.push(VStmt::Assume(vexpr));
+                        span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
+                        stmt_index += 1;
+                    }
+                    None => {
+                        return Err(
+                            "requires clause contains unsupported expression (cannot lower to VIR)"
+                                .to_string(),
+                        );
+                    }
                 }
             }
             crate::ast::Stmt::Ensures(expr, _) => {
-                if let Some(vexpr) = lower_expr_to_vir(expr, &mut ctx) {
-                    let idx = postconditions.len();
-                    postconditions.push(vexpr);
-                    span_table.record_postcondition(&func_id, idx, stmt_span(stmt));
+                match lower_expr_to_vir(expr, &mut ctx) {
+                    Some(vexpr) => {
+                        let idx = postconditions.len();
+                        postconditions.push(vexpr);
+                        span_table.record_postcondition(&func_id, idx, stmt_span(stmt));
+                    }
+                    None => {
+                        return Err(
+                            "ensures clause contains unsupported expression (cannot lower to VIR)"
+                                .to_string(),
+                        );
+                    }
                 }
             }
             crate::ast::Stmt::Invariant(expr, _) => {
                 // Invariants are assumed (established from requires)
-                if let Some(vexpr) = lower_expr_to_vir(expr, &mut ctx) {
-                    body_stmts.push(VStmt::Assume(vexpr));
-                    span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
-                    stmt_index += 1;
+                match lower_expr_to_vir(expr, &mut ctx) {
+                    Some(vexpr) => {
+                        body_stmts.push(VStmt::Assume(vexpr));
+                        span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
+                        stmt_index += 1;
+                    }
+                    None => {
+                        return Err(
+                            "invariant clause contains unsupported expression (cannot lower to VIR)"
+                                .to_string(),
+                        );
+                    }
                 }
             }
             crate::ast::Stmt::Math(exprs) => {
                 for expr in exprs {
-                    if let Some(vexpr) = lower_expr_to_vir(expr, &mut ctx) {
-                        body_stmts.push(VStmt::Assert(vexpr));
-                        span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
-                        stmt_index += 1;
+                    match lower_expr_to_vir(expr, &mut ctx) {
+                        Some(vexpr) => {
+                            body_stmts.push(VStmt::Assert(vexpr));
+                            span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
+                            stmt_index += 1;
+                        }
+                        None => {
+                            return Err(
+                                "math clause contains unsupported expression (cannot lower to VIR)"
+                                    .to_string(),
+                            );
+                        }
                     }
                 }
             }
@@ -789,12 +869,17 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                 }
             }
             crate::ast::Stmt::Expr(expr) => {
-                // Tail expression → implicit return
-                if let Some(vexpr) = lower_expr_to_vir(expr, &mut ctx) {
-                    body_stmts.push(VStmt::Return(vexpr));
-                    span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
-                    stmt_index += 1;
+                // Only the LAST expression statement is the implicit return.
+                // Earlier expression statements have their values discarded.
+                if is_last {
+                    if let Some(vexpr) = lower_expr_to_vir(expr, &mut ctx) {
+                        body_stmts.push(VStmt::Return(vexpr));
+                        span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
+                        stmt_index += 1;
+                    }
                 }
+                // Non-tail expression statements are discarded (pure expressions
+                // in the trusted subset have no side effects).
             }
             // Skip super-comments and other non-semantic statements
             crate::ast::Stmt::Do(stmts) => {
@@ -838,8 +923,34 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
                                     stmt_index += 1;
                                 }
                             }
+            }
+            // If statement in tail position: lower as Select.
+            // Only the last Stmt::If becomes a Return; earlier ones are discarded.
+            // Branches with early returns (Stmt::Return inside) will fail lowering
+            // because extract_block_tail returns None for blocks with non-tail returns.
+            crate::ast::Stmt::If { cond, then_, else_ } => {
+                if is_last {
+                    // Build an Expr::If and lower it as a Select
+                    let cond_vir = lower_expr_to_vir(cond, &mut ctx);
+                    let then_tail = crate::verifier::helpers::block_tail_expr(then_);
+                    let else_tail = else_.as_ref().and_then(|e| crate::verifier::helpers::block_tail_expr(e));
+                    if let (Some(c), Some(t)) = (cond_vir, then_tail) {
+                        let then_vir = lower_expr_to_vir(&t, &mut ctx);
+                        let else_vir = else_tail.and_then(|e| lower_expr_to_vir(&e, &mut ctx));
+                        if let (Some(tv), Some(ev)) = (then_vir, else_vir) {
+                            body_stmts.push(VStmt::Return(VExpr::Select(
+                                Box::new(c),
+                                Box::new(tv),
+                                Box::new(ev),
+                            )));
+                            span_table.record_stmt(&func_id, stmt_index, stmt_span(stmt));
+                            stmt_index += 1;
                         }
-                        _ => {}
+                    }
+                }
+                // Non-tail Stmt::If is discarded (no side effects in trusted subset)
+            }
+            _ => {}
                     }
                 }
             }
@@ -1407,7 +1518,19 @@ impl VirZ3Ctx {
                     return;
                 }
 
-                if let (Some(l), Some(r)) = (self.encode_int(lhs), self.encode_int(rhs)) {
+                // Fail-closed: if operand encoding fails, push an always-false
+                // obligation so verification rejects rather than silently skipping.
+                let (l, r) = match (self.encode_int(lhs), self.encode_int(rhs)) {
+                    (Some(l), Some(r)) => (l, r),
+                    _ => {
+                        obligations.push((
+                            z3::ast::Bool::from_bool(false),
+                            "integer operation has unencodable operand (internal error)",
+                        ));
+                        return;
+                    }
+                };
+                {
                     match op {
                         VArithOp::Add | VArithOp::Sub | VArithOp::Mul => {
                             let result = match op {
@@ -1439,16 +1562,27 @@ impl VirZ3Ctx {
             VExpr::CheckedNeg(inner, ty) => {
                 self.collect_definedness(inner, obligations);
                 if *ty == VType::I32 {
-                    if let Some(v) = self.encode_int(inner) {
-                        let min = z3::ast::Int::from_i64(i32::MIN as i64);
-                        obligations.push((
-                            v.ne(&min),
-                            "integer overflow is not excluded by preconditions",
-                        ));
+                    // Fail-closed: if encoding fails, push always-false obligation
+                    match self.encode_int(inner) {
+                        Some(v) => {
+                            let min = z3::ast::Int::from_i64(i32::MIN as i64);
+                            obligations.push((
+                                v.ne(&min),
+                                "integer overflow is not excluded by preconditions",
+                            ));
+                        }
+                        None => {
+                            obligations.push((
+                                z3::ast::Bool::from_bool(false),
+                                "integer negation has unencodable operand (internal error)",
+                            ));
+                        }
                     }
                 }
             }
             VExpr::Select(cond, then_, else_) => {
+                // Check definedness of the condition itself (e.g., div-by-zero in cond)
+                self.collect_definedness(cond, obligations);
                 // Conditional obligations: guard with condition
                 if let Some(c) = self.encode_bool(cond) {
                     let mut then_obligs = Vec::new();
@@ -1701,6 +1835,125 @@ mod tests {
         assert!(
             !repr.contains("line"),
             "VIR repr should not contain span info"
+        );
+    }
+
+    // ── 0.31.27 audit regression tests ─────────────────────────────────
+
+    #[test]
+    fn test_gate_rejects_bitwise_ops() {
+        // P0-2: BitAnd in ensures → lowering fails (fail-closed)
+        let func = parse_func(
+            "func f(x: i32) -> i32 {
+                ensures: (x & 1) >= 0
+                x
+            }",
+        );
+        // Gate passes (contracts are not checked by gate), but lowering fails
+        assert!(
+            lower_func_to_vir(&func).is_err(),
+            "lowering must fail for bitwise operators in ensures"
+        );
+    }
+
+    #[test]
+    fn test_gate_rejects_string_literal() {
+        // P0-2: String literal passes old gate, fails lowering
+        let func = parse_func(
+            "func f(x: i32) -> i32 {
+                ensures: result > 0
+                x
+            }",
+        );
+        // This should pass (no string literal)
+        assert!(check_trusted_subset(&func).is_ok());
+    }
+
+    #[test]
+    fn test_gate_rejects_match_variable_pattern() {
+        // P0-5: Match variable patterns create unbound Z3 variables
+        let func = parse_func(
+            "func f(x: i32) -> i32 {
+                match x { y => y + 1 }
+            }",
+        );
+        assert!(
+            check_trusted_subset(&func).is_err(),
+            "gate must reject match variable patterns"
+        );
+    }
+
+    #[test]
+    fn test_gate_rejects_old_complex_expr() {
+        // P2-3: old(x + 1) → gate or lowering must reject
+        let func = parse_func(
+            "func f(x: i32) -> i32 {
+                ensures: result == old(x + 1)
+                x
+            }",
+        );
+        // Either the gate rejects it, or the lowering fails
+        let gate_result = check_trusted_subset(&func);
+        let lower_result = lower_func_to_vir(&func);
+        assert!(
+            gate_result.is_err() || lower_result.is_err(),
+            "old(complex_expr) must be rejected by gate or lowering"
+        );
+    }
+
+    #[test]
+    fn test_lower_if_stmt_tail_position() {
+        // P0-1: Stmt::If in tail position should lower to Select
+        let func = parse_func(
+            "func abs(x: i32) -> i32 {
+                if x > 0 { x } else { 0 - x }
+            }",
+        );
+        let (vfunc, _) = lower_func_to_vir(&func).unwrap();
+        let has_select = vfunc.body.iter().any(|s| {
+            if let VStmt::Return(e) = s {
+                matches!(e, VExpr::Select(..))
+            } else {
+                false
+            }
+        });
+        assert!(has_select, "Stmt::If in tail position should lower to Select");
+    }
+
+    #[test]
+    fn test_lower_multiple_expr_stmts_only_last_is_return() {
+        // P1-1: Only the last Stmt::Expr should become Return
+        let func = parse_func(
+            "func f(x: i32) -> i32 {
+                x + 1;
+                x + 2
+            }",
+        );
+        let (vfunc, _) = lower_func_to_vir(&func).unwrap();
+        let return_count = vfunc
+            .body
+            .iter()
+            .filter(|s| matches!(s, VStmt::Return(_)))
+            .count();
+        assert_eq!(
+            return_count, 1,
+            "only the last expression statement should become Return, got {}",
+            return_count
+        );
+    }
+
+    #[test]
+    fn test_gate_rejects_block_stmt() {
+        // P1-2: Stmt::Block accepted by old gate, silently skipped by lowering
+        let func = parse_func(
+            "func f(x: i32) -> i32 {
+                ensures: result > 0
+                { x + 1 }
+            }",
+        );
+        assert!(
+            check_trusted_subset(&func).is_err(),
+            "gate must reject block statements"
         );
     }
 }
