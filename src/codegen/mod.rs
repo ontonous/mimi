@@ -383,6 +383,10 @@ pub struct CodeGenerator<'ctx> {
     resolved_transactional_fields: Option<HashMap<String, Vec<String>>>,
     resolved_metadata_shadow_fields: Option<HashMap<String, Vec<String>>>,
     resolved_flow_protocols: Option<HashMap<String, Vec<String>>>,
+    /// 0.31.30: Component IR — typed ABI surface for runtime function validation.
+    /// When present, get_runtime_fn validates names against the Component IR
+    /// exports, catching typos and removed functions at compiler compile time.
+    component_ir: Option<crate::component::ComponentIr>,
     /// v0.29.24: process spawn quota from first @max_children(N) (None = unlimited).
     max_children: Option<usize>,
     /// FLOW-TURN-001: true when compiling a transition body that declares
@@ -555,6 +559,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_transactional_fields: None,
             resolved_metadata_shadow_fields: None,
             resolved_flow_protocols: None,
+            component_ir: None,
             max_children: None,
             in_fails_transition: false,
         }
@@ -982,10 +987,30 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Look up a runtime/external function by name.
+    ///
+    /// 0.31.30: when Component IR is available (debug builds), validates
+    /// that the name is a known export. Catches typos and removed functions
+    /// at compiler development time.
     pub(super) fn get_runtime_fn(
         &self,
         name: &str,
     ) -> Result<inkwell::values::FunctionValue<'ctx>, CompileError> {
+        // 0.31.30: debug-time validation against Component IR.
+        // Only checks mimi_* names (runtime exports); libc/LLVM intrinsics
+        // (malloc, strcpy, etc.) are not in the Component IR.
+        #[cfg(debug_assertions)]
+        if name.starts_with("mimi_") {
+            if let Some(ref ir) = self.component_ir {
+                if ir.export(name).is_none() {
+                    // Not a hard error yet — the Component IR registry is
+                    // incomplete (23/426 functions). Log for development.
+                    eprintln!(
+                        "[component-ir] warning: get_runtime_fn(\"{}\") not in Component IR registry",
+                        name
+                    );
+                }
+            }
+        }
         self.module
             .get_function(name)
             .ok_or_else(|| CompileError::LlvmError(format!("{} not declared", name)))

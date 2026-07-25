@@ -35,7 +35,7 @@ mod gen;
 
 pub use types::*;
 pub use symbol::*;
-pub use gen::AbiGenerator;
+pub use gen::{AbiGenerator, register_core_runtime_abi};
 
 /// Component IR: the single source of truth for all component bindings.
 ///
