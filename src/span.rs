@@ -523,14 +523,9 @@ impl Span {
     }
 
     /// Create a span that covers from self's start to other's end.
+    /// P2: Identical to `to()` — delegate to avoid duplicate implementation.
     pub fn until(&self, other: &Span) -> Result<Self, SpanSourceMismatch> {
-        Ok(Self {
-            source_id: merged_source(self.source_id, other.source_id)?,
-            start_line: self.start_line,
-            start_col: self.start_col,
-            end_line: other.end_line,
-            end_col: other.end_col,
-        })
+        self.to(other)
     }
 
     /// Check if this span contains a given position.

@@ -15,7 +15,14 @@ fn substitute_type_params(ty: &Type, subst: &HashMap<String, Type>) -> Type {
 }
 
 fn subst_with_depth(ty: &Type, subst: &HashMap<String, Type>, depth: u32) -> Type {
+    // P2: Unified with record.rs — use >= and debug assert on overflow.
     if depth >= MAX_SUBST_DEPTH {
+        mimi_debug_assert!(
+            false,
+            "substitute_type_params: exceeded max depth ({}), \
+             possible self-referencing type parameter",
+            MAX_SUBST_DEPTH
+        );
         return ty.clone();
     }
     let next = depth + 1;
