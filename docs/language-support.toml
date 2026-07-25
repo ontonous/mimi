@@ -1,7 +1,7 @@
 # Mimi implementation evidence for the normative requirements in
 # docs/language-requirements.toml.
 schema_version = 1
-implementation_version = "0.1.1-dev (0.1.0-53-g536897e2, internal sprint 0.31.17)"
+implementation_version = "0.1.1-dev (internal sprint 0.31.25)"
 
 # Every dimension uses:
 # unsupported | partial | complete | not_applicable
@@ -43,16 +43,16 @@ evidence = "0.31.9: fails E syntax, E0424 (? without fails), Rejected path (Err(
 requirement = "FLOW-SPARSE-001"
 implementation = "partial"
 parse = "complete"
-check = "partial"
+check = "complete"
 resolved_ir = "unsupported"
-interp = "partial"
-codegen = "partial"
+interp = "complete"
+codegen = "complete"
 runtime = "partial"
 verify = "not_applicable"
 fmt = "complete"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test flow_matrix -- --test-threads=1"
-evidence = "0.31.10: @sparse annotation skips N×M fallback injection, per-Flow typed Fault (fault ErrorType), explicit reset/recover override. Remaining: progressive Main true lowering deferred (broke 23 golden IR tests)."
+evidence = "0.31.25: @sparse 翻转为 stable 默认（架构修正案条款 1）。无注解 Flow = 稀疏图（未声明对 → 编译错误），@dense 显式启用 N×M Fault 注入。Progressive Main flow 标记 @dense（脚本保持完整 Fault 路由）。per-Flow typed Fault (fault ErrorType), explicit reset/recover override."
 
 [[support]]
 requirement = "FLOW-MULTI-001"
@@ -153,11 +153,11 @@ resolved_ir = "unsupported"
 interp = "partial"
 codegen = "partial"
 runtime = "partial"
-verify = "not_applicable"
+verify = "partial"
 fmt = "partial"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test error_ -- --test-threads=1"
-evidence = "Typed channels exist but Fault and runtime sentinel boundaries are not closed."
+evidence = "0.31.25: VerifStatus 八结果代数（Proven/Disproven/NotInTrustedSubset/SolverUnknown/Timeout/InfrastructureError/RuntimeOnlyContract/NoObligations）+ ProofArtifact 语义绑定 + 验证域隔离（合约级 vs body 级 NotInTrustedSubset）。Typed channels exist but Fault and runtime sentinel boundaries are not closed."
 
 [[support]]
 requirement = "FLOW-FAULT-001"
@@ -268,7 +268,7 @@ evidence = "No Component IR or .mimiabi single source exists."
 requirement = "COMPTIME-PURE-001"
 implementation = "partial"
 parse = "complete"
-check = "partial"
+check = "complete"
 resolved_ir = "unsupported"
 interp = "partial"
 codegen = "not_applicable"
@@ -277,12 +277,12 @@ verify = "unsupported"
 fmt = "partial"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test comptime -- --test-threads=1"
-evidence = "Comptime exists, but the target pure/effect gate and generated-code recheck are incomplete."
+evidence = "0.31.24-5: Checker.in_comptime 守卫 + is_impure_builtin() 拒绝 I/O/FS/net/alloc/time/random/env/exit。extern_funcs 拒绝。Generated-code recheck remains incomplete."
 
 [[support]]
 requirement = "SYNTAX-REMOVED-001"
 implementation = "partial"
-parse = "partial"
+parse = "complete"
 check = "partial"
 resolved_ir = "not_applicable"
 interp = "partial"
@@ -292,12 +292,12 @@ verify = "partial"
 fmt = "partial"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test parser_ -- --test-threads=1"
-evidence = "Several removed statements and wrappers remain accepted in the execution AST."
+evidence = "0.31.21: pinned timeout 废止（Parser 拒绝 pinned(expr, timeout=N)）。架构修正案条款 2: delegate 废止（view/mutate 借用保留为纯函数参数传递）。@sparse 翻转为默认（0.31.25）。Several removed statements and wrappers remain accepted in the execution AST."
 
 [[support]]
 requirement = "LANG-FUNCTION-001"
 implementation = "partial"
-parse = "partial"
+parse = "complete"
 check = "partial"
 resolved_ir = "unsupported"
 interp = "complete"
@@ -307,7 +307,7 @@ verify = "partial"
 fmt = "partial"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test function -- --test-threads=1"
-evidence = "Both function forms exist, but removed type spellings and migration are not closed."
+evidence = "0.31.25: view/mutate 借用双后端等价（条款 6 门禁达成）— call-site mutate/view 语法 + codegen record 引用 ABI 修复 + 2 个双后端测试。Both function forms exist, but removed type spellings and migration are not closed."
 
 [[support]]
 requirement = "LANG-CONTRACT-001"
@@ -322,7 +322,7 @@ verify = "partial"
 fmt = "partial"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test contract -- --test-threads=1"
-evidence = "Contracts remain body statements and runtime/proof timing is not fully unified."
+evidence = "0.31.25: 验证域隔离（合约级 NotInTrustedSubset → mimi verify 硬错误，body 级 → 不阻断）+ ProofArtifact 语义绑定 + 八结果代数。Contracts remain body statements and runtime/proof timing is not fully unified."
 
 [[support]]
 requirement = "LANG-ATTRIBUTE-001"
