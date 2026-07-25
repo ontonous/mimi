@@ -126,6 +126,45 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // CK1: Scope constructor lookup to subject type when known
+                // v0.31.25: Flow state constructors — match record fields by name.
+                // Multi-target transitions return Value::Record(Some("StateName"), fields).
+                // match r { Small { v } => ..., Large { v } => ... }
+                if self.flow_state_type_names.contains(name.as_str()) {
+                    let field_types: Vec<(String, Type)> = self
+                        .types
+                        .get(name.as_str())
+                        .and_then(|tdef| match &tdef.kind {
+                            TypeDefKind::Record(fields) => Some(
+                                fields
+                                    .iter()
+                                    .map(|f| (f.name.clone(), self.resolve_type(&f.ty)))
+                                    .collect(),
+                            ),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    if !field_types.is_empty() || self.types.contains_key(name.as_str()) {
+                        for (field_name, pat) in pats {
+                            if let Some((_, resolved)) = field_types
+                                .iter()
+                                .find(|(n, _)| n == field_name)
+                            {
+                                self.check_pattern(pat, resolved, scopes);
+                            } else {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0226,
+                                    format!(
+                                        "flow state '{}' has no field '{}'",
+                                        name, field_name
+                                    ),
+                                );
+                            }
+                        }
+                        return;
+                    }
+                    // State name known but no type def — accept without field checking
+                    return;
+                }
                 let def = match subject.unlocated() {
                     Type::Name(type_name, _) => {
                         self.types.get(type_name).filter(|t| match &t.kind {
