@@ -595,10 +595,11 @@ requirements = ["VERIFY-CORE-001"]
 # 通过 flow_verify_file_or_mock / VerifierState::with_hashes 传递到 verify_func_vir。
 # 新增 2 个测试验证 hash 非空且不同源码产生不同 hash。
 #
-# 【DEFERRED → post-0.31.27】Callee ensures propagation in VIR path：
-# - 需要扩展 trusted subset gate 允许调用已验证函数
-# - 当前 calls 被 gate 拒绝；AST 路径通过 assert_callee_ensures_in_block 处理
-# - 验收标准：VIR 路径可验证含调用的函数（callee ensures 作为公理）
+# ✅ Callee ensures propagation in VIR path（ec657eb7）：
+# gate 因 calls 拒绝时，try_inline_callee_ensures 将已验证 callee 的 ensures
+# 内联为 requires（Assume），替换调用为 __call_N 变量。V-C4 守卫仅内联
+# Verified callee。编码前预注册所有 VIR 变量。V1：仅标识符 callee，
+# 复杂表达式回退 AST。新增 2 个测试（链式验证 + 反驳）。
 #
 # 【DEFERRED → post-0.31.27】Typestate 公理注入（CheckedProgram → Z3）：
 # - 需要 CheckedProgram 访问（当前 verifier 操作 raw AST）
