@@ -538,6 +538,13 @@ impl Parser {
         }
         loop {
             self.skip_newlines();
+            // v0.31.25: call-site `mutate`/`view` borrow annotation.
+            // The keyword is skipped — the actual borrow mode is determined by
+            // the parameter declaration. This is explicit syntax for clarity:
+            //   apply_filter(mutate self.buffer, sample)
+            if self.at(&TokenKind::Mutate) || self.at(&TokenKind::View) {
+                self.advance();
+            }
             // Check for named arg: `ident = expr`
             if let Some(name) = self.peek_named_arg() {
                 let arg_start = self.pos;
