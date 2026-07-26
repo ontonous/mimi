@@ -494,6 +494,27 @@ impl<'ctx> CodeGenerator<'ctx> {
         {
             let mut gen = crate::component::AbiGenerator::new();
             crate::component::register_core_runtime_abi(&mut gen);
+            // 0.31.30+: scan user extern blocks and register as imports.
+            // This makes the Component IR aware of user-declared extern
+            // functions, enabling bindgen backends to generate complete
+            // bindings that include both runtime exports and user imports.
+            for block in program.extern_blocks().values() {
+                for sig in &block.signatures {
+                    gen.import(&sig.name, |f| {
+                        let mut builder = f;
+                        for (pname, pty) in &sig.params {
+                            builder = builder.param(pname, crate::component::mimi_type_to_abi(pty));
+                        }
+                        if !sig.ret.is_empty() && sig.ret != "void" && sig.ret != "()" {
+                            builder = builder.returns(crate::component::mimi_type_to_abi(&sig.ret));
+                        }
+                        if block.unsafe_ {
+                            builder = builder.unsafe_fn();
+                        }
+                        builder
+                    });
+                }
+            }
             self.component_ir = Some(gen.build());
         }
         self.compile_file(program.legacy_body_file())

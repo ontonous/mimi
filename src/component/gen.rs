@@ -224,6 +224,24 @@ pub fn handle(name: &str) -> AbiTypeRef {
     AbiTypeRef::Opaque(name.to_string())
 }
 
+/// Convert a Mimi surface type name to an AbiTypeRef.
+///
+/// Handles primitives (via `AbiPrimitive::from_mimi_type`), strings
+/// (mapped to `*mut u8` for C ABI), and falls back to `Named` for
+/// user-defined types.
+pub fn mimi_type_to_abi(name: &str) -> AbiTypeRef {
+    if let Some(prim) = AbiPrimitive::from_mimi_type(name) {
+        return AbiTypeRef::Primitive(prim);
+    }
+    match name {
+        "string" | "String" => {
+            AbiTypeRef::Pointer(Box::new(AbiTypeRef::Primitive(AbiPrimitive::U8)))
+        }
+        "void" | "()" | "" => AbiTypeRef::Void,
+        _ => AbiTypeRef::Named(name.to_string()),
+    }
+}
+
 /// 0.31.31: Convenience: fat pointer type reference (String-like with capacity).
 pub fn fat_string() -> AbiTypeRef {
     AbiTypeRef::FatPointer {

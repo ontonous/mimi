@@ -357,6 +357,61 @@ impl WireType {
             _ => None,
         }
     }
+
+    /// Encode an array header (u32 LE element count).
+    ///
+    /// The caller is responsible for encoding each element after the header.
+    /// Elements should be self-delimiting (fixed-size or length-prefixed).
+    pub fn encode_array_header(count: u32) -> Vec<u8> {
+        count.to_le_bytes().to_vec()
+    }
+
+    /// Decode an array header, returning the element count.
+    ///
+    /// Returns `(count, bytes_consumed)` or `None` if data is too short.
+    pub fn decode_array_header(data: &[u8]) -> Option<(u32, usize)> {
+        if data.len() < 4 {
+            return None;
+        }
+        let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        Some((count, 4))
+    }
+
+    /// Encode a map header (u32 LE pair count).
+    ///
+    /// The caller is responsible for encoding each key-value pair after
+    /// the header. Keys and values should be self-delimiting.
+    pub fn encode_map_header(count: u32) -> Vec<u8> {
+        count.to_le_bytes().to_vec()
+    }
+
+    /// Decode a map header, returning the pair count.
+    ///
+    /// Returns `(count, bytes_consumed)` or `None` if data is too short.
+    pub fn decode_map_header(data: &[u8]) -> Option<(u32, usize)> {
+        Self::decode_array_header(data) // same wire format
+    }
+
+    /// Encode a Result header (1 byte tag: 0=Ok, 1=Err).
+    ///
+    /// The caller is responsible for encoding the value/error after the tag.
+    pub fn encode_result_tag(is_err: bool) -> Vec<u8> {
+        vec![if is_err { 1 } else { 0 }]
+    }
+
+    /// Decode a Result header tag.
+    ///
+    /// Returns `(is_err, bytes_consumed)` or `None` if data is empty.
+    pub fn decode_result_tag(data: &[u8]) -> Option<(bool, usize)> {
+        if data.is_empty() {
+            return None;
+        }
+        match data[0] {
+            0 => Some((false, 1)),
+            1 => Some((true, 1)),
+            _ => None,
+        }
+    }
 }
 
 /// Wire field: a field in a wire message.
@@ -723,5 +778,77 @@ mod tests {
     #[test]
     fn wire_optional_decode_empty() {
         assert!(WireType::decode_optional(&[]).is_none());
+    }
+
+    #[test]
+    fn wire_array_header_roundtrip() {
+        let encoded = WireType::encode_array_header(42);
+        assert_eq!(encoded.len(), 4);
+        let (count, consumed) = WireType::decode_array_header(&encoded).unwrap();
+        assert_eq!(count, 42);
+        assert_eq!(consumed, 4);
+
+        // Zero elements
+        let encoded = WireType::encode_array_header(0);
+        let (count, _) = WireType::decode_array_header(&encoded).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn wire_array_header_truncated() {
+        assert!(WireType::decode_array_header(&[1, 0]).is_none());
+    }
+
+    #[test]
+    fn wire_map_header_roundtrip() {
+        let encoded = WireType::encode_map_header(7);
+        let (count, consumed) = WireType::decode_map_header(&encoded).unwrap();
+        assert_eq!(count, 7);
+        assert_eq!(consumed, 4);
+    }
+
+    #[test]
+    fn wire_result_tag_roundtrip() {
+        // Ok
+        let encoded = WireType::encode_result_tag(false);
+        assert_eq!(encoded, vec![0]);
+        let (is_err, consumed) = WireType::decode_result_tag(&encoded).unwrap();
+        assert!(!is_err);
+        assert_eq!(consumed, 1);
+
+        // Err
+        let encoded = WireType::encode_result_tag(true);
+        assert_eq!(encoded, vec![1]);
+        let (is_err, consumed) = WireType::decode_result_tag(&encoded).unwrap();
+        assert!(is_err);
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn wire_result_tag_invalid() {
+        assert!(WireType::decode_result_tag(&[]).is_none());
+        assert!(WireType::decode_result_tag(&[2]).is_none());
+    }
+
+    #[test]
+    fn wire_composite_encode_example() {
+        // Encode an array of 3 i32 values: [10, 20, 30]
+        let mut buf = WireType::encode_array_header(3);
+        for &v in &[10i32, 20, 30] {
+            buf.extend(WireType::I32.encode_primitive(v as u64).unwrap());
+        }
+        assert_eq!(buf.len(), 4 + 3 * 4); // header + 3 elements
+
+        // Decode
+        let (count, offset) = WireType::decode_array_header(&buf).unwrap();
+        assert_eq!(count, 3);
+        let mut values = Vec::new();
+        let mut pos = offset;
+        for _ in 0..count {
+            let v = WireType::I32.decode_primitive(&buf[pos..pos + 4]).unwrap();
+            values.push(v as i32);
+            pos += 4;
+        }
+        assert_eq!(values, vec![10, 20, 30]);
     }
 }
