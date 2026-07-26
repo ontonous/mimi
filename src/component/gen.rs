@@ -297,9 +297,11 @@ pub fn register_fat_pointer_types(gen: &mut AbiGenerator) {
 
 /// Register the core runtime ABI surface.
 ///
-/// This is the v1 manual registry. It covers the most critical runtime
-/// functions (~60 of 426: RC, list, map, set, string, I/O, concurrency,
-/// file I/O, time). The full surface will be migrated incrementally.
+/// This is the v2 manual registry. It covers ~150 of 388 runtime functions:
+/// RC, list, map, set, string, I/O, concurrency, file I/O, time, JSON,
+/// crypto, regex, net, actor, future, env, exec, sort, capability, misc.
+/// JSON combinatorial serialization variants (mimi_map_from_json_* etc.)
+/// are intentionally excluded — they are internal codegen artifacts.
 pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     use AbiPrimitive::*;
 
@@ -308,7 +310,7 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     // of an opaque C-string pointer + separate length.
     register_fat_pointer_types(gen);
 
-    // Register opaque handle types (referenced by list/map/set functions).
+    // Register opaque handle types (referenced by list/map/set/actor/future).
     use super::types::{AbiOpaque, AbiTypeDef};
     gen.type_def(AbiTypeDef::Opaque(AbiOpaque {
         name: "ListHandle".to_string(),
@@ -322,6 +324,14 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
         name: "SetHandle".to_string(),
         description: "Opaque handle to a Mimi set (generational, kind-tagged)".to_string(),
     }));
+    gen.type_def(AbiTypeDef::Opaque(AbiOpaque {
+        name: "ActorHandle".to_string(),
+        description: "Opaque handle to a Mimi actor".to_string(),
+    }));
+    gen.type_def(AbiTypeDef::Opaque(AbiOpaque {
+        name: "FutureHandle".to_string(),
+        description: "Opaque handle to a Mimi future/task".to_string(),
+    }));
 
     // ── RC / Allocation ──
     gen.export("mimi_rc_alloc", |f| {
@@ -333,6 +343,13 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     gen.export("mimi_rc_release", |f| {
         f.param("ptr", prim(IntPtr)).effect("dealloc")
     });
+    gen.export("mimi_rc_upgrade", |f| {
+        f.param("weak_ptr", prim(IntPtr)).returns(prim(IntPtr))
+    });
+    gen.export("mimi_rc_weak_retain", |f| f.param("ptr", prim(IntPtr)));
+    gen.export("mimi_rc_weak_release", |f| {
+        f.param("ptr", prim(IntPtr)).effect("dealloc")
+    });
 
     // ── List ──
     gen.export("mimi_list_new", |f| {
@@ -342,10 +359,28 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
         f.param("list", handle("ListHandle"))
             .param("value", prim(I64))
     });
+    gen.export("mimi_list_push_f64", |f| {
+        f.param("list", handle("ListHandle"))
+            .param("value", prim(F64))
+    });
+    gen.export("mimi_list_push_string", |f| {
+        f.param("list", handle("ListHandle"))
+            .param("value", ptr(prim(U8)))
+    });
     gen.export("mimi_list_get_i64", |f| {
         f.param("list", handle("ListHandle"))
             .param("index", prim(UIntPtr))
             .returns(prim(I64))
+    });
+    gen.export("mimi_list_get_f64", |f| {
+        f.param("list", handle("ListHandle"))
+            .param("index", prim(UIntPtr))
+            .returns(prim(F64))
+    });
+    gen.export("mimi_list_get_string", |f| {
+        f.param("list", handle("ListHandle"))
+            .param("index", prim(UIntPtr))
+            .returns(ptr(prim(U8)))
     });
     gen.export("mimi_list_len", |f| {
         f.param("list", handle("ListHandle")).returns(prim(UIntPtr))
@@ -353,43 +388,156 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     gen.export("mimi_list_free", |f| {
         f.param("list", handle("ListHandle")).effect("dealloc")
     });
+    gen.export("mimi_list_push_grow", |f| {
+        f.param("list", handle("ListHandle"))
+            .param("value", prim(I64))
+            .param("capacity", prim(UIntPtr))
+    });
 
     // ── Map ──
     gen.export("mimi_map_new", |f| {
         f.returns(handle("MapHandle")).effect("alloc")
     });
-    gen.export("mimi_map_set_i64", |f| {
+    gen.export("mimi_map_set", |f| {
         f.param("map", handle("MapHandle"))
             .param("key", ptr(prim(U8)))
             .param("value", prim(I64))
     });
-    gen.export("mimi_map_get_i64", |f| {
+    gen.export("mimi_map_get", |f| {
         f.param("map", handle("MapHandle"))
             .param("key", ptr(prim(U8)))
             .returns(prim(I64))
     });
-    gen.export("mimi_map_free", |f| {
+    gen.export("mimi_map_remove", |f| {
+        f.param("map", handle("MapHandle"))
+            .param("key", ptr(prim(U8)))
+    });
+    gen.export("mimi_map_has_key", |f| {
+        f.param("map", handle("MapHandle"))
+            .param("key", ptr(prim(U8)))
+            .returns(prim(I32))
+    });
+    gen.export("mimi_map_keys", |f| {
+        f.param("map", handle("MapHandle"))
+            .returns(handle("ListHandle"))
+    });
+    gen.export("mimi_map_values", |f| {
+        f.param("map", handle("MapHandle"))
+            .returns(handle("ListHandle"))
+    });
+    gen.export("mimi_map_size", |f| {
+        f.param("map", handle("MapHandle")).returns(prim(UIntPtr))
+    });
+    gen.export("mimi_map_destroy", |f| {
         f.param("map", handle("MapHandle")).effect("dealloc")
+    });
+    gen.export("mimi_map_from_list", |f| {
+        f.param("keys", handle("ListHandle"))
+            .param("values", handle("ListHandle"))
+            .returns(handle("MapHandle"))
+            .effect("alloc")
     });
 
     // ── Set ──
     gen.export("mimi_set_new", |f| {
         f.returns(handle("SetHandle")).effect("alloc")
     });
-    gen.export("mimi_set_insert_i64", |f| {
+    gen.export("mimi_set_insert", |f| {
         f.param("set", handle("SetHandle"))
             .param("value", prim(I64))
     });
-    gen.export("mimi_set_contains_i64", |f| {
+    gen.export("mimi_set_contains", |f| {
         f.param("set", handle("SetHandle"))
             .param("value", prim(I64))
-            .returns(prim(Bool))
+            .returns(prim(I32))
     });
-    gen.export("mimi_set_free", |f| {
+    gen.export("mimi_set_remove", |f| {
+        f.param("set", handle("SetHandle"))
+            .param("value", prim(I64))
+    });
+    gen.export("mimi_set_size", |f| {
+        f.param("set", handle("SetHandle")).returns(prim(UIntPtr))
+    });
+    gen.export("mimi_set_destroy", |f| {
         f.param("set", handle("SetHandle")).effect("dealloc")
     });
+    gen.export("mimi_set_to_list", |f| {
+        f.param("set", handle("SetHandle"))
+            .returns(handle("ListHandle"))
+    });
 
-    // ── String (0.31.31: fat pointers replace C-string *mut c_char) ──
+    // ── String ──
+    gen.export("mimi_str_clone", |f| {
+        f.param("s", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_str_concat", |f| {
+        f.param("a", ptr(prim(U8)))
+            .param("b", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_str_char_at", |f| {
+        f.param("s", ptr(prim(U8)))
+            .param("index", prim(I64))
+            .returns(ptr(prim(U8)))
+    });
+    gen.export("mimi_str_substring", |f| {
+        f.param("s", ptr(prim(U8)))
+            .param("start", prim(I64))
+            .param("end", prim(I64))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_str_split", |f| {
+        f.param("s", ptr(prim(U8)))
+            .param("delim", ptr(prim(U8)))
+            .returns(handle("ListHandle"))
+            .effect("alloc")
+    });
+    gen.export("mimi_str_join", |f| {
+        f.param("list", handle("ListHandle"))
+            .param("sep", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_str_replace", |f| {
+        f.param("s", ptr(prim(U8)))
+            .param("from", ptr(prim(U8)))
+            .param("to", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_string_free", |f| {
+        f.param("s", ptr(prim(U8))).effect("dealloc")
+    });
+    gen.export("mimi_str_format", |f| {
+        f.param("num_args", prim(I64))
+            .param("template", ptr(prim(U8)))
+            .param("arg0", ptr(prim(U8)))
+            .param("arg1", ptr(prim(U8)))
+            .param("arg2", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_to_string_i64", |f| {
+        f.param("val", prim(I64))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_to_string_f64", |f| {
+        f.param("val", prim(F64))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_any_to_string", |f| {
+        f.param("value", prim(I64))
+            .param("type_tag", prim(I32))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    // 0.31.31: fat-pointer string surface (zero-copy, replaces C-string marshalling)
     gen.export("mimi_string_new", |f| {
         f.param("bytes", fat_slice(prim(U8)))
             .returns(fat_string())
@@ -398,11 +546,6 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     gen.export("mimi_string_len", |f| {
         f.param("s", fat_string()).returns(prim(UIntPtr))
     });
-    gen.export("mimi_string_free", |f| {
-        f.param("s", fat_string()).effect("dealloc")
-    });
-    // Zero-copy view: hand out a { data, len } slice into an existing string
-    // without a marshalling copy (blind review:胶水语言 Marshalling Tax).
     gen.export("mimi_string_as_slice", |f| {
         f.param("s", fat_string()).returns(fat_slice(prim(U8)))
     });
@@ -426,6 +569,19 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .unsafe_fn()
     });
     gen.export("mimi_wall_clock_ms", |f| f.returns(prim(I64)).effect("io"));
+    gen.export("mimi_runtime_set_error_handler", |f| {
+        f.param("handler", prim(IntPtr))
+    });
+    gen.export("mimi_install_no_panic_handlers", |f| f.effect("io"));
+    gen.export("mimi_restore_no_panic_handlers", |f| f.effect("io"));
+    gen.export("mimi_try_exit", |f| f.param("code", prim(I32)));
+    gen.export("mimi_try_exit_str", |f| f.param("msg", ptr(prim(U8))));
+    gen.export("mimi_assert_state", |f| {
+        f.param("cond", prim(I32)).param("msg", ptr(prim(U8)))
+    });
+    gen.export("mimi_value_type_name", |f| {
+        f.param("type_tag", prim(I32)).returns(ptr(prim(U8)))
+    });
 
     // ── Concurrency: Atomic ──
     gen.export("mimi_atomic_i32_new", |f| {
@@ -442,6 +598,12 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     gen.export("mimi_atomic_i32_fetch_add", |f| {
         f.param("handle", prim(I64))
             .param("delta", prim(I32))
+            .returns(prim(I32))
+    });
+    gen.export("mimi_atomic_i32_compare_exchange", |f| {
+        f.param("handle", prim(I64))
+            .param("expected", prim(I32))
+            .param("desired", prim(I32))
             .returns(prim(I32))
     });
     gen.export("mimi_atomic_i32_drop", |f| {
@@ -554,6 +716,52 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .returns(prim(I64))
             .effect("io")
     });
+    gen.export("mimi_read_file_bytes", |f| {
+        f.param("path", ptr(prim(U8)))
+            .param("out_len", ptr(prim(UIntPtr)))
+            .returns(ptr(prim(U8)))
+            .effect("io")
+            .effect("alloc")
+    });
+    gen.export("mimi_write_file_bytes", |f| {
+        f.param("path", ptr(prim(U8)))
+            .param("data", ptr(prim(U8)))
+            .param("len", prim(I64))
+            .returns(prim(I64))
+            .effect("io")
+    });
+    gen.export("mimi_append_file", |f| {
+        f.param("path", ptr(prim(U8)))
+            .param("data", ptr(prim(U8)))
+            .returns(prim(I64))
+            .effect("io")
+    });
+    gen.export("mimi_listdir", |f| {
+        f.param("path", ptr(prim(U8)))
+            .returns(handle("ListHandle"))
+            .effect("io")
+    });
+    gen.export("mimi_path_join", |f| {
+        f.param("a", ptr(prim(U8)))
+            .param("b", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_path_basename", |f| {
+        f.param("path", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_path_dirname", |f| {
+        f.param("path", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_path_ext", |f| {
+        f.param("path", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
 
     // ── Time ──
     gen.export("mimi_sleep_ms", |f| {
@@ -561,6 +769,331 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     });
     gen.export("mimi_timestamp", |f| f.returns(prim(I64)).effect("io"));
     gen.export("mimi_timestamp_ms", |f| f.returns(prim(I64)).effect("io"));
+    gen.export("mimi_now", |f| f.returns(prim(I64)).effect("io"));
+    gen.export("mimi_now_ms", |f| f.returns(prim(I64)).effect("io"));
+
+    // ── JSON ──
+    gen.export("mimi_json_serialize", |f| {
+        f.param("value", prim(I64))
+            .param("type_tag", prim(I32))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_json_deserialize", |f| {
+        f.param("json", ptr(prim(U8)))
+            .returns(prim(I64))
+            .effect("alloc")
+    });
+    gen.export("mimi_json_deserialize_free", |f| {
+        f.param("ptr", prim(I64)).effect("dealloc")
+    });
+    gen.export("mimi_json_as_i64", |f| {
+        f.param("json_ptr", prim(I64)).returns(prim(I64))
+    });
+    gen.export("mimi_json_as_f64", |f| {
+        f.param("json_ptr", prim(I64)).returns(prim(F64))
+    });
+    gen.export("mimi_json_as_bool", |f| {
+        f.param("json_ptr", prim(I64)).returns(prim(I32))
+    });
+    gen.export("mimi_is_valid_json", |f| {
+        f.param("json", ptr(prim(U8))).returns(prim(I32))
+    });
+    gen.export("mimi_json_escape_string", |f| {
+        f.param("s", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_from_json", |f| {
+        f.param("json", ptr(prim(U8)))
+            .param("type_tag", prim(I32))
+            .returns(prim(I64))
+    });
+
+    // ── Crypto ──
+    gen.export("mimi_sha256", |f| {
+        f.param("data", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_sha256_n", |f| {
+        f.param("data", ptr(prim(U8)))
+            .param("len", prim(I64))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_base64_encode", |f| {
+        f.param("data", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_base64_decode", |f| {
+        f.param("data", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+
+    // ── Regex ──
+    gen.export("mimi_regex_match", |f| {
+        f.param("text", ptr(prim(U8)))
+            .param("pattern", ptr(prim(U8)))
+            .returns(prim(I32))
+    });
+    gen.export("mimi_regex_find", |f| {
+        f.param("text", ptr(prim(U8)))
+            .param("pattern", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_regex_find_all", |f| {
+        f.param("text", ptr(prim(U8)))
+            .param("pattern", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_regex_replace", |f| {
+        f.param("text", ptr(prim(U8)))
+            .param("pattern", ptr(prim(U8)))
+            .param("replacement", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_regex_capture_groups", |f| {
+        f.param("text", ptr(prim(U8)))
+            .param("pattern", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+
+    // ── Net ──
+    gen.export("mimi_socket", |f| {
+        f.param("domain", prim(I64))
+            .param("type_", prim(I64))
+            .param("protocol", prim(I64))
+            .returns(prim(I64))
+            .effect("io")
+    });
+    gen.export("mimi_connect", |f| {
+        f.param("fd", prim(I64))
+            .param("addr", ptr(prim(U8)))
+            .param("port", prim(I64))
+            .returns(prim(I64))
+            .effect("io")
+            .effect("blocking")
+    });
+    gen.export("mimi_bind", |f| {
+        f.param("fd", prim(I64))
+            .param("addr", ptr(prim(U8)))
+            .param("port", prim(I64))
+            .returns(prim(I64))
+            .effect("io")
+    });
+    gen.export("mimi_listen", |f| {
+        f.param("fd", prim(I64))
+            .param("backlog", prim(I64))
+            .returns(prim(I64))
+            .effect("io")
+    });
+    gen.export("mimi_accept", |f| {
+        f.param("fd", prim(I64))
+            .returns(prim(I64))
+            .effect("io")
+            .effect("blocking")
+    });
+    gen.export("mimi_send", |f| {
+        f.param("fd", prim(I64))
+            .param("data", ptr(prim(U8)))
+            .param("len", prim(I64))
+            .returns(prim(I64))
+            .effect("io")
+    });
+    gen.export("mimi_recv", |f| {
+        f.param("fd", prim(I64))
+            .param("buf", ptr(prim(U8)))
+            .param("buf_len", prim(I64))
+            .returns(prim(I64))
+            .effect("io")
+            .effect("blocking")
+    });
+    gen.export("mimi_close", |f| f.param("fd", prim(I64)).effect("io"));
+    gen.export("mimi_http_get", |f| {
+        f.param("url", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("io")
+            .effect("blocking")
+            .effect("alloc")
+    });
+    gen.export("mimi_http_post", |f| {
+        f.param("url", ptr(prim(U8)))
+            .param("body", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("io")
+            .effect("blocking")
+            .effect("alloc")
+    });
+
+    // ── Actor ──
+    gen.export("mimi_actor_spawn", |f| {
+        f.param("fields_ptr", prim(IntPtr))
+            .param("fields_size", prim(I64))
+            .param("dispatch_fn", prim(IntPtr))
+            .returns(handle("ActorHandle"))
+            .effect("alloc")
+    });
+    gen.export("mimi_actor_spawn_detached", |f| {
+        f.param("fields_ptr", prim(IntPtr))
+            .param("fields_size", prim(I64))
+            .param("dispatch_fn", prim(IntPtr))
+            .returns(handle("ActorHandle"))
+            .effect("alloc")
+    });
+    gen.export("mimi_actor_call", |f| {
+        f.param("handle", handle("ActorHandle"))
+            .param("method_id", prim(I32))
+            .param("args_ptr", prim(IntPtr))
+            .param("args_size", prim(I64))
+            .returns(prim(I64))
+            .effect("blocking")
+    });
+    gen.export("mimi_actor_drop", |f| {
+        f.param("handle", handle("ActorHandle")).effect("dealloc")
+    });
+    gen.export("mimi_actor_id", |f| {
+        f.param("handle", handle("ActorHandle")).returns(prim(U64))
+    });
+    gen.export("mimi_actor_current_id", |f| f.returns(prim(U64)));
+    gen.export("mimi_actor_fault", |f| {
+        f.param("handle", handle("ActorHandle"))
+    });
+    gen.export("mimi_actor_is_faulted", |f| {
+        f.param("handle", handle("ActorHandle")).returns(prim(I32))
+    });
+    gen.export("mimi_actor_mailbox_depth", |f| {
+        f.param("handle", handle("ActorHandle")).returns(prim(I64))
+    });
+    gen.export("mimi_actor_max_children", |f| f.returns(prim(I64)));
+    gen.export("mimi_actor_spawn_count", |f| f.returns(prim(I64)));
+    gen.export("mimi_actor_system_kill", |f| {
+        f.param("handle", handle("ActorHandle"))
+    });
+    gen.export("mimi_broadcast", |f| {
+        f.param("handles", prim(IntPtr))
+            .param("count", prim(I64))
+            .param("method_name", ptr(prim(U8)))
+            .param("args_ptr", prim(IntPtr))
+            .param("args_size", prim(I64))
+            .returns(ptr(prim(I64)))
+            .effect("blocking")
+    });
+    gen.export("mimi_broadcast_free", |f| {
+        f.param("ptr", ptr(prim(I64)))
+            .param("len", prim(I64))
+            .effect("dealloc")
+    });
+
+    // ── Future / Async ──
+    gen.export("mimi_future_alloc", |f| {
+        f.param("result_size", prim(U64))
+            .returns(handle("FutureHandle"))
+            .effect("alloc")
+    });
+    gen.export("mimi_future_free", |f| {
+        f.param("fut", handle("FutureHandle")).effect("dealloc")
+    });
+    gen.export("mimi_future_set_completed", |f| {
+        f.param("fut", handle("FutureHandle"))
+    });
+    gen.export("mimi_future_is_completed", |f| {
+        f.param("fut", handle("FutureHandle")).returns(prim(I32))
+    });
+    gen.export("mimi_await_future", |f| {
+        f.param("future", handle("FutureHandle")).effect("blocking")
+    });
+    gen.export("mimi_spawn_future", |f| {
+        f.param("future", handle("FutureHandle"))
+            .param("poll_fn", prim(IntPtr))
+            .effect("alloc")
+    });
+    gen.export("mimi_executor_run", |f| f.effect("blocking"));
+
+    // ── Env ──
+    gen.export("mimi_getenv", |f| {
+        f.param("name", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("io")
+            .effect("alloc")
+    });
+    gen.export("mimi_set_env", |f| {
+        f.param("name", ptr(prim(U8)))
+            .param("value", ptr(prim(U8)))
+            .effect("io")
+    });
+    gen.export("mimi_args_count", |f| f.returns(prim(I64)));
+    gen.export("mimi_args_get", |f| {
+        f.param("i", prim(I64))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_args_init", |f| {
+        f.param("argc", prim(I32)).param("argv", prim(IntPtr))
+    });
+    gen.export("mimi_args_list", |f| {
+        f.returns(handle("ListHandle")).effect("alloc")
+    });
+
+    // ── Exec ──
+    gen.export("mimi_exec", |f| {
+        f.param("cmd", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("io")
+            .effect("blocking")
+            .effect("alloc")
+    });
+    gen.export("mimi_exec_safe", |f| {
+        f.param("cmd", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("io")
+            .effect("blocking")
+            .effect("alloc")
+    });
+    gen.export("mimi_exec_pipe", |f| {
+        f.param("cmd", ptr(prim(U8)))
+            .param("input", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("io")
+            .effect("blocking")
+            .effect("alloc")
+    });
+    gen.export("mimi_exec_free", |f| {
+        f.param("ptr", ptr(prim(U8))).effect("dealloc")
+    });
+
+    // ── Sort ──
+    gen.export("mimi_sort_f64_inplace", |f| {
+        f.param("list", handle("ListHandle"))
+    });
+    gen.export("mimi_sort_str_inplace", |f| {
+        f.param("list", handle("ListHandle"))
+    });
+
+    // ── Capability ──
+    gen.export("mimi_cap_register", |f| {
+        f.param("name", ptr(prim(U8))).param("level", prim(I32))
+    });
+    gen.export("mimi_cap_check", |f| {
+        f.param("name", ptr(prim(U8)))
+            .param("required", prim(I32))
+            .returns(prim(I32))
+    });
+    gen.export("mimi_cap_consume", |f| {
+        f.param("name", ptr(prim(U8))).returns(prim(I32))
+    });
+
+    // ── Fault injection ──
+    gen.export("mimi_inject_fault", |f| {
+        f.param("name", ptr(prim(U8)))
+            .param("probability", prim(F64))
+    });
 }
 
 #[cfg(test)]
@@ -608,34 +1141,74 @@ mod tests {
         register_core_runtime_abi(&mut gen);
         let ir = gen.build();
 
-        // Verify critical functions are registered
+        // v2 registry: ~150 functions across 18 categories
+        assert!(
+            ir.exports.len() >= 140,
+            "expected >=140 exports, got {}",
+            ir.exports.len()
+        );
+
+        // Verify critical functions from each category
         let critical = [
+            // RC
             "mimi_rc_alloc",
             "mimi_rc_retain",
             "mimi_rc_release",
+            "mimi_rc_upgrade",
+            "mimi_rc_weak_retain",
+            "mimi_rc_weak_release",
+            // List
             "mimi_list_new",
             "mimi_list_push_i64",
+            "mimi_list_push_f64",
+            "mimi_list_push_string",
             "mimi_list_get_i64",
+            "mimi_list_get_f64",
+            "mimi_list_get_string",
             "mimi_list_len",
             "mimi_list_free",
+            // Map
             "mimi_map_new",
-            "mimi_map_set_i64",
-            "mimi_map_get_i64",
-            "mimi_map_free",
+            "mimi_map_set",
+            "mimi_map_get",
+            "mimi_map_remove",
+            "mimi_map_has_key",
+            "mimi_map_keys",
+            "mimi_map_values",
+            "mimi_map_size",
+            "mimi_map_destroy",
+            "mimi_map_from_list",
+            // Set
             "mimi_set_new",
-            "mimi_set_insert_i64",
-            "mimi_set_contains_i64",
-            "mimi_set_free",
-            "mimi_string_new",
-            "mimi_string_len",
+            "mimi_set_insert",
+            "mimi_set_contains",
+            "mimi_set_remove",
+            "mimi_set_size",
+            "mimi_set_destroy",
+            "mimi_set_to_list",
+            // String
+            "mimi_str_clone",
+            "mimi_str_concat",
+            "mimi_str_char_at",
+            "mimi_str_substring",
+            "mimi_str_split",
+            "mimi_str_join",
+            "mimi_str_replace",
             "mimi_string_free",
+            "mimi_str_format",
+            "mimi_to_string_i64",
+            "mimi_to_string_f64",
+            "mimi_any_to_string",
+            // I/O + Runtime
             "mimi_print_line",
             "mimi_print_err",
             "mimi_runtime_abort",
             "mimi_wall_clock_ms",
+            "mimi_try_exit",
+            "mimi_assert_state",
             // Concurrency
             "mimi_atomic_i32_new",
-            "mimi_atomic_i32_load",
+            "mimi_atomic_i32_compare_exchange",
             "mimi_mutex_new",
             "mimi_mutex_lock",
             "mimi_mutex_unlock",
@@ -648,10 +1221,89 @@ mod tests {
             "mimi_is_file",
             "mimi_mkdir_p",
             "mimi_remove_file",
+            "mimi_read_file_bytes",
+            "mimi_write_file_bytes",
+            "mimi_append_file",
+            "mimi_listdir",
+            "mimi_path_join",
+            "mimi_path_basename",
             // Time
             "mimi_sleep_ms",
             "mimi_timestamp",
             "mimi_timestamp_ms",
+            "mimi_now",
+            "mimi_now_ms",
+            // JSON
+            "mimi_json_serialize",
+            "mimi_json_deserialize",
+            "mimi_json_as_i64",
+            "mimi_json_as_f64",
+            "mimi_json_as_bool",
+            "mimi_is_valid_json",
+            "mimi_json_escape_string",
+            "mimi_from_json",
+            // Crypto
+            "mimi_sha256",
+            "mimi_sha256_n",
+            "mimi_base64_encode",
+            "mimi_base64_decode",
+            // Regex
+            "mimi_regex_match",
+            "mimi_regex_find",
+            "mimi_regex_find_all",
+            "mimi_regex_replace",
+            "mimi_regex_capture_groups",
+            // Net
+            "mimi_socket",
+            "mimi_connect",
+            "mimi_bind",
+            "mimi_listen",
+            "mimi_accept",
+            "mimi_send",
+            "mimi_recv",
+            "mimi_close",
+            "mimi_http_get",
+            "mimi_http_post",
+            // Actor
+            "mimi_actor_spawn",
+            "mimi_actor_call",
+            "mimi_actor_drop",
+            "mimi_actor_id",
+            "mimi_actor_current_id",
+            "mimi_actor_fault",
+            "mimi_actor_is_faulted",
+            "mimi_actor_mailbox_depth",
+            "mimi_actor_spawn_count",
+            "mimi_broadcast",
+            // Future
+            "mimi_future_alloc",
+            "mimi_future_free",
+            "mimi_future_is_completed",
+            "mimi_future_set_completed",
+            "mimi_await_future",
+            "mimi_spawn_future",
+            "mimi_executor_run",
+            // Env
+            "mimi_getenv",
+            "mimi_set_env",
+            "mimi_args_count",
+            "mimi_args_get",
+            "mimi_args_init",
+            "mimi_args_list",
+            // Exec
+            "mimi_exec",
+            "mimi_exec_safe",
+            "mimi_exec_pipe",
+            "mimi_exec_free",
+            // Sort
+            "mimi_sort_f64_inplace",
+            "mimi_sort_str_inplace",
+            // Capability
+            "mimi_cap_register",
+            "mimi_cap_check",
+            "mimi_cap_consume",
+            // Fault
+            "mimi_inject_fault",
         ];
         for name in &critical {
             assert!(

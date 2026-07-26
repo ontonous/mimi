@@ -29,6 +29,7 @@
 //!       └──→ runtime exports ──→ AbiGenerator ──→ ComponentIr.exports
 //! ```
 
+mod c_header;
 mod checkpoint;
 mod gen;
 mod handle;
@@ -37,6 +38,7 @@ mod symbol;
 mod types;
 mod wire;
 
+pub use c_header::generate_c_header;
 pub use checkpoint::{
     probe_layout, struct_type_count, AllocFault, AllocLedger, AllocSide, LayoutFault,
 };
