@@ -790,6 +790,12 @@ title = "Tooling 全覆盖 + Body 迁移闭环"
 # - 交付 2：删除 legacy_body_file()（src/core/resolved/mod.rs:1059）
 # - 交付 3：P0-11 body 层 + P0-12 comptime 绕过关闭（依赖交付 1）
 # - 按 body class 分批：plain func → flow transition → actor method → comptime
+# 【SD-3 裁决】#[abi(errno)] 属性替代 ERRNO_CHECK_FUNC_NAMES 函数名猜测
+#   过渡期保留名称猜测 + deprecation 警告，1.0 删除
+# 【SD-4 裁决】删除 fork() 隔离，替换为 SIGSEGV/SIGABRT 信号守卫
+#   删除 FORK_LOCK / check_multithreaded_fork / call_ffi_with_fork_isolation*
+# 【SD-1 裁决】is_linear() 字符串匹配 → ResolvedType::Nominal 追加 is_linear: bool
+#   Checker 创建类型时设置标记，resource_lower.rs 读标记替代 starts_with("state:")
 # 【盲审追加】Provenance Tracking：InferTy 记录约束来源行号，Flow 专属报错
 # 【盲审追加】TyErr 毒药类型：推断失败标记 TyErr，防级联错误刷屏
 # 【盲审追加】Z3 报错翻译：SMT 公式 → 大白话（双重报错折叠，Python 难民 DX）

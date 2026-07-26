@@ -1,3 +1,7 @@
+// SD-5 裁决（architecture-amendment-1.0.md）：Actor 允许 mut 字段。
+// mut 字段 = actor 隔离的简单可变状态（计数器、标志位），单线程访问，无数据竞争。
+// Flow 状态 = 复杂业务状态机（多状态、转移矩阵、generation 追踪）。
+// 简单场景用 mut 字段，复杂状态机用 Flow。两者不冲突。
 actor Counter {
     mut count: i32 = 0
 
