@@ -51,9 +51,50 @@ impl MimiAbi {
         serde_json::to_string_pretty(self)
     }
 
-    /// Deserialize from JSON string.
+    /// Deserialize from JSON string (no validation).
+    ///
+    /// **Security**: Use [`from_json_validated`](Self::from_json_validated)
+    /// for untrusted input. This method does not check `format_version`
+    /// or validate enum field values.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
+    }
+
+    /// Deserialize from JSON string with full validation.
+    ///
+    /// Checks:
+    /// 1. `format_version` matches [`FORMAT_VERSION`](Self::FORMAT_VERSION)
+    /// 2. All primitive type names are recognized
+    /// 3. All symbol kinds are recognized
+    /// 4. All calling conventions are recognized
+    /// 5. All callback categories are recognized
+    ///
+    /// Returns `Err(MimiAbiError)` on any validation failure.
+    pub fn from_json_validated(json: &str) -> Result<Self, MimiAbiError> {
+        let abi: Self =
+            serde_json::from_str(json).map_err(|e| MimiAbiError::Json(e.to_string()))?;
+        abi.validate_deserialized()?;
+        Ok(abi)
+    }
+
+    /// Validate a deserialized `.mimiabi` for semantic correctness.
+    ///
+    /// This catches malformed inputs that serde accepts but represent
+    /// invalid ABI data (e.g., unknown primitive names, bad format version).
+    pub fn validate_deserialized(&self) -> Result<(), MimiAbiError> {
+        if self.format_version != Self::FORMAT_VERSION {
+            return Err(MimiAbiError::BadFormatVersion {
+                expected: Self::FORMAT_VERSION,
+                got: self.format_version,
+            });
+        }
+        for sym in self.exports.iter().chain(self.imports.iter()) {
+            validate_symbol(sym)?;
+        }
+        for ty in &self.types {
+            validate_type(ty)?;
+        }
+        Ok(())
     }
 
     /// Compute BLAKE3 hash of the serialized JSON (for tamper detection).
@@ -78,6 +119,112 @@ impl MimiAbi {
             types: self.types.iter().map(AbiTypeDef::from).collect(),
         }
     }
+}
+
+/// Validation error for `.mimiabi` deserialization.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MimiAbiError {
+    /// JSON parse error (stored as string since serde_json::Error is not Clone/PartialEq).
+    Json(String),
+    /// format_version does not match the expected version.
+    BadFormatVersion { expected: u32, got: u32 },
+    /// Unknown primitive type name in a type reference.
+    UnknownPrimitive(String),
+    /// Unknown symbol kind.
+    UnknownSymbolKind(String),
+    /// Unknown calling convention.
+    UnknownCallConv(String),
+    /// Unknown callback category.
+    UnknownCallbackCategory(String),
+}
+
+impl std::fmt::Display for MimiAbiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MimiAbiError::Json(e) => write!(f, "JSON parse error: {}", e),
+            MimiAbiError::BadFormatVersion { expected, got } => {
+                write!(
+                    f,
+                    "format_version mismatch: expected {}, got {}",
+                    expected, got
+                )
+            }
+            MimiAbiError::UnknownPrimitive(name) => {
+                write!(f, "unknown primitive type: {:?}", name)
+            }
+            MimiAbiError::UnknownSymbolKind(name) => {
+                write!(f, "unknown symbol kind: {:?}", name)
+            }
+            MimiAbiError::UnknownCallConv(name) => {
+                write!(f, "unknown calling convention: {:?}", name)
+            }
+            MimiAbiError::UnknownCallbackCategory(name) => {
+                write!(f, "unknown callback category: {:?}", name)
+            }
+        }
+    }
+}
+
+impl std::error::Error for MimiAbiError {}
+
+/// Validate a serialized symbol's enum fields.
+fn validate_symbol(sym: &MimiAbiSymbol) -> Result<(), MimiAbiError> {
+    if try_parse_symbol_kind(&sym.kind).is_none() {
+        return Err(MimiAbiError::UnknownSymbolKind(sym.kind.clone()));
+    }
+    if try_parse_call_conv(&sym.call_conv).is_none() {
+        return Err(MimiAbiError::UnknownCallConv(sym.call_conv.clone()));
+    }
+    if let Some(ref cat) = sym.callback_category {
+        if try_parse_callback_category(cat).is_none() {
+            return Err(MimiAbiError::UnknownCallbackCategory(cat.clone()));
+        }
+    }
+    validate_type_ref(&sym.ret)?;
+    for param in &sym.params {
+        validate_type_ref(&param.ty)?;
+    }
+    Ok(())
+}
+
+/// Validate a serialized type definition's enum fields.
+fn validate_type(ty: &MimiAbiType) -> Result<(), MimiAbiError> {
+    match ty {
+        MimiAbiType::Struct { fields, .. } => {
+            for field in fields {
+                validate_type_ref(&field.ty)?;
+            }
+        }
+        MimiAbiType::Enum { repr, .. } => {
+            if try_parse_primitive(repr).is_none() {
+                return Err(MimiAbiError::UnknownPrimitive(repr.clone()));
+            }
+        }
+        MimiAbiType::Alias { target, .. } => {
+            validate_type_ref(target)?;
+        }
+        MimiAbiType::Opaque { .. } => {}
+    }
+    Ok(())
+}
+
+/// Recursively validate a serialized type reference.
+fn validate_type_ref(ty: &MimiAbiTypeRef) -> Result<(), MimiAbiError> {
+    match ty {
+        MimiAbiTypeRef::Primitive(name) => {
+            if try_parse_primitive(name).is_none() {
+                return Err(MimiAbiError::UnknownPrimitive(name.clone()));
+            }
+        }
+        MimiAbiTypeRef::Pointer(inner) | MimiAbiTypeRef::Slice(inner) => {
+            validate_type_ref(inner)?;
+        }
+        MimiAbiTypeRef::FatPointer { element, .. } => {
+            validate_type_ref(element)?;
+        }
+        MimiAbiTypeRef::Named(_) | MimiAbiTypeRef::Opaque(_) | MimiAbiTypeRef::Void => {}
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -353,57 +500,81 @@ impl From<&MimiAbiField> for AbiField {
 
 // ── Parse helpers (Debug format → enum) ────────────────────────────────────
 
-fn parse_primitive(name: &str) -> AbiPrimitive {
+/// Try to parse a primitive type name. Returns `None` for unknown names.
+fn try_parse_primitive(name: &str) -> Option<AbiPrimitive> {
     match name {
-        "I8" => AbiPrimitive::I8,
-        "I16" => AbiPrimitive::I16,
-        "I32" => AbiPrimitive::I32,
-        "I64" => AbiPrimitive::I64,
-        "U8" => AbiPrimitive::U8,
-        "U16" => AbiPrimitive::U16,
-        "U32" => AbiPrimitive::U32,
-        "U64" => AbiPrimitive::U64,
-        "F32" => AbiPrimitive::F32,
-        "F64" => AbiPrimitive::F64,
-        "Bool" => AbiPrimitive::Bool,
-        "IntPtr" => AbiPrimitive::IntPtr,
-        "UIntPtr" => AbiPrimitive::UIntPtr,
-        _ => AbiPrimitive::I64, // fallback
+        "I8" => Some(AbiPrimitive::I8),
+        "I16" => Some(AbiPrimitive::I16),
+        "I32" => Some(AbiPrimitive::I32),
+        "I64" => Some(AbiPrimitive::I64),
+        "U8" => Some(AbiPrimitive::U8),
+        "U16" => Some(AbiPrimitive::U16),
+        "U32" => Some(AbiPrimitive::U32),
+        "U64" => Some(AbiPrimitive::U64),
+        "F32" => Some(AbiPrimitive::F32),
+        "F64" => Some(AbiPrimitive::F64),
+        "Bool" => Some(AbiPrimitive::Bool),
+        "IntPtr" => Some(AbiPrimitive::IntPtr),
+        "UIntPtr" => Some(AbiPrimitive::UIntPtr),
+        _ => None,
     }
+}
+
+/// Try to parse a symbol kind. Returns `None` for unknown kinds.
+fn try_parse_symbol_kind(name: &str) -> Option<AbiSymbolKind> {
+    match name {
+        "Function" => Some(AbiSymbolKind::Function),
+        "ExternFunction" => Some(AbiSymbolKind::ExternFunction),
+        "Method" => Some(AbiSymbolKind::Method),
+        "Constructor" => Some(AbiSymbolKind::Constructor),
+        "Destructor" => Some(AbiSymbolKind::Destructor),
+        "Callback" => Some(AbiSymbolKind::Callback),
+        _ => None,
+    }
+}
+
+/// Try to parse a calling convention. Returns `None` for unknown conventions.
+fn try_parse_call_conv(name: &str) -> Option<AbiCallConv> {
+    match name {
+        "C" => Some(AbiCallConv::C),
+        "SystemV" => Some(AbiCallConv::SystemV),
+        "Win64" => Some(AbiCallConv::Win64),
+        "Fast" => Some(AbiCallConv::Fast),
+        "MimiInternal" => Some(AbiCallConv::MimiInternal),
+        _ => None,
+    }
+}
+
+/// Try to parse a callback category. Returns `None` for unknown categories.
+fn try_parse_callback_category(name: &str) -> Option<AbiCallbackCategory> {
+    match name {
+        "SyncSameThread" => Some(AbiCallbackCategory::SyncSameThread),
+        "SyncCrossThread" => Some(AbiCallbackCategory::SyncCrossThread),
+        "AsyncOneShot" => Some(AbiCallbackCategory::AsyncOneShot),
+        "AsyncMultiShot" => Some(AbiCallbackCategory::AsyncMultiShot),
+        "AsyncSubscription" => Some(AbiCallbackCategory::AsyncSubscription),
+        _ => None,
+    }
+}
+
+/// Parse a primitive type name with fallback to I64.
+///
+/// **Security**: For untrusted input, use [`MimiAbi::from_json_validated`]
+/// which rejects unknown primitives instead of silently falling back.
+fn parse_primitive(name: &str) -> AbiPrimitive {
+    try_parse_primitive(name).unwrap_or(AbiPrimitive::I64)
 }
 
 fn parse_symbol_kind(name: &str) -> AbiSymbolKind {
-    match name {
-        "Function" => AbiSymbolKind::Function,
-        "ExternFunction" => AbiSymbolKind::ExternFunction,
-        "Method" => AbiSymbolKind::Method,
-        "Constructor" => AbiSymbolKind::Constructor,
-        "Destructor" => AbiSymbolKind::Destructor,
-        "Callback" => AbiSymbolKind::Callback,
-        _ => AbiSymbolKind::Function,
-    }
+    try_parse_symbol_kind(name).unwrap_or(AbiSymbolKind::Function)
 }
 
 fn parse_call_conv(name: &str) -> AbiCallConv {
-    match name {
-        "C" => AbiCallConv::C,
-        "SystemV" => AbiCallConv::SystemV,
-        "Win64" => AbiCallConv::Win64,
-        "Fast" => AbiCallConv::Fast,
-        "MimiInternal" => AbiCallConv::MimiInternal,
-        _ => AbiCallConv::C,
-    }
+    try_parse_call_conv(name).unwrap_or(AbiCallConv::C)
 }
 
 fn parse_callback_category(name: &str) -> AbiCallbackCategory {
-    match name {
-        "SyncSameThread" => AbiCallbackCategory::SyncSameThread,
-        "SyncCrossThread" => AbiCallbackCategory::SyncCrossThread,
-        "AsyncOneShot" => AbiCallbackCategory::AsyncOneShot,
-        "AsyncMultiShot" => AbiCallbackCategory::AsyncMultiShot,
-        "AsyncSubscription" => AbiCallbackCategory::AsyncSubscription,
-        _ => AbiCallbackCategory::SyncSameThread,
-    }
+    try_parse_callback_category(name).unwrap_or(AbiCallbackCategory::SyncSameThread)
 }
 
 #[cfg(test)]
@@ -506,6 +677,164 @@ mod tests {
         assert_eq!(
             sym.callback_category,
             Some(crate::component::AbiCallbackCategory::AsyncMultiShot)
+        );
+    }
+
+    // ── Attack tests (0.31.37) ──
+
+    #[test]
+    fn validated_rejects_bad_format_version() {
+        let json = r#"{
+            "format_version": 999,
+            "identity": { "name": "t", "version": "0", "abi_version": 1 },
+            "exports": [], "imports": [], "types": []
+        }"#;
+        let err = MimiAbi::from_json_validated(json).unwrap_err();
+        assert!(matches!(
+            err,
+            MimiAbiError::BadFormatVersion {
+                expected: 1,
+                got: 999
+            }
+        ));
+    }
+
+    #[test]
+    fn validated_rejects_unknown_primitive() {
+        let json = r#"{
+            "format_version": 1,
+            "identity": { "name": "t", "version": "0", "abi_version": 1 },
+            "exports": [{
+                "name": "mimi_evil",
+                "kind": "Function",
+                "params": [],
+                "ret": {"kind": "Primitive", "value": "NotAType"},
+                "effects": [],
+                "is_unsafe": false,
+                "call_conv": "C"
+            }],
+            "imports": [], "types": []
+        }"#;
+        let err = MimiAbi::from_json_validated(json).unwrap_err();
+        assert!(matches!(err, MimiAbiError::UnknownPrimitive(n) if n == "NotAType"));
+    }
+
+    #[test]
+    fn validated_rejects_unknown_symbol_kind() {
+        let json = r#"{
+            "format_version": 1,
+            "identity": { "name": "t", "version": "0", "abi_version": 1 },
+            "exports": [{
+                "name": "mimi_evil",
+                "kind": "NotAKind",
+                "params": [],
+                "ret": {"kind": "Void"},
+                "effects": [],
+                "is_unsafe": false,
+                "call_conv": "C"
+            }],
+            "imports": [], "types": []
+        }"#;
+        let err = MimiAbi::from_json_validated(json).unwrap_err();
+        assert!(matches!(err, MimiAbiError::UnknownSymbolKind(n) if n == "NotAKind"));
+    }
+
+    #[test]
+    fn validated_rejects_unknown_call_conv() {
+        let json = r#"{
+            "format_version": 1,
+            "identity": { "name": "t", "version": "0", "abi_version": 1 },
+            "exports": [{
+                "name": "mimi_evil",
+                "kind": "Function",
+                "params": [],
+                "ret": {"kind": "Void"},
+                "effects": [],
+                "is_unsafe": false,
+                "call_conv": "StdCall"
+            }],
+            "imports": [], "types": []
+        }"#;
+        let err = MimiAbi::from_json_validated(json).unwrap_err();
+        assert!(matches!(err, MimiAbiError::UnknownCallConv(n) if n == "StdCall"));
+    }
+
+    #[test]
+    fn validated_rejects_unknown_callback_category() {
+        let json = r#"{
+            "format_version": 1,
+            "identity": { "name": "t", "version": "0", "abi_version": 1 },
+            "exports": [{
+                "name": "mimi_evil",
+                "kind": "Callback",
+                "params": [],
+                "ret": {"kind": "Void"},
+                "effects": [],
+                "is_unsafe": false,
+                "call_conv": "C",
+                "callback_category": "AsyncForever"
+            }],
+            "imports": [], "types": []
+        }"#;
+        let err = MimiAbi::from_json_validated(json).unwrap_err();
+        assert!(matches!(err, MimiAbiError::UnknownCallbackCategory(n) if n == "AsyncForever"));
+    }
+
+    #[test]
+    fn validated_rejects_unknown_primitive_in_type_def() {
+        let json = r#"{
+            "format_version": 1,
+            "identity": { "name": "t", "version": "0", "abi_version": 1 },
+            "exports": [], "imports": [],
+            "types": [{
+                "kind": "Enum",
+                "name": "BadEnum",
+                "variants": [["A", 0]],
+                "repr": "NotAPrimitive"
+            }]
+        }"#;
+        let err = MimiAbi::from_json_validated(json).unwrap_err();
+        assert!(matches!(err, MimiAbiError::UnknownPrimitive(n) if n == "NotAPrimitive"));
+    }
+
+    #[test]
+    fn validated_accepts_clean_abi() {
+        let mut gen = AbiGenerator::new();
+        register_core_runtime_abi(&mut gen);
+        let ir = gen.build();
+        let abi = MimiAbi::from_component_ir(&ir);
+        let json = abi.to_json().expect("serialize");
+        // from_json_validated should accept our own output
+        let abi2 = MimiAbi::from_json_validated(&json).expect("validated deserialize");
+        assert_eq!(abi.exports.len(), abi2.exports.len());
+    }
+
+    #[test]
+    fn unvalidated_from_json_still_works_for_backward_compat() {
+        // from_json (unvalidated) should still accept unknown primitives
+        // with fallback behavior (backward compat)
+        let json = r#"{
+            "format_version": 1,
+            "identity": { "name": "t", "version": "0", "abi_version": 1 },
+            "exports": [{
+                "name": "mimi_legacy",
+                "kind": "Function",
+                "params": [],
+                "ret": {"kind": "Primitive", "value": "UnknownPrim"},
+                "effects": [],
+                "is_unsafe": false,
+                "call_conv": "C"
+            }],
+            "imports": [], "types": []
+        }"#;
+        // Unvalidated: accepts with fallback
+        let abi = MimiAbi::from_json(json).expect("unvalidated deserialize");
+        let ir = abi.to_component_ir();
+        let sym = ir.export("mimi_legacy").expect("should exist");
+        // Fallback: unknown primitive → I64
+        assert_eq!(
+            sym.ret,
+            crate::component::AbiTypeRef::Primitive(AbiPrimitive::I64)
         );
     }
 }

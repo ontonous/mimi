@@ -48,7 +48,7 @@ pub use diff::{diff_abi, AbiChange, AbiDiff};
 pub use gen::{mimi_type_to_abi, register_core_runtime_abi, AbiGenerator};
 pub use handle::{Handle, HandleError, HandleKind, HandleRegistry, RuntimeId};
 pub use rust_bind::generate_rust_bindings;
-pub use serialize::MimiAbi;
+pub use serialize::{MimiAbi, MimiAbiError};
 pub use symbol::*;
 pub use types::*;
 pub use wire::*;

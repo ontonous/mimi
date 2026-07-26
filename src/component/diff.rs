@@ -27,6 +27,12 @@ pub enum AbiChange {
     RemovedExport(String),
     /// An export's signature changed (BREAKING).
     ChangedExport { name: String, detail: String },
+    /// A new import was added (non-breaking for the component, breaking for consumers).
+    AddedImport(String),
+    /// An import was removed (BREAKING for consumers that provide it).
+    RemovedImport(String),
+    /// An import's signature changed (BREAKING).
+    ChangedImport { name: String, detail: String },
     /// A new type was added (non-breaking).
     AddedType(String),
     /// A type was removed (BREAKING).
@@ -44,6 +50,8 @@ impl AbiChange {
             self,
             AbiChange::RemovedExport(_)
                 | AbiChange::ChangedExport { .. }
+                | AbiChange::RemovedImport(_)
+                | AbiChange::ChangedImport { .. }
                 | AbiChange::RemovedType(_)
                 | AbiChange::ChangedType { .. }
         )
@@ -57,6 +65,11 @@ impl std::fmt::Display for AbiChange {
             AbiChange::RemovedExport(name) => write!(f, "- export {} (BREAKING)", name),
             AbiChange::ChangedExport { name, detail } => {
                 write!(f, "~ export {} (BREAKING): {}", name, detail)
+            }
+            AbiChange::AddedImport(name) => write!(f, "+ import {}", name),
+            AbiChange::RemovedImport(name) => write!(f, "- import {} (BREAKING)", name),
+            AbiChange::ChangedImport { name, detail } => {
+                write!(f, "~ import {} (BREAKING): {}", name, detail)
             }
             AbiChange::AddedType(name) => write!(f, "+ type {}", name),
             AbiChange::RemovedType(name) => write!(f, "- type {} (BREAKING)", name),
@@ -114,6 +127,7 @@ impl AbiDiff {
 /// Compare two `.mimiabi` versions and detect all changes.
 ///
 /// `old` is the baseline, `new` is the candidate.
+/// Compares exports, imports, and type definitions.
 pub fn diff_abi(old: &MimiAbi, new: &MimiAbi) -> AbiDiff {
     let mut changes = Vec::new();
 
@@ -126,55 +140,24 @@ pub fn diff_abi(old: &MimiAbi, new: &MimiAbi) -> AbiDiff {
     }
 
     // Export changes
-    let old_exports: std::collections::HashMap<&str, &super::serialize::MimiAbiSymbol> =
-        old.exports.iter().map(|s| (s.name.as_str(), s)).collect();
-    let new_exports: std::collections::HashMap<&str, &super::serialize::MimiAbiSymbol> =
-        new.exports.iter().map(|s| (s.name.as_str(), s)).collect();
+    diff_symbols(
+        &old.exports,
+        &new.exports,
+        &mut changes,
+        AbiChange::AddedExport,
+        AbiChange::RemovedExport,
+        |name, detail| AbiChange::ChangedExport { name, detail },
+    );
 
-    for (name, old_sym) in &old_exports {
-        match new_exports.get(name) {
-            None => changes.push(AbiChange::RemovedExport(name.to_string())),
-            Some(new_sym) => {
-                // Check signature changes
-                if old_sym.params.len() != new_sym.params.len() {
-                    changes.push(AbiChange::ChangedExport {
-                        name: name.to_string(),
-                        detail: format!(
-                            "param count {} → {}",
-                            old_sym.params.len(),
-                            new_sym.params.len()
-                        ),
-                    });
-                } else {
-                    for (i, (op, np)) in
-                        old_sym.params.iter().zip(new_sym.params.iter()).enumerate()
-                    {
-                        let ot = format!("{:?}", op.ty);
-                        let nt = format!("{:?}", np.ty);
-                        if ot != nt {
-                            changes.push(AbiChange::ChangedExport {
-                                name: name.to_string(),
-                                detail: format!("param {} type {} → {}", i, ot, nt),
-                            });
-                        }
-                    }
-                }
-                let ort = format!("{:?}", old_sym.ret);
-                let nrt = format!("{:?}", new_sym.ret);
-                if ort != nrt {
-                    changes.push(AbiChange::ChangedExport {
-                        name: name.to_string(),
-                        detail: format!("return type {} → {}", ort, nrt),
-                    });
-                }
-            }
-        }
-    }
-    for name in new_exports.keys() {
-        if !old_exports.contains_key(name) {
-            changes.push(AbiChange::AddedExport(name.to_string()));
-        }
-    }
+    // Import changes
+    diff_symbols(
+        &old.imports,
+        &new.imports,
+        &mut changes,
+        AbiChange::AddedImport,
+        AbiChange::RemovedImport,
+        |name, detail| AbiChange::ChangedImport { name, detail },
+    );
 
     // Type changes
     let old_types: std::collections::HashMap<&str, &super::serialize::MimiAbiType> =
@@ -204,6 +187,66 @@ pub fn diff_abi(old: &MimiAbi, new: &MimiAbi) -> AbiDiff {
     }
 
     AbiDiff { changes }
+}
+
+/// Compare two symbol lists and emit changes.
+fn diff_symbols(
+    old_syms: &[super::serialize::MimiAbiSymbol],
+    new_syms: &[super::serialize::MimiAbiSymbol],
+    changes: &mut Vec<AbiChange>,
+    make_added: impl Fn(String) -> AbiChange,
+    make_removed: impl Fn(String) -> AbiChange,
+    make_changed: impl Fn(String, String) -> AbiChange,
+) {
+    let old_map: std::collections::HashMap<&str, &super::serialize::MimiAbiSymbol> =
+        old_syms.iter().map(|s| (s.name.as_str(), s)).collect();
+    let new_map: std::collections::HashMap<&str, &super::serialize::MimiAbiSymbol> =
+        new_syms.iter().map(|s| (s.name.as_str(), s)).collect();
+
+    for (name, old_sym) in &old_map {
+        match new_map.get(name) {
+            None => changes.push(make_removed(name.to_string())),
+            Some(new_sym) => {
+                // Check signature changes
+                if old_sym.params.len() != new_sym.params.len() {
+                    changes.push(make_changed(
+                        name.to_string(),
+                        format!(
+                            "param count {} → {}",
+                            old_sym.params.len(),
+                            new_sym.params.len()
+                        ),
+                    ));
+                } else {
+                    for (i, (op, np)) in
+                        old_sym.params.iter().zip(new_sym.params.iter()).enumerate()
+                    {
+                        let ot = format!("{:?}", op.ty);
+                        let nt = format!("{:?}", np.ty);
+                        if ot != nt {
+                            changes.push(make_changed(
+                                name.to_string(),
+                                format!("param {} type {} → {}", i, ot, nt),
+                            ));
+                        }
+                    }
+                }
+                let ort = format!("{:?}", old_sym.ret);
+                let nrt = format!("{:?}", new_sym.ret);
+                if ort != nrt {
+                    changes.push(make_changed(
+                        name.to_string(),
+                        format!("return type {} → {}", ort, nrt),
+                    ));
+                }
+            }
+        }
+    }
+    for name in new_map.keys() {
+        if !old_map.contains_key(name) {
+            changes.push(make_added(name.to_string()));
+        }
+    }
 }
 
 /// Extract the name from a MimiAbiType.
@@ -400,5 +443,92 @@ mod tests {
             .changes
             .iter()
             .any(|c| matches!(c, AbiChange::ChangedType { name, .. } if name == "MimiString")));
+    }
+
+    // ── Attack tests (0.31.37) ──
+
+    #[test]
+    fn import_changes_tracked() {
+        let old = make_abi();
+        let mut new = make_abi();
+        // Add an import
+        new.imports
+            .push(crate::component::serialize::MimiAbiSymbol {
+                name: "external_fn".to_string(),
+                kind: "ExternFunction".to_string(),
+                params: vec![],
+                ret: crate::component::serialize::MimiAbiTypeRef::Void,
+                effects: vec![],
+                is_unsafe: false,
+                call_conv: "C".to_string(),
+                callback_category: None,
+            });
+
+        let diff = diff_abi(&old, &new);
+        assert!(diff
+            .changes
+            .iter()
+            .any(|c| matches!(c, AbiChange::AddedImport(n) if n == "external_fn")));
+        // Adding an import is non-breaking for the component itself
+        assert!(!diff.has_breaking_changes());
+    }
+
+    #[test]
+    fn removed_import_is_breaking() {
+        let mut old = make_abi();
+        old.imports
+            .push(crate::component::serialize::MimiAbiSymbol {
+                name: "external_fn".to_string(),
+                kind: "ExternFunction".to_string(),
+                params: vec![],
+                ret: crate::component::serialize::MimiAbiTypeRef::Void,
+                effects: vec![],
+                is_unsafe: false,
+                call_conv: "C".to_string(),
+                callback_category: None,
+            });
+        let new = make_abi(); // no imports
+
+        let diff = diff_abi(&old, &new);
+        assert!(diff.has_breaking_changes());
+        assert!(diff
+            .changes
+            .iter()
+            .any(|c| matches!(c, AbiChange::RemovedImport(n) if n == "external_fn")));
+    }
+
+    #[test]
+    fn changed_import_signature_is_breaking() {
+        let mut old = make_abi();
+        old.imports
+            .push(crate::component::serialize::MimiAbiSymbol {
+                name: "external_fn".to_string(),
+                kind: "ExternFunction".to_string(),
+                params: vec![],
+                ret: crate::component::serialize::MimiAbiTypeRef::Primitive("I32".to_string()),
+                effects: vec![],
+                is_unsafe: false,
+                call_conv: "C".to_string(),
+                callback_category: None,
+            });
+        let mut new = make_abi();
+        new.imports
+            .push(crate::component::serialize::MimiAbiSymbol {
+                name: "external_fn".to_string(),
+                kind: "ExternFunction".to_string(),
+                params: vec![],
+                ret: crate::component::serialize::MimiAbiTypeRef::Primitive("I64".to_string()),
+                effects: vec![],
+                is_unsafe: false,
+                call_conv: "C".to_string(),
+                callback_category: None,
+            });
+
+        let diff = diff_abi(&old, &new);
+        assert!(diff.has_breaking_changes());
+        assert!(diff
+            .changes
+            .iter()
+            .any(|c| matches!(c, AbiChange::ChangedImport { name, .. } if name == "external_fn")));
     }
 }
