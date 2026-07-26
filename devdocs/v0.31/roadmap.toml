@@ -131,6 +131,9 @@ requirements = ["FLOW-IDENTITY-001", "RESOURCE-LINEAR-001"]
 # - 自循环产生新 generation，旧别名在类型层面失效（非名字追踪）
 # - CFG dataflow 对 Flow 状态完整触发（move/drop/return/branch-merge）
 # - 删除 consumed_flow_vars: HashMap<String, String>，全部由 CFG 接管
+#   【降级说明 2026-07-27】实际保留为诊断层（checker.rs:92,262,371）。
+#   CFG dataflow 已接管核心路径，consumed_flow_vars 仅用于诊断信息生成。
+#   裁决：永久保留为诊断层，不再排期删除。support.toml 标注 "retained as diagnostic layer"。
 # - interp/codegen 适配新类型表示（0.31.9–12 路径可能需要调整）
 # - 【追加】Channel<T>/Mutex<T> guard token/AtomicI32/I64/Bool 纳入 is_linear()
 #   （与 Flow 状态同一个谓词修改，resource_lower.rs:695-707）
@@ -505,8 +508,9 @@ requirements = ["ERROR-ALGEBRA-001"]
 version = "0.31.25"
 kind = "implementation"
 title = "语言语义收敛"
-requirements = ["ERROR-ALGEBRA-001", "LANG-FUNCTION-001", "LANG-CONTRACT-001", "COMPTIME-PURE-001", "LANG-ATTRIBUTE-001", "SYNTAX-REMOVED-001"]
+requirements = ["ERROR-ALGEBRA-001", "LANG-FUNCTION-001", "LANG-CONTRACT-001", "COMPTIME-PURE-001", "LANG-ATTRIBUTE-001", "SYNTAX-REMOVED-001", "FLOW-MULTI-001"]
 # 追加：
+# - FLOW-MULTI-001 从 0.31.44 提前（架构修正案条款 7：Multi-target 是 1.0 必须）
 # - @sparse 翻转为 stable 默认（FLOW-SPARSE-001 闭环）：
 #   无注解时 = 稀疏图（未声明对 → 编译错误），@dense 显式启用 N×M Fault 注入
 #   对齐 language-spec.md §3.5："Stable mode prohibits auto-completing undeclared combinations"
@@ -705,6 +709,10 @@ version = "0.31.35"
 kind = "implementation"
 title = "Rust Safe SDK"
 requirements = []
+# 状态：deferred — 0.31.30–36 乱序执行期间被跳过，无交付 commit。
+# Component IR 基础设施（gen.rs/serialize.rs/c_header.rs/rust_bind.rs）已就位，
+# Rust Safe SDK 的 bindgen 管线可在 0.31.38（SDK 加固）中补做。
+# 裁决：合并到 0.31.38，不单独占 sprint。
 
 [[milestone]]
 version = "0.31.36"
@@ -775,7 +783,13 @@ requirements = ["MIGRATION-PRE1-001", "SYNTAX-REMOVED-001"]
 [[milestone]]
 version = "0.31.43"
 kind = "implementation"
-title = "Tooling 全覆盖"
+title = "Tooling 全覆盖 + Body 迁移闭环"
+# 【P2-6 裁决 2026-07-27】body 迁移（legacy_body_file 删除）是 README §9 退出条件，
+# 但此前无 milestone 认领。现显式归入本 sprint：
+# - 交付 1：interp/codegen/verifier 函数体全部消费 Typed Resolved IR
+# - 交付 2：删除 legacy_body_file()（src/core/resolved/mod.rs:1059）
+# - 交付 3：P0-11 body 层 + P0-12 comptime 绕过关闭（依赖交付 1）
+# - 按 body class 分批：plain func → flow transition → actor method → comptime
 # 【盲审追加】Provenance Tracking：InferTy 记录约束来源行号，Flow 专属报错
 # 【盲审追加】TyErr 毒药类型：推断失败标记 TyErr，防级联错误刷屏
 # 【盲审追加】Z3 报错翻译：SMT 公式 → 大白话（双重报错折叠，Python 难民 DX）

@@ -1,5 +1,10 @@
 # v0.31 Requirement 分配矩阵（v3）
 
+> ⚠ **本文件停留在 v3，roadmap.toml 已演进到 v5（last=48）。**
+> 0.31.21–24（Soundness 止血 + Runtime 架构 + 错误模型）在 v3 中缺失。
+> 编号对照：v3 的 0.31.22 = v5 的 0.31.25（语义收敛），v3 无 0.31.22–24。
+> **权威来源是 roadmap.toml**。本文件仅供参考，待机器生成替代。
+>
 > 机器可读来源：`roadmap.toml`（schema_version = 2）。成熟度来源：`docs/language-support.toml`。
 > v2 变更：插入 0.31.16–18（地基深修）、0.31.28（Component 稳定检查点）、0.31.34（SDK 加固）、0.31.35（自举 spike）。原 0.31.16–37 重编号为 0.31.19–43。
 > v3 变更：0.31.19 追加 B（性能 quick wins）；插入 0.31.20（Runtime Efficiency）；原 0.31.20–43 顺延为 0.31.22–44。

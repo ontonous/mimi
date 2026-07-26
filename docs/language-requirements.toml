@@ -33,10 +33,12 @@ summary = "Stable Flow graphs contain only declared business edges."
 
 [[requirement]]
 id = "FLOW-MULTI-001"
-target = "experimental"
+target = "stable"
 spec = "3.7"
 gate = ["static", "trace"]
 summary = "Multi-target transitions require a closed tagged state union and control-flow refinement."
+# 修正案不变量 7（architecture-amendment-1.0.md:350）：Multi-target 是 1.0 必须，不是 experimental。
+# supersedes: 原 target = "experimental"（2026-07-25 修正案升级）
 
 [[requirement]]
 id = "ACTOR-FLOW-001"
