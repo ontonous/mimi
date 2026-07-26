@@ -20,7 +20,11 @@ use serde::{Deserialize, Serialize};
 /// Wire envelope: versioned message wrapper.
 ///
 /// Layout: [magic: 4 bytes][version: 4 bytes][payload_len: 8 bytes][payload: N bytes]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// **Serialization**: Use `to_bytes()`/`from_bytes()` for binary wire transport.
+/// The `Serialize`/`Deserialize` impls are header-only (payload excluded) for
+/// logging/debugging — they do NOT roundtrip the payload.
+#[derive(Debug, Clone)]
 pub struct WireEnvelope {
     /// Magic bytes: "MIMI" (0x4D494D49).
     pub magic: u32,
@@ -29,7 +33,6 @@ pub struct WireEnvelope {
     /// Payload length in bytes.
     pub payload_len: u64,
     /// Payload (serialized message).
-    #[serde(skip)]
     pub payload: Vec<u8>,
 }
 
@@ -82,6 +85,9 @@ impl WireEnvelope {
     }
 
     /// Deserialize from bytes.
+    ///
+    /// Returns `Err(WireError::TrailingData)` if there are extra bytes after
+    /// the declared payload (possible corruption or framing error).
     pub fn from_bytes(data: &[u8]) -> Result<Self, WireError> {
         if data.len() < 16 {
             return Err(WireError::TooShort(data.len()));
@@ -91,13 +97,20 @@ impl WireEnvelope {
         let payload_len = u64::from_le_bytes([
             data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
         ]);
-        if data.len() < 16 + payload_len as usize {
+        let total = 16 + payload_len as usize;
+        if data.len() < total {
             return Err(WireError::Truncated {
-                expected: 16 + payload_len as usize,
+                expected: total,
                 actual: data.len(),
             });
         }
-        let payload = data[16..16 + payload_len as usize].to_vec();
+        if data.len() > total {
+            return Err(WireError::TrailingData {
+                expected: total,
+                actual: data.len(),
+            });
+        }
+        let payload = data[16..total].to_vec();
         let envelope = Self {
             magic,
             version,
@@ -185,6 +198,88 @@ impl WireType {
             _ => false,
         }
     }
+
+    /// Encode a primitive value to wire bytes (little-endian).
+    ///
+    /// Returns `None` if this type is not a fixed-size primitive.
+    pub fn encode_primitive(&self, value: u64) -> Option<Vec<u8>> {
+        match self {
+            WireType::Bool => Some(vec![if value != 0 { 1 } else { 0 }]),
+            WireType::I8 => Some((value as i8).to_le_bytes().to_vec()),
+            WireType::I16 => Some((value as i16).to_le_bytes().to_vec()),
+            WireType::I32 => Some((value as i32).to_le_bytes().to_vec()),
+            WireType::I64 => Some((value as i64).to_le_bytes().to_vec()),
+            WireType::U8 => Some((value as u8).to_le_bytes().to_vec()),
+            WireType::U16 => Some((value as u16).to_le_bytes().to_vec()),
+            WireType::U32 => Some((value as u32).to_le_bytes().to_vec()),
+            WireType::U64 | WireType::Handle => Some(value.to_le_bytes().to_vec()),
+            WireType::F32 => Some(f32::from_bits(value as u32).to_le_bytes().to_vec()),
+            WireType::F64 => Some(f64::from_bits(value).to_le_bytes().to_vec()),
+            WireType::Unit => Some(vec![]),
+            _ => None,
+        }
+    }
+
+    /// Decode a primitive value from wire bytes (little-endian).
+    ///
+    /// Returns `None` if this type is not a fixed-size primitive or the
+    /// byte slice has the wrong length.
+    pub fn decode_primitive(&self, bytes: &[u8]) -> Option<u64> {
+        match self {
+            WireType::Bool => {
+                if bytes.len() == 1 {
+                    Some(if bytes[0] != 0 { 1 } else { 0 })
+                } else {
+                    None
+                }
+            }
+            WireType::I8 => bytes
+                .try_into()
+                .ok()
+                .map(|b: [u8; 1]| i8::from_le_bytes(b) as u64),
+            WireType::I16 => bytes
+                .try_into()
+                .ok()
+                .map(|b: [u8; 2]| i16::from_le_bytes(b) as u64),
+            WireType::I32 => bytes
+                .try_into()
+                .ok()
+                .map(|b: [u8; 4]| i32::from_le_bytes(b) as u64),
+            WireType::I64 => bytes
+                .try_into()
+                .ok()
+                .map(|b: [u8; 8]| i64::from_le_bytes(b) as u64),
+            WireType::U8 => bytes
+                .try_into()
+                .ok()
+                .map(|b: [u8; 1]| u8::from_le_bytes(b) as u64),
+            WireType::U16 => bytes
+                .try_into()
+                .ok()
+                .map(|b: [u8; 2]| u16::from_le_bytes(b) as u64),
+            WireType::U32 => bytes
+                .try_into()
+                .ok()
+                .map(|b: [u8; 4]| u32::from_le_bytes(b) as u64),
+            WireType::U64 | WireType::Handle => bytes.try_into().ok().map(u64::from_le_bytes),
+            WireType::F32 => bytes
+                .try_into()
+                .ok()
+                .map(|b: [u8; 4]| f32::from_le_bytes(b).to_bits() as u64),
+            WireType::F64 => bytes
+                .try_into()
+                .ok()
+                .map(|b: [u8; 8]| f64::from_le_bytes(b).to_bits()),
+            WireType::Unit => {
+                if bytes.is_empty() {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Wire field: a field in a wire message.
@@ -211,6 +306,42 @@ pub struct WireSchema {
     pub fields: Vec<WireField>,
 }
 
+impl WireSchema {
+    /// Validate schema consistency.
+    ///
+    /// Checks:
+    /// 1. No duplicate field indices
+    /// 2. No duplicate field names
+    /// 3. Field indices are contiguous from 0 (recommended, not required)
+    ///
+    /// Returns a list of validation errors (empty = consistent).
+    pub fn validate(&self) -> Vec<WireSchemaError> {
+        let mut errors = Vec::new();
+        let mut seen_indices = std::collections::HashSet::new();
+        let mut seen_names = std::collections::HashSet::new();
+
+        for field in &self.fields {
+            if !seen_indices.insert(field.index) {
+                errors.push(WireSchemaError::DuplicateIndex(field.index));
+            }
+            if !seen_names.insert(field.name.as_str()) {
+                errors.push(WireSchemaError::DuplicateName(field.name.clone()));
+            }
+        }
+
+        errors
+    }
+}
+
+/// Wire schema validation error.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WireSchemaError {
+    /// Duplicate field index.
+    DuplicateIndex(u32),
+    /// Duplicate field name.
+    DuplicateName(String),
+}
+
 /// Wire error.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WireError {
@@ -222,8 +353,10 @@ pub enum WireError {
     LengthMismatch { declared: u64, actual: u64 },
     /// Data too short for header.
     TooShort(usize),
-    /// Data truncated.
+    /// Data truncated (not enough bytes for declared payload).
     Truncated { expected: usize, actual: usize },
+    /// Extra bytes after declared payload (possible corruption).
+    TrailingData { expected: usize, actual: usize },
 }
 
 impl std::fmt::Display for WireError {
@@ -248,6 +381,13 @@ impl std::fmt::Display for WireError {
                 f,
                 "data truncated: expected {} bytes, got {}",
                 expected, actual
+            ),
+            WireError::TrailingData { expected, actual } => write!(
+                f,
+                "trailing data: expected {} bytes, got {} ({} extra)",
+                expected,
+                actual,
+                actual - expected
             ),
         }
     }
@@ -313,5 +453,142 @@ mod tests {
         // "MIMI" in ASCII: M=0x4D, I=0x49, M=0x4D, I=0x49
         // Little-endian: 0x494D494D
         assert_eq!(WireEnvelope::MAGIC, 0x494D_494D);
+    }
+
+    #[test]
+    fn envelope_trailing_data_detected() {
+        let mut bytes = WireEnvelope::new(b"test".to_vec()).to_bytes();
+        bytes.push(0xFF); // extra trailing byte
+        assert!(matches!(
+            WireEnvelope::from_bytes(&bytes),
+            Err(WireError::TrailingData { .. })
+        ));
+    }
+
+    #[test]
+    fn wire_schema_validate_clean() {
+        let schema = WireSchema {
+            name: "test".to_string(),
+            version: 1,
+            fields: vec![
+                WireField {
+                    name: "a".to_string(),
+                    ty: WireType::I32,
+                    index: 0,
+                    optional: false,
+                },
+                WireField {
+                    name: "b".to_string(),
+                    ty: WireType::String,
+                    index: 1,
+                    optional: true,
+                },
+            ],
+        };
+        assert!(schema.validate().is_empty());
+    }
+
+    #[test]
+    fn wire_schema_validate_duplicate_index() {
+        let schema = WireSchema {
+            name: "bad".to_string(),
+            version: 1,
+            fields: vec![
+                WireField {
+                    name: "a".to_string(),
+                    ty: WireType::I32,
+                    index: 0,
+                    optional: false,
+                },
+                WireField {
+                    name: "b".to_string(),
+                    ty: WireType::I64,
+                    index: 0, // duplicate
+                    optional: false,
+                },
+            ],
+        };
+        let errors = schema.validate();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, WireSchemaError::DuplicateIndex(0))));
+    }
+
+    #[test]
+    fn wire_schema_validate_duplicate_name() {
+        let schema = WireSchema {
+            name: "bad".to_string(),
+            version: 1,
+            fields: vec![
+                WireField {
+                    name: "x".to_string(),
+                    ty: WireType::I32,
+                    index: 0,
+                    optional: false,
+                },
+                WireField {
+                    name: "x".to_string(), // duplicate
+                    ty: WireType::I64,
+                    index: 1,
+                    optional: false,
+                },
+            ],
+        };
+        let errors = schema.validate();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, WireSchemaError::DuplicateName(n) if n == "x")));
+    }
+
+    #[test]
+    fn wire_type_primitive_encode_decode_roundtrip() {
+        // I32
+        let ty = WireType::I32;
+        let encoded = ty.encode_primitive(42).unwrap();
+        assert_eq!(encoded.len(), 4);
+        assert_eq!(ty.decode_primitive(&encoded), Some(42));
+
+        // I64
+        let ty = WireType::I64;
+        let encoded = ty.encode_primitive(0xDEAD_BEEF).unwrap();
+        assert_eq!(encoded.len(), 8);
+        assert_eq!(ty.decode_primitive(&encoded), Some(0xDEAD_BEEF));
+
+        // Bool
+        let ty = WireType::Bool;
+        assert_eq!(ty.encode_primitive(1).unwrap(), vec![1]);
+        assert_eq!(ty.encode_primitive(0).unwrap(), vec![0]);
+        assert_eq!(ty.decode_primitive(&[1]), Some(1));
+        assert_eq!(ty.decode_primitive(&[0]), Some(0));
+
+        // U8
+        let ty = WireType::U8;
+        let encoded = ty.encode_primitive(255).unwrap();
+        assert_eq!(ty.decode_primitive(&encoded), Some(255));
+
+        // F64 (via bits)
+        let ty = WireType::F64;
+        let pi_bits = std::f64::consts::PI.to_bits();
+        let encoded = ty.encode_primitive(pi_bits).unwrap();
+        assert_eq!(encoded.len(), 8);
+        assert_eq!(ty.decode_primitive(&encoded), Some(pi_bits));
+
+        // Unit
+        let ty = WireType::Unit;
+        assert_eq!(ty.encode_primitive(0).unwrap(), Vec::<u8>::new());
+        assert_eq!(ty.decode_primitive(&[]), Some(0));
+
+        // Variable-length types return None
+        assert!(WireType::String.encode_primitive(0).is_none());
+        assert!(WireType::Array(Box::new(WireType::I32))
+            .encode_primitive(0)
+            .is_none());
+    }
+
+    #[test]
+    fn wire_type_decode_wrong_length() {
+        let ty = WireType::I32;
+        assert_eq!(ty.decode_primitive(&[1, 2]), None); // too short
+        assert_eq!(ty.decode_primitive(&[1, 2, 3, 4, 5]), None); // too long
     }
 }

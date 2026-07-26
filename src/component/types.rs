@@ -8,7 +8,7 @@
 ///
 /// Types can be primitives, struct references, pointers, slices,
 /// opaque handles, fat pointers, or void.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AbiTypeRef {
     /// Primitive scalar type.
     Primitive(AbiPrimitive),
@@ -48,6 +48,16 @@ impl AbiTypeRef {
         matches!(self, AbiTypeRef::Void)
     }
 
+    /// True if this is a fat pointer (String or slice with explicit layout).
+    pub fn is_fat_pointer(&self) -> bool {
+        matches!(self, AbiTypeRef::FatPointer { .. })
+    }
+
+    /// True if this is a thin slice (data + len, no capacity).
+    pub fn is_slice(&self) -> bool {
+        matches!(self, AbiTypeRef::Slice(_))
+    }
+
     /// C type name for this reference.
     pub fn c_type_name(&self) -> String {
         match self {
@@ -67,6 +77,28 @@ impl AbiTypeRef {
                 }
             }
             AbiTypeRef::Void => "void".to_string(),
+        }
+    }
+
+    /// Rust type name for this reference (used by Rust bindgen backends).
+    pub fn rust_type_name(&self) -> String {
+        match self {
+            AbiTypeRef::Primitive(p) => p.rust_name().to_string(),
+            AbiTypeRef::Named(name) => name.clone(),
+            AbiTypeRef::Pointer(inner) => format!("*mut {}", inner.rust_type_name()),
+            AbiTypeRef::Slice(inner) => format!("&[{}]", inner.rust_type_name()),
+            AbiTypeRef::Opaque(name) => format!("{}Handle", name),
+            AbiTypeRef::FatPointer {
+                element,
+                has_capacity,
+            } => {
+                if *has_capacity {
+                    "MimiString".to_string()
+                } else {
+                    format!("MimiSlice<{}>", element.rust_type_name())
+                }
+            }
+            AbiTypeRef::Void => "()".to_string(),
         }
     }
 }
@@ -125,6 +157,25 @@ impl AbiPrimitive {
         }
     }
 
+    /// Rust type name.
+    pub fn rust_name(&self) -> &'static str {
+        match self {
+            AbiPrimitive::I8 => "i8",
+            AbiPrimitive::I16 => "i16",
+            AbiPrimitive::I32 => "i32",
+            AbiPrimitive::I64 => "i64",
+            AbiPrimitive::U8 => "u8",
+            AbiPrimitive::U16 => "u16",
+            AbiPrimitive::U32 => "u32",
+            AbiPrimitive::U64 => "u64",
+            AbiPrimitive::F32 => "f32",
+            AbiPrimitive::F64 => "f64",
+            AbiPrimitive::Bool => "bool",
+            AbiPrimitive::IntPtr => "isize",
+            AbiPrimitive::UIntPtr => "usize",
+        }
+    }
+
     /// Parse from a Mimi surface type name.
     pub fn from_mimi_type(name: &str) -> Option<Self> {
         match name {
@@ -147,7 +198,7 @@ impl AbiPrimitive {
 }
 
 /// ABI type definition: a named type in the Component IR.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AbiTypeDef {
     /// repr(C) struct with explicit field layout.
     Struct(AbiStruct),
@@ -172,7 +223,7 @@ impl AbiTypeDef {
 }
 
 /// repr(C) struct definition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AbiStruct {
     /// Struct name (e.g., "MimiList").
     pub name: String,
@@ -187,7 +238,7 @@ pub struct AbiStruct {
 }
 
 /// A field in an ABI struct.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AbiField {
     /// Field name.
     pub name: String,
@@ -198,7 +249,7 @@ pub struct AbiField {
 }
 
 /// C-style enum definition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AbiEnum {
     /// Enum name.
     pub name: String,
@@ -209,7 +260,7 @@ pub struct AbiEnum {
 }
 
 /// Type alias definition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AbiAlias {
     /// Alias name.
     pub name: String,
@@ -218,7 +269,7 @@ pub struct AbiAlias {
 }
 
 /// Opaque handle type (no visible layout, generational).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AbiOpaque {
     /// Handle type name (e.g., "ListHandle", "MapHandle").
     pub name: String,
@@ -268,5 +319,41 @@ mod tests {
             Some(AbiPrimitive::Bool)
         );
         assert_eq!(AbiPrimitive::from_mimi_type("string"), None);
+    }
+
+    #[test]
+    fn rust_type_names() {
+        assert_eq!(AbiPrimitive::I32.rust_name(), "i32");
+        assert_eq!(AbiPrimitive::F64.rust_name(), "f64");
+        assert_eq!(AbiPrimitive::IntPtr.rust_name(), "isize");
+        assert_eq!(
+            AbiTypeRef::Primitive(AbiPrimitive::I32).rust_type_name(),
+            "i32"
+        );
+        assert_eq!(
+            AbiTypeRef::Pointer(Box::new(AbiTypeRef::Primitive(AbiPrimitive::U8))).rust_type_name(),
+            "*mut u8"
+        );
+        assert_eq!(AbiTypeRef::Void.rust_type_name(), "()");
+    }
+
+    #[test]
+    fn fat_pointer_and_slice_predicates() {
+        let fp = AbiTypeRef::FatPointer {
+            element: Box::new(AbiTypeRef::Primitive(AbiPrimitive::U8)),
+            has_capacity: true,
+        };
+        assert!(fp.is_fat_pointer());
+        assert!(!fp.is_slice());
+        assert!(!fp.is_pointer());
+
+        let sl = AbiTypeRef::Slice(Box::new(AbiTypeRef::Primitive(AbiPrimitive::I64)));
+        assert!(sl.is_slice());
+        assert!(!sl.is_fat_pointer());
+
+        let ptr = AbiTypeRef::Pointer(Box::new(AbiTypeRef::Primitive(AbiPrimitive::I32)));
+        assert!(ptr.is_pointer());
+        assert!(!ptr.is_slice());
+        assert!(!ptr.is_fat_pointer());
     }
 }

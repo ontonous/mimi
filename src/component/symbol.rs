@@ -6,7 +6,7 @@
 use super::types::AbiTypeRef;
 
 /// ABI symbol: a function or method in the Component IR.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AbiSymbol {
     /// Symbol name (e.g., "mimi_list_push_i64").
     pub name: String,
@@ -48,7 +48,7 @@ impl AbiSymbol {
 }
 
 /// Symbol kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AbiSymbolKind {
     /// Free function.
     Function,
@@ -67,7 +67,7 @@ pub enum AbiSymbolKind {
 /// 0.31.33: Callback category (blind review: 5 categories).
 ///
 /// Determines lifetime, thread affinity, and cancellation semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AbiCallbackCategory {
     /// Synchronous, same-thread. Caller blocks until callback returns.
     /// Example: comparator for sort, predicate for filter.
@@ -107,7 +107,7 @@ impl AbiCallbackCategory {
 }
 
 /// ABI parameter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AbiParam {
     /// Parameter name.
     pub name: String,
@@ -118,7 +118,7 @@ pub struct AbiParam {
 }
 
 /// Calling convention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AbiCallConv {
     /// C calling convention (extern "C").
     #[default]
