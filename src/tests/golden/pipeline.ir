@@ -11,6 +11,8 @@ source_filename = "golden_test"
 @str.7 = private unnamed_addr constant [11 x i8] c"peer_fault\00", align 1
 @str.8 = private unnamed_addr constant [1 x i8] zeroinitializer, align 1
 @str.9 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
+@op_name = private unnamed_addr constant [15 x i8] c"multiplication\00", align 1
+@op_name.10 = private unnamed_addr constant [9 x i8] c"addition\00", align 1
 
 declare i32 @printf(ptr, ...)
 
@@ -735,14 +737,29 @@ declare i32 @mimi_quote_argc(ptr)
 
 declare ptr @mimi_quote_list_child(ptr, i64)
 
+declare void @mimi_trap_overflow(ptr)
+
+declare void @mimi_trap_div_by_zero()
+
+declare void @mimi_trap_div_overflow()
+
 define i32 @double(i32 %0) {
 entry:
   %x = alloca i32, align 4
   store i32 %0, ptr %x, align 4
   %x1 = load i32, ptr %x, align 4
   %promote = sext i32 %x1 to i64
-  %mul = mul i64 %promote, 2
-  %trunc = trunc i64 %mul to i32
+  %checked_op = call { i64, i1 } @llvm.smul.with.overflow.i64(i64 %promote, i64 2)
+  %op_result = extractvalue { i64, i1 } %checked_op, 0
+  %op_overflow = extractvalue { i64, i1 } %checked_op, 1
+  br i1 %op_overflow, label %trap_overflow, label %op_ok
+
+trap_overflow:                                    ; preds = %entry
+  call void @mimi_trap_overflow(ptr @op_name)
+  unreachable
+
+op_ok:                                            ; preds = %entry
+  %trunc = trunc i64 %op_result to i32
   ret i32 %trunc
 }
 
@@ -752,8 +769,17 @@ entry:
   store i32 %0, ptr %x, align 4
   %x1 = load i32, ptr %x, align 4
   %promote = sext i32 %x1 to i64
-  %add = add i64 %promote, 1
-  %trunc = trunc i64 %add to i32
+  %checked_op = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %promote, i64 1)
+  %op_result = extractvalue { i64, i1 } %checked_op, 0
+  %op_overflow = extractvalue { i64, i1 } %checked_op, 1
+  br i1 %op_overflow, label %trap_overflow, label %op_ok
+
+trap_overflow:                                    ; preds = %entry
+  call void @mimi_trap_overflow(ptr @op_name.10)
+  unreachable
+
+op_ok:                                            ; preds = %entry
+  %trunc = trunc i64 %op_result to i32
   ret i32 %trunc
 }
 
@@ -910,4 +936,11 @@ entry:
   ret { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load
 }
 
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare { i64, i1 } @llvm.smul.with.overflow.i64(i64, i64) #1
+
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64) #1
+
 attributes #0 = { noreturn }
+attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }

@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::codegen::{CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{
     AggregateValueEnum, BasicMetadataValueEnum, BasicValueEnum, FloatValue, IntValue, PointerValue,
 };
@@ -301,51 +301,195 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Integer arithmetic (`+`, `-`, `*`, `/`).
+    ///
+    /// SD-7 (0.31.51a): add/sub/mul use LLVM checked arithmetic intrinsics.
+    /// On overflow, calls mimi_trap_overflow (E0801).
+    /// SD-8 (0.31.51a): div/mod check for zero divisor and MIN/-1.
+    /// On violation, calls mimi_trap_div_by_zero / mimi_trap_div_overflow.
     fn compile_int_binop(
         &self,
         op: BinOp,
         l: IntValue<'ctx>,
         r: IntValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        // CG-H1 (deep audit): division by zero is UB (SIGFPE on x86).
-        // Emit a runtime check that returns 0 instead of crashing.
-        if matches!(op, BinOp::Div) {
-            // Use operand width for constants — i32 operands need i32 constants.
-            let zero = r.get_type().const_int(0, false);
+        let int_ty = l.get_type();
+        let bit_width = int_ty.get_bit_width();
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("no current function for int binop".into()))?;
+
+        // SD-8: Division and modulo — check for zero divisor and MIN/-1.
+        if matches!(op, BinOp::Div | BinOp::Mod) {
+            let zero = int_ty.const_int(0, false);
             let is_zero = self
                 .builder
                 .build_int_compare(inkwell::IntPredicate::EQ, r, zero, "div_by_zero")
                 .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-            let safe_r = self
+
+            // Trap block: call mimi_trap_div_by_zero (unreachable after).
+            let trap_bb = self.context.append_basic_block(function, "trap_div_zero");
+            let cont_bb = self.context.append_basic_block(function, "div_cont");
+            self.builder
+                .build_conditional_branch(is_zero, trap_bb, cont_bb)
+                .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
+
+            // Emit trap call.
+            self.builder.position_at_end(trap_bb);
+            let trap_fn = self.get_runtime_fn("mimi_trap_div_by_zero")?;
+            self.builder
+                .build_call(trap_fn, &[], "")
+                .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+            self.builder
+                .build_unreachable()
+                .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+
+            // Continue with safe division.
+            self.builder.position_at_end(cont_bb);
+
+            // SD-8: MIN/-1 check. MIN / -1 overflows (result = MIN, not MAX+1).
+            let min_val = int_ty.const_int(1 << (bit_width - 1), false); // e.g. i32::MIN
+            let neg_one = int_ty.const_all_ones(); // -1 in two's complement
+            let l_is_min = self
                 .builder
-                .build_select(is_zero, r.get_type().const_int(1, false), r, "safe_divisor")
-                .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-                .into_int_value();
-            let div = self
+                .build_int_compare(inkwell::IntPredicate::EQ, l, min_val, "l_is_min")
+                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+            let r_is_neg1 = self
                 .builder
-                .build_int_signed_div(l, safe_r, "div")
-                .map_err(|e| CompileError::LlvmError(format!("div error: {}", e)))?;
-            let result = self
+                .build_int_compare(inkwell::IntPredicate::EQ, r, neg_one, "r_is_neg1")
+                .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
+            let min_div_neg1 = self
                 .builder
-                .build_select(is_zero, zero, div, "div_result")
-                .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?;
-            return Ok(result);
+                .build_and(l_is_min, r_is_neg1, "min_div_neg1")
+                .map_err(|e| CompileError::LlvmError(format!("and error: {}", e)))?;
+
+            let trap_ovf_bb = self.context.append_basic_block(function, "trap_div_ovf");
+            let safe_bb = self.context.append_basic_block(function, "div_safe");
+            self.builder
+                .build_conditional_branch(min_div_neg1, trap_ovf_bb, safe_bb)
+                .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
+
+            self.builder.position_at_end(trap_ovf_bb);
+            let trap_ovf_fn = self.get_runtime_fn("mimi_trap_div_overflow")?;
+            self.builder
+                .build_call(trap_ovf_fn, &[], "")
+                .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+            self.builder
+                .build_unreachable()
+                .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+
+            self.builder.position_at_end(safe_bb);
+
+            let result = if op == BinOp::Div {
+                self.builder
+                    .build_int_signed_div(l, r, "div")
+                    .map_err(|e| CompileError::LlvmError(format!("div error: {}", e)))?
+            } else {
+                self.builder
+                    .build_int_signed_rem(l, r, "rem")
+                    .map_err(|e| CompileError::LlvmError(format!("rem error: {}", e)))?
+            };
+            return Ok(result.into());
         }
-        let res = match op {
-            BinOp::Add => self.builder.build_int_add(l, r, "add"),
-            BinOp::Sub => self.builder.build_int_sub(l, r, "sub"),
-            BinOp::Mul => self.builder.build_int_mul(l, r, "mul"),
-            // Div is handled above with zero-check; keep defensive Err not panic.
-            BinOp::Div => {
-                return Err(CompileError::LlvmError(
-                    "internal: integer Div should have been handled earlier".into(),
-                ));
-            }
+
+        // SD-7: Checked add/sub/mul via LLVM overflow intrinsics.
+        let intrinsic_name = match op {
+            BinOp::Add => format!("llvm.sadd.with.overflow.i{}", bit_width),
+            BinOp::Sub => format!("llvm.ssub.with.overflow.i{}", bit_width),
+            BinOp::Mul => format!("llvm.smul.with.overflow.i{}", bit_width),
             _ => return Err(format!("unsupported integer arithmetic operator {:?}", op).into()),
         };
-        Ok(res
-            .map_err(|e| CompileError::LlvmError(format!("{} error: {}", op_name(op), e)))?
-            .into())
+
+        // Declare the intrinsic: {iN, i1} @llvm.sX.with.overflow.iN(iN, iN)
+        let struct_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(int_ty),
+                BasicTypeEnum::IntType(self.context.bool_type()),
+            ],
+            false,
+        );
+        let fn_type = struct_ty.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(int_ty),
+                BasicMetadataTypeEnum::IntType(int_ty),
+            ],
+            false,
+        );
+        let intrinsic_fn = self
+            .module
+            .get_function(&intrinsic_name)
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    &intrinsic_name,
+                    fn_type,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+
+        let call = self
+            .builder
+            .build_call(
+                intrinsic_fn,
+                &[
+                    BasicMetadataValueEnum::IntValue(l),
+                    BasicMetadataValueEnum::IntValue(r),
+                ],
+                "checked_op",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("intrinsic call error: {}", e)))?;
+
+        let result_struct = call
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("intrinsic returned void".into()))?;
+
+        // Extract value (field 0) and overflow flag (field 1).
+        let result_val = self
+            .builder
+            .build_extract_value(result_struct.into_struct_value(), 0, "op_result")
+            .map_err(|e| CompileError::LlvmError(format!("extract value error: {}", e)))?
+            .into_int_value();
+        let overflow_flag = self
+            .builder
+            .build_extract_value(result_struct.into_struct_value(), 1, "op_overflow")
+            .map_err(|e| CompileError::LlvmError(format!("extract flag error: {}", e)))?
+            .into_int_value();
+
+        // Branch on overflow: trap or continue.
+        let trap_bb = self.context.append_basic_block(function, "trap_overflow");
+        let ok_bb = self.context.append_basic_block(function, "op_ok");
+        self.builder
+            .build_conditional_branch(overflow_flag, trap_bb, ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
+
+        // Trap block.
+        self.builder.position_at_end(trap_bb);
+        let trap_fn = self.get_runtime_fn("mimi_trap_overflow")?;
+        let op_name_str = match op {
+            BinOp::Add => "addition",
+            BinOp::Sub => "subtraction",
+            BinOp::Mul => "multiplication",
+            _ => "operation",
+        };
+        let op_cstr = self
+            .builder
+            .build_global_string_ptr(op_name_str, "op_name")
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+        self.builder
+            .build_call(
+                trap_fn,
+                &[BasicMetadataValueEnum::PointerValue(
+                    op_cstr.as_pointer_value(),
+                )],
+                "",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+
+        // OK block: result_val is already available (trap block is unreachable).
+        self.builder.position_at_end(ok_bb);
+
+        Ok(result_val.into())
     }
 
     /// Floating-point arithmetic (`+`, `-`, `*`, `/`).
@@ -368,6 +512,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Integer remainder (`%`).
+    /// SD-8 (0.31.51a): delegates to compile_int_binop which handles
+    /// zero-divisor and MIN/-1 traps.
     fn compile_mod_binop(
         &self,
         lhs: BasicValueEnum<'ctx>,
@@ -375,32 +521,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         match (lhs, rhs) {
             (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
-                // CG-H1 (deep audit): modulo by zero is UB (SIGFPE).
-                // Use operand width for constants — i32 operands need i32 constants.
-                let zero = r.get_type().const_int(0, false);
-                let is_zero = self
-                    .builder
-                    .build_int_compare(inkwell::IntPredicate::EQ, r, zero, "mod_by_zero")
-                    .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?;
-                let safe_r = self
-                    .builder
-                    .build_select(
-                        is_zero,
-                        r.get_type().const_int(1, false),
-                        r,
-                        "safe_mod_divisor",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?
-                    .into_int_value();
-                let rem = self
-                    .builder
-                    .build_int_signed_rem(l, safe_r, "rem")
-                    .map_err(|e| CompileError::LlvmError(format!("rem error: {}", e)))?;
-                let result = self
-                    .builder
-                    .build_select(is_zero, zero, rem, "mod_result")
-                    .map_err(|e| CompileError::LlvmError(format!("select error: {}", e)))?;
-                Ok(result)
+                self.compile_int_binop(BinOp::Mod, l, r)
             }
             _ => Err("mod requires integer types".into()),
         }

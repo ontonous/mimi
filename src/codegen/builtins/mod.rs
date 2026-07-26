@@ -51,6 +51,7 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     register_actor_concurrency_rt(module, ctx, i8_ptr, i32, i64, void);
     register_atomic_mutex_channel_rt(module, ctx, i8_ptr, i32, i64, void);
     register_quoted_ast_rt(module, ctx, i8_ptr, i32, i64, void);
+    register_arithmetic_trap_fns(module, ctx, i8_ptr, void);
 }
 
 fn register_libc<'ctx>(
@@ -4225,6 +4226,35 @@ fn register_quoted_ast_rt<'ctx>(
             ],
             false,
         ),
+        Some(inkwell::module::Linkage::External),
+    );
+}
+
+/// SD-7/SD-8 (0.31.51a): Register arithmetic trap functions for checked
+/// integer arithmetic. These are called when overflow or division by zero
+/// is detected at runtime.
+fn register_arithmetic_trap_fns<'ctx>(
+    module: &Module<'ctx>,
+    _ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
+) {
+    // mimi_trap_overflow(op: *const c_char) -> !
+    module.add_function(
+        "mimi_trap_overflow",
+        void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_trap_div_by_zero() -> !
+    module.add_function(
+        "mimi_trap_div_by_zero",
+        void.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_trap_div_overflow() -> !
+    module.add_function(
+        "mimi_trap_div_overflow",
+        void.fn_type(&[], false),
         Some(inkwell::module::Linkage::External),
     );
 }

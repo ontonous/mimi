@@ -11,6 +11,7 @@ source_filename = "golden_test"
 @str.7 = private unnamed_addr constant [11 x i8] c"peer_fault\00", align 1
 @str.8 = private unnamed_addr constant [1 x i8] zeroinitializer, align 1
 @str.9 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
+@op_name = private unnamed_addr constant [9 x i8] c"addition\00", align 1
 
 declare i32 @printf(ptr, ...)
 
@@ -735,27 +736,42 @@ declare i32 @mimi_quote_argc(ptr)
 
 declare ptr @mimi_quote_list_child(ptr, i64)
 
+declare void @mimi_trap_overflow(ptr)
+
+declare void @mimi_trap_div_by_zero()
+
+declare void @mimi_trap_div_overflow()
+
 define i32 @main() {
 entry:
   %i = alloca i64, align 8
   store i64 0, ptr %i, align 4
   br label %loop
 
-loop:                                             ; preds = %loopbody, %entry
+loop:                                             ; preds = %op_ok, %entry
   %i1 = load i64, ptr %i, align 4
   %lt = icmp slt i64 %i1, 10
   br i1 %lt, label %loopbody, label %loopcont
 
 loopbody:                                         ; preds = %loop
   %i2 = load i64, ptr %i, align 4
-  %add = add i64 %i2, 1
-  store i64 %add, ptr %i, align 4
-  br label %loop
+  %checked_op = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %i2, i64 1)
+  %op_result = extractvalue { i64, i1 } %checked_op, 0
+  %op_overflow = extractvalue { i64, i1 } %checked_op, 1
+  br i1 %op_overflow, label %trap_overflow, label %op_ok
 
 loopcont:                                         ; preds = %loop
   %i3 = load i64, ptr %i, align 4
   %trunc = trunc i64 %i3 to i32
   ret i32 %trunc
+
+trap_overflow:                                    ; preds = %loopbody
+  call void @mimi_trap_overflow(ptr @op_name)
+  unreachable
+
+op_ok:                                            ; preds = %loopbody
+  store i64 %op_result, ptr %i, align 4
+  br label %loop
 }
 
 define {} @Main__run__from_Single({} %0) {
@@ -904,4 +920,8 @@ entry:
   ret { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load
 }
 
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64) #1
+
 attributes #0 = { noreturn }
+attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
