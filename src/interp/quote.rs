@@ -636,11 +636,16 @@ impl<'a> Interpreter<'a> {
             }
             QuotedAst::ExprStmt(e) => self.eval_quoted_ast(e),
             QuotedAst::Return(e) => {
-                if let Some(e) = e {
-                    self.eval_quoted_ast(e)
+                // Q-1 (0.31.54): set early_return so the enclosing function
+                // actually stops. Previously this was a no-op (just evaluated
+                // the expression and continued executing subsequent statements).
+                let v = if let Some(e) = e {
+                    self.eval_quoted_ast(e)?
                 } else {
-                    Ok(Value::Unit)
-                }
+                    Value::Unit
+                };
+                self.early_return = Some(v.clone());
+                Ok(v)
             }
             QuotedAst::If(cond, then_, else_) => {
                 let c = self.eval_quoted_ast(cond)?;
@@ -737,11 +742,13 @@ impl<'a> Interpreter<'a> {
                     }
                 };
                 for item in list {
+                    // I-4 (0.31.54): push/pop scope per iteration so the loop
+                    // variable doesn't leak into the outer scope.
+                    self.push_scope();
                     self.bind(var, item)?;
-                    if self.early_return.is_some() {
-                        break;
-                    }
-                    self.eval_quoted_ast(body)?;
+                    let body_result = self.eval_quoted_ast(body);
+                    self.pop_scope();
+                    body_result?;
                     if self.early_return.is_some() {
                         break;
                     }
