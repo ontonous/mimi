@@ -104,6 +104,9 @@ pub(crate) mod dual_backend;
 // === Dual-interpreter equivalence tests (0.31.45) ===
 pub(crate) mod dual_interp;
 
+// === Trap tests: IEEE-754 / integer overflow / OOB (0.31.46) ===
+pub(crate) mod trap_tests;
+
 // === Benchmark modules ===
 pub(crate) mod benchmarks;
 pub(crate) mod lsp_e2e;
