@@ -30,12 +30,14 @@
 //! ```
 
 mod gen;
+mod handle;
 mod serialize;
 mod symbol;
 mod types;
 mod wire;
 
 pub use gen::{register_core_runtime_abi, AbiGenerator};
+pub use handle::{Handle, HandleError, HandleKind, HandleRegistry, RuntimeId};
 pub use serialize::MimiAbi;
 pub use symbol::*;
 pub use types::*;
