@@ -48,21 +48,39 @@ impl AbiGenerator {
     }
 
     /// Register an exported runtime function.
+    ///
+    /// Panics in debug builds if a duplicate export name is registered.
     pub fn export(&mut self, name: &str, build: impl FnOnce(SymbolBuilder) -> SymbolBuilder) {
+        #[cfg(debug_assertions)]
+        if self.exports.iter().any(|s| s.name == name) {
+            panic!("duplicate export registration: {}", name);
+        }
         let builder = SymbolBuilder::new(name, AbiSymbolKind::Function);
         let symbol = build(builder).build();
         self.exports.push(symbol);
     }
 
     /// Register an imported extern function.
+    ///
+    /// Panics in debug builds if a duplicate import name is registered.
     pub fn import(&mut self, name: &str, build: impl FnOnce(SymbolBuilder) -> SymbolBuilder) {
+        #[cfg(debug_assertions)]
+        if self.imports.iter().any(|s| s.name == name) {
+            panic!("duplicate import registration: {}", name);
+        }
         let builder = SymbolBuilder::new(name, AbiSymbolKind::ExternFunction);
         let symbol = build(builder).build();
         self.imports.push(symbol);
     }
 
     /// Register a type definition.
+    ///
+    /// Panics in debug builds if a duplicate type name is registered.
     pub fn type_def(&mut self, def: super::types::AbiTypeDef) {
+        #[cfg(debug_assertions)]
+        if self.types.iter().any(|t| t.name() == def.name()) {
+            panic!("duplicate type definition: {}", def.name());
+        }
         self.types.push(def);
     }
 
@@ -280,8 +298,8 @@ pub fn register_fat_pointer_types(gen: &mut AbiGenerator) {
 /// Register the core runtime ABI surface.
 ///
 /// This is the v1 manual registry. It covers the most critical runtime
-/// functions (list, map, set, string, RC, I/O). The full 426-function
-/// surface will be migrated incrementally.
+/// functions (~60 of 426: RC, list, map, set, string, I/O, concurrency,
+/// file I/O, time). The full surface will be migrated incrementally.
 pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     use AbiPrimitive::*;
 
@@ -289,6 +307,21 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     // so String/buffer surfaces carry { data, len, capacity } directly instead
     // of an opaque C-string pointer + separate length.
     register_fat_pointer_types(gen);
+
+    // Register opaque handle types (referenced by list/map/set functions).
+    use super::types::{AbiOpaque, AbiTypeDef};
+    gen.type_def(AbiTypeDef::Opaque(AbiOpaque {
+        name: "ListHandle".to_string(),
+        description: "Opaque handle to a Mimi list (generational, kind-tagged)".to_string(),
+    }));
+    gen.type_def(AbiTypeDef::Opaque(AbiOpaque {
+        name: "MapHandle".to_string(),
+        description: "Opaque handle to a Mimi map (generational, kind-tagged)".to_string(),
+    }));
+    gen.type_def(AbiTypeDef::Opaque(AbiOpaque {
+        name: "SetHandle".to_string(),
+        description: "Opaque handle to a Mimi set (generational, kind-tagged)".to_string(),
+    }));
 
     // ── RC / Allocation ──
     gen.export("mimi_rc_alloc", |f| {

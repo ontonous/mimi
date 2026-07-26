@@ -10,11 +10,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::symbol::AbiParam;
-use super::symbol::AbiSymbol;
-use super::types::AbiField;
-use super::types::AbiTypeDef;
-use super::types::AbiTypeRef;
+use super::symbol::{AbiCallConv, AbiCallbackCategory, AbiParam, AbiSymbol, AbiSymbolKind};
+use super::types::{
+    AbiAlias, AbiEnum, AbiField, AbiOpaque, AbiPrimitive, AbiStruct, AbiTypeDef, AbiTypeRef,
+};
 use super::{ComponentIdentity, ComponentIr};
 
 /// Serialized `.mimiabi` format (JSON-compatible).
@@ -61,6 +60,23 @@ impl MimiAbi {
     pub fn hash(&self) -> Result<String, serde_json::Error> {
         let json = serde_json::to_string(self)?;
         Ok(blake3::hash(json.as_bytes()).to_hex().to_string())
+    }
+
+    /// Reconstruct a ComponentIr from the serialized `.mimiabi` format.
+    ///
+    /// This is the reverse of `from_component_ir()`. Used by bindgen backends
+    /// that consume `.mimiabi` files directly.
+    pub fn to_component_ir(&self) -> ComponentIr {
+        ComponentIr {
+            identity: ComponentIdentity {
+                name: self.identity.name.clone(),
+                version: self.identity.version.clone(),
+                abi_version: self.identity.abi_version,
+            },
+            exports: self.exports.iter().map(AbiSymbol::from).collect(),
+            imports: self.imports.iter().map(AbiSymbol::from).collect(),
+            types: self.types.iter().map(AbiTypeDef::from).collect(),
+        }
     }
 }
 
@@ -235,6 +251,161 @@ impl From<&AbiField> for MimiAbiField {
     }
 }
 
+// ── Reverse conversions (MimiAbi → Component IR) ──────────────────────────
+
+impl From<&MimiAbiSymbol> for AbiSymbol {
+    fn from(sym: &MimiAbiSymbol) -> Self {
+        Self {
+            name: sym.name.clone(),
+            kind: parse_symbol_kind(&sym.kind),
+            params: sym.params.iter().map(AbiParam::from).collect(),
+            ret: AbiTypeRef::from(&sym.ret),
+            effects: sym.effects.clone(),
+            is_unsafe: sym.is_unsafe,
+            call_conv: parse_call_conv(&sym.call_conv),
+            callback_category: sym
+                .callback_category
+                .as_deref()
+                .map(parse_callback_category),
+        }
+    }
+}
+
+impl From<&MimiAbiParam> for AbiParam {
+    fn from(p: &MimiAbiParam) -> Self {
+        Self {
+            name: p.name.clone(),
+            ty: AbiTypeRef::from(&p.ty),
+            is_nullable: p.is_nullable,
+        }
+    }
+}
+
+impl From<&MimiAbiTypeRef> for AbiTypeRef {
+    fn from(ty: &MimiAbiTypeRef) -> Self {
+        match ty {
+            MimiAbiTypeRef::Primitive(name) => AbiTypeRef::Primitive(parse_primitive(name)),
+            MimiAbiTypeRef::Named(name) => AbiTypeRef::Named(name.clone()),
+            MimiAbiTypeRef::Pointer(inner) => {
+                AbiTypeRef::Pointer(Box::new(AbiTypeRef::from(inner.as_ref())))
+            }
+            MimiAbiTypeRef::Slice(inner) => {
+                AbiTypeRef::Slice(Box::new(AbiTypeRef::from(inner.as_ref())))
+            }
+            MimiAbiTypeRef::Opaque(name) => AbiTypeRef::Opaque(name.clone()),
+            MimiAbiTypeRef::FatPointer {
+                element,
+                has_capacity,
+            } => AbiTypeRef::FatPointer {
+                element: Box::new(AbiTypeRef::from(element.as_ref())),
+                has_capacity: *has_capacity,
+            },
+            MimiAbiTypeRef::Void => AbiTypeRef::Void,
+        }
+    }
+}
+
+impl From<&MimiAbiType> for AbiTypeDef {
+    fn from(ty: &MimiAbiType) -> Self {
+        match ty {
+            MimiAbiType::Struct {
+                name,
+                fields,
+                size,
+                align,
+            } => AbiTypeDef::Struct(AbiStruct {
+                name: name.clone(),
+                fields: fields.iter().map(AbiField::from).collect(),
+                is_repr_c: true,
+                size: *size,
+                align: *align,
+            }),
+            MimiAbiType::Enum {
+                name,
+                variants,
+                repr,
+            } => AbiTypeDef::Enum(AbiEnum {
+                name: name.clone(),
+                variants: variants.clone(),
+                repr: parse_primitive(repr),
+            }),
+            MimiAbiType::Alias { name, target } => AbiTypeDef::Alias(AbiAlias {
+                name: name.clone(),
+                target: AbiTypeRef::from(target),
+            }),
+            MimiAbiType::Opaque { name, description } => AbiTypeDef::Opaque(AbiOpaque {
+                name: name.clone(),
+                description: description.clone(),
+            }),
+        }
+    }
+}
+
+impl From<&MimiAbiField> for AbiField {
+    fn from(f: &MimiAbiField) -> Self {
+        Self {
+            name: f.name.clone(),
+            ty: AbiTypeRef::from(&f.ty),
+            offset: f.offset,
+        }
+    }
+}
+
+// ── Parse helpers (Debug format → enum) ────────────────────────────────────
+
+fn parse_primitive(name: &str) -> AbiPrimitive {
+    match name {
+        "I8" => AbiPrimitive::I8,
+        "I16" => AbiPrimitive::I16,
+        "I32" => AbiPrimitive::I32,
+        "I64" => AbiPrimitive::I64,
+        "U8" => AbiPrimitive::U8,
+        "U16" => AbiPrimitive::U16,
+        "U32" => AbiPrimitive::U32,
+        "U64" => AbiPrimitive::U64,
+        "F32" => AbiPrimitive::F32,
+        "F64" => AbiPrimitive::F64,
+        "Bool" => AbiPrimitive::Bool,
+        "IntPtr" => AbiPrimitive::IntPtr,
+        "UIntPtr" => AbiPrimitive::UIntPtr,
+        _ => AbiPrimitive::I64, // fallback
+    }
+}
+
+fn parse_symbol_kind(name: &str) -> AbiSymbolKind {
+    match name {
+        "Function" => AbiSymbolKind::Function,
+        "ExternFunction" => AbiSymbolKind::ExternFunction,
+        "Method" => AbiSymbolKind::Method,
+        "Constructor" => AbiSymbolKind::Constructor,
+        "Destructor" => AbiSymbolKind::Destructor,
+        "Callback" => AbiSymbolKind::Callback,
+        _ => AbiSymbolKind::Function,
+    }
+}
+
+fn parse_call_conv(name: &str) -> AbiCallConv {
+    match name {
+        "C" => AbiCallConv::C,
+        "SystemV" => AbiCallConv::SystemV,
+        "Win64" => AbiCallConv::Win64,
+        "Fast" => AbiCallConv::Fast,
+        "MimiInternal" => AbiCallConv::MimiInternal,
+        _ => AbiCallConv::C,
+    }
+}
+
+fn parse_callback_category(name: &str) -> AbiCallbackCategory {
+    match name {
+        "SyncSameThread" => AbiCallbackCategory::SyncSameThread,
+        "SyncCrossThread" => AbiCallbackCategory::SyncCrossThread,
+        "AsyncOneShot" => AbiCallbackCategory::AsyncOneShot,
+        "AsyncMultiShot" => AbiCallbackCategory::AsyncMultiShot,
+        "AsyncSubscription" => AbiCallbackCategory::AsyncSubscription,
+        _ => AbiCallbackCategory::SyncSameThread,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +456,56 @@ mod tests {
         assert!(json.contains("mimi_test_fn"));
         // Should be valid JSON
         let _: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    }
+
+    #[test]
+    fn component_ir_roundtrip_via_mimiabi() {
+        let mut gen = AbiGenerator::new();
+        register_core_runtime_abi(&mut gen);
+        let ir1 = gen.build();
+
+        // ComponentIr → MimiAbi → JSON → MimiAbi → ComponentIr
+        let abi = MimiAbi::from_component_ir(&ir1);
+        let json = abi.to_json().expect("serialize");
+        let abi2 = MimiAbi::from_json(&json).expect("deserialize");
+        let ir2 = abi2.to_component_ir();
+
+        // Structural equality
+        assert_eq!(ir1.identity, ir2.identity);
+        assert_eq!(ir1.exports.len(), ir2.exports.len());
+        assert_eq!(ir1.imports.len(), ir2.imports.len());
+        assert_eq!(ir1.types.len(), ir2.types.len());
+
+        // Spot-check a symbol
+        let sym1 = ir1.export("mimi_list_push_i64").expect("should exist");
+        let sym2 = ir2.export("mimi_list_push_i64").expect("should exist");
+        assert_eq!(sym1, sym2);
+
+        // Spot-check a type
+        let ty1 = ir1.type_def("MimiString").expect("should exist");
+        let ty2 = ir2.type_def("MimiString").expect("should exist");
+        assert_eq!(ty1, ty2);
+    }
+
+    #[test]
+    fn reverse_conversion_preserves_callback_category() {
+        let mut gen = AbiGenerator::new();
+        gen.export("mimi_on_event", |f| {
+            f.param("data", crate::component::gen::prim(AbiPrimitive::I64))
+                .callback(crate::component::AbiCallbackCategory::AsyncMultiShot)
+        });
+        let ir1 = gen.build();
+
+        let abi = MimiAbi::from_component_ir(&ir1);
+        let json = abi.to_json().expect("serialize");
+        let abi2 = MimiAbi::from_json(&json).expect("deserialize");
+        let ir2 = abi2.to_component_ir();
+
+        let sym = ir2.export("mimi_on_event").expect("should exist");
+        assert_eq!(sym.kind, crate::component::AbiSymbolKind::Callback);
+        assert_eq!(
+            sym.callback_category,
+            Some(crate::component::AbiCallbackCategory::AsyncMultiShot)
+        );
     }
 }

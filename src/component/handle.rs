@@ -112,6 +112,40 @@ impl Handle {
             | (((self.generation & 0xFFFF) as u64) << 32)
             | (self.index as u64)
     }
+
+    /// Unpack from a 64-bit opaque identifier.
+    ///
+    /// Returns `None` if the kind or runtime tags are not recognized.
+    /// The generation is truncated to 16 bits (matching `to_u64`).
+    pub fn from_u64(packed: u64) -> Option<Self> {
+        let kind_tag = (packed >> 56) as u8;
+        let runtime_tag = ((packed >> 48) & 0xFF) as u8;
+        let generation = ((packed >> 32) & 0xFFFF) as u32;
+        let index = (packed & 0xFFFF_FFFF) as u32;
+
+        let kind = match kind_tag {
+            1 => HandleKind::List,
+            2 => HandleKind::Map,
+            3 => HandleKind::Set,
+            4 => HandleKind::Buffer,
+            5 => HandleKind::Task,
+            6 => HandleKind::Subscription,
+            7 => HandleKind::Foreign,
+            _ => return None,
+        };
+        let runtime = match runtime_tag {
+            1 => RuntimeId::Interp,
+            2 => RuntimeId::Native,
+            _ => return None,
+        };
+
+        Some(Handle {
+            kind,
+            runtime,
+            index,
+            generation,
+        })
+    }
 }
 
 /// Reasons a handle operation can fail.
@@ -451,6 +485,32 @@ mod tests {
         // kind tag in top byte
         assert_eq!((packed >> 56) as u8, HandleKind::Map.tag());
         assert_eq!(((packed >> 48) & 0xFF) as u8, RuntimeId::Native.tag());
+    }
+
+    #[test]
+    fn from_u64_roundtrip() {
+        let reg = HandleRegistry::new(RuntimeId::Native);
+        let h = reg.acquire(HandleKind::Foreign).unwrap();
+        let packed = h.to_u64();
+        let unpacked = Handle::from_u64(packed).expect("should unpack");
+        assert_eq!(unpacked.kind(), HandleKind::Foreign);
+        assert_eq!(unpacked.runtime(), RuntimeId::Native);
+        assert_eq!(unpacked.generation(), h.generation());
+        assert_eq!(unpacked, h);
+    }
+
+    #[test]
+    fn from_u64_rejects_bad_kind() {
+        // kind tag 0 is invalid
+        let packed: u64 = 0x0002_0000_0000_0000;
+        assert!(Handle::from_u64(packed).is_none());
+    }
+
+    #[test]
+    fn from_u64_rejects_bad_runtime() {
+        // runtime tag 0 is invalid
+        let packed: u64 = 0x0100_0000_0000_0000;
+        assert!(Handle::from_u64(packed).is_none());
     }
 
     #[test]

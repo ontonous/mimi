@@ -52,7 +52,7 @@ pub use wire::*;
 /// Generated from CheckedProgram + runtime exports, consumed by all
 /// bindgen backends. Replaces the current pattern of 7 independent
 /// raw-AST consumers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ComponentIr {
     /// Component identity (name, version, ABI version).
     pub identity: ComponentIdentity,
@@ -92,10 +92,115 @@ impl ComponentIr {
         names.dedup();
         names
     }
+
+    /// Validate internal consistency of the Component IR.
+    ///
+    /// Checks:
+    /// 1. No duplicate export names
+    /// 2. No duplicate import names
+    /// 3. No export/import name conflicts
+    /// 4. No duplicate type definition names
+    /// 5. All Named type references resolve to a type definition
+    /// 6. All Opaque type references resolve to a type definition
+    ///
+    /// Returns a list of validation errors (empty = consistent).
+    pub fn validate(&self) -> Vec<ComponentIrError> {
+        let mut errors = Vec::new();
+
+        // 1. Duplicate exports
+        let mut seen_exports = std::collections::HashSet::new();
+        for sym in &self.exports {
+            if !seen_exports.insert(sym.name.as_str()) {
+                errors.push(ComponentIrError::DuplicateExport(sym.name.clone()));
+            }
+        }
+
+        // 2. Duplicate imports
+        let mut seen_imports = std::collections::HashSet::new();
+        for sym in &self.imports {
+            if !seen_imports.insert(sym.name.as_str()) {
+                errors.push(ComponentIrError::DuplicateImport(sym.name.clone()));
+            }
+        }
+
+        // 3. Export/import conflicts
+        for name in &seen_exports {
+            if seen_imports.contains(name) {
+                errors.push(ComponentIrError::ExportImportConflict(name.to_string()));
+            }
+        }
+
+        // 4. Duplicate type definitions
+        let mut seen_types = std::collections::HashSet::new();
+        for ty in &self.types {
+            if !seen_types.insert(ty.name()) {
+                errors.push(ComponentIrError::DuplicateType(ty.name().to_string()));
+            }
+        }
+
+        // 5+6. Unresolved type references
+        for sym in self.exports.iter().chain(self.imports.iter()) {
+            Self::check_type_refs(&sym.ret, &seen_types, &sym.name, &mut errors);
+            for param in &sym.params {
+                Self::check_type_refs(&param.ty, &seen_types, &sym.name, &mut errors);
+            }
+        }
+
+        errors
+    }
+
+    /// Recursively check that Named/Opaque type references resolve.
+    fn check_type_refs(
+        ty: &AbiTypeRef,
+        known_types: &std::collections::HashSet<&str>,
+        context: &str,
+        errors: &mut Vec<ComponentIrError>,
+    ) {
+        match ty {
+            AbiTypeRef::Named(name) => {
+                if !known_types.contains(name.as_str()) {
+                    errors.push(ComponentIrError::UnresolvedTypeRef {
+                        name: name.clone(),
+                        context: context.to_string(),
+                    });
+                }
+            }
+            AbiTypeRef::Opaque(name) => {
+                if !known_types.contains(name.as_str()) {
+                    errors.push(ComponentIrError::UnresolvedTypeRef {
+                        name: name.clone(),
+                        context: context.to_string(),
+                    });
+                }
+            }
+            AbiTypeRef::Pointer(inner) | AbiTypeRef::Slice(inner) => {
+                Self::check_type_refs(inner, known_types, context, errors);
+            }
+            AbiTypeRef::FatPointer { element, .. } => {
+                Self::check_type_refs(element, known_types, context, errors);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Validation error for Component IR consistency checks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ComponentIrError {
+    /// Duplicate export symbol name.
+    DuplicateExport(String),
+    /// Duplicate import symbol name.
+    DuplicateImport(String),
+    /// Name appears in both exports and imports.
+    ExportImportConflict(String),
+    /// Duplicate type definition name.
+    DuplicateType(String),
+    /// Named/Opaque type reference does not resolve to a type definition.
+    UnresolvedTypeRef { name: String, context: String },
 }
 
 /// Component identity: name, semver, ABI version.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ComponentIdentity {
     /// Component name (e.g., "mimi-runtime").
     pub name: String,
@@ -159,5 +264,96 @@ mod tests {
         assert_eq!(id.name, "mimi-runtime");
         assert_eq!(id.abi_version, 1);
         assert!(!id.version.is_empty());
+    }
+
+    #[test]
+    fn validate_clean_ir() {
+        let mut gen = crate::component::AbiGenerator::new();
+        crate::component::register_core_runtime_abi(&mut gen);
+        let ir = gen.build();
+        let errors = ir.validate();
+        assert!(errors.is_empty(), "validation errors: {:?}", errors);
+    }
+
+    #[test]
+    fn validate_catches_duplicate_exports() {
+        let ir = ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![
+                AbiSymbol {
+                    name: "mimi_dup".to_string(),
+                    kind: AbiSymbolKind::Function,
+                    params: vec![],
+                    ret: AbiTypeRef::Void,
+                    effects: vec![],
+                    is_unsafe: false,
+                    call_conv: AbiCallConv::C,
+                    callback_category: None,
+                },
+                AbiSymbol {
+                    name: "mimi_dup".to_string(),
+                    kind: AbiSymbolKind::Function,
+                    params: vec![],
+                    ret: AbiTypeRef::Void,
+                    effects: vec![],
+                    is_unsafe: false,
+                    call_conv: AbiCallConv::C,
+                    callback_category: None,
+                },
+            ],
+            imports: vec![],
+            types: vec![],
+        };
+        let errors = ir.validate();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ComponentIrError::DuplicateExport(n) if n == "mimi_dup")));
+    }
+
+    #[test]
+    fn validate_catches_export_import_conflict() {
+        let sym = AbiSymbol {
+            name: "mimi_conflict".to_string(),
+            kind: AbiSymbolKind::Function,
+            params: vec![],
+            ret: AbiTypeRef::Void,
+            effects: vec![],
+            is_unsafe: false,
+            call_conv: AbiCallConv::C,
+            callback_category: None,
+        };
+        let ir = ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![sym.clone()],
+            imports: vec![sym],
+            types: vec![],
+        };
+        let errors = ir.validate();
+        assert!(errors.iter().any(
+            |e| matches!(e, ComponentIrError::ExportImportConflict(n) if n == "mimi_conflict")
+        ));
+    }
+
+    #[test]
+    fn validate_catches_unresolved_type_ref() {
+        let ir = ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![AbiSymbol {
+                name: "mimi_uses_missing".to_string(),
+                kind: AbiSymbolKind::Function,
+                params: vec![],
+                ret: AbiTypeRef::Named("MissingType".to_string()),
+                effects: vec![],
+                is_unsafe: false,
+                call_conv: AbiCallConv::C,
+                callback_category: None,
+            }],
+            imports: vec![],
+            types: vec![],
+        };
+        let errors = ir.validate();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ComponentIrError::UnresolvedTypeRef { name, .. } if name == "MissingType")));
     }
 }
