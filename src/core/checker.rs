@@ -441,6 +441,14 @@ impl<'a> Checker<'a> {
         for item in &self.file.items {
             self.check_item(item);
         }
+        // 0.31.46: sort warnings by span for deterministic output.
+        self.warnings.sort_by(|a, b| {
+            a.span
+                .start_line
+                .cmp(&b.span.start_line)
+                .then(a.span.start_col.cmp(&b.span.start_col))
+                .then(a.message.cmp(&b.message))
+        });
         if self.errors.is_empty() {
             Ok(())
         } else {
@@ -458,6 +466,17 @@ impl<'a> Checker<'a> {
                     deduped.push(e);
                 }
             }
+            // 0.31.46: sort diagnostics by span for deterministic output.
+            // HashMap iteration order is non-deterministic, so diagnostics
+            // emitted during multi-item checking can vary between runs.
+            // Sorting by (line, col, message) ensures stable output.
+            deduped.sort_by(|a, b| {
+                a.span
+                    .start_line
+                    .cmp(&b.span.start_line)
+                    .then(a.span.start_col.cmp(&b.span.start_col))
+                    .then(a.message.cmp(&b.message))
+            });
             Err(deduped)
         }
     }
