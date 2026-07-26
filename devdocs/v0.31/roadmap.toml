@@ -787,28 +787,38 @@ requirements = ["MIGRATION-PRE1-001", "SYNTAX-REMOVED-001", "TOOL-SUPPORT-001"]
 [[milestone]]
 version = "0.31.43"
 kind = "implementation"
-title = "Body 迁移闭环 + 线性分析结构化"
-# 【P2-6 裁决 2026-07-27】body 迁移（legacy_body_file 删除）是 README §9 退出条件，
-# 但此前无 milestone 认领。现显式归入本 sprint：
-# - 交付 1：interp/codegen/verifier 函数体全部消费 Typed Resolved IR
-# - 交付 2：删除 legacy_body_file()（src/core/resolved/mod.rs:1059）
-# - 交付 3：P0-11 body 层 + P0-12 comptime 绕过关闭（依赖交付 1）
-# - 按 body class 分批：plain func → flow transition → actor method → comptime
-# 【SD-1 裁决】is_linear() 字符串匹配 → ResolvedType::Nominal 追加 is_linear: bool
-#   Checker 创建类型时设置标记，resource_lower.rs 读标记替代 starts_with("state:")
-#   与 body 迁移同 sprint 因为两者都修改 ResolvedType，避免合并冲突
+title = "线性分析结构化 + Body 迁移地基"
+# 【SD-1 裁决 ✅】is_linear() 字符串匹配 → ResolvedType::Nominal 追加 is_linear: bool
+#   NominalTypeId::nominal_is_linear() 单一真相源，intern_type 设置标记
+#   resource_lower.rs 读标记替代 starts_with("state:")（6 文件 / 23 处 / +6 测试）
+# 【Body 迁移评估 2026-07-27】三后端深度评估结论：
+#   - Verifier: 合约元数据可从 Resolved IR 读取 ✅（+2 一致性测试）
+#     Z3 编码仍需 raw AST（~880 LOC 待迁移 → 0.31.44）
+#   - Interpreter: ResolvedInterpreter 存在（4345 LOC）但仅测试用
+#     缺 FFI/actor/flow/Delegate/Pinned/Spawn/Await/Quote/Comptime
+#     dual-path 接入 → 0.31.45
+#   - Codegen: 零 Resolved IR 消费，~20k+ LOC 迁移量
+#     排入 post-0.31.48（需 8-15 sprint）
+#   - legacy_body_file() 删除取决于 codegen 迁移完成
+# 【原交付 1-3 拆分】：
+#   原交付 1（全后端消费 Resolved IR）→ 按后端拆分到 0.31.44/45/post-48
+#   原交付 2（删除 legacy_body_file）→ post-0.31.48（codegen 完成后）
+#   原交付 3（P0-11/P0-12 关闭）→ 依赖交付 1，同步后移
 requirements = []
 
 [[milestone]]
 version = "0.31.44"
 kind = "implementation"
-title = "Experimental 隔离 + FFI 加固"
+title = "Experimental 隔离 + FFI 加固 + Verifier Z3 编码迁移"
 requirements = ["PROTOCOL-DYN-001", "EFFECT-CAP-001", "COMPONENT-RAW-001"]
 # 注：FLOW-MULTI-001 已提前到 0.31.25 追加 C（架构修正案条款 7）
 # 【SD-3 裁决】#[abi(errno)] 属性替代 ERRNO_CHECK_FUNC_NAMES 函数名猜测
 #   过渡期保留名称猜测 + deprecation 警告，1.0 删除
 # 【SD-4 裁决】删除 fork() 隔离，替换为 SIGSEGV/SIGABRT 信号守卫
 #   删除 FORK_LOCK / check_multithreaded_fork / call_ffi_with_fork_isolation*
+# 【Body 迁移】Verifier Z3 编码从 Expr → ResolvedExpr（~880 LOC）
+#   expr_to_z3_int/real/bool 移植到 ResolvedExprKind
+#   完成后 verifier 不再依赖 legacy_body_file() 的合约表达式
 #   Mimi 永远多线程（actor 系统），fork() 始终在多线程上下文 = POSIX UB
 
 # === Phase E: 冻结与 RC（0.31.45–0.31.48）===
@@ -816,10 +826,13 @@ requirements = ["PROTOCOL-DYN-001", "EFFECT-CAP-001", "COMPONENT-RAW-001"]
 [[milestone]]
 version = "0.31.45"
 kind = "debug"
-title = "DEBUG 周期"
+title = "DEBUG 周期 + Interpreter dual-path"
 # 【盲审追加】L1 强化：比对 exit code + Fault Trace + ASSERT_FAULT 测试宏
 # 【盲审追加】L1 浮点 assert_approx_eq（跨平台浮点非确定性）
 # 【盲审追加】Surface interpreter 物理删除（ResolvedInterpreter 69/69 后）
+# 【Body 迁移】Interpreter dual-path 接入：
+#   ResolvedInterpreter 生产路径（plain func 子集）+ AST fallback
+#   补齐 FFI/actor/flow/Delegate/Pinned 后逐步缩小 fallback 面
 # 【盲审追加】876 unsafe SAFETY 注释（AI 批量 + 人工审计高风险项，贯穿 0.31.45-48）
 requirements = []
 # 【v4 吸收】Interpreter 结构体瘦身：
