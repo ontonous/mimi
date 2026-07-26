@@ -3,6 +3,7 @@ mod expr;
 mod flow;
 mod func;
 mod helpers;
+pub(crate) mod resolved_expr;
 pub mod vir;
 
 pub mod ffi;
