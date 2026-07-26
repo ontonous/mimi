@@ -18225,13 +18225,18 @@ mod no_panic {
 use std::sync::atomic::AtomicPtr;
 
 type ErrorHandler = unsafe extern "C" fn(*const std::ffi::c_char);
-// S19: Use typed AtomicPtr<ErrorHandler> instead of AtomicPtr<c_void> + transmute.
-static ERROR_HANDLER: AtomicPtr<ErrorHandler> = AtomicPtr::new(std::ptr::null_mut());
+// R-1 (0.31.52): store function pointer as opaque data pointer via usize round-trip.
+// AtomicPtr<ErrorHandler> was UB — it stored a fn ptr as *mut ErrorHandler
+// (pointer-to-fn-ptr), then dereferenced it as if it pointed to an ErrorHandler
+// value. On architectures where fn ptrs ≠ data ptrs this is SIGSEGV.
+// Fix: AtomicPtr<()> stores the fn ptr bits as a data pointer; we round-trip
+// through usize to call it. Runtime is exempt from Flow transmute ban (§20.2).
+static ERROR_HANDLER: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
 #[no_mangle]
 pub extern "C" fn mimi_runtime_set_error_handler(handler: Option<ErrorHandler>) {
-    let ptr: *mut ErrorHandler = match handler {
-        Some(f) => f as *const ErrorHandler as *mut ErrorHandler,
+    let ptr: *mut () = match handler {
+        Some(f) => f as usize as *mut (),
         None => std::ptr::null_mut(),
     };
     ERROR_HANDLER.store(ptr, Ordering::Release);
@@ -18272,10 +18277,13 @@ pub extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
     let handler_ptr = ERROR_HANDLER.load(Ordering::Acquire);
     if !handler_ptr.is_null() {
         ERROR_HANDLER.store(std::ptr::null_mut(), Ordering::Release);
-        // SAFETY: `handler_ptr` was checked non-null and the handler was cleared before calling.
-        let handler: &ErrorHandler = unsafe { &*handler_ptr };
+        // R-1 (0.31.52): round-trip through usize to recover the fn pointer.
+        // SAFETY: handler_ptr was stored from a valid ErrorHandler fn pointer
+        // via `f as usize as *mut ()`. The usize→fn transmute is valid because
+        // we only store values that originated from `Some(f)`.
+        let handler: ErrorHandler = unsafe { std::mem::transmute(handler_ptr as usize) };
         // SAFETY: calling the registered error handler with the validated message pointer.
-        unsafe { (*handler)(msg) };
+        unsafe { handler(msg) };
         std::process::abort();
     }
 
