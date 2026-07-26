@@ -440,6 +440,8 @@ impl TypeFolder for NamedSubstitutionFolder {
 mod tests {
     use super::*;
 
+    // === RemapFolder tests ===
+
     #[test]
     fn remap_preserves_nested_forall_binders() {
         let ty = Type::Tuple(vec![
@@ -456,6 +458,120 @@ mod tests {
             ])
         );
     }
+
+    #[test]
+    fn remap_basic_typevar() {
+        let ty = Type::TypeVar(3);
+        let mut folder = RemapFolder::new([(3, 10)].into_iter().collect());
+        assert_eq!(walk_type(ty, &mut folder), Type::TypeVar(10));
+    }
+
+    #[test]
+    fn remap_unmapped_typevar_unchanged() {
+        let ty = Type::TypeVar(5);
+        let mut folder = RemapFolder::new([(3, 10)].into_iter().collect());
+        assert_eq!(walk_type(ty, &mut folder), Type::TypeVar(5));
+    }
+
+    #[test]
+    fn remap_nested_in_containers() {
+        let ty = Type::Option(Box::new(Type::Result(
+            Box::new(Type::TypeVar(1)),
+            Box::new(Type::TypeVar(2)),
+        )));
+        let mut folder = RemapFolder::new([(1, 100), (2, 200)].into_iter().collect());
+        assert_eq!(
+            walk_type(ty, &mut folder),
+            Type::Option(Box::new(Type::Result(
+                Box::new(Type::TypeVar(100)),
+                Box::new(Type::TypeVar(200)),
+            )))
+        );
+    }
+
+    #[test]
+    fn remap_deeply_nested_forall_shadowing() {
+        // ForAll shadowing at multiple levels:
+        // outer: TypeVar(0) should be remapped
+        // inner ForAll shadows 0: TypeVar(0) should NOT be remapped
+        let ty = Type::ForAll(
+            vec!["A".into()],
+            Box::new(Type::Tuple(vec![
+                Type::TypeVar(0), // shadowed by ForAll
+                Type::TypeVar(1), // not shadowed
+            ])),
+        );
+        let mut folder = RemapFolder::new([(0, 50), (1, 60)].into_iter().collect());
+        assert_eq!(
+            walk_type(ty, &mut folder),
+            Type::ForAll(
+                vec!["A".into()],
+                Box::new(Type::Tuple(vec![
+                    Type::TypeVar(0),  // shadowed, unchanged
+                    Type::TypeVar(60), // remapped
+                ])),
+            )
+        );
+    }
+
+    // === CollectVarsFolder tests ===
+
+    #[test]
+    fn collect_vars_basic() {
+        let ty = Type::Tuple(vec![Type::TypeVar(1), Type::TypeVar(2), Type::TypeVar(3)]);
+        let mut folder = CollectVarsFolder::new();
+        walk_type(ty, &mut folder);
+        assert_eq!(folder.vars, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn collect_vars_skips_shadowed() {
+        let ty = Type::ForAll(
+            vec!["A".into(), "B".into()],
+            Box::new(Type::Tuple(vec![
+                Type::TypeVar(0), // shadowed
+                Type::TypeVar(1), // shadowed
+                Type::TypeVar(2), // free
+            ])),
+        );
+        let mut folder = CollectVarsFolder::new();
+        walk_type(ty, &mut folder);
+        assert_eq!(folder.vars, vec![2]);
+    }
+
+    #[test]
+    fn collect_vars_nested_forall() {
+        // Nested ForAll: inner shadows 0, outer doesn't
+        let ty = Type::Tuple(vec![
+            Type::TypeVar(0),                                           // free
+            Type::ForAll(vec!["X".into()], Box::new(Type::TypeVar(0))), // shadowed
+        ]);
+        let mut folder = CollectVarsFolder::new();
+        walk_type(ty, &mut folder);
+        assert_eq!(folder.vars, vec![0]); // only the free one
+    }
+
+    #[test]
+    fn collect_vars_in_containers() {
+        let ty = Type::Result(
+            Box::new(Type::Option(Box::new(Type::TypeVar(5)))),
+            Box::new(Type::TypeVar(6)),
+        );
+        let mut folder = CollectVarsFolder::new();
+        walk_type(ty, &mut folder);
+        assert_eq!(folder.vars, vec![5, 6]);
+    }
+
+    #[test]
+    fn collect_vars_no_duplicates() {
+        let ty = Type::Tuple(vec![Type::TypeVar(1), Type::TypeVar(1), Type::TypeVar(1)]);
+        let mut folder = CollectVarsFolder::new();
+        walk_type(ty, &mut folder);
+        // CollectVarsFolder collects all occurrences, not unique
+        assert_eq!(folder.vars, vec![1, 1, 1]);
+    }
+
+    // === NamedSubstitutionFolder tests ===
 
     #[test]
     fn named_substitution_preserves_nested_forall_binders() {
@@ -476,5 +592,116 @@ mod tests {
                 Type::ForAll(vec!["T".into()], Box::new(Type::Name("T".into(), vec![])),),
             ])
         );
+    }
+
+    #[test]
+    fn named_substitution_basic() {
+        let ty = Type::Name("T".into(), vec![]);
+        let mut folder = NamedSubstitutionFolder::new(
+            [("T".to_string(), Type::Name("String".into(), vec![]))]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            walk_type(ty, &mut folder),
+            Type::Name("String".into(), vec![])
+        );
+    }
+
+    #[test]
+    fn named_substitution_chain() {
+        // P1-13: chain substitution {T→U, U→i32} → T resolves to i32
+        let ty = Type::Name("T".into(), vec![]);
+        let mut folder = NamedSubstitutionFolder::new(
+            [
+                ("T".to_string(), Type::Name("U".into(), vec![])),
+                ("U".to_string(), Type::Name("i32".into(), vec![])),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(walk_type(ty, &mut folder), Type::Name("i32".into(), vec![]));
+    }
+
+    #[test]
+    fn named_substitution_cycle_detection() {
+        // P1-13: cycle {T→U, U→T} should not infinite loop.
+        // Trace: T→U→T (cycle detected)→ returns T unchanged.
+        let ty = Type::Name("T".into(), vec![]);
+        let mut folder = NamedSubstitutionFolder::new(
+            [
+                ("T".to_string(), Type::Name("U".into(), vec![])),
+                ("U".to_string(), Type::Name("T".into(), vec![])),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        // Should terminate (cycle detection). T→U→T(cycle)→T.
+        let result = walk_type(ty, &mut folder);
+        assert_eq!(result, Type::Name("T".into(), vec![]));
+    }
+
+    #[test]
+    fn named_substitution_in_containers() {
+        let ty = Type::Option(Box::new(Type::Name("T".into(), vec![])));
+        let mut folder = NamedSubstitutionFolder::new(
+            [("T".to_string(), Type::Name("bool".into(), vec![]))]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            walk_type(ty, &mut folder),
+            Type::Option(Box::new(Type::Name("bool".into(), vec![])))
+        );
+    }
+
+    #[test]
+    fn named_substitution_with_args_not_substituted() {
+        // Name with args should NOT be substituted (only bare names)
+        let ty = Type::Name("List".into(), vec![Type::Name("T".into(), vec![])]);
+        let mut folder = NamedSubstitutionFolder::new(
+            [("List".to_string(), Type::Name("Vec".into(), vec![]))]
+                .into_iter()
+                .collect(),
+        );
+        // List<T> should NOT become Vec (because List has args)
+        assert_eq!(
+            walk_type(ty, &mut folder),
+            Type::Name("List".into(), vec![Type::Name("T".into(), vec![])])
+        );
+    }
+
+    // === type_any / type_try_visit tests ===
+
+    #[test]
+    fn type_any_finds_nested() {
+        let ty = Type::Option(Box::new(Type::Result(
+            Box::new(Type::Name("i32".into(), vec![])),
+            Box::new(Type::Name("String".into(), vec![])),
+        )));
+        assert!(type_any(
+            &ty,
+            &|t| matches!(t, Type::Name(n, _) if n == "String")
+        ));
+        assert!(!type_any(
+            &ty,
+            &|t| matches!(t, Type::Name(n, _) if n == "bool")
+        ));
+    }
+
+    #[test]
+    fn type_try_visit_short_circuits() {
+        let ty = Type::Tuple(vec![
+            Type::Name("i32".into(), vec![]),
+            Type::Name("String".into(), vec![]),
+        ]);
+        let result = type_try_visit(&ty, &|t| {
+            if matches!(t, Type::Name(n, _) if n == "String") {
+                Err("found String")
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result, Err("found String"));
     }
 }
