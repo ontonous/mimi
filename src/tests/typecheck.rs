@@ -1915,3 +1915,114 @@ func main() -> i32 {
         msgs
     );
 }
+
+// ── 0.31.49: T-1~T-4 let _ = soundness tests ──────────────────────────
+
+#[test]
+fn typecheck_push_element_type_mismatch_rejected() {
+    // T-1: push(list_of_i32, "hello") must be rejected.
+    let src = r#"
+func main() -> i32 {
+    let mut xs: List<i32> = [1, 2, 3]
+    push(xs, "hello")
+    0
+}
+"#;
+    let errs = check_source(src).unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|d| d.message.contains("push expects value of type")),
+        "expected push type mismatch, got: {:?}",
+        errs
+    );
+}
+
+#[test]
+fn typecheck_push_compatible_types_accepted() {
+    // T-1 positive: push(list_of_i32, 42) must pass.
+    let src = r#"
+func main() -> i32 {
+    let mut xs: List<i32> = [1, 2, 3]
+    push(xs, 42)
+    len(xs)
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "push with matching type should pass"
+    );
+}
+
+#[test]
+fn typecheck_slice_non_integer_index_rejected() {
+    // T-2: x["hello"..2] must be rejected.
+    let src = r#"
+func main() -> i32 {
+    let xs = [1, 2, 3]
+    let s = xs["hello"..2]
+    0
+}
+"#;
+    let errs = check_source(src).unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|d| d.message.contains("slice start index must be an integer")),
+        "expected slice index type error, got: {:?}",
+        errs
+    );
+}
+
+#[test]
+fn typecheck_range_non_integer_bound_rejected() {
+    // T-3: "a".."z" range expression must be rejected.
+    // The .. operator is parsed as BinOp::Range and validated in operator.rs.
+    let src = r#"
+func main() -> i32 {
+    let r = "a".."z"
+    0
+}
+"#;
+    let errs = check_source(src).unwrap_err();
+    assert!(
+        errs.iter().any(|d| {
+            d.message.contains("range requires matching integer types")
+                || d.message.contains("range start must be an integer")
+        }),
+        "expected range bound type error, got: {:?}",
+        errs
+    );
+}
+
+#[test]
+fn typecheck_reduce_init_type_mismatch_rejected() {
+    // T-4: reduce([1,2,3], f, "hello") must be rejected when f expects i32 accumulator.
+    let src = r#"
+func main() -> i32 {
+    let xs = [1, 2, 3]
+    let r = reduce(xs, fn(acc: i32, x: i32) -> i32 { acc + x }, "hello")
+    0
+}
+"#;
+    let errs = check_source(src).unwrap_err();
+    assert!(
+        errs.iter().any(|d| d.message.contains("reduce init type")),
+        "expected reduce init type mismatch, got: {:?}",
+        errs
+    );
+}
+
+#[test]
+fn typecheck_reduce_valid_generic_accumulator_accepted() {
+    // T-4 positive: reduce with different accumulator type (U != T) must pass.
+    let src = r#"
+func main() -> i32 {
+    let xs = [1, 2, 3]
+    let r = reduce(xs, fn(acc: i32, x: i32) -> i32 { acc + x }, 0)
+    r
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "reduce with valid types should pass"
+    );
+}
