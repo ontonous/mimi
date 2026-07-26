@@ -50,10 +50,14 @@ impl AbiGenerator {
     /// Register an exported runtime function.
     ///
     /// Panics in debug builds if a duplicate export name is registered.
+    /// In release builds, duplicates are silently skipped (the first
+    /// registration wins) to avoid crashing the compiler.
     pub fn export(&mut self, name: &str, build: impl FnOnce(SymbolBuilder) -> SymbolBuilder) {
-        #[cfg(debug_assertions)]
         if self.exports.iter().any(|s| s.name == name) {
+            #[cfg(debug_assertions)]
             panic!("duplicate export registration: {}", name);
+            #[cfg(not(debug_assertions))]
+            return; // skip duplicate in release
         }
         let builder = SymbolBuilder::new(name, AbiSymbolKind::Function);
         let symbol = build(builder).build();
@@ -63,10 +67,13 @@ impl AbiGenerator {
     /// Register an imported extern function.
     ///
     /// Panics in debug builds if a duplicate import name is registered.
+    /// In release builds, duplicates are silently skipped.
     pub fn import(&mut self, name: &str, build: impl FnOnce(SymbolBuilder) -> SymbolBuilder) {
-        #[cfg(debug_assertions)]
         if self.imports.iter().any(|s| s.name == name) {
+            #[cfg(debug_assertions)]
             panic!("duplicate import registration: {}", name);
+            #[cfg(not(debug_assertions))]
+            return;
         }
         let builder = SymbolBuilder::new(name, AbiSymbolKind::ExternFunction);
         let symbol = build(builder).build();
@@ -76,10 +83,13 @@ impl AbiGenerator {
     /// Register a type definition.
     ///
     /// Panics in debug builds if a duplicate type name is registered.
+    /// In release builds, duplicates are silently skipped.
     pub fn type_def(&mut self, def: super::types::AbiTypeDef) {
-        #[cfg(debug_assertions)]
         if self.types.iter().any(|t| t.name() == def.name()) {
+            #[cfg(debug_assertions)]
             panic!("duplicate type definition: {}", def.name());
+            #[cfg(not(debug_assertions))]
+            return;
         }
         self.types.push(def);
     }
@@ -234,31 +244,41 @@ pub fn handle(name: &str) -> AbiTypeRef {
 /// - Slices (`[T]`, `Vec<T>` → `Slice`)
 /// - Void (`void`, `()`, empty)
 /// - User-defined types → `Named`
+///
+/// Recursion depth is bounded to 64 levels to prevent stack overflow
+/// on pathologically nested type expressions (e.g., `*mut *mut *mut ...`).
 pub fn mimi_type_to_abi(name: &str) -> AbiTypeRef {
-    let name = name.trim();
+    mimi_type_to_abi_depth(name.trim(), 0)
+}
+
+fn mimi_type_to_abi_depth(name: &str, depth: usize) -> AbiTypeRef {
+    if depth > 64 {
+        // Bail out: treat as opaque named type at extreme depth
+        return AbiTypeRef::Named(name.to_string());
+    }
     if let Some(prim) = AbiPrimitive::from_mimi_type(name) {
         return AbiTypeRef::Primitive(prim);
     }
     // Pointer types: *mut T, *const T
     if let Some(inner) = name.strip_prefix("*mut ") {
-        return AbiTypeRef::Pointer(Box::new(mimi_type_to_abi(inner)));
+        return AbiTypeRef::Pointer(Box::new(mimi_type_to_abi_depth(inner, depth + 1)));
     }
     if let Some(inner) = name.strip_prefix("*const ") {
-        return AbiTypeRef::Pointer(Box::new(mimi_type_to_abi(inner)));
+        return AbiTypeRef::Pointer(Box::new(mimi_type_to_abi_depth(inner, depth + 1)));
     }
     // Reference types: &T, &mut T (ABI-equivalent to pointers)
     if let Some(inner) = name.strip_prefix("&mut ") {
-        return AbiTypeRef::Pointer(Box::new(mimi_type_to_abi(inner)));
+        return AbiTypeRef::Pointer(Box::new(mimi_type_to_abi_depth(inner, depth + 1)));
     }
     if let Some(inner) = name.strip_prefix('&') {
-        return AbiTypeRef::Pointer(Box::new(mimi_type_to_abi(inner)));
+        return AbiTypeRef::Pointer(Box::new(mimi_type_to_abi_depth(inner, depth + 1)));
     }
     // Slice types: [T], Vec<T>
     if let Some(inner) = name.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-        return AbiTypeRef::Slice(Box::new(mimi_type_to_abi(inner)));
+        return AbiTypeRef::Slice(Box::new(mimi_type_to_abi_depth(inner, depth + 1)));
     }
     if let Some(inner) = name.strip_prefix("Vec<").and_then(|s| s.strip_suffix('>')) {
-        return AbiTypeRef::Slice(Box::new(mimi_type_to_abi(inner)));
+        return AbiTypeRef::Slice(Box::new(mimi_type_to_abi_depth(inner, depth + 1)));
     }
     match name {
         "string" | "String" => {

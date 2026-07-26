@@ -168,6 +168,12 @@ pub enum HandleError {
     NoLease,
     /// Internal lock was poisoned.
     Poisoned,
+    /// Slot index would overflow u32 (registry full).
+    RegistryFull,
+    /// Lease count would overflow u32.
+    LeaseOverflow,
+    /// Generation counter would wrap around (ABA risk after 2^32 cycles).
+    GenerationWrap,
 }
 
 impl std::fmt::Display for HandleError {
@@ -194,6 +200,11 @@ impl std::fmt::Display for HandleError {
             }
             HandleError::NoLease => write!(f, "no lease to release"),
             HandleError::Poisoned => write!(f, "handle registry lock poisoned"),
+            HandleError::RegistryFull => write!(f, "handle registry full (u32::MAX slots)"),
+            HandleError::LeaseOverflow => write!(f, "lease count overflow (u32::MAX)"),
+            HandleError::GenerationWrap => {
+                write!(f, "generation counter wrap-around (ABA risk)")
+            }
         }
     }
 }
@@ -244,6 +255,8 @@ impl HandleRegistry {
 
     /// Allocate a slot for a resource of `kind` and return a handle holding
     /// one lease.
+    ///
+    /// Returns `Err(RegistryFull)` if the slot count would exceed `u32::MAX`.
     pub fn acquire(&self, kind: HandleKind) -> Result<Handle, HandleError> {
         let mut inner = self.inner.lock().map_err(|_| HandleError::Poisoned)?;
         let runtime = self.runtime;
@@ -260,7 +273,7 @@ impl HandleRegistry {
                 generation,
             })
         } else {
-            let index = inner.slots.len() as u32;
+            let index = u32::try_from(inner.slots.len()).map_err(|_| HandleError::RegistryFull)?;
             inner.slots.push(Slot {
                 kind: Some(kind),
                 runtime,
@@ -305,10 +318,15 @@ impl HandleRegistry {
     }
 
     /// Take an additional lease on a live handle.
+    ///
+    /// Returns `Err(LeaseOverflow)` if the lease count would exceed `u32::MAX`.
     pub fn lease(&self, h: &Handle) -> Result<(), HandleError> {
         let mut inner = self.inner.lock().map_err(|_| HandleError::Poisoned)?;
         let slot = Self::resolve(&mut inner, h)?;
-        slot.leases += 1;
+        slot.leases = slot
+            .leases
+            .checked_add(1)
+            .ok_or(HandleError::LeaseOverflow)?;
         Ok(())
     }
 
@@ -344,6 +362,10 @@ impl HandleRegistry {
     /// On success the generation is bumped so every previously minted handle
     /// for this slot becomes stale (ABA defense), and the slot is returned to
     /// the free list.
+    ///
+    /// Returns `Err(GenerationWrap)` if the generation counter would wrap
+    /// around (after 2^32 destroy/reacquire cycles on the same slot), which
+    /// would re-enable stale handles from generation 0.
     pub fn destroy(&self, h: &Handle) -> Result<(), HandleError> {
         let mut inner = self.inner.lock().map_err(|_| HandleError::Poisoned)?;
         {
@@ -355,7 +377,10 @@ impl HandleRegistry {
         let index = h.index;
         let slot = &mut inner.slots[index as usize];
         slot.kind = None;
-        slot.generation = slot.generation.wrapping_add(1);
+        slot.generation = slot
+            .generation
+            .checked_add(1)
+            .ok_or(HandleError::GenerationWrap)?;
         inner.free.push(index);
         Ok(())
     }
@@ -549,5 +574,59 @@ mod tests {
         }
         // all slots freed
         assert_eq!(reg.live_count(), 0);
+    }
+
+    // ── Attack tests (0.31.37) ──
+
+    #[test]
+    fn generation_wrap_rejected() {
+        let reg = HandleRegistry::new(RuntimeId::Interp);
+        let _h = reg.acquire(HandleKind::List).unwrap();
+        // Manually set generation to u32::MAX to simulate near-wrap state
+        {
+            let mut inner = reg.inner.lock().unwrap();
+            inner.slots[0].generation = u32::MAX;
+        }
+        // Forge a handle with the max generation
+        let max_h = Handle {
+            kind: HandleKind::List,
+            runtime: RuntimeId::Interp,
+            index: 0,
+            generation: u32::MAX,
+        };
+        reg.release_lease(&max_h).unwrap();
+        // Destroy should fail with GenerationWrap instead of wrapping to 0
+        assert_eq!(reg.destroy(&max_h), Err(HandleError::GenerationWrap));
+    }
+
+    #[test]
+    fn lease_overflow_rejected() {
+        let reg = HandleRegistry::new(RuntimeId::Interp);
+        let h = reg.acquire(HandleKind::Map).unwrap();
+        // Set leases to u32::MAX
+        {
+            let mut inner = reg.inner.lock().unwrap();
+            inner.slots[0].leases = u32::MAX;
+        }
+        // One more lease should overflow
+        assert_eq!(reg.lease(&h), Err(HandleError::LeaseOverflow));
+    }
+
+    #[test]
+    fn from_u64_generation_truncation_documented() {
+        // to_u64 truncates generation to 16 bits. Verify the behavior
+        // is consistent: a handle with generation > 0xFFFF roundtrips
+        // with truncated generation.
+        let h = Handle {
+            kind: HandleKind::List,
+            runtime: RuntimeId::Interp,
+            index: 42,
+            generation: 0x1_2345, // > 16 bits
+        };
+        let packed = h.to_u64();
+        let unpacked = Handle::from_u64(packed).unwrap();
+        // Generation is truncated to 16 bits
+        assert_eq!(unpacked.generation(), 0x2345);
+        assert_ne!(unpacked, h); // NOT equal due to truncation
     }
 }

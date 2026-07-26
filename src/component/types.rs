@@ -59,21 +59,33 @@ impl AbiTypeRef {
     }
 
     /// C type name for this reference.
+    ///
+    /// Recursion depth is bounded to 64 levels to prevent stack overflow
+    /// on pathologically nested pointer types.
     pub fn c_type_name(&self) -> String {
+        self.c_type_name_depth(0)
+    }
+
+    fn c_type_name_depth(&self, depth: usize) -> String {
+        if depth > 64 {
+            return "void*/* depth limit */".to_string();
+        }
         match self {
             AbiTypeRef::Primitive(p) => p.c_name().to_string(),
             AbiTypeRef::Named(name) => name.clone(),
-            AbiTypeRef::Pointer(inner) => format!("{}*", inner.c_type_name()),
-            AbiTypeRef::Slice(inner) => format!("MimiSlice/* {} */", inner.c_type_name()),
+            AbiTypeRef::Pointer(inner) => format!("{}*", inner.c_type_name_depth(depth + 1)),
+            AbiTypeRef::Slice(inner) => {
+                format!("MimiSlice/* {} */", inner.c_type_name_depth(depth + 1))
+            }
             AbiTypeRef::Opaque(name) => format!("MimiHandle/* {} */", name),
             AbiTypeRef::FatPointer {
                 element,
                 has_capacity,
             } => {
                 if *has_capacity {
-                    format!("MimiString/* {} */", element.c_type_name())
+                    format!("MimiString/* {} */", element.c_type_name_depth(depth + 1))
                 } else {
-                    format!("MimiSlice/* {} */", element.c_type_name())
+                    format!("MimiSlice/* {} */", element.c_type_name_depth(depth + 1))
                 }
             }
             AbiTypeRef::Void => "void".to_string(),
@@ -81,12 +93,25 @@ impl AbiTypeRef {
     }
 
     /// Rust type name for this reference (used by Rust bindgen backends).
+    ///
+    /// Recursion depth is bounded to 64 levels to prevent stack overflow.
     pub fn rust_type_name(&self) -> String {
+        self.rust_type_name_depth(0)
+    }
+
+    fn rust_type_name_depth(&self, depth: usize) -> String {
+        if depth > 64 {
+            return "/* depth limit */".to_string();
+        }
         match self {
             AbiTypeRef::Primitive(p) => p.rust_name().to_string(),
             AbiTypeRef::Named(name) => name.clone(),
-            AbiTypeRef::Pointer(inner) => format!("*mut {}", inner.rust_type_name()),
-            AbiTypeRef::Slice(inner) => format!("&[{}]", inner.rust_type_name()),
+            AbiTypeRef::Pointer(inner) => {
+                format!("*mut {}", inner.rust_type_name_depth(depth + 1))
+            }
+            AbiTypeRef::Slice(inner) => {
+                format!("&[{}]", inner.rust_type_name_depth(depth + 1))
+            }
             AbiTypeRef::Opaque(name) => format!("{}Handle", name),
             AbiTypeRef::FatPointer {
                 element,
@@ -95,7 +120,7 @@ impl AbiTypeRef {
                 if *has_capacity {
                     "MimiString".to_string()
                 } else {
-                    format!("MimiSlice<{}>", element.rust_type_name())
+                    format!("MimiSlice<{}>", element.rust_type_name_depth(depth + 1))
                 }
             }
             AbiTypeRef::Void => "()".to_string(),

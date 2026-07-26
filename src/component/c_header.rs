@@ -19,6 +19,55 @@ use super::symbol::AbiSymbol;
 use super::types::AbiTypeDef;
 use super::ComponentIr;
 
+/// Validate that a string is a safe C identifier.
+///
+/// Returns `true` if the name matches `[a-zA-Z_][a-zA-Z0-9_]*`.
+/// Names failing this check could inject arbitrary C code into the
+/// generated header (security: code injection via crafted .mimiabi).
+pub fn is_valid_c_identifier(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let first = name.chars().next().unwrap_or('_');
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Sanitize a name for safe use as a C identifier.
+///
+/// Replaces invalid characters with `_`. Prepends `_` if the name
+/// starts with a digit. Returns the sanitized name and whether it
+/// was modified.
+fn sanitize_c_identifier(name: &str) -> (String, bool) {
+    if is_valid_c_identifier(name) {
+        return (name.to_string(), false);
+    }
+    let mut out = String::with_capacity(name.len() + 1);
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+        } else if i == 0 && c.is_ascii_digit() {
+            out.push('_');
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
+    (out, true)
+}
+
+/// Sanitize a string for safe use inside a C comment.
+///
+/// Removes `*/` sequences that would break out of the comment block.
+fn sanitize_c_comment(s: &str) -> String {
+    s.replace("*/", "* /")
+}
+
 /// Generate a complete C header file from a Component IR.
 ///
 /// The output is a self-contained `.h` file suitable for `#include`
@@ -73,6 +122,7 @@ pub fn generate_c_header(ir: &ComponentIr) -> String {
 fn emit_type_def(out: &mut String, ty: &AbiTypeDef) {
     match ty {
         AbiTypeDef::Struct(s) => {
+            let (name, _) = sanitize_c_identifier(&s.name);
             if let Some(size) = s.size {
                 out.push_str(&format!("/* size={}B", size));
                 if let Some(align) = s.align {
@@ -80,8 +130,9 @@ fn emit_type_def(out: &mut String, ty: &AbiTypeDef) {
                 }
                 out.push_str(" */\n");
             }
-            out.push_str(&format!("typedef struct {} {{\n", s.name));
+            out.push_str(&format!("typedef struct {} {{\n", name));
             for field in &s.fields {
+                let (field_name, _) = sanitize_c_identifier(&field.name);
                 let offset_comment = field
                     .offset
                     .map(|o| format!("  /* offset {} */", o))
@@ -89,19 +140,21 @@ fn emit_type_def(out: &mut String, ty: &AbiTypeDef) {
                 out.push_str(&format!(
                     "    {} {};{}\n",
                     field.ty.c_type_name(),
-                    field.name,
+                    field_name,
                     offset_comment
                 ));
             }
-            out.push_str(&format!("}} {};\n\n", s.name));
+            out.push_str(&format!("}} {};\n\n", name));
         }
         AbiTypeDef::Enum(e) => {
-            out.push_str(&format!("typedef {} {};\n", e.repr.c_name(), e.name));
+            let (name, _) = sanitize_c_identifier(&e.name);
+            out.push_str(&format!("typedef {} {};\n", e.repr.c_name(), name));
             for (variant, discriminant) in &e.variants {
+                let (variant_name, _) = sanitize_c_identifier(variant);
                 out.push_str(&format!(
                     "#define {}_{} (({}){})\n",
-                    e.name,
-                    variant,
+                    name,
+                    variant_name,
                     e.repr.c_name(),
                     discriminant
                 ));
@@ -109,26 +162,30 @@ fn emit_type_def(out: &mut String, ty: &AbiTypeDef) {
             out.push('\n');
         }
         AbiTypeDef::Alias(a) => {
-            out.push_str(&format!(
-                "typedef {} {};\n\n",
-                a.target.c_type_name(),
-                a.name
-            ));
+            let (name, _) = sanitize_c_identifier(&a.name);
+            out.push_str(&format!("typedef {} {};\n\n", a.target.c_type_name(), name));
         }
         AbiTypeDef::Opaque(o) => {
-            out.push_str(&format!(
-                "/* {} */\ntypedef uintptr_t {};\n\n",
-                o.description, o.name
-            ));
+            let (name, _) = sanitize_c_identifier(&o.name);
+            let desc = sanitize_c_comment(&o.description);
+            out.push_str(&format!("/* {} */\ntypedef uintptr_t {};\n\n", desc, name));
         }
     }
 }
 
 /// Emit a single function declaration.
 fn emit_function_decl(out: &mut String, sym: &AbiSymbol) {
-    // Effect annotations as comments
+    let (name, _) = sanitize_c_identifier(&sym.name);
+
+    // Effect annotations as comments (sanitized against comment injection)
     if !sym.effects.is_empty() {
-        out.push_str(&format!("/* effects: {} */\n", sym.effects.join(", ")));
+        let effects = sym
+            .effects
+            .iter()
+            .map(|e| sanitize_c_comment(e))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("/* effects: {} */\n", effects));
     }
     if sym.is_unsafe {
         out.push_str("/* UNSAFE: caller must uphold safety invariants */\n");
@@ -140,8 +197,9 @@ fn emit_function_decl(out: &mut String, sym: &AbiSymbol) {
         sym.params
             .iter()
             .map(|p| {
+                let (param_name, _) = sanitize_c_identifier(&p.name);
                 let nullable = if p.is_nullable { "/* nullable */ " } else { "" };
-                format!("{}{} {}", nullable, p.ty.c_type_name(), p.name)
+                format!("{}{} {}", nullable, p.ty.c_type_name(), param_name)
             })
             .collect::<Vec<_>>()
             .join(",\n    ")
@@ -152,14 +210,14 @@ fn emit_function_decl(out: &mut String, sym: &AbiSymbol) {
         out.push_str(&format!(
             "{} {}(\n    {}\n);\n\n",
             sym.ret.c_type_name(),
-            sym.name,
+            name,
             params
         ));
     } else {
         out.push_str(&format!(
             "{} {}({});\n\n",
             sym.ret.c_type_name(),
-            sym.name,
+            name,
             params
         ));
     }
@@ -353,5 +411,83 @@ mod tests {
         };
         let header = generate_c_header(&ir);
         assert!(header.contains("typedef int64_t MimiFd;"));
+    }
+
+    // ── Attack tests (0.31.37) ──
+
+    #[test]
+    fn c_identifier_validation() {
+        assert!(is_valid_c_identifier("mimi_list_push"));
+        assert!(is_valid_c_identifier("_private"));
+        assert!(is_valid_c_identifier("MimiString"));
+        assert!(!is_valid_c_identifier(""));
+        assert!(!is_valid_c_identifier("123abc"));
+        assert!(!is_valid_c_identifier("mimi_evil(); int x"));
+        assert!(!is_valid_c_identifier("foo-bar"));
+        assert!(!is_valid_c_identifier("a b"));
+    }
+
+    #[test]
+    fn c_header_sanitizes_injection_in_symbol_name() {
+        let ir = ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![AbiSymbol {
+                name: "mimi_evil(); int x".to_string(),
+                kind: crate::component::symbol::AbiSymbolKind::Function,
+                params: vec![],
+                ret: AbiTypeRef::Void,
+                effects: vec![],
+                is_unsafe: false,
+                call_conv: crate::component::symbol::AbiCallConv::C,
+                callback_category: None,
+            }],
+            imports: vec![],
+            types: vec![],
+        };
+        let header = generate_c_header(&ir);
+        // The injected code must not appear verbatim
+        assert!(!header.contains("mimi_evil(); int x"));
+        // The sanitized name should appear (each invalid char → _)
+        assert!(header.contains("mimi_evil____int_x"));
+    }
+
+    #[test]
+    fn c_header_sanitizes_comment_injection() {
+        let ir = ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![AbiSymbol {
+                name: "mimi_test".to_string(),
+                kind: crate::component::symbol::AbiSymbolKind::Function,
+                params: vec![],
+                ret: AbiTypeRef::Void,
+                effects: vec!["alloc */ int evil; /*".to_string()],
+                is_unsafe: false,
+                call_conv: crate::component::symbol::AbiCallConv::C,
+                callback_category: None,
+            }],
+            imports: vec![],
+            types: vec![],
+        };
+        let header = generate_c_header(&ir);
+        // The */ must be neutralized
+        assert!(!header.contains("*/ int evil;"));
+        assert!(header.contains("* / int evil;"));
+    }
+
+    #[test]
+    fn c_header_sanitizes_type_name_injection() {
+        use crate::component::types::{AbiOpaque, AbiTypeDef};
+        let ir = ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![],
+            imports: vec![],
+            types: vec![AbiTypeDef::Opaque(AbiOpaque {
+                name: "Evil; typedef int".to_string(),
+                description: "test */ break".to_string(),
+            })],
+        };
+        let header = generate_c_header(&ir);
+        assert!(!header.contains("Evil; typedef int"));
+        assert!(header.contains("Evil__typedef_int"));
     }
 }

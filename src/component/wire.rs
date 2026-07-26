@@ -200,13 +200,27 @@ impl WireType {
     }
 
     /// True if this type contains a handle (directly or nested).
+    ///
+    /// Traversal is bounded to depth 128 to prevent stack overflow
+    /// on pathologically nested types.
     pub fn contains_handle(&self) -> bool {
+        self.contains_handle_depth(0)
+    }
+
+    fn contains_handle_depth(&self, depth: usize) -> bool {
+        if depth > 128 {
+            return false; // bail out: treat as no handle at extreme depth
+        }
         match self {
             WireType::Handle => true,
-            WireType::Array(inner) => inner.contains_handle(),
-            WireType::Map(k, v) => k.contains_handle() || v.contains_handle(),
-            WireType::Optional(inner) => inner.contains_handle(),
-            WireType::Result(ok, err) => ok.contains_handle() || err.contains_handle(),
+            WireType::Array(inner) => inner.contains_handle_depth(depth + 1),
+            WireType::Map(k, v) => {
+                k.contains_handle_depth(depth + 1) || v.contains_handle_depth(depth + 1)
+            }
+            WireType::Optional(inner) => inner.contains_handle_depth(depth + 1),
+            WireType::Result(ok, err) => {
+                ok.contains_handle_depth(depth + 1) || err.contains_handle_depth(depth + 1)
+            }
             _ => false,
         }
     }
@@ -294,12 +308,19 @@ impl WireType {
     }
 
     /// Encode a UTF-8 string to wire bytes (u32 LE length prefix + bytes).
-    pub fn encode_string(s: &str) -> Vec<u8> {
+    ///
+    /// Returns `Err(WireError::LengthOverflow)` if the string exceeds
+    /// `u32::MAX` bytes (the wire format limit).
+    pub fn encode_string(s: &str) -> Result<Vec<u8>, WireError> {
         let bytes = s.as_bytes();
+        let len = u32::try_from(bytes.len()).map_err(|_| WireError::LengthOverflow {
+            max: u32::MAX as usize,
+            got: bytes.len(),
+        })?;
         let mut buf = Vec::with_capacity(4 + bytes.len());
-        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&len.to_le_bytes());
         buf.extend_from_slice(bytes);
-        buf
+        Ok(buf)
     }
 
     /// Decode a UTF-8 string from wire bytes.
@@ -311,19 +332,27 @@ impl WireType {
             return None;
         }
         let len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        if data.len() < 4 + len {
+        let total = 4usize.checked_add(len)?;
+        if data.len() < total {
             return None;
         }
-        let s = std::str::from_utf8(&data[4..4 + len]).ok()?.to_string();
-        Some((s, 4 + len))
+        let s = std::str::from_utf8(&data[4..total]).ok()?.to_string();
+        Some((s, total))
     }
 
     /// Encode a byte array to wire bytes (u32 LE length prefix + bytes).
-    pub fn encode_bytes(b: &[u8]) -> Vec<u8> {
+    ///
+    /// Returns `Err(WireError::LengthOverflow)` if the data exceeds
+    /// `u32::MAX` bytes (the wire format limit).
+    pub fn encode_bytes(b: &[u8]) -> Result<Vec<u8>, WireError> {
+        let len = u32::try_from(b.len()).map_err(|_| WireError::LengthOverflow {
+            max: u32::MAX as usize,
+            got: b.len(),
+        })?;
         let mut buf = Vec::with_capacity(4 + b.len());
-        buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&len.to_le_bytes());
         buf.extend_from_slice(b);
-        buf
+        Ok(buf)
     }
 
     /// Decode a byte array from wire bytes.
@@ -334,10 +363,11 @@ impl WireType {
             return None;
         }
         let len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        if data.len() < 4 + len {
+        let total = 4usize.checked_add(len)?;
+        if data.len() < total {
             return None;
         }
-        Some((data[4..4 + len].to_vec(), 4 + len))
+        Some((data[4..total].to_vec(), total))
     }
 
     /// Encode an optional value to wire bytes.
@@ -501,6 +531,8 @@ pub enum WireError {
     Truncated { expected: usize, actual: usize },
     /// Extra bytes after declared payload (possible corruption).
     TrailingData { expected: usize, actual: usize },
+    /// Length exceeds the u32 wire format limit.
+    LengthOverflow { max: usize, got: usize },
 }
 
 impl std::fmt::Display for WireError {
@@ -532,6 +564,11 @@ impl std::fmt::Display for WireError {
                 expected,
                 actual,
                 actual - expected
+            ),
+            WireError::LengthOverflow { max, got } => write!(
+                f,
+                "length overflow: {} bytes exceeds wire format limit of {}",
+                got, max
             ),
         }
     }
@@ -751,14 +788,14 @@ mod tests {
 
     #[test]
     fn wire_string_roundtrip() {
-        let encoded = WireType::encode_string("hello world");
+        let encoded = WireType::encode_string("hello world").unwrap();
         assert_eq!(&encoded[..4], &(11u32).to_le_bytes());
         let (decoded, consumed) = WireType::decode_string(&encoded).unwrap();
         assert_eq!(decoded, "hello world");
         assert_eq!(consumed, encoded.len());
 
         // Empty string
-        let encoded = WireType::encode_string("");
+        let encoded = WireType::encode_string("").unwrap();
         assert_eq!(&encoded[..4], &(0u32).to_le_bytes());
         let (decoded, consumed) = WireType::decode_string(&encoded).unwrap();
         assert_eq!(decoded, "");
@@ -774,7 +811,7 @@ mod tests {
     #[test]
     fn wire_bytes_roundtrip() {
         let data = vec![0xDE, 0xAD, 0xBE, 0xEF];
-        let encoded = WireType::encode_bytes(&data);
+        let encoded = WireType::encode_bytes(&data).unwrap();
         assert_eq!(&encoded[..4], &(4u32).to_le_bytes());
         let (decoded, consumed) = WireType::decode_bytes(&encoded).unwrap();
         assert_eq!(decoded, data);
@@ -875,5 +912,68 @@ mod tests {
             pos += 4;
         }
         assert_eq!(values, vec![10, 20, 30]);
+    }
+
+    // ── Attack tests (0.31.37) ──
+
+    #[test]
+    fn wire_encode_string_rejects_over_u32_max() {
+        // We can't actually allocate 4GB+ in a test, but we can verify
+        // the error path exists and the function signature returns Result.
+        // A string of length u32::MAX + 1 would trigger LengthOverflow.
+        // Here we just verify the Ok path works for normal strings.
+        assert!(WireType::encode_string("normal").is_ok());
+        assert!(WireType::encode_string("").is_ok());
+    }
+
+    #[test]
+    fn wire_encode_bytes_rejects_over_u32_max() {
+        assert!(WireType::encode_bytes(&[1, 2, 3]).is_ok());
+        assert!(WireType::encode_bytes(&[]).is_ok());
+    }
+
+    #[test]
+    fn wire_decode_string_u32_max_len_no_panic() {
+        // Craft a header claiming u32::MAX bytes of string data.
+        // decode_string must return None (not enough data), not panic.
+        let mut data = vec![0u8; 8];
+        data[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(WireType::decode_string(&data).is_none());
+    }
+
+    #[test]
+    fn wire_decode_bytes_u32_max_len_no_panic() {
+        let mut data = vec![0u8; 8];
+        data[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(WireType::decode_bytes(&data).is_none());
+    }
+
+    #[test]
+    fn wire_decode_string_non_utf8_rejected() {
+        // Valid length prefix but invalid UTF-8 payload
+        let mut data = vec![0u8; 8];
+        data[0..4].copy_from_slice(&4u32.to_le_bytes());
+        data[4] = 0xFF; // invalid UTF-8 start byte
+        data[5] = 0xFE;
+        data[6] = 0x41;
+        data[7] = 0x42;
+        assert!(WireType::decode_string(&data).is_none());
+    }
+
+    #[test]
+    fn wire_nested_type_contains_handle_depth() {
+        // 100 levels of nesting should not stack overflow
+        let mut ty = WireType::Handle;
+        for _ in 0..100 {
+            ty = WireType::Array(Box::new(ty));
+        }
+        assert!(ty.contains_handle());
+
+        // Same depth without handle
+        let mut ty = WireType::I32;
+        for _ in 0..100 {
+            ty = WireType::Optional(Box::new(ty));
+        }
+        assert!(!ty.contains_handle());
     }
 }

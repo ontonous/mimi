@@ -18,6 +18,75 @@ use super::symbol::AbiSymbol;
 use super::types::{AbiTypeDef, AbiTypeRef};
 use super::ComponentIr;
 
+/// Rust keywords that must be escaped with `r#` when used as identifiers.
+const RUST_KEYWORDS: &[&str] = &[
+    "as", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn",
+    "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+    "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
+    "use", "where", "while", "async", "await", "abstract", "become", "box", "do", "final", "macro",
+    "override", "priv", "typeof", "unsized", "virtual", "yield",
+];
+
+/// Validate that a string is a safe Rust identifier.
+///
+/// Returns `true` if the name matches `[a-zA-Z_][a-zA-Z0-9_]*` and is
+/// not a Rust keyword (or is already escaped with `r#`).
+fn is_valid_rust_identifier(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    // Already escaped with r# — valid as long as the inner part is alphanumeric
+    if let Some(inner) = name.strip_prefix("r#") {
+        if inner.is_empty() {
+            return false;
+        }
+        let first = inner.chars().next().unwrap_or('_');
+        return (first.is_ascii_alphabetic() || first == '_')
+            && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    }
+    let first = name.chars().next().unwrap_or('_');
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
+    !RUST_KEYWORDS.contains(&name)
+}
+
+/// Escape a name for safe use as a Rust identifier.
+///
+/// - Replaces invalid characters with `_`
+/// - Prepends `_` if the name starts with a digit
+/// - Escapes Rust keywords with `r#`
+///
+/// Fast path: if the name is already valid, returns it unchanged.
+fn escape_rust_identifier(name: &str) -> String {
+    if is_valid_rust_identifier(name) {
+        return name.to_string();
+    }
+    let mut out = String::with_capacity(name.len() + 2);
+    for (i, c) in name.chars().enumerate() {
+        if i == 0 && c.is_ascii_digit() {
+            // Digit at start: prepend underscore
+            out.push('_');
+            out.push(c);
+        } else if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
+    if RUST_KEYWORDS.contains(&out.as_str()) {
+        format!("r#{}", out)
+    } else {
+        out
+    }
+}
+
 /// Generate Rust FFI bindings from a Component IR.
 ///
 /// The output is a self-contained `.rs` file suitable for inclusion
@@ -61,6 +130,7 @@ pub fn generate_rust_bindings(ir: &ComponentIr) -> String {
 fn emit_rust_type_def(out: &mut String, ty: &AbiTypeDef) {
     match ty {
         AbiTypeDef::Struct(s) => {
+            let name = escape_rust_identifier(&s.name);
             if let Some(size) = s.size {
                 out.push_str(&format!("/// size={}B", size));
                 if let Some(align) = s.align {
@@ -69,15 +139,16 @@ fn emit_rust_type_def(out: &mut String, ty: &AbiTypeDef) {
                 out.push('\n');
             }
             out.push_str("#[repr(C)]\n");
-            out.push_str(&format!("pub struct {} {{\n", s.name));
+            out.push_str(&format!("pub struct {} {{\n", name));
             for field in &s.fields {
+                let field_name = escape_rust_identifier(&field.name);
                 let offset_comment = field
                     .offset
                     .map(|o| format!(" // offset {}", o))
                     .unwrap_or_default();
                 out.push_str(&format!(
                     "    pub {}: {},{}\n",
-                    field.name,
+                    field_name,
                     rust_type_name(&field.ty),
                     offset_comment
                 ));
@@ -85,12 +156,14 @@ fn emit_rust_type_def(out: &mut String, ty: &AbiTypeDef) {
             out.push_str("}\n\n");
         }
         AbiTypeDef::Enum(e) => {
-            out.push_str(&format!("pub type {} = {};\n", e.name, e.repr.rust_name()));
+            let name = escape_rust_identifier(&e.name);
+            out.push_str(&format!("pub type {} = {};\n", name, e.repr.rust_name()));
             for (variant, discriminant) in &e.variants {
+                let variant_name = escape_rust_identifier(variant);
                 out.push_str(&format!(
                     "pub const {}_{}: {} = {};\n",
-                    e.name,
-                    variant,
+                    name,
+                    variant_name,
                     e.repr.rust_name(),
                     discriminant
                 ));
@@ -98,21 +171,25 @@ fn emit_rust_type_def(out: &mut String, ty: &AbiTypeDef) {
             out.push('\n');
         }
         AbiTypeDef::Alias(a) => {
+            let name = escape_rust_identifier(&a.name);
             out.push_str(&format!(
                 "pub type {} = {};\n\n",
-                a.name,
+                name,
                 rust_type_name(&a.target)
             ));
         }
         AbiTypeDef::Opaque(o) => {
+            let name = escape_rust_identifier(&o.name);
             out.push_str(&format!("/// {}\n", o.description));
-            out.push_str(&format!("pub type {} = usize;\n\n", o.name));
+            out.push_str(&format!("pub type {} = usize;\n\n", name));
         }
     }
 }
 
 /// Emit a Rust function declaration inside an `extern "C"` block.
 fn emit_rust_fn_decl(out: &mut String, sym: &AbiSymbol) {
+    let name = escape_rust_identifier(&sym.name);
+
     // Doc comment from effects
     if !sym.effects.is_empty() || sym.is_unsafe {
         out.push_str("    ///");
@@ -131,7 +208,10 @@ fn emit_rust_fn_decl(out: &mut String, sym: &AbiSymbol) {
     let params = sym
         .params
         .iter()
-        .map(|p| format!("{}: {}", p.name, rust_type_name(&p.ty)))
+        .map(|p| {
+            let param_name = escape_rust_identifier(&p.name);
+            format!("{}: {}", param_name, rust_type_name(&p.ty))
+        })
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -141,7 +221,7 @@ fn emit_rust_fn_decl(out: &mut String, sym: &AbiSymbol) {
         format!(" -> {}", rust_type_name(&sym.ret))
     };
 
-    out.push_str(&format!("    pub fn {}({}){};\n", sym.name, params, ret));
+    out.push_str(&format!("    pub fn {}({}){};\n", name, params, ret));
 }
 
 /// Convert an AbiTypeRef to a Rust type name.
@@ -317,5 +397,96 @@ mod tests {
         // Imports are not in the extern "C" block (only exports are)
         let bindings = generate_rust_bindings(&ir);
         assert!(!bindings.contains("pub fn abs"));
+    }
+
+    // ── Attack tests (0.31.37) ──
+
+    #[test]
+    fn rust_identifier_escaping() {
+        assert!(is_valid_rust_identifier("mimi_list_push"));
+        assert!(is_valid_rust_identifier("_private"));
+        assert!(!is_valid_rust_identifier(""));
+        assert!(!is_valid_rust_identifier("123abc"));
+        assert!(!is_valid_rust_identifier("type")); // Rust keyword
+        assert!(!is_valid_rust_identifier("fn")); // Rust keyword
+        assert!(is_valid_rust_identifier("r#type")); // already escaped
+    }
+
+    #[test]
+    fn rust_bindings_escapes_keyword_field_names() {
+        use crate::component::types::{AbiField, AbiPrimitive, AbiStruct, AbiTypeDef};
+        let ir = ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![],
+            imports: vec![],
+            types: vec![AbiTypeDef::Struct(AbiStruct {
+                name: "Config".to_string(),
+                fields: vec![
+                    AbiField {
+                        name: "type".to_string(),
+                        ty: AbiTypeRef::Primitive(AbiPrimitive::I32),
+                        offset: Some(0),
+                    },
+                    AbiField {
+                        name: "match".to_string(),
+                        ty: AbiTypeRef::Primitive(AbiPrimitive::I64),
+                        offset: Some(4),
+                    },
+                ],
+                is_repr_c: true,
+                size: Some(16),
+                align: Some(8),
+            })],
+        };
+        let bindings = generate_rust_bindings(&ir);
+        // Keywords must be escaped with r#
+        assert!(bindings.contains("pub r#type: i32"));
+        assert!(bindings.contains("pub r#match: i64"));
+    }
+
+    #[test]
+    fn rust_bindings_sanitizes_injection_in_fn_name() {
+        let ir = ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![AbiSymbol {
+                name: "mimi_evil() -> i32 { 42 }".to_string(),
+                kind: crate::component::symbol::AbiSymbolKind::Function,
+                params: vec![],
+                ret: AbiTypeRef::Void,
+                effects: vec![],
+                is_unsafe: false,
+                call_conv: crate::component::symbol::AbiCallConv::C,
+                callback_category: None,
+            }],
+            imports: vec![],
+            types: vec![],
+        };
+        let bindings = generate_rust_bindings(&ir);
+        // The injected code must not appear verbatim
+        assert!(!bindings.contains("mimi_evil() -> i32 { 42 }"));
+        // Sanitized name should appear (each invalid char → _)
+        // "mimi_evil() -> i32 { 42 }" → "mimi_evil______i32___42__"
+        assert!(bindings.contains("mimi_evil______i32___42__"));
+    }
+
+    #[test]
+    fn rust_bindings_sanitizes_digit_start_name() {
+        let ir = ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![AbiSymbol {
+                name: "123invalid".to_string(),
+                kind: crate::component::symbol::AbiSymbolKind::Function,
+                params: vec![],
+                ret: AbiTypeRef::Void,
+                effects: vec![],
+                is_unsafe: false,
+                call_conv: crate::component::symbol::AbiCallConv::C,
+                callback_category: None,
+            }],
+            imports: vec![],
+            types: vec![],
+        };
+        let bindings = generate_rust_bindings(&ir);
+        assert!(bindings.contains("pub fn _123invalid()"));
     }
 }
