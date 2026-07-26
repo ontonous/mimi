@@ -56,6 +56,9 @@ thread_local! {
     /// Thread-local buffer for the sigjmp_buf (avoids stack allocation
     /// across the signal handler boundary).
     static JMP_BUF: Cell<[u8; JMP_BUF_SIZE]> = const { Cell::new([0u8; JMP_BUF_SIZE]) };
+    /// Re-entrancy guard: true while inside call_guarded on this thread.
+    /// Prevents deadlock when a C function calls back into Mimi → FFI.
+    static IN_GUARDED_CALL: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Signal handler: restores SIG_DFL for all guarded signals, then
@@ -134,16 +137,32 @@ fn restore_handlers(saved: &SavedHandlers) {
 /// If the closure completes normally, returns `Ok(result)`.
 ///
 /// # Limitations
-/// - Not re-entrant: nested guarded calls will overwrite the recovery point.
 /// - Process-wide signal handlers: concurrent guarded calls from multiple
-///   threads share handlers (but recovery points are thread-local).
+///   threads are serialized by GUARD_LOCK.
 /// - Resources acquired by the closure before the crash are leaked.
+///
+/// # Re-entrancy
+/// If the closure calls back into `call_guarded` (e.g. C callback → Mimi → FFI),
+/// the inner call runs WITHOUT signal protection (returns the closure result
+/// directly). This avoids deadlock on GUARD_LOCK and is acceptable because
+/// the outer call already has a recovery point active.
 pub(crate) fn call_guarded<F, R>(f: F) -> Result<R, String>
 where
     F: FnOnce() -> R,
 {
+    // Re-entrancy check: if we're already inside a guarded call on this
+    // thread, skip the lock and signal setup. The outer call's recovery
+    // point is still active, so crashes in the inner call are caught.
+    let is_reentrant = IN_GUARDED_CALL.with(|flag| flag.get());
+    if is_reentrant {
+        return Ok(f());
+    }
+
     // Serialize signal guard usage: handlers are process-wide.
     let _lock = GUARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Mark this thread as inside a guarded call.
+    IN_GUARDED_CALL.with(|flag| flag.set(true));
 
     let saved = install_handlers();
 
@@ -180,8 +199,9 @@ where
         })
     });
 
-    // Clear recovery point and restore handlers.
+    // Clear recovery point, re-entrancy flag, and restore handlers.
     RECOVERY_BUF.with(|rec| rec.set(std::ptr::null_mut()));
+    IN_GUARDED_CALL.with(|flag| flag.set(false));
     restore_handlers(&saved);
 
     result
@@ -244,5 +264,33 @@ mod tests {
     fn signal_guard_string_result() {
         let result = call_guarded(|| "hello".to_string());
         assert_eq!(result, Ok("hello".to_string()));
+    }
+
+    #[test]
+    fn signal_guard_reentrant_call_does_not_deadlock() {
+        // Simulates C callback → Mimi → FFI re-entrancy.
+        // The inner call_guarded should NOT deadlock on GUARD_LOCK.
+        let result = call_guarded(|| {
+            // Inner call: re-entrant, should skip lock and run directly.
+            let inner = call_guarded(|| 42);
+            inner.unwrap() + 1
+        });
+        assert_eq!(result, Ok(43));
+    }
+
+    #[test]
+    fn signal_guard_reentrant_crash_caught_by_outer() {
+        // If the inner (re-entrant) call crashes, the outer recovery
+        // point catches it (inner has no separate recovery point).
+        let result = call_guarded(|| -> i32 {
+            let inner = call_guarded(|| -> i32 {
+                unsafe { std::ptr::read_volatile(std::ptr::null::<i32>()) }
+            });
+            // inner crash is caught by outer's recovery point,
+            // so we never reach here.
+            inner.unwrap()
+        });
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("SIGSEGV"));
     }
 }

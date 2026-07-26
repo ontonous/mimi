@@ -474,10 +474,16 @@ pub(crate) enum DualPathResult {
     /// Both interpreters succeeded and produced equal results.
     Match(interp::Value),
     /// AST interpreter succeeded, ResolvedInterpreter returned "unsupported".
-    /// This is expected for programs using FFI/actors/flows/closures.
+    /// This is expected for programs using FFI/actors/flows.
     ResolvedUnsupported {
         ast_value: interp::Value,
         reason: String,
+    },
+    /// AST interpreter succeeded, ResolvedInterpreter failed with a real error.
+    /// This indicates a ResolvedInterpreter bug (not an unsupported feature).
+    ResolvedFailed {
+        ast_value: interp::Value,
+        resolved_error: String,
     },
     /// Both interpreters failed (expected for invalid programs).
     BothFailed {
@@ -545,9 +551,9 @@ pub(crate) fn run_dual_path(src: &str) -> DualPathResult {
                 }
             } else {
                 // ResolvedInterpreter failed with a real error - this is a bug
-                DualPathResult::Mismatch {
+                DualPathResult::ResolvedFailed {
                     ast_value: ast_val,
-                    resolved_value: interp::Value::Unit, // placeholder
+                    resolved_error: resolved_err,
                 }
             }
         }
@@ -647,6 +653,15 @@ pub(crate) fn assert_dual_path_match(src: &str) -> interp::Value {
             panic!(
                 "AST interpreter failed but ResolvedInterpreter succeeded!\nAST error: {}\nResolved: {:?}",
                 ast_error, resolved_value
+            );
+        }
+        DualPathResult::ResolvedFailed {
+            ast_value,
+            resolved_error,
+        } => {
+            panic!(
+                "ResolvedInterpreter failed with a real error (not unsupported)!\nAST value: {:?}\nResolved error: {}",
+                ast_value, resolved_error
             );
         }
         DualPathResult::BothFailed {

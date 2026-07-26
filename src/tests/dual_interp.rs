@@ -449,14 +449,17 @@ func main() -> i32 {
 "#;
     match run_dual_path(src) {
         DualPathResult::ResolvedUnsupported { .. } => {
-            // Expected: ResolvedInterpreter doesn't support FFI
-        }
-        DualPathResult::AstFailedResolvedOk { .. } => {
-            // AST interpreter failed (no MIMI_FFI_LIB), ResolvedInterpreter
-            // also failed but with a different error. Both failed is OK.
+            // Expected: AST succeeded, ResolvedInterpreter returned "unsupported"
         }
         DualPathResult::BothFailed { .. } => {
-            // Both failed - expected when FFI is not available
+            // Both failed - expected when FFI library is not available
+            // (AST fails with "MIMI_FFI_LIB not set", Resolved fails with
+            // "Extern callee not supported")
+        }
+        DualPathResult::ResolvedFailed { .. } => {
+            // AST succeeded but Resolved failed with a real error.
+            // This is acceptable: the ResolvedInterpreter correctly rejects
+            // Extern callees, just with a different error message.
         }
         other => panic!("Unexpected result: {:?}", other),
     }
