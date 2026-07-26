@@ -493,12 +493,21 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Floating-point arithmetic (`+`, `-`, `*`, `/`).
+    ///
+    /// SD-9 (0.31.51b): finiteness invariant — result must not be NaN or Inf.
+    /// Matches interpreter behavior (interp/ops.rs:27 traps on NaN/Inf, E0813).
+    /// `ieee_float { }` escape hatch deferred to post-0.31.51b.
     fn compile_float_binop(
         &self,
         op: BinOp,
         l: FloatValue<'ctx>,
         r: FloatValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let f64_ty = l.get_type();
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("no current function for float binop".into()))?;
+
         let res = match op {
             BinOp::Add => self.builder.build_float_add(l, r, "fadd"),
             BinOp::Sub => self.builder.build_float_sub(l, r, "fsub"),
@@ -506,9 +515,82 @@ impl<'ctx> CodeGenerator<'ctx> {
             BinOp::Div => self.builder.build_float_div(l, r, "fdiv"),
             _ => return Err(format!("unsupported float arithmetic operator {:?}", op).into()),
         };
-        Ok(res
-            .map_err(|e| CompileError::LlvmError(format!("{} error: {}", op_name(op), e)))?
-            .into())
+        let result =
+            res.map_err(|e| CompileError::LlvmError(format!("{} error: {}", op_name(op), e)))?;
+
+        // SD-9: Check for NaN (unordered comparison with self) and Inf.
+        // NaN: fcmp uno x, x → true only for NaN.
+        let is_nan = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::UNO, result, result, "is_nan")
+            .map_err(|e| CompileError::LlvmError(format!("fcmp error: {}", e)))?;
+        // Inf: |x| == Inf. Use LLVM intrinsic llvm.fabs.f64 then compare.
+        let fabs_name = format!("llvm.fabs.f{}", f64_ty.get_bit_width());
+        let fabs_fn = self.module.get_function(&fabs_name).unwrap_or_else(|| {
+            self.module.add_function(
+                &fabs_name,
+                f64_ty.fn_type(&[BasicMetadataTypeEnum::FloatType(f64_ty)], false),
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+        let abs_val = self
+            .builder
+            .build_call(
+                fabs_fn,
+                &[BasicMetadataValueEnum::FloatValue(result)],
+                "fabs",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("fabs call error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("fabs returned void".into()))?
+            .into_float_value();
+        let inf_const = f64_ty.const_float(f64::INFINITY);
+        let is_inf = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OEQ, abs_val, inf_const, "is_inf")
+            .map_err(|e| CompileError::LlvmError(format!("fcmp error: {}", e)))?;
+        let not_finite = self
+            .builder
+            .build_or(is_nan, is_inf, "not_finite")
+            .map_err(|e| CompileError::LlvmError(format!("or error: {}", e)))?;
+
+        // Branch: trap or continue.
+        let trap_bb = self.context.append_basic_block(function, "trap_float");
+        let ok_bb = self.context.append_basic_block(function, "float_ok");
+        self.builder
+            .build_conditional_branch(not_finite, trap_bb, ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("br error: {}", e)))?;
+
+        // Trap block.
+        self.builder.position_at_end(trap_bb);
+        let trap_fn = self.get_runtime_fn("mimi_trap_float_not_finite")?;
+        let op_name_str = match op {
+            BinOp::Add => "addition",
+            BinOp::Sub => "subtraction",
+            BinOp::Mul => "multiplication",
+            BinOp::Div => "division",
+            _ => "operation",
+        };
+        let op_cstr = self
+            .builder
+            .build_global_string_ptr(op_name_str, "float_op_name")
+            .map_err(|e| CompileError::LlvmError(format!("global string error: {}", e)))?;
+        self.builder
+            .build_call(
+                trap_fn,
+                &[BasicMetadataValueEnum::PointerValue(
+                    op_cstr.as_pointer_value(),
+                )],
+                "",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("call error: {}", e)))?;
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("unreachable error: {}", e)))?;
+
+        // OK block.
+        self.builder.position_at_end(ok_bb);
+        Ok(result.into())
     }
 
     /// Integer remainder (`%`).

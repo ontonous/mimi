@@ -4257,4 +4257,10 @@ fn register_arithmetic_trap_fns<'ctx>(
         void.fn_type(&[], false),
         Some(inkwell::module::Linkage::External),
     );
+    // SD-9: mimi_trap_float_not_finite(op: *const c_char) -> !
+    module.add_function(
+        "mimi_trap_float_not_finite",
+        void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
 }
