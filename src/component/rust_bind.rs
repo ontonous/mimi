@@ -10,8 +10,7 @@
 //! The generated code includes:
 //! - `#[repr(C)]` struct definitions
 //! - Type aliases for opaque handles
-//! - `extern "C"` function declarations
-//! - `unsafe` marker on all functions
+//! - `extern "C"` function declarations (implicitly unsafe to call in Rust 2021)
 //! - Doc comments from effects/unsafe annotations
 
 use super::symbol::AbiSymbol;
@@ -90,7 +89,8 @@ fn escape_rust_identifier(name: &str) -> String {
 /// Generate Rust FFI bindings from a Component IR.
 ///
 /// The output is a self-contained `.rs` file suitable for inclusion
-/// in a `-sys` crate. All functions are `unsafe extern "C"`.
+/// in a `-sys` crate. All functions are inside `extern "C"` blocks
+/// and are implicitly unsafe to call (Rust 2021 semantics).
 pub fn generate_rust_bindings(ir: &ComponentIr) -> String {
     let mut out = String::with_capacity(8192);
 

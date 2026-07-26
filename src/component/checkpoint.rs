@@ -155,6 +155,8 @@ pub enum AllocFault {
     UnknownPointer(u64),
     /// Double free.
     DoubleFree(u64),
+    /// Double allocation (pointer already live). GAP-5 fix.
+    DoubleAlloc(u64),
     /// Freed by the wrong side (Mimi freeing a Foreign allocation or vice versa).
     WrongSide {
         ptr: u64,
@@ -168,6 +170,7 @@ impl std::fmt::Display for AllocFault {
         match self {
             AllocFault::UnknownPointer(p) => write!(f, "free of unknown pointer 0x{p:X}"),
             AllocFault::DoubleFree(p) => write!(f, "double free of 0x{p:X}"),
+            AllocFault::DoubleAlloc(p) => write!(f, "double allocation of 0x{p:X} (already live)"),
             AllocFault::WrongSide {
                 ptr,
                 allocated_by,
@@ -192,8 +195,16 @@ impl AllocLedger {
     }
 
     /// Record an allocation by `side`.
-    pub fn record_alloc(&mut self, ptr: u64, side: AllocSide) {
+    ///
+    /// GAP-5 fix: Returns `Err` if the pointer is already live (double
+    /// allocation). Previously this was silently overwritten by
+    /// `HashMap::insert`, hiding use-after-free / double-alloc bugs.
+    pub fn record_alloc(&mut self, ptr: u64, side: AllocSide) -> Result<(), AllocFault> {
+        if self.live.contains_key(&ptr) {
+            return Err(AllocFault::DoubleAlloc(ptr));
+        }
         self.live.insert(ptr, side);
+        Ok(())
     }
 
     /// Validate and record a free by `side`. Returns `Ok(())` if the free is
@@ -338,7 +349,7 @@ mod tests {
     #[test]
     fn well_paired_alloc_free() {
         let mut ledger = AllocLedger::new();
-        ledger.record_alloc(0x1000, AllocSide::Mimi);
+        ledger.record_alloc(0x1000, AllocSide::Mimi).unwrap();
         assert!(ledger.record_free(0x1000, AllocSide::Mimi).is_ok());
         assert_eq!(ledger.leak_count(), 0);
     }
@@ -346,7 +357,7 @@ mod tests {
     #[test]
     fn wrong_side_free_detected() {
         let mut ledger = AllocLedger::new();
-        ledger.record_alloc(0x2000, AllocSide::Foreign);
+        ledger.record_alloc(0x2000, AllocSide::Foreign).unwrap();
         assert_eq!(
             ledger.record_free(0x2000, AllocSide::Mimi),
             Err(AllocFault::WrongSide {
@@ -369,7 +380,7 @@ mod tests {
     #[test]
     fn double_free_detected() {
         let mut ledger = AllocLedger::new();
-        ledger.record_alloc(0x3000, AllocSide::Mimi);
+        ledger.record_alloc(0x3000, AllocSide::Mimi).unwrap();
         assert!(ledger.record_free(0x3000, AllocSide::Mimi).is_ok());
         assert_eq!(
             ledger.record_free_checked(0x3000, AllocSide::Mimi, true),
@@ -377,11 +388,22 @@ mod tests {
         );
     }
 
+    /// GAP-5 regression: double allocation must be detected.
+    #[test]
+    fn double_alloc_detected() {
+        let mut ledger = AllocLedger::new();
+        ledger.record_alloc(0x4000, AllocSide::Mimi).unwrap();
+        assert_eq!(
+            ledger.record_alloc(0x4000, AllocSide::Foreign),
+            Err(AllocFault::DoubleAlloc(0x4000))
+        );
+    }
+
     #[test]
     fn leak_count_reflects_unfreed() {
         let mut ledger = AllocLedger::new();
-        ledger.record_alloc(0x10, AllocSide::Mimi);
-        ledger.record_alloc(0x20, AllocSide::Foreign);
+        ledger.record_alloc(0x10, AllocSide::Mimi).unwrap();
+        ledger.record_alloc(0x20, AllocSide::Foreign).unwrap();
         ledger.record_free(0x10, AllocSide::Mimi).unwrap();
         assert_eq!(ledger.leak_count(), 1);
     }

@@ -7,6 +7,15 @@
 //!
 //! Format: JSON (human-readable, tool-friendly). Future: optional binary
 //! (bincode/flatbuffers) for performance-critical paths.
+//!
+//! # GAP-3: Debug format as wire format
+//!
+//! Enum variants (AbiSymbolKind, AbiCallConv, AbiPrimitive, etc.) are
+//! serialized using `format!("{:?}", variant)` — Rust's Debug output.
+//! This is fragile: renaming a variant or changing the Debug impl will
+//! silently break `.mimiabi` compatibility. The proper fix is explicit
+//! `as_str()` / `from_str()` methods for each enum. Until then, treat
+//! the Debug output as a frozen wire format and do NOT rename variants.
 
 use serde::{Deserialize, Serialize};
 
@@ -107,6 +116,12 @@ impl MimiAbi {
     ///
     /// This is the reverse of `from_component_ir()`. Used by bindgen backends
     /// that consume `.mimiabi` files directly.
+    ///
+    /// **Warning**: This method does NOT validate enum fields. Unknown
+    /// primitives/symbol kinds/calling conventions are silently mapped to
+    /// defaults (I64/Function/C). For untrusted input, call
+    /// [`from_json_validated`](Self::from_json_validated) first, which
+    /// rejects unknown values with an error.
     pub fn to_component_ir(&self) -> ComponentIr {
         ComponentIr {
             identity: ComponentIdentity {
@@ -561,18 +576,31 @@ fn try_parse_callback_category(name: &str) -> Option<AbiCallbackCategory> {
 ///
 /// **Security**: For untrusted input, use [`MimiAbi::from_json_validated`]
 /// which rejects unknown primitives instead of silently falling back.
+/// This function is only safe to call on validated data.
+///
+/// GAP-2: The silent fallback to I64 is a known design gap. Unknown
+/// primitives are mapped to I64, which may cause incorrect ABI layout.
 fn parse_primitive(name: &str) -> AbiPrimitive {
     try_parse_primitive(name).unwrap_or(AbiPrimitive::I64)
 }
 
+/// Parse a symbol kind with fallback to Function.
+///
+/// See [`parse_primitive`] for security notes.
 fn parse_symbol_kind(name: &str) -> AbiSymbolKind {
     try_parse_symbol_kind(name).unwrap_or(AbiSymbolKind::Function)
 }
 
+/// Parse a calling convention with fallback to C.
+///
+/// See [`parse_primitive`] for security notes.
 fn parse_call_conv(name: &str) -> AbiCallConv {
     try_parse_call_conv(name).unwrap_or(AbiCallConv::C)
 }
 
+/// Parse a callback category with fallback to SyncSameThread.
+///
+/// See [`parse_primitive`] for security notes.
 fn parse_callback_category(name: &str) -> AbiCallbackCategory {
     try_parse_callback_category(name).unwrap_or(AbiCallbackCategory::SyncSameThread)
 }
