@@ -803,6 +803,69 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("f64".into(), vec![]);
             }
+            // SD-7 escape hatches: wrapping arithmetic (no overflow trap).
+            "wrapping_add" | "wrapping_sub" | "wrapping_mul" => {
+                if args.len() != 2 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        format!("{} expects 2 arguments", name),
+                    );
+                } else {
+                    let t1 = self.infer_expr(&args[0], scopes);
+                    let t2 = self.infer_expr(&args[1], scopes);
+                    if !is_int(&t1) || !is_int(&t2) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects integer arguments", name),
+                        );
+                    }
+                }
+                return Type::Name("i64".into(), vec![]);
+            }
+            // SD-9 support: float classification.
+            "is_nan" | "is_infinite" | "is_finite" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        format!("{} expects 1 argument", name),
+                    );
+                } else {
+                    let t = self.infer_expr(&args[0], scopes);
+                    if !is_numeric(&t) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{} expects a float argument", name),
+                        );
+                    }
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
+            // SD-10 escape hatches: explicit float comparison.
+            "is_close" => {
+                if args.len() != 3 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "is_close expects 3 arguments (a, b, epsilon)",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                    self.infer_expr(&args[2], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
+            "f64_eq_exact" => {
+                if args.len() != 2 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "f64_eq_exact expects 2 arguments",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
             "random" => {
                 return Type::Name("f64".into(), vec![]);
             }

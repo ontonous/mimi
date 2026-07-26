@@ -330,4 +330,105 @@ impl<'a> Interpreter<'a> {
             _ => Err(InterpError::new("cbrt expects a number")),
         }
     }
+
+    // === SD-7 escape hatches: wrapping arithmetic ===
+
+    pub(crate) fn builtin_wrapping_add(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new("wrapping_add expects 2 arguments"));
+        }
+        match (&args[0], &args[1]) {
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_add(*b))),
+            _ => Err(InterpError::new("wrapping_add expects integers")),
+        }
+    }
+
+    pub(crate) fn builtin_wrapping_sub(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new("wrapping_sub expects 2 arguments"));
+        }
+        match (&args[0], &args[1]) {
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_sub(*b))),
+            _ => Err(InterpError::new("wrapping_sub expects integers")),
+        }
+    }
+
+    pub(crate) fn builtin_wrapping_mul(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new("wrapping_mul expects 2 arguments"));
+        }
+        match (&args[0], &args[1]) {
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_mul(*b))),
+            _ => Err(InterpError::new("wrapping_mul expects integers")),
+        }
+    }
+
+    // === SD-9 support: float classification ===
+
+    pub(crate) fn builtin_is_nan(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("is_nan expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Bool(v.is_nan())),
+            Value::Int(_) => Ok(Value::Bool(false)),
+            _ => Err(InterpError::new("is_nan expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_is_infinite(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("is_infinite expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Bool(v.is_infinite())),
+            Value::Int(_) => Ok(Value::Bool(false)),
+            _ => Err(InterpError::new("is_infinite expects a number")),
+        }
+    }
+
+    pub(crate) fn builtin_is_finite(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 1 {
+            return Err(InterpError::new("is_finite expects 1 argument"));
+        }
+        match &args[0] {
+            Value::Float(v) => Ok(Value::Bool(v.is_finite())),
+            Value::Int(_) => Ok(Value::Bool(true)),
+            _ => Err(InterpError::new("is_finite expects a number")),
+        }
+    }
+
+    // === SD-10 escape hatches: explicit float comparison ===
+
+    pub(crate) fn builtin_is_close(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 3 {
+            return Err(InterpError::new(
+                "is_close expects 3 arguments (a, b, epsilon)",
+            ));
+        }
+        match (&args[0], &args[1], &args[2]) {
+            (Value::Float(a), Value::Float(b), Value::Float(eps)) => {
+                Ok(Value::Bool((a - b).abs() <= *eps))
+            }
+            (Value::Int(a), Value::Float(b), Value::Float(eps)) => {
+                Ok(Value::Bool((*a as f64 - b).abs() <= *eps))
+            }
+            (Value::Float(a), Value::Int(b), Value::Float(eps)) => {
+                Ok(Value::Bool((a - *b as f64).abs() <= *eps))
+            }
+            _ => Err(InterpError::new("is_close expects (float, float, float)")),
+        }
+    }
+
+    pub(crate) fn builtin_f64_eq_exact(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new("f64_eq_exact expects 2 arguments"));
+        }
+        match (&args[0], &args[1]) {
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a == b)),
+            (Value::Int(a), Value::Float(b)) => Ok(Value::Bool(*a as f64 == *b)),
+            (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a == *b as f64)),
+            _ => Err(InterpError::new("f64_eq_exact expects numbers")),
+        }
+    }
 }
