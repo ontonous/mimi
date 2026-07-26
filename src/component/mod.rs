@@ -471,5 +471,49 @@ mod tests {
             mimi_type_to_abi("MyStruct"),
             AbiTypeRef::Named("MyStruct".to_string())
         );
+
+        // Pointer types
+        assert_eq!(
+            mimi_type_to_abi("*mut i32"),
+            AbiTypeRef::Pointer(Box::new(AbiTypeRef::Primitive(AbiPrimitive::I32)))
+        );
+        assert_eq!(
+            mimi_type_to_abi("*const u8"),
+            AbiTypeRef::Pointer(Box::new(AbiTypeRef::Primitive(AbiPrimitive::U8)))
+        );
+
+        // Reference types (ABI-equivalent to pointers)
+        assert_eq!(
+            mimi_type_to_abi("&i64"),
+            AbiTypeRef::Pointer(Box::new(AbiTypeRef::Primitive(AbiPrimitive::I64)))
+        );
+        assert_eq!(
+            mimi_type_to_abi("&mut bool"),
+            AbiTypeRef::Pointer(Box::new(AbiTypeRef::Primitive(AbiPrimitive::Bool)))
+        );
+
+        // Slice types
+        assert_eq!(
+            mimi_type_to_abi("[i32]"),
+            AbiTypeRef::Slice(Box::new(AbiTypeRef::Primitive(AbiPrimitive::I32)))
+        );
+        assert_eq!(
+            mimi_type_to_abi("Vec<u8>"),
+            AbiTypeRef::Slice(Box::new(AbiTypeRef::Primitive(AbiPrimitive::U8)))
+        );
+
+        // Nested pointer
+        assert_eq!(
+            mimi_type_to_abi("*mut *mut u8"),
+            AbiTypeRef::Pointer(Box::new(AbiTypeRef::Pointer(Box::new(
+                AbiTypeRef::Primitive(AbiPrimitive::U8)
+            ))))
+        );
+
+        // Whitespace trimming
+        assert_eq!(
+            mimi_type_to_abi("  i32  "),
+            AbiTypeRef::Primitive(AbiPrimitive::I32)
+        );
     }
 }

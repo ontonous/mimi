@@ -361,4 +361,44 @@ mod tests {
         assert_eq!(diff.non_breaking_count(), 1);
         assert_eq!(diff.summary(), "1 breaking + 1 non-breaking change(s)");
     }
+
+    #[test]
+    fn changed_param_type_is_breaking() {
+        let old = make_abi();
+        let mut new = make_abi();
+        // Change mimi_rc_alloc param type from UIntPtr to I32
+        if let Some(sym) = new.exports.iter_mut().find(|s| s.name == "mimi_rc_alloc") {
+            if let Some(param) = sym.params.first_mut() {
+                param.ty =
+                    crate::component::serialize::MimiAbiTypeRef::Primitive("I32".to_string());
+            }
+        }
+
+        let diff = diff_abi(&old, &new);
+        assert!(diff.has_breaking_changes());
+        assert!(diff.changes.iter().any(
+            |c| matches!(c, AbiChange::ChangedExport { name, detail } if name == "mimi_rc_alloc" && detail.contains("param 0 type"))
+        ));
+    }
+
+    #[test]
+    fn changed_type_definition_is_breaking() {
+        let old = make_abi();
+        let mut new = make_abi();
+        // Change MimiString struct size
+        for ty in &mut new.types {
+            if let crate::component::serialize::MimiAbiType::Struct { name, size, .. } = ty {
+                if name == "MimiString" {
+                    *size = Some(32); // was 24
+                }
+            }
+        }
+
+        let diff = diff_abi(&old, &new);
+        assert!(diff.has_breaking_changes());
+        assert!(diff
+            .changes
+            .iter()
+            .any(|c| matches!(c, AbiChange::ChangedType { name, .. } if name == "MimiString")));
+    }
 }

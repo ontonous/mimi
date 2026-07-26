@@ -226,12 +226,39 @@ pub fn handle(name: &str) -> AbiTypeRef {
 
 /// Convert a Mimi surface type name to an AbiTypeRef.
 ///
-/// Handles primitives (via `AbiPrimitive::from_mimi_type`), strings
-/// (mapped to `*mut u8` for C ABI), and falls back to `Named` for
-/// user-defined types.
+/// Handles:
+/// - Primitives (via `AbiPrimitive::from_mimi_type`)
+/// - Strings (`string`/`String` → `*mut u8` for C ABI)
+/// - Pointers (`*mut T`, `*const T` → `Pointer`)
+/// - References (`&T`, `&mut T` → `Pointer` at ABI level)
+/// - Slices (`[T]`, `Vec<T>` → `Slice`)
+/// - Void (`void`, `()`, empty)
+/// - User-defined types → `Named`
 pub fn mimi_type_to_abi(name: &str) -> AbiTypeRef {
+    let name = name.trim();
     if let Some(prim) = AbiPrimitive::from_mimi_type(name) {
         return AbiTypeRef::Primitive(prim);
+    }
+    // Pointer types: *mut T, *const T
+    if let Some(inner) = name.strip_prefix("*mut ") {
+        return AbiTypeRef::Pointer(Box::new(mimi_type_to_abi(inner)));
+    }
+    if let Some(inner) = name.strip_prefix("*const ") {
+        return AbiTypeRef::Pointer(Box::new(mimi_type_to_abi(inner)));
+    }
+    // Reference types: &T, &mut T (ABI-equivalent to pointers)
+    if let Some(inner) = name.strip_prefix("&mut ") {
+        return AbiTypeRef::Pointer(Box::new(mimi_type_to_abi(inner)));
+    }
+    if let Some(inner) = name.strip_prefix('&') {
+        return AbiTypeRef::Pointer(Box::new(mimi_type_to_abi(inner)));
+    }
+    // Slice types: [T], Vec<T>
+    if let Some(inner) = name.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        return AbiTypeRef::Slice(Box::new(mimi_type_to_abi(inner)));
+    }
+    if let Some(inner) = name.strip_prefix("Vec<").and_then(|s| s.strip_suffix('>')) {
+        return AbiTypeRef::Slice(Box::new(mimi_type_to_abi(inner)));
     }
     match name {
         "string" | "String" => {
