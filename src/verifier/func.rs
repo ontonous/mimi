@@ -539,7 +539,21 @@ impl VerifierCtx {
             if let Some(z3_bool) = expr::expr_to_z3_bool(req, &mut vars) {
                 session.assert(z3_bool);
             } else {
-                parse_errors.push(format!("could not encode requires: {}", format_expr(req)));
+                // V-2 (0.31.53): fail-closed — unencodable requires means the
+                // precondition is incomplete. Returning Proven would be unsound.
+                return VerificationResult {
+                    func_name: func.name.clone(),
+                    status: VerifStatus::NotInTrustedSubset,
+                    message: format!(
+                        "could not encode requires (fail-closed): {}",
+                        format_expr(req)
+                    ),
+                    diagnostic: None,
+                    duration_us: start.elapsed().as_micros() as u64,
+                    constraint_count: 0,
+                    artifact: None,
+                    trusted_subset_domain: None,
+                };
             }
         }
 
@@ -935,8 +949,21 @@ impl VerifierCtx {
                                 }
                             }
                         } else {
-                            parse_errors
-                                .push(format!("could not encode ensures: {}", format_expr(e)));
+                            // V-2 (0.31.53): fail-closed — unencodable ensures
+                            // means we cannot verify the postcondition fully.
+                            return VerificationResult {
+                                func_name: func.name.clone(),
+                                status: VerifStatus::NotInTrustedSubset,
+                                message: format!(
+                                    "could not encode ensures (fail-closed): {}",
+                                    format_expr(e)
+                                ),
+                                diagnostic: None,
+                                duration_us: start.elapsed().as_micros() as u64,
+                                constraint_count,
+                                artifact: None,
+                                trusted_subset_domain: None,
+                            };
                         }
                     }
                     if found_violation {
