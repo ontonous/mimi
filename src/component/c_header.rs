@@ -169,6 +169,8 @@ fn emit_function_decl(out: &mut String, sym: &AbiSymbol) {
 mod tests {
     use super::*;
     use crate::component::gen::{register_core_runtime_abi, AbiGenerator};
+    use crate::component::types::AbiTypeRef;
+    use crate::component::ComponentIdentity;
 
     #[test]
     fn c_header_contains_guard() {
@@ -310,5 +312,46 @@ mod tests {
 
         // mimi_str_format has 5 params → should be multi-line
         assert!(header.contains("uint8_t* mimi_str_format(\n"));
+    }
+
+    #[test]
+    fn c_header_enum_type() {
+        use crate::component::types::{AbiEnum, AbiPrimitive, AbiTypeDef};
+        let ir = ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![],
+            imports: vec![],
+            types: vec![AbiTypeDef::Enum(AbiEnum {
+                name: "MimiError".to_string(),
+                variants: vec![
+                    ("Ok".to_string(), 0),
+                    ("IoError".to_string(), 1),
+                    ("TypeError".to_string(), 2),
+                ],
+                repr: AbiPrimitive::I32,
+            })],
+        };
+        let header = generate_c_header(&ir);
+
+        assert!(header.contains("typedef int32_t MimiError;"));
+        assert!(header.contains("#define MimiError_Ok ((int32_t)0)"));
+        assert!(header.contains("#define MimiError_IoError ((int32_t)1)"));
+        assert!(header.contains("#define MimiError_TypeError ((int32_t)2)"));
+    }
+
+    #[test]
+    fn c_header_alias_type() {
+        use crate::component::types::{AbiAlias, AbiPrimitive, AbiTypeDef};
+        let ir = ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![],
+            imports: vec![],
+            types: vec![AbiTypeDef::Alias(AbiAlias {
+                name: "MimiFd".to_string(),
+                target: AbiTypeRef::Primitive(AbiPrimitive::I64),
+            })],
+        };
+        let header = generate_c_header(&ir);
+        assert!(header.contains("typedef int64_t MimiFd;"));
     }
 }

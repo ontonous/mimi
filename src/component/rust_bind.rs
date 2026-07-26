@@ -167,6 +167,8 @@ fn rust_type_name(ty: &AbiTypeRef) -> String {
 mod tests {
     use super::*;
     use crate::component::gen::{register_core_runtime_abi, AbiGenerator};
+    use crate::component::types::AbiTypeRef;
+    use crate::component::ComponentIdentity;
 
     fn make_ir() -> ComponentIr {
         let mut gen = AbiGenerator::new();
@@ -263,5 +265,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn rust_bindings_callback_symbol() {
+        use crate::component::symbol::{AbiCallbackCategory, AbiSymbolKind};
+        let ir = ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![AbiSymbol {
+                name: "mimi_on_data".to_string(),
+                kind: AbiSymbolKind::Callback,
+                params: vec![crate::component::symbol::AbiParam {
+                    name: "data".to_string(),
+                    ty: AbiTypeRef::Primitive(crate::component::types::AbiPrimitive::I64),
+                    is_nullable: false,
+                }],
+                ret: AbiTypeRef::Void,
+                effects: vec![],
+                is_unsafe: false,
+                call_conv: crate::component::symbol::AbiCallConv::C,
+                callback_category: Some(AbiCallbackCategory::AsyncMultiShot),
+            }],
+            imports: vec![],
+            types: vec![],
+        };
+        let bindings = generate_rust_bindings(&ir);
+        assert!(bindings.contains("pub fn mimi_on_data(data: i64);"));
+    }
+
+    #[test]
+    fn rust_bindings_import_symbols() {
+        let ir = ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![],
+            imports: vec![AbiSymbol {
+                name: "abs".to_string(),
+                kind: crate::component::symbol::AbiSymbolKind::ExternFunction,
+                params: vec![crate::component::symbol::AbiParam {
+                    name: "x".to_string(),
+                    ty: AbiTypeRef::Primitive(crate::component::types::AbiPrimitive::I32),
+                    is_nullable: false,
+                }],
+                ret: AbiTypeRef::Primitive(crate::component::types::AbiPrimitive::I32),
+                effects: vec![],
+                is_unsafe: false,
+                call_conv: crate::component::symbol::AbiCallConv::C,
+                callback_category: None,
+            }],
+            types: vec![],
+        };
+        // Imports are not in the extern "C" block (only exports are)
+        let bindings = generate_rust_bindings(&ir);
+        assert!(!bindings.contains("pub fn abs"));
     }
 }

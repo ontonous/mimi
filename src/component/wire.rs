@@ -88,6 +88,7 @@ impl WireEnvelope {
     ///
     /// Returns `Err(WireError::TrailingData)` if there are extra bytes after
     /// the declared payload (possible corruption or framing error).
+    /// Returns `Err(WireError::Truncated)` if `payload_len` overflows `usize`.
     pub fn from_bytes(data: &[u8]) -> Result<Self, WireError> {
         if data.len() < 16 {
             return Err(WireError::TooShort(data.len()));
@@ -97,7 +98,18 @@ impl WireEnvelope {
         let payload_len = u64::from_le_bytes([
             data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
         ]);
-        let total = 16 + payload_len as usize;
+        // Overflow-safe: reject payload_len that doesn't fit in usize or
+        // would overflow when adding the 16-byte header.
+        let payload_len_usize = usize::try_from(payload_len).map_err(|_| WireError::Truncated {
+            expected: usize::MAX,
+            actual: data.len(),
+        })?;
+        let total = 16usize
+            .checked_add(payload_len_usize)
+            .ok_or(WireError::Truncated {
+                expected: usize::MAX,
+                actual: data.len(),
+            })?;
         if data.len() < total {
             return Err(WireError::Truncated {
                 expected: total,
@@ -556,6 +568,19 @@ mod tests {
         assert!(matches!(
             WireEnvelope::from_bytes(&[0u8; 8]),
             Err(WireError::TooShort(8))
+        ));
+    }
+
+    #[test]
+    fn envelope_payload_len_overflow() {
+        // Craft a header with payload_len = u64::MAX (would overflow usize)
+        let mut data = vec![0u8; 16];
+        data[0..4].copy_from_slice(&WireEnvelope::MAGIC.to_le_bytes());
+        data[4..8].copy_from_slice(&WireEnvelope::VERSION.to_le_bytes());
+        data[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(matches!(
+            WireEnvelope::from_bytes(&data),
+            Err(WireError::Truncated { .. })
         ));
     }
 
