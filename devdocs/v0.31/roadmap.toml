@@ -827,13 +827,15 @@ requirements = ["PROTOCOL-DYN-001", "EFFECT-CAP-001", "COMPONENT-RAW-001"]
 version = "0.31.45"
 kind = "debug"
 title = "DEBUG 周期 + Interpreter dual-path"
-# 【盲审追加】L1 强化：比对 exit code + Fault Trace + ASSERT_FAULT 测试宏
-# 【盲审追加】L1 浮点 assert_approx_eq（跨平台浮点非确定性）
-# 【盲审追加】Surface interpreter 物理删除（ResolvedInterpreter 69/69 后）
-# 【Body 迁移】Interpreter dual-path 接入：
-#   ResolvedInterpreter 生产路径（plain func 子集）+ AST fallback
-#   补齐 FFI/actor/flow/Delegate/Pinned 后逐步缩小 fallback 面
-# 【盲审追加】876 unsafe SAFETY 注释（AI 批量 + 人工审计高风险项，贯穿 0.31.45-48）
+status = "done"  # 2026-07-27: 4366 tests green, dual-path infra + 28 tests
+# 【盲审追加】L1 强化：比对 exit code + Fault Trace + ASSERT_FAULT 测试宏 → 0.31.46
+# 【盲审追加】L1 浮点 assert_approx_eq（跨平台浮点非确定性）→ 0.31.46
+# 【盲审追加】Surface interpreter 物理删除（ResolvedInterpreter 69/69 后）→ post-0.31.48
+# 【Body 迁移】Interpreter dual-path 接入：✅ 基础设施 + 28 项等价测试
+#   ResolvedInterpreter 支持：基础算术、控制流、函数、递归、数据结构、
+#   模式匹配、记录/变体、Option/Result、字符串、合约、推导、闭包
+#   ResolvedInterpreter 不支持：FFI（Extern callee）、Flow（Delegate/Pinned）
+# 【盲审追加】876 unsafe SAFETY 注释 → 0.31.46-48 贯穿
 requirements = []
 # 【v4 吸收】Interpreter 结构体瘦身：
 # - 审计 Interpreter<'a> ~105 个字段，将冷路径字段（comptime_results、
