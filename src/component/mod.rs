@@ -31,6 +31,7 @@
 
 mod c_header;
 mod checkpoint;
+mod conformance;
 mod diff;
 mod gen;
 mod handle;
