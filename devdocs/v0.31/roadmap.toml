@@ -948,15 +948,30 @@ version = "0.31.51"
 kind = "soundness"
 title = "语义裁决 + Interpreter 对齐（L1 分歧）"
 requirements = ["R1"]
-# 语义裁决（SD-7~SD-12）：
-#   SD-7:  整数溢出 → trap（报错），非 wrapping
-#   SD-8:  除零 → trap（报错），非返回 0
-#   SD-9:  Float NaN/Inf → 遵循 IEEE 754（interpreter 当前拒绝，需修改）
-#   SD-10: Float 相等 → 精确比较（移除 epsilon），0.1+0.2 != 0.3
-#   SD-11: NaN 比较 → 返回 false（IEEE 754），非报错
-#   SD-12: std/json.mimi get_float 不用 0.0/0.0 产生 NaN
-# L1-1~L1-6: 修 interpreter 对齐裁决，codegen 分歧记录为迁移任务
-# 退出条件：interpreter 行为匹配裁决文档；codegen 分歧有 tracking issue
+# 拆分为两阶段：
+#
+# 0.31.51a：SD-7/8（整数 Trap）
+#   - codegen: llvm.sadd.with.overflow + mimi_trap_overflow（~80 行）
+#   - codegen: MIN/-1 检查（~15 行）
+#   - runtime: mimi_trap_overflow / mimi_trap_div_by_zero（~30 行）
+#   - wrapping_add/sub/mul 内置（interp + codegen + infer）（~80 行）
+#   - 常量折叠 checked_*（~10 行）
+#   - verifier i64 definedness VC（~5 行）
+#   - 测试（~60 行）
+#   退出条件：i64::MAX + 1 双后端 trap；wrapping_add 双后端 wrap
+#
+# 0.31.51b：SD-9/10/11/12（浮点语义）
+#   - codegen: float op 后 is_finite 检查 + E0813 trap（~60 行）
+#   - ieee_float { } 语法（lexer/parser/AST/checker/codegen）（~150 行）
+#   - FFI 边界 float 校验（~30 行）
+#   - Flow transition float 字段校验（~40 行）
+#   - float == 层 1 E04XX（transition guard）+ 层 2 W0XX（普通条件）（~50 行）
+#   - is_close/is_nan/is_finite/f64_eq_exact 内置（~90 行）
+#   - json.mimi get_float → Result + NaN 拒绝（~50 行）
+#   - 规范 §5.2 修正（~5 行）
+#   - 测试（~100 行）
+#   退出条件：0.0/0.0 双后端 trap；ieee_float 内不 trap；
+#     Flow guard float == 编译错误；json NaN 拒绝
 
 [[milestone]]
 version = "0.31.52"
