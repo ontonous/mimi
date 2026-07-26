@@ -29,6 +29,13 @@
 
 use std::cell::Cell;
 use std::ffi::c_void;
+use std::sync::Mutex;
+
+/// Global mutex serializing signal guard usage. Signal handlers are
+/// process-wide (not thread-local), so concurrent `call_guarded()` calls
+/// would overwrite each other's handlers. The mutex prevents this race.
+/// Overhead is negligible: FFI calls are orders of magnitude slower.
+static GUARD_LOCK: Mutex<()> = Mutex::new(());
 
 /// sigjmp_buf is 200 bytes on x86_64 Linux (glibc).
 /// Use 256 for alignment headroom across platforms.
@@ -135,6 +142,9 @@ pub(crate) fn call_guarded<F, R>(f: F) -> Result<R, String>
 where
     F: FnOnce() -> R,
 {
+    // Serialize signal guard usage: handlers are process-wide.
+    let _lock = GUARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     let saved = install_handlers();
 
     // Set up thread-local jmp_buf and recovery point.
