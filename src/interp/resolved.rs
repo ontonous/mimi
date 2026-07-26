@@ -2348,11 +2348,16 @@ fn eval_builtin(
         "str_parse_float" => {
             expect_arity(name, &arguments, 1)?;
             match &arguments[0] {
-                Value::String(value) => Ok(value
-                    .trim()
-                    .parse::<f64>()
-                    .map(|value| Value::Tuple(vec![Value::Bool(true), Value::Float(value)]))
-                    .unwrap_or_else(|_| Value::Tuple(vec![Value::Bool(false), Value::Float(0.0)]))),
+                Value::String(value) => {
+                    let result = value.trim().parse::<f64>();
+                    match result {
+                        // SD-12 (0.31.51b): reject NaN/Inf per RFC 8259.
+                        Ok(n) if n.is_finite() => {
+                            Ok(Value::Tuple(vec![Value::Bool(true), Value::Float(n)]))
+                        }
+                        _ => Ok(Value::Tuple(vec![Value::Bool(false), Value::Float(0.0)])),
+                    }
+                }
                 _ => Err(builtin_type_error(name, "one string")),
             }
         }

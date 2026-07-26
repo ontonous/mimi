@@ -11,6 +11,9 @@ source_filename = "golden_test"
 @str.7 = private unnamed_addr constant [11 x i8] c"peer_fault\00", align 1
 @str.8 = private unnamed_addr constant [1 x i8] zeroinitializer, align 1
 @str.9 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
+@float_op_name = private unnamed_addr constant [15 x i8] c"multiplication\00", align 1
+@float_op_name.10 = private unnamed_addr constant [9 x i8] c"division\00", align 1
+@float_op_name.11 = private unnamed_addr constant [9 x i8] c"addition\00", align 1
 
 declare i32 @printf(ptr, ...)
 
@@ -741,6 +744,8 @@ declare void @mimi_trap_div_by_zero()
 
 declare void @mimi_trap_div_overflow()
 
+declare void @mimi_trap_float_not_finite(ptr)
+
 define double @main() {
 entry:
   %b = alloca double, align 8
@@ -750,10 +755,43 @@ entry:
   %a1 = load double, ptr %a, align 8
   %b2 = load double, ptr %b, align 8
   %fmul = fmul double %a1, %b2
+  %is_nan = fcmp uno double %fmul, %fmul
+  %fabs = call double @llvm.fabs.f64(double %fmul)
+  %is_inf = fcmp oeq double %fabs, 0x7FF0000000000000
+  %not_finite = or i1 %is_nan, %is_inf
+  br i1 %not_finite, label %trap_float, label %float_ok
+
+trap_float:                                       ; preds = %entry
+  call void @mimi_trap_float_not_finite(ptr @float_op_name)
+  unreachable
+
+float_ok:                                         ; preds = %entry
   %a3 = load double, ptr %a, align 8
   %b4 = load double, ptr %b, align 8
   %fdiv = fdiv double %a3, %b4
+  %is_nan5 = fcmp uno double %fdiv, %fdiv
+  %fabs6 = call double @llvm.fabs.f64(double %fdiv)
+  %is_inf7 = fcmp oeq double %fabs6, 0x7FF0000000000000
+  %not_finite8 = or i1 %is_nan5, %is_inf7
+  br i1 %not_finite8, label %trap_float9, label %float_ok10
+
+trap_float9:                                      ; preds = %float_ok
+  call void @mimi_trap_float_not_finite(ptr @float_op_name.10)
+  unreachable
+
+float_ok10:                                       ; preds = %float_ok
   %fadd = fadd double %fmul, %fdiv
+  %is_nan11 = fcmp uno double %fadd, %fadd
+  %fabs12 = call double @llvm.fabs.f64(double %fadd)
+  %is_inf13 = fcmp oeq double %fabs12, 0x7FF0000000000000
+  %not_finite14 = or i1 %is_nan11, %is_inf13
+  br i1 %not_finite14, label %trap_float15, label %float_ok16
+
+trap_float15:                                     ; preds = %float_ok10
+  call void @mimi_trap_float_not_finite(ptr @float_op_name.11)
+  unreachable
+
+float_ok16:                                       ; preds = %float_ok10
   ret double %fadd
 }
 
@@ -903,4 +941,8 @@ entry:
   ret { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load
 }
 
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare double @llvm.fabs.f64(double) #1
+
 attributes #0 = { noreturn }
+attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }

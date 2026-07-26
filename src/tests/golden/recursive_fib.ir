@@ -744,6 +744,8 @@ declare void @mimi_trap_div_by_zero()
 
 declare void @mimi_trap_div_overflow()
 
+declare void @mimi_trap_float_not_finite(ptr)
+
 define i32 @fib(i32 %0) {
 entry:
   %n = alloca i32, align 4

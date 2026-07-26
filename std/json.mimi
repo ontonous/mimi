@@ -28,7 +28,7 @@ trait JsonExt {
     func get_int(key: string) -> i64
     func get_element(index: i32) -> string
     func get_bool(key: string) -> Result<bool, string>
-    func get_float(key: string) -> f64
+    func get_float(key: string) -> Result<f64, string>
     func has_key(key: string) -> bool
     func is_valid() -> bool
     func to_string_pretty() -> string
@@ -49,14 +49,13 @@ impl JsonExt for string {
         else if v == "false" { Ok(false) }
         else { Err("not a boolean") }
     }
-    func get_float(key: string) -> f64 {
-        // HIGH fix: previously returned 0.0 silently when key was missing or
-        // value was not a valid float. Now returns NaN to distinguish invalid
-        // values from legitimate 0.0.
+    // SD-12 (0.31.51b): RFC 8259 rejects NaN/Inf. get_float returns Result.
+    // str_parse_float rejects "NaN"/"inf" strings (see interp/builtins/string.rs).
+    func get_float(key: string) -> Result<f64, string> {
+        if !has_key(key) { return Err("key not found") }
         let v = json_get_string(self, key)
-        if !has_key(key) { return 0.0 / 0.0 }
         let parsed = str_parse_float(v)
-        if parsed.0 { parsed.1 } else { 0.0 / 0.0 }
+        if parsed.0 { Ok(parsed.1) } else { Err("not a valid float") }
     }
     func has_key(key: string) -> bool { json_has_key(self, key) }
     func is_valid() -> bool { json_is_valid(self) }
@@ -100,12 +99,12 @@ pub func get_bool(json: string, key: string) -> Result<bool, string> {
 }
 
 // get_float: Gets a float field from a JSON object by key.
-// Returns NaN if key is missing or value is not a valid float.
-pub func get_float(json: string, key: string) -> f64 {
+// SD-12 (0.31.51b): returns Result — RFC 8259 rejects NaN/Inf.
+pub func get_float(json: string, key: string) -> Result<f64, string> {
+    if !json_has_key(json, key) { return Err("key not found") }
     let v = json_get_string(json, key)
-    if !json_has_key(json, key) { return 0.0 / 0.0 }
     let parsed = str_parse_float(v)
-    if parsed.0 { parsed.1 } else { 0.0 / 0.0 }
+    if parsed.0 { Ok(parsed.1) } else { Err("not a valid float") }
 }
 
 // has_key: Returns true if the JSON object contains the given key.

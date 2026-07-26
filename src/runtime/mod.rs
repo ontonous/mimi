@@ -18343,6 +18343,33 @@ pub extern "C" fn mimi_trap_div_overflow() -> ! {
     std::process::abort();
 }
 
+/// SD-9 (0.31.51b): Float finiteness trap. Called when a float operation
+/// produces NaN or Infinity. Prints diagnostic and aborts.
+#[no_mangle]
+pub extern "C" fn mimi_trap_float_not_finite(op: *const std::ffi::c_char) -> ! {
+    extern "C" {
+        fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
+    }
+    const PREFIX: &[u8] = b"[E0813] float operation produced NaN/Inf in ";
+    const SUFFIX: &[u8] =
+        b"\nHint: use ieee_float { } block for IEEE 754 semantics (post-0.31.51b).\n";
+    // SAFETY: writing static byte buffers to stderr (fd 2) is async-signal-safe.
+    unsafe {
+        let _ = write(2, PREFIX.as_ptr() as *const std::ffi::c_void, PREFIX.len());
+        if !op.is_null() {
+            let mut len = 0usize;
+            let base = op as *const u8;
+            const MAX_MSG: usize = 64;
+            while len < MAX_MSG && *base.add(len) != 0 {
+                len += 1;
+            }
+            let _ = write(2, op as *const std::ffi::c_void, len);
+        }
+        let _ = write(2, SUFFIX.as_ptr() as *const std::ffi::c_void, SUFFIX.len());
+    }
+    std::process::abort();
+}
+
 /// DEAD: 架构修正案条款 10 废除同步 pinned timeout。此函数仅供已废止的看门狗使用。
 /// 清理排入后续 sprint。
 /// v0.29.32: Wall-clock timestamp in milliseconds since UNIX epoch.

@@ -743,6 +743,8 @@ declare void @mimi_trap_div_by_zero()
 
 declare void @mimi_trap_div_overflow()
 
+declare void @mimi_trap_float_not_finite(ptr)
+
 define i32 @main() {
 entry:
   %c = alloca i64, align 8

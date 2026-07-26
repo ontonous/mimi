@@ -104,11 +104,16 @@ impl<'a> Interpreter<'a> {
             return Err(InterpError::new("str_parse_float expects 1 argument"));
         }
         match &args[0] {
-            Value::String(s) => Ok(s
-                .trim()
-                .parse::<f64>()
-                .map(|n| Value::Tuple(vec![Value::Bool(true), Value::Float(n)]))
-                .unwrap_or_else(|_| Value::Tuple(vec![Value::Bool(false), Value::Float(0.0)]))),
+            Value::String(s) => {
+                let result = s.trim().parse::<f64>();
+                match result {
+                    // SD-12 (0.31.51b): reject NaN/Inf per RFC 8259.
+                    Ok(n) if n.is_finite() => {
+                        Ok(Value::Tuple(vec![Value::Bool(true), Value::Float(n)]))
+                    }
+                    _ => Ok(Value::Tuple(vec![Value::Bool(false), Value::Float(0.0)])),
+                }
+            }
             _ => Err(InterpError::new("str_parse_float expects a string")),
         }
     }

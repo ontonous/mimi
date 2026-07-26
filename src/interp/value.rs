@@ -2038,23 +2038,10 @@ fn values_equal_depth(a: &Value, b: &Value, depth: u32) -> bool {
     match (a, b) {
         (Value::Int(a), Value::Int(b)) => a == b,
         // Cross numeric comparison: widen the integer side to float.
-        (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => {
-            let a_f = *a as f64;
-            let diff = (a_f - b).abs();
-            if diff == 0.0 {
-                return true;
-            }
-            let scale = a_f.abs().max(b.abs());
-            diff <= f64::EPSILON * scale.max(1.0)
-        }
-        (Value::Float(a), Value::Float(b)) => {
-            let diff = (a - b).abs();
-            if diff == 0.0 {
-                return true;
-            }
-            let scale = a.abs().max(b.abs());
-            diff <= f64::EPSILON * scale.max(1.0)
-        }
+        // SD-10 (0.31.51b): exact comparison (matches codegen OEQ).
+        // Epsilon comparison was an L1 divergence — use is_close() for approximate.
+        (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => (*a as f64) == *b,
+        (Value::Float(a), Value::Float(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Unit, Value::Unit) => true,
