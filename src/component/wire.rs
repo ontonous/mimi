@@ -280,6 +280,83 @@ impl WireType {
             _ => None,
         }
     }
+
+    /// Encode a UTF-8 string to wire bytes (u32 LE length prefix + bytes).
+    pub fn encode_string(s: &str) -> Vec<u8> {
+        let bytes = s.as_bytes();
+        let mut buf = Vec::with_capacity(4 + bytes.len());
+        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(bytes);
+        buf
+    }
+
+    /// Decode a UTF-8 string from wire bytes.
+    ///
+    /// Returns `(string, bytes_consumed)` or `None` if the data is
+    /// too short or not valid UTF-8.
+    pub fn decode_string(data: &[u8]) -> Option<(String, usize)> {
+        if data.len() < 4 {
+            return None;
+        }
+        let len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        if data.len() < 4 + len {
+            return None;
+        }
+        let s = std::str::from_utf8(&data[4..4 + len]).ok()?.to_string();
+        Some((s, 4 + len))
+    }
+
+    /// Encode a byte array to wire bytes (u32 LE length prefix + bytes).
+    pub fn encode_bytes(b: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(4 + b.len());
+        buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
+        buf.extend_from_slice(b);
+        buf
+    }
+
+    /// Decode a byte array from wire bytes.
+    ///
+    /// Returns `(bytes, bytes_consumed)` or `None` if the data is too short.
+    pub fn decode_bytes(data: &[u8]) -> Option<(Vec<u8>, usize)> {
+        if data.len() < 4 {
+            return None;
+        }
+        let len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        if data.len() < 4 + len {
+            return None;
+        }
+        Some((data[4..4 + len].to_vec(), 4 + len))
+    }
+
+    /// Encode an optional value to wire bytes.
+    ///
+    /// Layout: [tag: 1 byte (0=None, 1=Some)] [value: N bytes (if Some)]
+    pub fn encode_optional(inner: Option<&[u8]>) -> Vec<u8> {
+        match inner {
+            None => vec![0],
+            Some(value) => {
+                let mut buf = Vec::with_capacity(1 + value.len());
+                buf.push(1);
+                buf.extend_from_slice(value);
+                buf
+            }
+        }
+    }
+
+    /// Decode an optional value from wire bytes.
+    ///
+    /// Returns `(Some(value), bytes_consumed)` or `(None, 1)`.
+    /// Returns `None` (the outer Option) if the data is empty.
+    pub fn decode_optional(data: &[u8]) -> Option<(Option<Vec<u8>>, usize)> {
+        if data.is_empty() {
+            return None;
+        }
+        match data[0] {
+            0 => Some((None, 1)),
+            1 => Some((Some(data[1..].to_vec()), data.len())),
+            _ => None,
+        }
+    }
 }
 
 /// Wire field: a field in a wire message.
@@ -590,5 +667,61 @@ mod tests {
         let ty = WireType::I32;
         assert_eq!(ty.decode_primitive(&[1, 2]), None); // too short
         assert_eq!(ty.decode_primitive(&[1, 2, 3, 4, 5]), None); // too long
+    }
+
+    #[test]
+    fn wire_string_roundtrip() {
+        let encoded = WireType::encode_string("hello world");
+        assert_eq!(&encoded[..4], &(11u32).to_le_bytes());
+        let (decoded, consumed) = WireType::decode_string(&encoded).unwrap();
+        assert_eq!(decoded, "hello world");
+        assert_eq!(consumed, encoded.len());
+
+        // Empty string
+        let encoded = WireType::encode_string("");
+        assert_eq!(&encoded[..4], &(0u32).to_le_bytes());
+        let (decoded, consumed) = WireType::decode_string(&encoded).unwrap();
+        assert_eq!(decoded, "");
+        assert_eq!(consumed, 4);
+    }
+
+    #[test]
+    fn wire_string_decode_truncated() {
+        assert!(WireType::decode_string(&[1, 0]).is_none()); // too short for len
+        assert!(WireType::decode_string(&[10, 0, 0, 0, b'h']).is_none()); // len=10 but only 1 byte
+    }
+
+    #[test]
+    fn wire_bytes_roundtrip() {
+        let data = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let encoded = WireType::encode_bytes(&data);
+        assert_eq!(&encoded[..4], &(4u32).to_le_bytes());
+        let (decoded, consumed) = WireType::decode_bytes(&encoded).unwrap();
+        assert_eq!(decoded, data);
+        assert_eq!(consumed, 8);
+    }
+
+    #[test]
+    fn wire_optional_roundtrip() {
+        // None
+        let encoded = WireType::encode_optional(None);
+        assert_eq!(encoded, vec![0]);
+        let (decoded, consumed) = WireType::decode_optional(&encoded).unwrap();
+        assert_eq!(decoded, None);
+        assert_eq!(consumed, 1);
+
+        // Some
+        let value = vec![1, 2, 3, 4];
+        let encoded = WireType::encode_optional(Some(&value));
+        assert_eq!(encoded[0], 1);
+        assert_eq!(&encoded[1..], &value);
+        let (decoded, consumed) = WireType::decode_optional(&encoded).unwrap();
+        assert_eq!(decoded, Some(value));
+        assert_eq!(consumed, 5);
+    }
+
+    #[test]
+    fn wire_optional_decode_empty() {
+        assert!(WireType::decode_optional(&[]).is_none());
     }
 }

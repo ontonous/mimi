@@ -31,6 +31,7 @@
 
 mod c_header;
 mod checkpoint;
+mod diff;
 mod gen;
 mod handle;
 mod serialize;
@@ -42,6 +43,7 @@ pub use c_header::generate_c_header;
 pub use checkpoint::{
     probe_layout, struct_type_count, AllocFault, AllocLedger, AllocSide, LayoutFault,
 };
+pub use diff::{diff_abi, AbiChange, AbiDiff};
 pub use gen::{register_core_runtime_abi, AbiGenerator};
 pub use handle::{Handle, HandleError, HandleKind, HandleRegistry, RuntimeId};
 pub use serialize::MimiAbi;
