@@ -342,9 +342,10 @@ pub fn register_fat_pointer_types(gen: &mut AbiGenerator) {
 
 /// Register the core runtime ABI surface.
 ///
-/// This is the v2 manual registry. It covers ~150 of 388 runtime functions:
+/// This is the v3 manual registry. It covers ~180 of 388 runtime functions:
 /// RC, list, map, set, string, I/O, concurrency, file I/O, time, JSON,
-/// crypto, regex, net, actor, future, env, exec, sort, capability, misc.
+/// crypto, regex, net, actor, future, env, exec, sort, capability, misc,
+/// list/set serialization, tuple, option/result JSON, executor, actor extras.
 /// JSON combinatorial serialization variants (mimi_map_from_json_* etc.)
 /// are intentionally excluded — they are internal codegen artifacts.
 pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
@@ -1139,6 +1140,139 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
         f.param("name", ptr(prim(U8)))
             .param("probability", prim(F64))
     });
+
+    // ── List serialization / display ──
+    gen.export("mimi_list_serialize", |f| {
+        f.param("list", handle("ListHandle"))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_list_deserialize", |f| {
+        f.param("data", ptr(prim(U8)))
+            .returns(handle("ListHandle"))
+            .effect("alloc")
+    });
+    gen.export("mimi_list_to_string", |f| {
+        f.param("list", handle("ListHandle"))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_list_i32_to_string", |f| {
+        f.param("list", handle("ListHandle"))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_list_element_kind", |f| {
+        f.param("list", handle("ListHandle"))
+            .param("index", prim(UIntPtr))
+            .returns(prim(I32))
+    });
+    gen.export("mimi_list_free_elements", |f| {
+        f.param("list", handle("ListHandle")).effect("dealloc")
+    });
+
+    // ── Set display / serialization ──
+    gen.export("mimi_set_to_display", |f| {
+        f.param("set", handle("SetHandle"))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_set_list_free", |f| {
+        f.param("list", handle("ListHandle")).effect("dealloc")
+    });
+
+    // ── Tuple serialization ──
+    gen.export("mimi_tuple_serialize", |f| {
+        f.param("ptr", prim(IntPtr))
+            .param("type_tag", prim(I32))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_tuple_deserialize", |f| {
+        f.param("data", ptr(prim(U8)))
+            .param("type_tag", prim(I32))
+            .returns(prim(IntPtr))
+            .effect("alloc")
+    });
+
+    // ── Option / Result JSON ──
+    gen.export("mimi_option_i64_to_json", |f| {
+        f.param("has_value", prim(I32))
+            .param("value", prim(I64))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_result_i64_to_json", |f| {
+        f.param("is_ok", prim(I32))
+            .param("value", prim(I64))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+
+    // ── File I/O extras ──
+    gen.export("mimi_read_file_partial", |f| {
+        f.param("path", ptr(prim(U8)))
+            .param("offset", prim(I64))
+            .param("len", prim(I64))
+            .param("out_len", ptr(prim(UIntPtr)))
+            .returns(ptr(prim(U8)))
+            .effect("io")
+            .effect("alloc")
+    });
+    gen.export("mimi_read_lines_each", |f| {
+        f.param("path", ptr(prim(U8)))
+            .returns(handle("ListHandle"))
+            .effect("io")
+    });
+    gen.export("mimi_read_lines_json", |f| {
+        f.param("path", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("io")
+            .effect("alloc")
+    });
+    gen.export("mimi_file_stat", |f| {
+        f.param("path", ptr(prim(U8)))
+            .returns(prim(IntPtr))
+            .effect("io")
+            .effect("alloc")
+    });
+    gen.export("mimi_file_stat_free", |f| {
+        f.param("stat", prim(IntPtr)).effect("dealloc")
+    });
+    gen.export("mimi_walk_dir", |f| {
+        f.param("path", ptr(prim(U8)))
+            .returns(handle("ListHandle"))
+            .effect("io")
+    });
+
+    // ── Executor ──
+    gen.export("mimi_executor_spawn", |f| {
+        f.param("future", handle("FutureHandle"))
+            .param("poll_fn", prim(IntPtr))
+            .effect("alloc")
+    });
+
+    // ── Actor extras ──
+    gen.export("mimi_actor_set_mailbox_depth", |f| {
+        f.param("handle", handle("ActorHandle"))
+            .param("depth", prim(I64))
+    });
+    gen.export("mimi_actor_set_max_children", |f| f.param("max", prim(I64)));
+    gen.export("mimi_actor_set_method_names", |f| {
+        f.param("handle", handle("ActorHandle"))
+            .param("names", handle("ListHandle"))
+    });
+    gen.export("mimi_actor_method_id", |f| {
+        f.param("handle", handle("ActorHandle"))
+            .param("name", ptr(prim(U8)))
+            .returns(prim(I32))
+    });
+    gen.export("mimi_actor_is_muted", |f| {
+        f.param("handle", handle("ActorHandle")).returns(prim(I32))
+    });
+
+    // ── Misc ──
+    gen.export("mimi_match_panic", |f| f.param("msg", ptr(prim(U8))));
 }
 
 #[cfg(test)]
@@ -1186,10 +1320,10 @@ mod tests {
         register_core_runtime_abi(&mut gen);
         let ir = gen.build();
 
-        // v2 registry: ~150 functions across 18 categories
+        // v2 registry: ~180 functions across 22 categories
         assert!(
-            ir.exports.len() >= 140,
-            "expected >=140 exports, got {}",
+            ir.exports.len() >= 170,
+            "expected >=170 exports, got {}",
             ir.exports.len()
         );
 
@@ -1349,6 +1483,38 @@ mod tests {
             "mimi_cap_consume",
             // Fault
             "mimi_inject_fault",
+            // List serialization
+            "mimi_list_serialize",
+            "mimi_list_deserialize",
+            "mimi_list_to_string",
+            "mimi_list_element_kind",
+            "mimi_list_free_elements",
+            // Set display
+            "mimi_set_to_display",
+            "mimi_set_list_free",
+            // Tuple
+            "mimi_tuple_serialize",
+            "mimi_tuple_deserialize",
+            // Option/Result JSON
+            "mimi_option_i64_to_json",
+            "mimi_result_i64_to_json",
+            // File I/O extras
+            "mimi_read_file_partial",
+            "mimi_read_lines_each",
+            "mimi_read_lines_json",
+            "mimi_file_stat",
+            "mimi_file_stat_free",
+            "mimi_walk_dir",
+            // Executor
+            "mimi_executor_spawn",
+            // Actor extras
+            "mimi_actor_set_mailbox_depth",
+            "mimi_actor_set_max_children",
+            "mimi_actor_set_method_names",
+            "mimi_actor_method_id",
+            "mimi_actor_is_muted",
+            // Misc
+            "mimi_match_panic",
         ];
         for name in &critical {
             assert!(

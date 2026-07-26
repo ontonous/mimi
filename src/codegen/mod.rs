@@ -1003,7 +1003,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let Some(ref ir) = self.component_ir {
                 if ir.export(name).is_none() {
                     // Not a hard error yet — the Component IR registry is
-                    // incomplete (~150/388 functions). Log for development.
+                    // incomplete (~180/388 functions). Log for development.
                     eprintln!(
                         "[component-ir] warning: get_runtime_fn(\"{}\") not in Component IR registry",
                         name
