@@ -140,6 +140,7 @@ mod ffi_verification_tests {
             ensures: None,
             variadic: false,
             no_panic: false,
+            returns_errno: false,
         };
 
         let contract = FfiContract::from_extern(&func);
@@ -166,6 +167,7 @@ mod ffi_verification_tests {
             ensures: None,
             variadic: false,
             no_panic: false,
+            returns_errno: false,
         };
 
         let contract = FfiContract::from_extern(&func);
@@ -192,6 +194,7 @@ mod ffi_verification_tests {
             ensures: None,
             variadic: false,
             no_panic: false,
+            returns_errno: false,
         };
 
         let contract = FfiContract::from_extern(&func);

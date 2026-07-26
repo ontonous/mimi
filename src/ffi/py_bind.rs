@@ -753,6 +753,7 @@ mod tests {
                 ensures: None,
                 variadic: false,
                 no_panic: false,
+                returns_errno: false,
             },
             ExternFunc {
                 meta: fixture_meta(),
@@ -768,6 +769,7 @@ mod tests {
                 ensures: None,
                 variadic: false,
                 no_panic: false,
+                returns_errno: false,
             },
         ]
     }

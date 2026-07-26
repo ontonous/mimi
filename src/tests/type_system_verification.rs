@@ -46,6 +46,7 @@ mod verification {
             ensures: None,
             variadic: false,
             no_panic: false,
+            returns_errno: false,
         };
         let contract = FfiContract::from_extern(&func);
         assert!(matches!(contract.args[0], FfiArgContract::RawPtr(_)));
@@ -84,6 +85,7 @@ mod verification {
             ensures: Some(crate::ast::Expr::Literal(crate::ast::Lit::Bool(true))),
             variadic: false,
             no_panic: false,
+            returns_errno: false,
         };
         let contract = FfiContract::from_extern(&func);
         assert!(contract.requires.is_some());

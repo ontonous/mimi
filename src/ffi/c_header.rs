@@ -562,6 +562,7 @@ impl CHeaderGenerator {
             ensures: None,
             variadic: false,
             no_panic: false,
+            returns_errno: false,
         };
         let contract = FfiContract::from_extern_with_caps_repr(
             &extern_func,
@@ -635,6 +636,7 @@ mod tests {
             ensures: None,
             variadic: false,
             no_panic: false,
+            returns_errno: false,
         }];
 
         let header = generate_c_header(&extern_funcs, HashMap::new())
@@ -671,6 +673,7 @@ mod tests {
             ensures: None,
             variadic: false,
             no_panic: false,
+            returns_errno: false,
         }];
         let header = generate_c_header(&extern_funcs, HashMap::new())
             .expect("test_header_endif_after_declarations: generate failed");

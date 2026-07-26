@@ -325,15 +325,23 @@ impl FfiContract {
             })
             .unwrap_or(FfiRetContract::Unit);
 
-        // Auto-enable errno checking if return type is Result-like
-        // (convention: negative return values indicate errors).
-        // Uses exact function name matching (not `contains`) to avoid false
-        // positives on wrapper functions like `my_open_wrapper`.
+        // SD-3: explicit #[errno] attribute takes priority.
+        // Transition period: fall back to ERRNO_CHECK_FUNC_NAMES name-guessing
+        // for unannotated functions, with deprecation warning.
         let fname: &str = &func.name;
-        let check_errno = matches!(
-            func.ret.as_ref().map(Type::unlocated),
-            Some(Type::Name(name, _)) if name == "i32" || name == "i64"
-        ) && ERRNO_CHECK_FUNC_NAMES.contains(&fname);
+        let check_errno = if func.returns_errno {
+            // Explicit attribute: always check errno (if return type is i32/i64)
+            matches!(
+                func.ret.as_ref().map(Type::unlocated),
+                Some(Type::Name(name, _)) if name == "i32" || name == "i64"
+            )
+        } else {
+            // Legacy fallback: name-guessing (deprecated, removed in 1.0)
+            matches!(
+                func.ret.as_ref().map(Type::unlocated),
+                Some(Type::Name(name, _)) if name == "i32" || name == "i64"
+            ) && ERRNO_CHECK_FUNC_NAMES.contains(&fname)
+        };
 
         Self {
             args,

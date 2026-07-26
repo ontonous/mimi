@@ -619,6 +619,8 @@ pub struct ResolvedExternFunc {
     pub ensures: Option<Expr>,
     pub variadic: bool,
     pub no_panic: bool,
+    /// SD-3: explicit errno checking flag from #[errno] attribute.
+    pub returns_errno: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -630,6 +632,8 @@ pub struct ResolvedExternBlock {
     pub signatures: Vec<ResolvedExternFunc>,
     pub no_panic: bool,
     pub unsafe_: bool,
+    /// SD-3: block-level errno checking default.
+    pub returns_errno: bool,
     pub origin: Origin,
 }
 
@@ -2507,6 +2511,7 @@ fn collect_items(
                         ensures: func.ensures.clone(),
                         variadic: func.variadic,
                         no_panic: func.no_panic,
+                        returns_errno: func.returns_errno,
                     });
                 }
                 extern_blocks.insert(
@@ -2519,6 +2524,7 @@ fn collect_items(
                         signatures,
                         no_panic: block.no_panic,
                         unsafe_: block.unsafe_,
+                        returns_errno: block.returns_errno,
                         origin: resolve_named_origin(
                             ResolvedItemKind::ExternBlock,
                             &qualified,

@@ -68,6 +68,7 @@ pub(crate) fn resolved_extern_funcs(
                 ensures: signature.ensures.clone(),
                 variadic: signature.variadic,
                 no_panic: signature.no_panic || block.no_panic,
+                returns_errno: false,
             });
         }
     }
@@ -353,6 +354,7 @@ pub(crate) fn emit_py_bindings(
             ensures: None,
             variadic: false,
             no_panic: false,
+            returns_errno: false,
         };
         extern_funcs.push(extern_func);
     }
