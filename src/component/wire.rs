@@ -202,14 +202,19 @@ impl WireType {
     /// True if this type contains a handle (directly or nested).
     ///
     /// Traversal is bounded to depth 128 to prevent stack overflow
-    /// on pathologically nested types.
+    /// on pathologically nested types. Beyond depth 128, returns `true`
+    /// (conservative: assume handle present) to avoid missing handle
+    /// tracking in deeply nested types.
     pub fn contains_handle(&self) -> bool {
         self.contains_handle_depth(0)
     }
 
     fn contains_handle_depth(&self, depth: usize) -> bool {
         if depth > 128 {
-            return false; // bail out: treat as no handle at extreme depth
+            // GAP-7 fix: return true (conservative) instead of false.
+            // A false negative here would skip handle tracking for a
+            // deeply nested Handle, causing use-after-free.
+            return true;
         }
         match self {
             WireType::Handle => true,

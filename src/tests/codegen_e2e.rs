@@ -4711,7 +4711,15 @@ int32_t __mimi_extern_checked_mod(int32_t a, int32_t b) {
     // Program exits with code 2 (17 % 5), which the test framework
     // reports as an error. We just verify it compiled and linked.
     match stdout {
-        Ok(_) => {} // stdout is empty, exit code 0 (shouldn't happen)
+        Ok(v) => {
+            // BUG-2 fix: exit code 0 means the C function didn't run
+            // or returned 0 instead of 17 % 5 = 2. Fail loudly.
+            panic!(
+                "expected non-zero exit code (17 % 5 = 2), but got Ok({:?}). \
+                 The C function may not have been called.",
+                v
+            );
+        }
         Err(e) => {
             // Expect "exit code Some(2)" — proves the C function ran
             assert!(

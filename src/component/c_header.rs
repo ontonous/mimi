@@ -13,7 +13,10 @@
 //! - Opaque handle typedefs
 //! - Enum definitions
 //! - Function declarations (extern "C")
-//! - BLAKE3 hash comment for tamper detection
+//!
+//! Note: BLAKE3 hash comment for tamper detection was planned but not
+//! implemented. The hash is available via `MimiAbi::hash()` but is not
+//! embedded in the generated header.
 
 use super::symbol::AbiSymbol;
 use super::types::AbiTypeDef;
@@ -46,10 +49,13 @@ fn sanitize_c_identifier(name: &str) -> (String, bool) {
     }
     let mut out = String::with_capacity(name.len() + 1);
     for (i, c) in name.chars().enumerate() {
-        if c.is_ascii_alphanumeric() || c == '_' {
-            out.push(c);
-        } else if i == 0 && c.is_ascii_digit() {
+        // BUG-1 fix: check digit-first BEFORE alphanumeric, because
+        // is_ascii_alphanumeric() returns true for digits, making the
+        // digit-first branch unreachable if checked second.
+        if i == 0 && c.is_ascii_digit() {
             out.push('_');
+            out.push(c);
+        } else if c.is_ascii_alphanumeric() || c == '_' {
             out.push(c);
         } else {
             out.push('_');
@@ -489,5 +495,34 @@ mod tests {
         let header = generate_c_header(&ir);
         assert!(!header.contains("Evil; typedef int"));
         assert!(header.contains("Evil__typedef_int"));
+    }
+
+    /// BUG-1 regression: digit-leading identifiers must be sanitized.
+    /// Previously the digit-first branch was dead code because
+    /// is_ascii_alphanumeric() catches digits before the digit check.
+    #[test]
+    fn c_header_sanitizes_digit_leading_identifier() {
+        let ir = ComponentIr {
+            identity: ComponentIdentity::default(),
+            exports: vec![AbiSymbol {
+                name: "123abc".to_string(),
+                kind: crate::component::symbol::AbiSymbolKind::Function,
+                params: vec![],
+                ret: AbiTypeRef::Void,
+                effects: vec![],
+                is_unsafe: false,
+                call_conv: crate::component::symbol::AbiCallConv::C,
+                callback_category: None,
+            }],
+            imports: vec![],
+            types: vec![],
+        };
+        let header = generate_c_header(&ir);
+        // "123abc" is not a valid C identifier; must be prefixed with _
+        assert!(
+            !header.contains(" 123abc("),
+            "digit-leading name must be sanitized"
+        );
+        assert!(header.contains("_123abc"), "expected _123abc in header");
     }
 }
