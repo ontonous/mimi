@@ -196,7 +196,7 @@ pub fn ptr(inner: AbiTypeRef) -> AbiTypeRef {
 }
 
 /// Convenience: void type reference.
-#[allow(dead_code)] // Infrastructure for future bindgen backends.
+#[allow(dead_code)] // Used by tests and future bindgen backends.
 pub fn void() -> AbiTypeRef {
     AbiTypeRef::Void
 }
@@ -207,7 +207,6 @@ pub fn handle(name: &str) -> AbiTypeRef {
 }
 
 /// 0.31.31: Convenience: fat pointer type reference (String-like with capacity).
-#[allow(dead_code)] // Infrastructure for 0.31.31 fat pointer migration.
 pub fn fat_string() -> AbiTypeRef {
     AbiTypeRef::FatPointer {
         element: Box::new(AbiTypeRef::Primitive(AbiPrimitive::U8)),
@@ -216,7 +215,6 @@ pub fn fat_string() -> AbiTypeRef {
 }
 
 /// 0.31.31: Convenience: fat pointer slice type reference (no capacity).
-#[allow(dead_code)] // Infrastructure for 0.31.31 fat pointer migration.
 pub fn fat_slice(element: AbiTypeRef) -> AbiTypeRef {
     AbiTypeRef::FatPointer {
         element: Box::new(element),
@@ -229,7 +227,6 @@ pub fn fat_slice(element: AbiTypeRef) -> AbiTypeRef {
 /// 0.31.31: These replace the opaque handle types for String/List/Map/Set.
 /// Fat pointers carry { data, len, capacity } directly, eliminating the
 /// global handle registry lookup.
-#[allow(dead_code)] // Infrastructure for 0.31.31 fat pointer migration.
 pub fn register_fat_pointer_types(gen: &mut AbiGenerator) {
     use super::types::{AbiField, AbiStruct};
     use AbiPrimitive::*;
@@ -287,6 +284,11 @@ pub fn register_fat_pointer_types(gen: &mut AbiGenerator) {
 /// surface will be migrated incrementally.
 pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     use AbiPrimitive::*;
+
+    // 0.31.31: register the fat-pointer struct layouts (MimiString/MimiSlice)
+    // so String/buffer surfaces carry { data, len, capacity } directly instead
+    // of an opaque C-string pointer + separate length.
+    register_fat_pointer_types(gen);
 
     // ── RC / Allocation ──
     gen.export("mimi_rc_alloc", |f| {
@@ -354,18 +356,22 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
         f.param("set", handle("SetHandle")).effect("dealloc")
     });
 
-    // ── String ──
+    // ── String (0.31.31: fat pointers replace C-string *mut c_char) ──
     gen.export("mimi_string_new", |f| {
-        f.param("data", ptr(prim(U8)))
-            .param("len", prim(UIntPtr))
-            .returns(handle("StringHandle"))
+        f.param("bytes", fat_slice(prim(U8)))
+            .returns(fat_string())
             .effect("alloc")
     });
     gen.export("mimi_string_len", |f| {
-        f.param("s", handle("StringHandle")).returns(prim(UIntPtr))
+        f.param("s", fat_string()).returns(prim(UIntPtr))
     });
     gen.export("mimi_string_free", |f| {
-        f.param("s", handle("StringHandle")).effect("dealloc")
+        f.param("s", fat_string()).effect("dealloc")
+    });
+    // Zero-copy view: hand out a { data, len } slice into an existing string
+    // without a marshalling copy (blind review:胶水语言 Marshalling Tax).
+    gen.export("mimi_string_as_slice", |f| {
+        f.param("s", fat_string()).returns(fat_slice(prim(U8)))
     });
 
     // ── I/O ──

@@ -88,10 +88,9 @@ impl WireEnvelope {
         }
         let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-        let payload_len =
-            u64::from_le_bytes([
-                data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
-            ]);
+        let payload_len = u64::from_le_bytes([
+            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
+        ]);
         if data.len() < 16 + payload_len as usize {
             return Err(WireError::Truncated {
                 expected: 16 + payload_len as usize,
@@ -218,10 +217,7 @@ pub enum WireError {
     /// Bad magic bytes.
     BadMagic(u32),
     /// Version mismatch (major version differs).
-    VersionMismatch {
-        expected_major: u32,
-        got_major: u32,
-    },
+    VersionMismatch { expected_major: u32, got_major: u32 },
     /// Payload length mismatch.
     LengthMismatch { declared: u64, actual: u64 },
     /// Data too short for header.
