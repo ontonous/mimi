@@ -56,7 +56,13 @@ impl<T> ListExt<T> for List<T> {
     func dedup() -> List<T> {
         let mut dd_result: List<T> = []
         for dd_x in self {
-            if !contains(dd_result, dd_x) { push(dd_result, dd_x) }
+            // Inline membership check to avoid name collision with
+            // std::strings::contains when both modules are imported.
+            let mut dd_found = false
+            for dd_y in dd_result {
+                if dd_y == dd_x { dd_found = true }
+            }
+            if !dd_found { push(dd_result, dd_x) }
         }
         dd_result
     }
