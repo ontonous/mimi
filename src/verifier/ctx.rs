@@ -1884,4 +1884,139 @@ mod tests {
         assert_eq!(VerifStatus::Verified, VerifStatus::Proven);
         assert_eq!(VerifStatus::Failed, VerifStatus::Disproven);
     }
+
+    // ── 0.31.43: Resolved IR contract extraction consistency ──
+
+    #[test]
+    fn resolved_contracts_match_ast_extraction() {
+        // Verify that ResolvedCallable.contracts (from Resolved IR) matches
+        // the contract extraction from raw AST (the current verifier path).
+        // This proves the Resolved IR contract infrastructure is correct and
+        // ready for the verifier to consume directly.
+        let source = r#"
+func safe_div(a: i32, b: i32) -> i32 {
+    requires: b != 0
+    ensures: result * b == a
+    a / b
+}
+func no_contracts(x: i32) -> i32 { x + 1 }
+func main() -> i32 { 0 }
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+
+        // Extract contracts from raw AST (current verifier path)
+        let mut ast_contracts: Vec<(String, Vec<&str>)> = Vec::new();
+        for item in &file.items {
+            if let crate::ast::Item::Func(f) = item {
+                let mut kinds = Vec::new();
+                for stmt in &f.body {
+                    match stmt.unlocated() {
+                        crate::ast::Stmt::Requires(..) => kinds.push("requires"),
+                        crate::ast::Stmt::Ensures(..) => kinds.push("ensures"),
+                        crate::ast::Stmt::Invariant(..) => kinds.push("invariant"),
+                        _ => {}
+                    }
+                }
+                if !kinds.is_empty() {
+                    ast_contracts.push((f.name.clone(), kinds));
+                }
+            }
+        }
+
+        // Extract contracts from Resolved IR (new path)
+        let mut resolved_contracts: Vec<(String, Vec<&str>)> = Vec::new();
+        for (owner, callable) in program.callables() {
+            if callable.contracts.is_empty() {
+                continue;
+            }
+            let name = owner
+                .0
+                .strip_prefix("function:")
+                .unwrap_or(&owner.0)
+                .to_string();
+            let kinds: Vec<&str> = callable
+                .contracts
+                .iter()
+                .map(|c| match c.kind {
+                    crate::core::ir::ContractKind::Requires => "requires",
+                    crate::core::ir::ContractKind::Ensures => "ensures",
+                    crate::core::ir::ContractKind::Invariant => "invariant",
+                })
+                .collect();
+            resolved_contracts.push((name, kinds));
+        }
+
+        // Sort both for comparison
+        ast_contracts.sort();
+        resolved_contracts.sort();
+
+        assert_eq!(
+            ast_contracts.len(),
+            resolved_contracts.len(),
+            "contract count mismatch: AST={} Resolved={}\nAST: {:?}\nResolved: {:?}",
+            ast_contracts.len(),
+            resolved_contracts.len(),
+            ast_contracts,
+            resolved_contracts
+        );
+        for (ast, resolved) in ast_contracts.iter().zip(&resolved_contracts) {
+            assert_eq!(
+                ast.0, resolved.0,
+                "function name mismatch: AST={} Resolved={}",
+                ast.0, resolved.0
+            );
+            assert_eq!(
+                ast.1, resolved.1,
+                "contract kinds mismatch for {}: AST={:?} Resolved={:?}",
+                ast.0, ast.1, resolved.1
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_contracts_cover_math_statements() {
+        // Math statements are collected separately in the AST path but
+        // appear as ResolvedStmtKind::Math in the Resolved IR body.
+        let source = r#"
+func with_math(x: i32) -> i32 {
+    requires: x > 0
+    math: { x * x >= 0 }
+    x * x
+}
+func main() -> i32 { 0 }
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+
+        let owner = crate::core::NodeId("function:with_math".into());
+        let callable = program.callables().get(&owner).expect("with_math callable");
+
+        // Should have at least the requires contract
+        assert!(
+            callable
+                .contracts
+                .iter()
+                .any(|c| c.kind == crate::core::ir::ContractKind::Requires),
+            "requires contract must be present in Resolved IR"
+        );
+
+        // Math statements are in the body, not in contracts
+        let body = program.resolved_body(&owner).expect("with_math body");
+        let has_math = body
+            .root
+            .statements
+            .iter()
+            .any(|s| matches!(s.kind, crate::core::ResolvedStmtKind::Math(_)));
+        assert!(
+            has_math,
+            "math statement must be present in Resolved IR body"
+        );
+    }
 }
