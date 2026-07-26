@@ -362,4 +362,114 @@ mod tests {
             .iter()
             .any(|e| matches!(e, ComponentIrError::UnresolvedTypeRef { name, .. } if name == "MissingType")));
     }
+
+    // ── End-to-end pipeline integration test ──
+
+    #[test]
+    fn full_pipeline_integration() {
+        // Step 1: Build ComponentIr from registry
+        let mut gen = crate::component::AbiGenerator::new();
+        crate::component::register_core_runtime_abi(&mut gen);
+        let ir = gen.build();
+        assert!(ir.exports.len() >= 140, "registry too small");
+
+        // Step 2: Validate internal consistency
+        let errors = ir.validate();
+        assert!(errors.is_empty(), "validation errors: {:?}", errors);
+
+        // Step 3: Serialize to .mimiabi JSON
+        let abi = crate::component::MimiAbi::from_component_ir(&ir);
+        let json = abi.to_json().expect("serialize");
+        assert!(json.contains("mimi_rc_alloc"));
+        assert!(json.contains("MimiString"));
+
+        // Step 4: Deserialize back
+        let abi2 = crate::component::MimiAbi::from_json(&json).expect("deserialize");
+        assert_eq!(abi.exports.len(), abi2.exports.len());
+        assert_eq!(abi.types.len(), abi2.types.len());
+
+        // Step 5: Reverse conversion to ComponentIr
+        let ir2 = abi2.to_component_ir();
+        assert_eq!(ir.exports.len(), ir2.exports.len());
+        assert_eq!(ir.identity, ir2.identity);
+
+        // Step 6: Hash is deterministic
+        let h1 = abi.hash().expect("hash");
+        let h2 = abi2.hash().expect("hash");
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 64); // BLAKE3 hex
+
+        // Step 7: Layout probe (checkpoint)
+        let faults = crate::component::probe_layout(&abi);
+        assert!(faults.is_empty(), "layout faults: {:?}", faults);
+        assert!(crate::component::struct_type_count(&abi) >= 2);
+
+        // Step 8: ABI diff (identical → no changes)
+        let diff = crate::component::diff_abi(&abi, &abi2);
+        assert!(!diff.has_breaking_changes());
+        assert_eq!(diff.summary(), "no changes");
+
+        // Step 9: Generate C header
+        let c_header = crate::component::generate_c_header(&ir);
+        assert!(c_header.contains("#ifndef MIMI_RUNTIME_ABI_H"));
+        assert!(c_header.contains("typedef struct MimiString {"));
+        assert!(c_header.contains("extern \"C\" {"));
+        assert!(c_header.contains("mimi_rc_alloc"));
+
+        // Step 10: Generate Rust bindings
+        let rust_bind = crate::component::generate_rust_bindings(&ir);
+        assert!(rust_bind.contains("#[repr(C)]"));
+        assert!(rust_bind.contains("pub struct MimiString {"));
+        assert!(rust_bind.contains("extern \"C\" {"));
+        assert!(rust_bind.contains("pub fn mimi_rc_alloc"));
+
+        // Step 11: Roundtrip fixpoint (serialize → deserialize → re-serialize)
+        let json2 = abi2.to_json().expect("re-serialize");
+        assert_eq!(json, json2, "roundtrip is not a fixpoint");
+    }
+
+    #[test]
+    fn mimi_type_to_abi_conversions() {
+        use crate::component::mimi_type_to_abi;
+        use crate::component::AbiPrimitive;
+
+        // Primitives
+        assert_eq!(
+            mimi_type_to_abi("i32"),
+            AbiTypeRef::Primitive(AbiPrimitive::I32)
+        );
+        assert_eq!(
+            mimi_type_to_abi("f64"),
+            AbiTypeRef::Primitive(AbiPrimitive::F64)
+        );
+        assert_eq!(
+            mimi_type_to_abi("bool"),
+            AbiTypeRef::Primitive(AbiPrimitive::Bool)
+        );
+        assert_eq!(
+            mimi_type_to_abi("int"),
+            AbiTypeRef::Primitive(AbiPrimitive::I32)
+        );
+
+        // String → *mut u8
+        assert_eq!(
+            mimi_type_to_abi("string"),
+            AbiTypeRef::Pointer(Box::new(AbiTypeRef::Primitive(AbiPrimitive::U8)))
+        );
+        assert_eq!(
+            mimi_type_to_abi("String"),
+            AbiTypeRef::Pointer(Box::new(AbiTypeRef::Primitive(AbiPrimitive::U8)))
+        );
+
+        // Void
+        assert_eq!(mimi_type_to_abi("void"), AbiTypeRef::Void);
+        assert_eq!(mimi_type_to_abi("()"), AbiTypeRef::Void);
+        assert_eq!(mimi_type_to_abi(""), AbiTypeRef::Void);
+
+        // User-defined → Named
+        assert_eq!(
+            mimi_type_to_abi("MyStruct"),
+            AbiTypeRef::Named("MyStruct".to_string())
+        );
+    }
 }
