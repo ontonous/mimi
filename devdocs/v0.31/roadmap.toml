@@ -2,7 +2,7 @@ schema_version = 2
 series = "0.31"
 baseline = "0.30.0"
 first = 0
-last = 48
+last = 58
 
 # === Phase 0: 基线（已完成，0.1.0 发布）===
 
@@ -901,11 +901,149 @@ requirements = []
 [[milestone]]
 version = "0.31.47"
 kind = "rc"
-title = "RC1"
+title = "RC1 准备（CHANGELOG + 门禁通过，未发布）"
 requirements = []
 
 [[milestone]]
 version = "0.31.48"
+kind = "audit"
+title = "全量攻击性审查 + real_world 重写"
+status = "done"  # 2026-07-27
+# 六路并行深潜：446 commits / +90,565/−21,159 / 328 files
+# 发现：18 P0 + 23 P1 + 10 P2 + 4 系统性模式 + 6 测试基础设施
+# real_world 69/69 mimi run 通过，13 个 flow 测试重写
+requirements = []
+
+# === Phase F: Soundness（0.31.49–0.31.54）===
+# 审计 P0/P1 修复。不碰 codegen。语义裁决 → interpreter 对齐 → 记录 codegen 分歧。
+
+[[milestone]]
+version = "0.31.49"
+kind = "soundness"
+title = "类型系统健全性 I — let _ = 漏洞"
+requirements = ["R2"]
+# T-1: push() unification 结果被 let _ = 丢弃 → push(list_of_i32, "hello") 通过
+# T-2: slice start/end 不验证是整数 → x["hello".."world"] 通过
+# T-3: range start..end 接受任意类型
+# T-4: reduce() 的 list/closure/return 类型互不关联
+# 退出条件：上述 4 个 PoC 全部被 checker 拒绝
+
+[[milestone]]
+version = "0.31.50"
+kind = "soundness"
+title = "类型系统健全性 II — 结构性缺口"
+requirements = ["R2"]
+# T-5:  Newtype 透明化 — UserId(i32) 和 OrderId(i32) 都能和裸 i32 unify
+# T-6:  resolve() DepthOverflow/BindingCycle 静默返回原始类型（19 个生产路径）
+# T-7:  resolve_type 不递归进 10 个所有权 wrapper（Shared[MyAlias] 别名不解析）
+# T-8:  ExternFunc 泛型替换时被静默转成 Func（ABI 区分丢失）
+# T-9:  session_recv payload 类型缺失时默认 i64
+# T-10: session resolution 失败时 unwrap_or(body) 静默使用未解析类型
+# T-11: 泛型返回类型解析失败产生 "unknown" 毒化后续检查
+# T-12: TypeVar 在 release 构建中静默通过（mimi_debug_assert! 被擦除）
+# 退出条件：UserId(i32) ≠ OrderId(i32) ≠ i32；resolve() 失败传播 Err
+
+[[milestone]]
+version = "0.31.51"
+kind = "soundness"
+title = "语义裁决 + Interpreter 对齐（L1 分歧）"
+requirements = ["R1"]
+# 语义裁决（SD-7~SD-12）：
+#   SD-7:  整数溢出 → trap（报错），非 wrapping
+#   SD-8:  除零 → trap（报错），非返回 0
+#   SD-9:  Float NaN/Inf → 遵循 IEEE 754（interpreter 当前拒绝，需修改）
+#   SD-10: Float 相等 → 精确比较（移除 epsilon），0.1+0.2 != 0.3
+#   SD-11: NaN 比较 → 返回 false（IEEE 754），非报错
+#   SD-12: std/json.mimi get_float 不用 0.0/0.0 产生 NaN
+# L1-1~L1-6: 修 interpreter 对齐裁决，codegen 分歧记录为迁移任务
+# 退出条件：interpreter 行为匹配裁决文档；codegen 分歧有 tracking issue
+
+[[milestone]]
+version = "0.31.52"
+kind = "soundness"
+title = "Runtime 安全"
+requirements = ["R3"]
+# R-1: ERROR_HANDLER 函数指针当数据指针存 → SIGSEGV/任意代码执行（安全漏洞）
+# R-2: PENDING_C_STRINGS 4096 drain → C 调用者悬垂指针
+# R-3: "统一分配器"不变量是假的 — 4 处直接 libc::malloc/free
+# R-4: Capability 表 thread-local → 跨线程消费静默失败
+# 退出条件：R-1 修复 + SAFETY 注释；R-2 改为不 drain；R-3 统一分配器；
+#   R-4 文档化限制或改为全局表
+
+[[milestone]]
+version = "0.31.53"
+kind = "soundness"
+title = "Verifier 健全性"
+requirements = ["R2"]
+# V-1: i64 建模为无界整数 → 溢出/除零不生成 VC → 错误 Proven
+# V-2: 不可编码的 requires 被静默丢弃 → 约束不足
+# V-3: Disproven 不检查 parse_errors → 假反例 → 正确程序被错误拒绝
+# V-4: ProofArtifact::is_compatible 不检查 source_hash → 旧 proof 可重放
+# V-5: Callee ensures 传播只有 2 wave → A→B→C 链不够
+# V-6: old(param)==param 无条件断言 → mutate 参数验证不健全
+# V-7: 8 态验证代数只产生 5 态 → 3 态从未使用
+# 退出条件：verifier 永远不对可崩溃程序说 Proven
+
+[[milestone]]
+version = "0.31.54"
+kind = "soundness"
+title = "Interpreter / Stdlib / Quote 修复"
+requirements = ["R1", "R2"]
+# Q-1: QuotedAst::Return 不设置 early_return → return 是空操作
+# Q-2: Stmt::Invariant 被静默过滤（0.31.22 漏修）
+# I-1: QuotedAst::Defer 立即执行而非延迟
+# I-2: QuotedAst::OnFailure 静默丢弃补偿体
+# I-3: QuotedAst::Parasteps body 根本不执行（注释撒谎）
+# I-4: Quoted For 不做 push_scope/pop_scope → 变量泄漏
+# I-5: std/set.mimi SetExt trait impl 无限递归
+# I-6: std/mymath.mimi abs(i32::MIN) 溢出
+# I-7: std/mymath.mimi map_range 除零
+# I-8: std/strings.mimi trim_left/right 只 trim 空格
+# I-9: std/net.mimi 空字符串做错误哨兵（违反红线 2）
+# I-10: std/json.mimi get_bool 空字符串判断 key 不存在
+# I-11: std/csv.mimi get 越界返回 ""（与合法空 cell 不可区分）
+# 退出条件：零哨兵值；quote 语义匹配文档；set.mimi 不递归
+
+# === Phase G: Completeness（0.31.55–0.31.56）===
+
+[[milestone]]
+version = "0.31.55"
+kind = "completeness"
+title = "Flow/Session/Actor + 设计缺口"
+requirements = ["R2"]
+# S-1: Session 协议顺序检查对表达式分支是瞎的（match arm / if-as-expr）
+# S-2: 泛型参数绕过线性检查 — func consume<T>(x: T) { drop(x); drop(x) } 通过
+# S-3: Flow generation counter 硬编码 0 → 运行时不强制状态新鲜度
+# D-1~D-10: 设计缺口（生命周期忽略、cloneable 注释、条件 break 检测等）
+# 退出条件：session 违规在所有语法位置被捕获
+
+[[milestone]]
+version = "0.31.56"
+kind = "completeness"
+title = "系统性模式修复 + 测试基础设施"
+requirements = []
+# 模式 1（注释撒谎）：12+ 处注释/文档与代码矛盾 → 逐个修正或删除
+# 模式 2（let _ = 丢弃）：0.31.49 修了类型系统的 4 处，全局扫描剩余
+# 模式 3（哨兵值）：0.31.54 修了 stdlib，全局扫描 runtime 剩余
+# 模式 4（verifier fail-open）：0.31.53 修了 AST 路径，确认 VIR 路径
+# 测试基础设施：
+#   - valgrind CI 集成（16 个测试不再静默跳过）
+#   - dual_assert! stdout 为空时不跳过比较
+#   - run_suite.py 比较输出而非仅 exit code
+#   - 55 个 CHECKER-GAP 集中追踪
+#   - AGENTS.md 数据修正（ignored 数量、OwnershipLedger 状态）
+# 退出条件：零已知注释-代码矛盾；CHECKER-GAP 有 tracking
+
+# === Phase H: Release（0.31.57–0.31.58）===
+
+[[milestone]]
+version = "0.31.57"
 kind = "rc"
-title = "RC2 与 Pre-1.0 退出"
+title = "RC1"
+requirements = []
+
+[[milestone]]
+version = "0.31.58"
+kind = "rc"
+title = "RC2 与 0.1.1 发布"
 requirements = []
