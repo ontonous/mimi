@@ -57,18 +57,19 @@ impl<'a> Checker<'a> {
                 args.iter().map(|a| self.resolve_type(a)).collect(),
                 Box::new(self.resolve_type(ret)),
             ),
-            Type::Cap(_)
-            | Type::Shared(_)
-            | Type::LocalShared(_)
-            | Type::Weak(_)
-            | Type::WeakLocal(_)
-            | Type::CShared(_)
-            | Type::CBorrow(_)
-            | Type::CBorrowMut(_)
-            | Type::RawPtr(_)
-            | Type::RawPtrMut(_)
-            | Type::RawString
-            | Type::Allocator => ty.clone(),
+            // T-7 (0.31.50): recurse into ownership wrapper inner types so that
+            // type aliases inside wrappers are resolved (e.g. Shared<MyAlias>).
+            Type::Cap(_) => ty.clone(),
+            Type::Shared(inner) => Type::Shared(Box::new(self.resolve_type(inner))),
+            Type::LocalShared(inner) => Type::LocalShared(Box::new(self.resolve_type(inner))),
+            Type::Weak(inner) => Type::Weak(Box::new(self.resolve_type(inner))),
+            Type::WeakLocal(inner) => Type::WeakLocal(Box::new(self.resolve_type(inner))),
+            Type::CShared(inner) => Type::CShared(Box::new(self.resolve_type(inner))),
+            Type::CBorrow(inner) => Type::CBorrow(Box::new(self.resolve_type(inner))),
+            Type::CBorrowMut(inner) => Type::CBorrowMut(Box::new(self.resolve_type(inner))),
+            Type::RawPtr(inner) => Type::RawPtr(Box::new(self.resolve_type(inner))),
+            Type::RawPtrMut(inner) => Type::RawPtrMut(Box::new(self.resolve_type(inner))),
+            Type::RawString | Type::Allocator => ty.clone(),
             Type::CBuffer(inner) => Type::CBuffer(Box::new(self.resolve_type(inner))),
             Type::Newtype(name, inner) => {
                 Type::Newtype(name.clone(), Box::new(self.resolve_type(inner)))

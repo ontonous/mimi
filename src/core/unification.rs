@@ -196,8 +196,22 @@ impl UnificationTable {
     /// Compatibility wrapper for inference code that has not yet been migrated
     /// to structured resolution errors. Mandatory finalization uses `zonk`, not
     /// this wrapper.
+    ///
+    /// T-6 (0.31.50): debug assertion fires when resolution fails silently.
+    /// In release builds the fallback is preserved for compatibility.
     pub fn resolve(&mut self, ty: &Type) -> Type {
-        self.resolve_infer(ty).unwrap_or_else(|_| ty.clone())
+        match self.resolve_infer(ty) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                debug_assert!(
+                    false,
+                    "resolve() silently swallowed resolution error: {} for type {}",
+                    e,
+                    crate::core::helpers::fmt_type(ty)
+                );
+                ty.clone()
+            }
+        }
     }
 
     fn resolve_with_depth(
