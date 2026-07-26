@@ -34,6 +34,7 @@ mod checkpoint;
 mod diff;
 mod gen;
 mod handle;
+mod rust_bind;
 mod serialize;
 mod symbol;
 mod types;
@@ -44,8 +45,9 @@ pub use checkpoint::{
     probe_layout, struct_type_count, AllocFault, AllocLedger, AllocSide, LayoutFault,
 };
 pub use diff::{diff_abi, AbiChange, AbiDiff};
-pub use gen::{register_core_runtime_abi, AbiGenerator};
+pub use gen::{mimi_type_to_abi, register_core_runtime_abi, AbiGenerator};
 pub use handle::{Handle, HandleError, HandleKind, HandleRegistry, RuntimeId};
+pub use rust_bind::generate_rust_bindings;
 pub use serialize::MimiAbi;
 pub use symbol::*;
 pub use types::*;
