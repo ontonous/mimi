@@ -2,6 +2,12 @@
 
 ## [Unreleased] — 0.1.1-dev
 
+### Phase C: Component 边界（0.31.30–0.31.36 完善）
+
+- **0.31.30 Component IR**（COMPONENT-IR-001）：`ComponentIr` 单一语义源（identity/exports/imports/types）+ `AbiGenerator` 类型化注册表（`register_core_runtime_abi` 覆盖 RC/list/map/set/string/io/concurrency/fs/time ~40 函数）+ `.mimiabi` JSON 序列化 round-trip + BLAKE3 防篡改哈希。Codegen debug 构建对发射的 runtime 调用做 Component IR 校验。
+- **0.31.31 Native ABI + 代际 handle**（COMPONENT-HANDLE-001）：`HandleRegistry` nominal generational handle 运行时——kind 标签 + runtime owner + generation 计数 + 并发 lease；destroy 要求零 lease 且递增 generation（ABA 防御）；拒绝 StaleGeneration/WrongKind/WrongRuntime/UnknownSlot/LeasesOutstanding；Mutex 线程安全零 unsafe。String 表面迁移到胖指针（MimiString/MimiSlice）+ 零拷贝 `mimi_string_as_slice`。11 个测试含 8 线程并发压力。
+- **0.31.32 稳定检查点**：`checkpoint.rs` 无新 surface——ABI 布局 probe（offset 越界/非单调/对齐校验）+ `.mimiabi` round-trip 不动点 + allocator provenance ledger（wrong-side/double-free/unknown free/leak 检测）+ handle lease race 高并发压力（generation 复用安全）。11 个测试。
+
 ### io.rs 格式化 dispatch 重构（Sprint A1–A2 完成）
 
 - 46 个 `emit_map_*` 近重复函数合并为参数化 `emit_map_container_product_to_json` + `product_tuple_arity` 辅助函数（-1544 行）。
