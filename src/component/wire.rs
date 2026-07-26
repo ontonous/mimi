@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 /// Layout: [magic: 4 bytes][version: 4 bytes][payload_len: 8 bytes][payload: N bytes]
 ///
 /// **Serialization**: Use `to_bytes()`/`from_bytes()` for binary wire transport.
-/// The `Serialize`/`Deserialize` impls are header-only (payload excluded) for
-/// logging/debugging — they do NOT roundtrip the payload.
+/// This type does NOT implement `Serialize`/`Deserialize` — the payload is
+/// binary data that doesn't belong in JSON. Use `MimiAbi` for JSON serialization.
 #[derive(Debug, Clone)]
 pub struct WireEnvelope {
     /// Magic bytes: "MIMI" (0x4D494D49).
