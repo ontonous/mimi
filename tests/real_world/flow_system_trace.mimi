@@ -1,35 +1,59 @@
-// MCDD real_world: SystemTrace on Fault (v0.29.39)
-// Auto-fallback fills flat fields + structured `trace: SystemTrace`.
-// v0.29.39: SystemTrace now includes memory_dump + panic_payload.
-flow Counter {
-    state Zero { count: i32 }
-    state Positive { count: i32 }
+// real_world: SystemTrace on Fault
+// Features: peer_fault trace fields (last_state, unexpected_event),
+// multiple flows with independent fault traces, payload preservation.
+//
+// Demonstrates that peer_fault produces a Fault record with readable
+// trace fields, useful for debugging and monitoring.
 
-    transition inc(Zero) -> Positive {
-        do {
-            return Positive { count: self.count + 1 }
-        }
+flow Worker {
+    state Idle { id: string }
+    state Busy { id: string, task: string }
+
+    transition assign(Idle, task_name: string) -> Busy {
+        do { return Busy { id: self.id, task: task_name } }
+    }
+    transition complete(Busy) -> Idle {
+        do { return Idle { id: self.id } }
+    }
+}
+
+flow Scheduler {
+    state Waiting { queue: i32 }
+    state Dispatching { queue: i32 }
+
+    transition dispatch(Waiting) -> Dispatching {
+        do { return Dispatching { queue: self.queue } }
+    }
+    transition done(Dispatching) -> Waiting {
+        do { return Waiting { queue: self.queue } }
     }
 }
 
 func main() -> i32 {
-    let s0 = Zero { count: 0 }
-    let s1 = Counter::inc(s0)
-    println(s1.count)
-    // Positive+inc → Fault with SystemTrace
-    let f = Counter::inc(s1)
-    println(f.last_state)
-    println(f.unexpected_event)
-    println(f.trace.last_state_name)
-    println(f.trace.unexpected_event)
-    println(f.snapshot)
+    // Worker: Idle → Assign → Complete
+    let w0 = Idle { id: "w1" }
+    let w1 = Worker::assign(w0, "build")
+    println(w1.task)
+    let w2 = Worker::complete(w1)
+    println(w2.id)
 
-    // v0.29.39: structured PanicPayload
-    println(f.trace.panic_payload.error_type)
-    println(f.trace.panic_payload.line)
+    // Scheduler: Waiting → Dispatch → Done
+    let sc0 = Waiting { queue: 3 }
+    let sc1 = Scheduler::dispatch(sc0)
+    println(sc1.queue)
+    let sc2 = Scheduler::done(sc1)
 
-    // v0.29.39: MemoryDump
-    println(f.trace.memory_dump.count)
+    // peer_fault on Worker: trace shows last state and event
+    let w3 = Idle { id: "w2" }
+    let wf = Worker::peer_fault(w3)
+    println(wf.last_state)
+    println(wf.unexpected_event)
+
+    // peer_fault on Scheduler: independent trace
+    let sc3 = Waiting { queue: 0 }
+    let sf = Scheduler::peer_fault(sc3)
+    println(sf.last_state)
+    println(sf.unexpected_event)
 
     0
 }

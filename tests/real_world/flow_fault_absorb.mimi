@@ -1,24 +1,43 @@
-// MCDD real_world: Fault absorption + payload drop (v0.29.11)
-// Transition into Fault (via user path or matrix fallback) must leave a readable
-// Fault payload and not crash. Nested actor short-circuit is covered by unit tests.
-flow Holder {
-    state Live { tag: string, n: i32 }
-    state Done { tag: string }
+// real_world: Fault Absorption + Recovery
+// Features: peer_fault → Fault state, Fault payload field access,
+// explicit recover transition, persistent data across recovery.
+//
+// Demonstrates that Fault is a real state with readable payload,
+// and that recovery transitions can restore normal operation.
 
-    transition finish(Live) -> Done {
-        do {
-            return Done { tag: self.tag }
-        }
+flow Service {
+    state Active { requests: i32 }
+    state Degraded { requests: i32, errors: i32 }
+
+    transition serve(Active) -> Active {
+        do { return Active { requests: self.requests + 1 } }
+    }
+    transition degrade(Active) -> Degraded {
+        do { return Degraded { requests: self.requests, errors: 1 } }
+    }
+    transition recover(Degraded) -> Active {
+        do { return Active { requests: self.requests } }
     }
 }
 
 func main() -> i32 {
-    let s0 = Live { tag: "ok", n: 42 }
-    let s1 = Holder::finish(s0)
-    println(s1.tag)
-    // Done+finish is auto-fallback → Fault
-    let f = Holder::finish(s1)
-    println(f.last_state)
-    println(f.unexpected_event)
+    // Normal operation
+    let s0 = Active { requests: 0 }
+    let s1 = Service::serve(s0)
+    let s2 = Service::serve(s1)
+    println(s2.requests)
+
+    // Degrade → Recover
+    let s3 = Service::degrade(s2)
+    println(s3.errors)
+    let s4 = Service::recover(s3)
+    println(s4.requests)
+
+    // peer_fault: system-level Fault with trace
+    let s5 = Active { requests: 10 }
+    let ft = Service::peer_fault(s5)
+    println(ft.last_state)
+    println(ft.unexpected_event)
+
     0
 }

@@ -1,92 +1,52 @@
-// MCDD real_world: Flow complex interaction — Turn-Based Battle System
-// Combines: multi-field state payloads, subflow for status effects,
-// Fault trace access on invalid transition.
+// real_world: Battle System
+// Features: game state machine, event parameters (damage),
+// conditional transitions, peer_fault, payload tracking.
 //
-// Tests: complex payload construction, field preservation across transitions,
-// subflow interaction, Fault absorption with trace fields.
-// Design: each transition name maps to a single target state (avoids E0420).
-
-flow StatusEffect {
-    state Inactive
-    state Active { turns_left: i32, magnitude: i32 }
-
-    transition apply(Inactive) -> Active {
-        do { return Active { turns_left: 3, magnitude: 10 } }
-    }
-    transition tick(Active) -> Active {
-        do { return Active { turns_left: self.turns_left - 1, magnitude: self.magnitude } }
-    }
-    transition expire(Active) -> Inactive {
-        do { return Inactive { } }
-    }
-}
+// A battle unit transitions: Fresh → Buffed → Wounded → Defeated.
+// Demonstrates parameterized transitions and conditional logic.
 
 flow BattleUnit {
-    state Fresh { hp: i32, atk: i32 }
-    state Hurt { hp: i32, atk: i32 }
+    state Fresh { hp: i32, attack: i32 }
+    state Buffed { hp: i32, attack: i32 }
+    state Wounded { hp: i32, attack: i32 }
     state Defeated
 
-    // Each transition name has a single target state
-    transition damage(Fresh) -> Hurt {
-        do { return Hurt { hp: self.hp - 20, atk: self.atk } }
+    transition buff(Fresh) -> Buffed {
+        do { return Buffed { hp: self.hp, attack: self.attack + 5 } }
     }
-    transition defeat(Hurt) -> Defeated {
+    transition hit(Buffed, damage: i32) -> Wounded {
+        do { return Wounded { hp: self.hp - damage, attack: self.attack } }
+    }
+    transition hit_fresh(Fresh, damage: i32) -> Wounded {
+        do { return Wounded { hp: self.hp - damage, attack: self.attack } }
+    }
+    transition defeat(Wounded) -> Defeated {
         do { return Defeated { } }
     }
-    transition heal(Hurt) -> Fresh {
-        do { return Fresh { hp: self.hp + 15, atk: self.atk } }
-    }
-    transition buff(Fresh) -> Fresh {
-        do { return Fresh { hp: self.hp, atk: self.atk + 5 } }
-    }
-    transition recover(Fresh) -> Fresh {
-        do { return Fresh { hp: self.hp + 5, atk: self.atk } }
-    }
-    transition recover_hurt(Hurt) -> Hurt {
-        do { return Hurt { hp: self.hp + 5, atk: self.atk } }
+    transition heal(Wounded) -> Fresh {
+        do { return Fresh { hp: self.hp + 10, attack: self.attack } }
     }
 }
 
 func main() -> i32 {
-    // Test 1: Take damage and heal
-    let u0 = Fresh { hp: 100, atk: 10 }
-    let u1 = BattleUnit::damage(u0)
-    println(u1.hp)
-    let u2 = BattleUnit::heal(u1)
+    // Fresh → Buff → Hit → Heal → Hit → Defeat
+    let u0 = Fresh { hp: 100, attack: 10 }
+    println(u0.attack)
+    let u1 = BattleUnit::buff(u0)
+    println(u1.attack)
+    let u2 = BattleUnit::hit(u1, 30)
     println(u2.hp)
-    
-    // Test 2: Power up while fresh
-    let u3 = Fresh { hp: 100, atk: 10 }
-    let u4 = BattleUnit::buff(u3)
-    println(u4.atk)
-    let u5 = BattleUnit::recover(u4)
-    println(u5.hp)
-    println(u5.atk)
-    
-    // Test 3: Defeat path: Fresh → Hurt → Defeated
-    let u6 = Fresh { hp: 100, atk: 10 }
-    let u7 = BattleUnit::damage(u6)
-    let u8 = BattleUnit::defeat(u7)
-    
-    // Test 4: Status effect subflow
-    let s0 = Inactive { }
-    let s1 = StatusEffect::apply(s0)
-    println(s1.turns_left)
-    println(s1.magnitude)
-    let s2 = StatusEffect::tick(s1)
-    println(s2.turns_left)
-    let s3 = StatusEffect::expire(s2)
-    
-    // Test 5: Fault on buff(Defeated) — undefined
-    let f = BattleUnit::buff(u8)
-    println(f.last_state)
-    println(f.unexpected_event)
-    
-    // Test 6: Rest on Hurt
-    let u9 = Fresh { hp: 50, atk: 5 }
-    let u10 = BattleUnit::damage(u9)
-    let u11 = BattleUnit::recover_hurt(u10)
-    println(u11.hp)
-    
+    let u3 = BattleUnit::heal(u2)
+    println(u3.hp)
+    let u4 = BattleUnit::hit_fresh(u3, 200)
+    println(u4.hp)
+    let u5 = BattleUnit::defeat(u4)
+
+    // peer_fault
+    let v0 = Fresh { hp: 50, attack: 8 }
+    let ft = BattleUnit::peer_fault(v0)
+    println(ft.last_state)
+    println(ft.unexpected_event)
+
     0
 }

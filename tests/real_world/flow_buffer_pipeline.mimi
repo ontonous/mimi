@@ -1,67 +1,61 @@
-// MCDD real_world: Flow complex interaction — Buffer Pipeline
-// Combines: single-target transitions, Fault on invalid transition,
-// field access on Fault trace, subflow with multiple states.
+// real_world: Buffer Pipeline
+// Features: data pipeline state machine, payload accumulation,
+// overloaded transitions, peer_fault, drain/reset pattern.
 //
-// Tests: transition dispatch, Fault absorption with trace fields,
-// field access on different state variants.
+// A buffer accumulates items: Empty → Partial → Full.
+// Drain empties it back. Demonstrates accumulation and reset.
 
 flow Buffer {
-    state Empty { capacity: i32 }
-    state Partial { data: i32, capacity: i32 }
-    state Full { data: i32, capacity: i32 }
+    state Empty
+    state Partial { items: i32, capacity: i32 }
+    state Full { items: i32 }
 
-    transition write(Empty) -> Partial {
-        do { return Partial { data: 1, capacity: self.capacity } }
+    transition push(Empty) -> Partial {
+        do { return Partial { items: 1, capacity: 4 } }
+    }
+    transition push(Partial) -> Partial {
+        do {
+            if self.items + 1 >= self.capacity {
+                return Partial { items: self.capacity, capacity: self.capacity }
+            }
+            return Partial { items: self.items + 1, capacity: self.capacity }
+        }
     }
     transition fill(Partial) -> Full {
-        do { return Full { data: self.data + 1, capacity: self.capacity } }
+        do { return Full { items: self.items } }
     }
-    transition top_off(Full) -> Full {
-        do { return Full { data: self.data + 1, capacity: self.capacity } }
+    transition drain(Full) -> Empty {
+        do { return Empty { } }
     }
-    transition read(Full) -> Partial {
-        do { return Partial { data: self.data - 1, capacity: self.capacity } }
-    }
-    transition drain(Partial) -> Empty {
-        do { return Empty { capacity: self.capacity } }
-    }
-    transition drain_all(Full) -> Empty {
-        do { return Empty { capacity: self.capacity } }
+    transition drain_partial(Partial) -> Empty {
+        do { return Empty { } }
     }
 }
 
 func main() -> i32 {
-    // Test 1: Fill buffer: Empty → Partial → Full
-    let b0 = Empty { capacity: 3 }
-    let b1 = Buffer::write(b0)
-    println(b1.data)
-    let b2 = Buffer::fill(b1)
-    println(b2.data)
-    
-    // Test 2: Read from Full → Partial
-    let b3 = Buffer::read(b2)
-    println(b3.data)
-    
-    // Test 3: Drain Partial → Empty
-    let b4 = Buffer::drain(b3)
-    println(b4.capacity)
-    
-    // Test 4: Top off a Full buffer
-    let b5 = Empty { capacity: 5 }
-    let b6 = Buffer::write(b5)
-    let b7 = Buffer::fill(b6)
-    let b8 = Buffer::top_off(b7)
-    println(b8.data)
-    
-    // Test 5: Drain all from Full
-    let b9 = Buffer::drain_all(b8)
-    println(b9.capacity)
-    
-    // Test 6: Fault on drain(Empty) — undefined transition
-    let b10 = Empty { capacity: 3 }
-    let f = Buffer::drain(b10)
-    println(f.last_state)
-    println(f.unexpected_event)
-    
+    // Empty → Push → Push → Push → Fill → Drain
+    let b0 = Empty { }
+    let b1 = Buffer::push(b0)
+    println(b1.items)
+    let b2 = Buffer::push(b1)
+    println(b2.items)
+    let b3 = Buffer::push(b2)
+    println(b3.items)
+    let b4 = Buffer::fill(b3)
+    println(b4.items)
+    let b5 = Buffer::drain(b4)
+
+    // Partial drain
+    let c0 = Empty { }
+    let c1 = Buffer::push(c0)
+    let c2 = Buffer::push(c1)
+    let c3 = Buffer::drain_partial(c2)
+
+    // peer_fault
+    let d0 = Empty { }
+    let ft = Buffer::peer_fault(d0)
+    println(ft.last_state)
+    println(ft.unexpected_event)
+
     0
 }

@@ -1,6 +1,9 @@
-// MCDD real_world: Test engineering — assert_state! + inject_fault! (v0.29.38)
-// Tests: assert_state verifies flow state in the interpreter.
-// LLVM codegen rejects this file until runtime state identity is available.
+// real_world: Test engineering — assert_state! (interpreter-only)
+// Tests: assert_state verifies flow state name in the interpreter.
+// LLVM codegen rejects this file (assert_state cannot inspect state identity).
+//
+// Note: assert_state consumes the flow state (linear resource).
+// Create separate state values for assertion vs. transition use.
 
 flow Counter {
     state Zero { count: i32 }
@@ -19,14 +22,19 @@ flow Counter {
 }
 
 func main() -> i32 {
-    let s0 = Zero { count: 0 }
-    // Verify initial state.
-    assert_state(s0, "Zero")
+    // Verify initial state (consumes the value).
+    let check0 = Zero { count: 0 }
+    assert_state(check0, "Zero")
 
+    // Separate value for transition use.
+    let s0 = Zero { count: 0 }
     let s1 = Counter::inc(s0)
-    // Verify state transition
     assert_state(s1, "Positive")
-    println(s1.count)
+
+    // Another chain for println output.
+    let s2 = Zero { count: 0 }
+    let s3 = Counter::inc(s2)
+    println(s3.count)
 
     0
 }
