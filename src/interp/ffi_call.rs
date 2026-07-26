@@ -295,20 +295,23 @@ impl<'a> Interpreter<'a> {
                 });
             }
 
-            // Call via libffi with correct ABI and crash protection
+            // Call via libffi with correct ABI and crash protection.
+            // SD-4: signal guard replaces fork isolation (POSIX UB in multi-threaded).
             // Struct-by-value return uses custom rvalue buffer; other paths use scalar return.
             let call_result: Result<i64, String> = if let Some(buf_size) = struct_ret_size {
                 // Allocate zeroed buffer for the struct return value.
                 let mut ret_buf = vec![0u8; buf_size];
                 let rvalue = ret_buf.as_mut_ptr() as *mut std::ffi::c_void;
-                // F-16: Apply crash protection to struct-by-value returns.
+                // SD-4: signal guard for struct-by-value returns.
                 if self.verify_ffi || extern_func.no_panic {
-                    self.call_ffi_with_fork_isolation_struct(
-                        &cif,
-                        code_ptr,
-                        &ffi_args,
-                        &mut ret_buf,
-                    )?;
+                    super::ffi::signal_guard::call_guarded(|| {
+                        // SAFETY: call_ffi_raw_struct uses the low-level ffi_call API
+                        // with a caller-provided return buffer. rvalue points to a valid
+                        // ret_buf allocation.
+                        unsafe {
+                            Self::call_ffi_raw_struct(&cif, code_ptr, &ffi_args, rvalue);
+                        }
+                    })?;
                 } else {
                     // SAFETY: call_ffi_raw_struct uses the low-level ffi_call API
                     // with a caller-provided return buffer. rvalue points to a valid
@@ -320,7 +323,12 @@ impl<'a> Interpreter<'a> {
                 struct_buffers.push(ret_buf);
                 Ok(0i64) // placeholder; actual result read from buffer below
             } else if self.verify_ffi || extern_func.no_panic {
-                self.call_ffi_with_fork_isolation(&cif, code_ptr, &ffi_args, &contract.ret)
+                // SD-4: signal guard for scalar returns.
+                super::ffi::signal_guard::call_guarded(|| {
+                    // SAFETY: call_ffi_raw is an unsafe fn; its contract is satisfied
+                    // by the valid CIF, code pointer, and argument slice.
+                    unsafe { Self::call_ffi_raw(&cif, code_ptr, &ffi_args, &contract.ret) }
+                })
             } else {
                 self.call_ffi_direct(&cif, code_ptr, &ffi_args, &contract.ret)
             };
