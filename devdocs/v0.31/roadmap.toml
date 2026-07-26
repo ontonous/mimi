@@ -777,36 +777,39 @@ requirements = []
 [[milestone]]
 version = "0.31.42"
 kind = "implementation"
-title = "Pre-1.0 migration tool"
-requirements = ["MIGRATION-PRE1-001", "SYNTAX-REMOVED-001"]
+title = "Pre-1.0 migration tool + Tooling 全覆盖"
+requirements = ["MIGRATION-PRE1-001", "SYNTAX-REMOVED-001", "TOOL-SUPPORT-001"]
+# 原 0.31.43 的 Tooling 交付前移至此，平衡 Phase D 负载：
+# 【盲审追加】Provenance Tracking：InferTy 记录约束来源行号，Flow 专属报错
+# 【盲审追加】TyErr 毒药类型：推断失败标记 TyErr，防级联错误刷屏
+# 【盲审追加】Z3 报错翻译：SMT 公式 → 大白话（双重报错折叠，Python 难民 DX）
 
 [[milestone]]
 version = "0.31.43"
 kind = "implementation"
-title = "Tooling 全覆盖 + Body 迁移闭环"
+title = "Body 迁移闭环 + 线性分析结构化"
 # 【P2-6 裁决 2026-07-27】body 迁移（legacy_body_file 删除）是 README §9 退出条件，
 # 但此前无 milestone 认领。现显式归入本 sprint：
 # - 交付 1：interp/codegen/verifier 函数体全部消费 Typed Resolved IR
 # - 交付 2：删除 legacy_body_file()（src/core/resolved/mod.rs:1059）
 # - 交付 3：P0-11 body 层 + P0-12 comptime 绕过关闭（依赖交付 1）
 # - 按 body class 分批：plain func → flow transition → actor method → comptime
-# 【SD-3 裁决】#[abi(errno)] 属性替代 ERRNO_CHECK_FUNC_NAMES 函数名猜测
-#   过渡期保留名称猜测 + deprecation 警告，1.0 删除
-# 【SD-4 裁决】删除 fork() 隔离，替换为 SIGSEGV/SIGABRT 信号守卫
-#   删除 FORK_LOCK / check_multithreaded_fork / call_ffi_with_fork_isolation*
 # 【SD-1 裁决】is_linear() 字符串匹配 → ResolvedType::Nominal 追加 is_linear: bool
 #   Checker 创建类型时设置标记，resource_lower.rs 读标记替代 starts_with("state:")
-# 【盲审追加】Provenance Tracking：InferTy 记录约束来源行号，Flow 专属报错
-# 【盲审追加】TyErr 毒药类型：推断失败标记 TyErr，防级联错误刷屏
-# 【盲审追加】Z3 报错翻译：SMT 公式 → 大白话（双重报错折叠，Python 难民 DX）
-requirements = ["TOOL-SUPPORT-001"]
+#   与 body 迁移同 sprint 因为两者都修改 ResolvedType，避免合并冲突
+requirements = []
 
 [[milestone]]
 version = "0.31.44"
 kind = "implementation"
-title = "Experimental 隔离"
+title = "Experimental 隔离 + FFI 加固"
 requirements = ["PROTOCOL-DYN-001", "EFFECT-CAP-001", "COMPONENT-RAW-001"]
 # 注：FLOW-MULTI-001 已提前到 0.31.25 追加 C（架构修正案条款 7）
+# 【SD-3 裁决】#[abi(errno)] 属性替代 ERRNO_CHECK_FUNC_NAMES 函数名猜测
+#   过渡期保留名称猜测 + deprecation 警告，1.0 删除
+# 【SD-4 裁决】删除 fork() 隔离，替换为 SIGSEGV/SIGABRT 信号守卫
+#   删除 FORK_LOCK / check_multithreaded_fork / call_ffi_with_fork_isolation*
+#   Mimi 永远多线程（actor 系统），fork() 始终在多线程上下文 = POSIX UB
 
 # === Phase E: 冻结与 RC（0.31.45–0.31.48）===
 

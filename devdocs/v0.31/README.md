@@ -50,13 +50,14 @@ Span/Origin -> HM -> CFG/ownership -> CheckedProgram/Resolved IR
 > | Phase A | 0.31.8–0.31.19 | Flow 核心闭环 + 地基深修：原子 turn、Fault、Actor runs Flow、Session 线性、exactly-once、**Flow 类型级线性、高阶交互闭环、证据同步**、攻击审查 I |
 > | **Perf** | **0.31.20–0.31.21** | **Runtime Efficiency I/II：FuncDef O(1) flags、named-arg 去重、benchmark 基线（I）；Value 热路径 clone 消减 + O1 codegen 修复（II）** |
 > | Phase B | 0.31.22–0.31.26 | 语言冻结：语法收敛、**type walker 合并**、Verification IR fail-closed、VC artifact、攻击审查 II + **假双后端标记** |
-> | Phase C | 0.31.27–0.31.35 | Component 边界：Component IR、Native ABI、**稳定检查点**、Wire Schema、Rust SDK conformance、**XPU FFI 验证**、**SDK 加固** |
-> | Phase D | 0.31.36–0.31.41 | 工具与隔离：~~自举（deferred to post-1.0）~~、迁移、fmt/LSP/probes、experimental 隔离 |
-> | Phase E | 0.31.42–0.31.45 | 冻结：DEBUG + **Interpreter 瘦身**、最终敌对审查、RC1、RC2 |
+> | Phase C | 0.31.27–0.31.38 | Component 边界：Component IR、Native ABI、**稳定检查点**、Wire Schema、Rust SDK conformance、**XPU FFI 验证**、**SDK 加固** |
+> | Phase D | 0.31.39–0.31.44 | 工具与隔离：~~自举（deferred to post-1.0）~~、迁移、Tooling 全覆盖（Provenance/TyErr/Z3 翻译）、**Body 迁移闭环 + is_linear 结构化（SD-1/6）**、**FFI 加固（SD-3 errno 属性 + SD-4 fork 删除）**、experimental 隔离 |
+> | Phase E | 0.31.45–0.31.48 | 冻结：DEBUG + **L1 强化** + Interpreter 瘦身、最终敌对审查 + **Trap Tests**、RC1、RC2 |
 >
 > **加粗**为 v2 路线图新增 sprint（共 +6：0.31.16–18 地基深修、0.31.28 Component 稳定检查点、0.31.34 SDK 加固、0.31.35 自举 spike）。
 > **v3 变更**：0.31.19 追加 B（性能 quick wins）；插入 0.31.20（Runtime Efficiency）；原 0.31.20–43 顺延为 0.31.21–44；0.31.35–37（自举）标记 `deferred`；0.31.32 替换为 XPU FFI 验证；0.31.18 增加 CI 防护（gas limit）；0.31.19 增加 ABI 前置验证。
 > **v4 变更**：插入 0.31.21（Runtime Efficiency II：Value clone + O1 修复）；原 0.31.21–44 顺延为 0.31.22–45；AD-5（type walker）吸收进 0.31.22；假双后端标记吸收进 0.31.26；Interpreter 瘦身吸收进 0.31.42；call_named dispatch 推迟 post-1.0（Rust match 已高效）。
+> **v5 变更**（2026-07-27）：插入 0.31.22–24（Soundness 止血 + Runtime 架构 + 错误模型），last = 48；语义裁决 SD-1~6 排期落地（SD-1/6 → 0.31.43，SD-3/4 → 0.31.44）；0.31.35（Rust Safe SDK）deferred 合并到 0.31.38；FLOW-MULTI-001 补入 0.31.25 requirements + stability 升 stable；body 迁移（legacy_body_file 删除）显式归入 0.31.43。
 
 详细版本及 requirement 分配见 `roadmap.toml` 和 `requirements-matrix.md`。
 
