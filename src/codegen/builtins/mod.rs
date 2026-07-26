@@ -3261,6 +3261,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             "floor",
             "ceil",
             "round",
+            "wrapping_add",
+            "wrapping_sub",
+            "wrapping_mul",
+            "is_nan",
+            "is_infinite",
+            "is_finite",
+            "is_close",
+            "f64_eq_exact",
             "now",
             "timestamp",
             "now_ms",
@@ -3375,6 +3383,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             "exp" => self.compile_math_unary(args, "exp"),
             "exp2" => self.compile_math_unary(args, "exp2"),
             "cbrt" => self.compile_math_unary(args, "cbrt"),
+            // SD-7/9/10 escape hatches
+            "wrapping_add" | "wrapping_sub" | "wrapping_mul" => {
+                self.compile_wrapping_arith(args, name)
+            }
+            "is_nan" | "is_infinite" | "is_finite" => self.compile_float_classify(args, name),
+            "is_close" => self.compile_is_close(args),
+            "f64_eq_exact" => self.compile_f64_eq_exact(args),
             "now" | "timestamp" => self.compile_now(args),
             "now_ms" | "timestamp_ms" => self.compile_now_ms(args),
             "sleep" => self.compile_sleep(args),
