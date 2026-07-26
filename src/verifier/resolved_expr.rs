@@ -314,6 +314,222 @@ fn resolved_field_var_name(expr: &ResolvedExpr, body: &ResolvedBody) -> String {
     }
 }
 
+// === Contract verification from Resolved IR ===
+
+/// Z3 type category for parameter variable creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Z3TypeCategory {
+    Int,
+    Real,
+    Bool,
+}
+
+/// Determine the Z3 type category from a ResolvedTypeId.
+fn z3_type_category(
+    ty: &crate::core::ir::ResolvedTypeId,
+    types: &crate::core::ir::ResolvedTypeTable,
+) -> Z3TypeCategory {
+    match types.get(ty) {
+        Some(crate::core::ir::ResolvedType::Primitive(p)) => match p {
+            crate::core::ir::PrimitiveType::F64 => Z3TypeCategory::Real,
+            crate::core::ir::PrimitiveType::Bool => Z3TypeCategory::Bool,
+            _ => Z3TypeCategory::Int,
+        },
+        _ => Z3TypeCategory::Int,
+    }
+}
+
+/// Create Z3 variables for all parameters in a resolved body.
+/// Mirrors the variable creation in `verify_func()` (func.rs:402-487).
+fn create_parameter_vars(
+    body: &ResolvedBody,
+    types: &crate::core::ir::ResolvedTypeTable,
+    vars: &mut Z3VarMap,
+    session: &mut crate::verifier::ctx::SolverSession,
+) {
+    for param_id in &body.parameters {
+        let Some(local) = body.locals.get(param_id) else {
+            continue;
+        };
+        let name = &local.display_name;
+        let category = z3_type_category(&local.ty, types);
+        match category {
+            Z3TypeCategory::Real => {
+                vars.insert_real(name, Z3Real::new_const(name.as_str()));
+            }
+            Z3TypeCategory::Bool => {
+                vars.insert_bool(name, Z3Bool::new_const(name.as_str()));
+            }
+            Z3TypeCategory::Int => {
+                let iv = Z3Int::new_const(name.as_str());
+                vars.insert_int(name, iv.clone());
+                // V-H4: constrain i32 params to machine range
+                if let Some(crate::core::ir::ResolvedType::Primitive(
+                    crate::core::ir::PrimitiveType::I32,
+                )) = types.get(&local.ty)
+                {
+                    let lo = Z3Int::from_i64(i32::MIN as i64);
+                    let hi = Z3Int::from_i64(i32::MAX as i64);
+                    session.solver.assert(iv.ge(&lo));
+                    session.solver.assert(iv.le(&hi));
+                }
+            }
+        }
+        // Create old_* snapshot variable
+        let old_name = format!("old_{}", name);
+        match category {
+            Z3TypeCategory::Real => {
+                vars.insert_real(&old_name, Z3Real::new_const(old_name.as_str()));
+            }
+            Z3TypeCategory::Bool => {
+                vars.insert_bool(&old_name, Z3Bool::new_const(old_name.as_str()));
+            }
+            Z3TypeCategory::Int => {
+                vars.insert_int(&old_name, Z3Int::new_const(old_name.as_str()));
+            }
+        }
+    }
+}
+
+/// Verify contracts from Resolved IR (ResolvedCallable).
+///
+/// This is the Resolved IR parallel of `verify_func()` (func.rs).
+/// It extracts contracts from `ResolvedCallable.contracts`, creates Z3
+/// variables from `ResolvedBody.parameters`, and checks validity.
+///
+/// # Limitations (vs AST path)
+/// - No let-substitution (body return encoding deferred)
+/// - No call-site requires checking (deferred)
+/// - No math obligation checking (deferred)
+/// - No invariant checking (deferred)
+/// - No callee ensures propagation (deferred)
+///
+/// These limitations mean the Resolved IR path currently handles
+/// simple requires/ensures contracts on pure functions. Complex
+/// contracts still use the AST path.
+pub(crate) fn verify_contracts_from_resolved(
+    callable: &crate::core::ir::ResolvedCallable,
+    types: &crate::core::ir::ResolvedTypeTable,
+    session: &mut crate::verifier::ctx::SolverSession,
+) -> Option<crate::verifier::ctx::VerifStatus> {
+    use crate::core::ir::ContractKind;
+    use z3::SatResult;
+
+    let body = &callable.body;
+    let mut vars = Z3VarMap::new();
+
+    // 1. Create parameter variables
+    create_parameter_vars(body, types, &mut vars, session);
+
+    // 2. Create result variable (default to Int)
+    let result_var = Z3Int::new_const("result");
+    vars.insert_int("result", result_var.clone());
+
+    // 3. Assert old(param) == param equalities
+    for param_id in &body.parameters {
+        let Some(local) = body.locals.get(param_id) else {
+            continue;
+        };
+        let name = &local.display_name;
+        let old_name = format!("old_{}", name);
+        let category = z3_type_category(&local.ty, types);
+        match category {
+            Z3TypeCategory::Int => {
+                if let (Some(pv), Some(ov)) = (
+                    vars.get_int(name).cloned(),
+                    vars.get_int(&old_name).cloned(),
+                ) {
+                    session.solver.assert(ov.eq(&pv));
+                }
+            }
+            Z3TypeCategory::Real => {
+                if let (Some(pv), Some(ov)) = (
+                    vars.get_real(name).cloned(),
+                    vars.get_real(&old_name).cloned(),
+                ) {
+                    session.solver.assert(ov.eq(&pv));
+                }
+            }
+            Z3TypeCategory::Bool => {
+                if let (Some(pv), Some(ov)) = (
+                    vars.get_bool(name).cloned(),
+                    vars.get_bool(&old_name).cloned(),
+                ) {
+                    session.solver.assert(ov.eq(&pv));
+                }
+            }
+        }
+    }
+
+    // 4. Separate contracts by kind
+    let mut requires = Vec::new();
+    let mut ensures = Vec::new();
+    for contract in &callable.contracts {
+        match contract.kind {
+            ContractKind::Requires => requires.push(&contract.condition),
+            ContractKind::Ensures => ensures.push(&contract.condition),
+            ContractKind::Invariant => {} // deferred
+        }
+    }
+
+    if requires.is_empty() && ensures.is_empty() {
+        return None; // No contracts to verify
+    }
+
+    // 5. Assert requires
+    let mut encoding_failures = 0;
+    for req in &requires {
+        if let Some(z3_bool) = resolved_to_z3_bool(req, body, &mut vars) {
+            session.solver.assert(z3_bool);
+        } else {
+            encoding_failures += 1;
+        }
+    }
+
+    // 6. Encode body return → result (if available)
+    if let Some(ref result_expr) = body.root.result {
+        if let Some(body_z3) = resolved_to_z3_int(result_expr, body, &mut vars) {
+            session.solver.assert(result_var.eq(&body_z3));
+        }
+    }
+
+    // 7. Check each ensures independently
+    if ensures.is_empty() {
+        return Some(crate::verifier::ctx::VerifStatus::NoObligations);
+    }
+
+    let mut found_violation = false;
+    let mut found_unknown = false;
+    for ens in &ensures {
+        if let Some(z3_bool) = resolved_to_z3_bool(ens, body, &mut vars) {
+            let (result, _model) = session.check_scope(z3_bool.not());
+            match result {
+                SatResult::Sat => {
+                    found_violation = true;
+                    break;
+                }
+                SatResult::Unknown => {
+                    found_unknown = true;
+                }
+                SatResult::Unsat => {}
+            }
+        } else {
+            encoding_failures += 1;
+        }
+    }
+
+    if encoding_failures > 0 && !found_violation {
+        return Some(crate::verifier::ctx::VerifStatus::NotInTrustedSubset);
+    }
+    if found_violation {
+        Some(crate::verifier::ctx::VerifStatus::Disproven)
+    } else if found_unknown {
+        Some(crate::verifier::ctx::VerifStatus::SolverUnknown)
+    } else {
+        Some(crate::verifier::ctx::VerifStatus::Proven)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,5 +656,103 @@ mod tests {
         let expr = test_expr(ResolvedExprKind::Old(Box::new(inner)));
         let result = resolved_to_z3_int(&expr, &body, &mut vars);
         assert!(result.is_some(), "old(x) must resolve to old_x variable");
+    }
+
+    // === End-to-end: Resolved IR contract verification ===
+
+    #[test]
+    fn e2e_resolved_contract_proven() {
+        // A simple contract that should be provable from Resolved IR:
+        //   func abs_val(x: i32) -> i32 {
+        //       requires: x >= 0
+        //       ensures: result >= 0
+        //       x
+        //   }
+        let source = r#"
+func abs_val(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result >= 0
+    x
+}
+func main() -> i32 { 0 }
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+
+        let owner = NodeId("function:abs_val".into());
+        let callable = program.callables().get(&owner).expect("abs_val callable");
+        assert!(
+            !callable.contracts.is_empty(),
+            "abs_val must have contracts"
+        );
+
+        let mut session = crate::verifier::ctx::SolverSession::new(5000).expect("solver");
+        let status =
+            verify_contracts_from_resolved(callable, program.resolved_types(), &mut session);
+        assert_eq!(
+            status,
+            Some(crate::verifier::ctx::VerifStatus::Proven),
+            "requires: x >= 0, ensures: result >= 0, body: x → must be Proven"
+        );
+    }
+
+    #[test]
+    fn e2e_resolved_contract_disproven() {
+        // A contract that should be disprovable:
+        //   func bad(x: i32) -> i32 {
+        //       requires: x >= 0
+        //       ensures: result > x
+        //       x
+        //   }
+        // result == x, so result > x is false.
+        let source = r#"
+func bad(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result > x
+    x
+}
+func main() -> i32 { 0 }
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+
+        let owner = NodeId("function:bad".into());
+        let callable = program.callables().get(&owner).expect("bad callable");
+
+        let mut session = crate::verifier::ctx::SolverSession::new(5000).expect("solver");
+        let status =
+            verify_contracts_from_resolved(callable, program.resolved_types(), &mut session);
+        assert_eq!(
+            status,
+            Some(crate::verifier::ctx::VerifStatus::Disproven),
+            "ensures: result > x with body: x → must be Disproven"
+        );
+    }
+
+    #[test]
+    fn e2e_resolved_contract_no_contracts() {
+        let source = r#"
+func plain(x: i32) -> i32 { x + 1 }
+func main() -> i32 { 0 }
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+
+        let owner = NodeId("function:plain".into());
+        let callable = program.callables().get(&owner).expect("plain callable");
+
+        let mut session = crate::verifier::ctx::SolverSession::new(5000).expect("solver");
+        let status =
+            verify_contracts_from_resolved(callable, program.resolved_types(), &mut session);
+        assert_eq!(status, None, "no contracts → None (skip verification)");
     }
 }
