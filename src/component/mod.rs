@@ -29,6 +29,7 @@
 //!       └──→ runtime exports ──→ AbiGenerator ──→ ComponentIr.exports
 //! ```
 
+mod checkpoint;
 mod gen;
 mod handle;
 mod serialize;
@@ -36,6 +37,9 @@ mod symbol;
 mod types;
 mod wire;
 
+pub use checkpoint::{
+    probe_layout, struct_type_count, AllocFault, AllocLedger, AllocSide, LayoutFault,
+};
 pub use gen::{register_core_runtime_abi, AbiGenerator};
 pub use handle::{Handle, HandleError, HandleKind, HandleRegistry, RuntimeId};
 pub use serialize::MimiAbi;
