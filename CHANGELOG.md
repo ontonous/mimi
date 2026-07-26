@@ -2,6 +2,23 @@
 
 ## [Unreleased] — 0.1.1-dev
 
+### Phase D: 工具与隔离（0.31.42–0.31.44）
+
+- **0.31.42 TyErr 毒药类型 + Z3 报错翻译**：`TyErr` 毒药类型防止级联错误刷屏（18 文件 / 31 match arms）；`VerifStatus::plain_language()` + `hint()` + `icon()` 将 Z3 验证状态翻译为用户可读语言。+12 测试。
+- **0.31.43 SD-1 is_linear 结构化标记**：`ResolvedType::Nominal { is_linear: bool }` 替代字符串匹配；`NominalTypeId::nominal_is_linear()` 单一真相源（`state:` 前缀 / `SessionChan` 后缀）；`intern_type()` 设置标记，`substitute()` 保留，`canonical()` 不含（派生属性）。6 文件 / 23 处 pattern match 修复。+6 测试。
+- **0.31.44 SD-3 #[errno] 属性**：块级 `#[errno] extern "C" { ... }` 传播到所有函数；函数级 `#[errno] func ...` per-function 控制。`ExternFunc.returns_errno` / `ResolvedExternFunc.returns_errno`。过渡期保留 `ERRNO_CHECK_FUNC_NAMES` 名称猜测（1.0 删除）。15 文件。+6 测试。
+- **0.31.44 SD-4 fork() → 信号守卫**：删除 `FORK_LOCK` / `check_multithreaded_fork` / `call_ffi_with_fork_isolation*`（−457 行）；新增 `signal_guard.rs`（+263 行）：SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE 信号处理器 + `sigsetjmp`/`siglongjmp` 恢复点 + thread-local jmp_buf。GUARD_LOCK 全局 Mutex 序列化 + IN_GUARDED_CALL thread-local 重入检测（防 C 回调 → Mimi → FFI 死锁）。+7 测试。
+- **0.31.44 ResolvedExpr Z3 编码**：`src/verifier/resolved_expr.rs`（+758 LOC）：`resolved_to_z3_int/real/bool` 三路编码 + `verify_contracts_from_resolved()` 端到端合约验证。P0 健全性修复：body 编码失败 → `NotInTrustedSubset`（防假 Disproven）；encoding_failures > 0 → 无条件 `NotInTrustedSubset`。P1：result 变量类型推断（Int/Real/Bool）+ bool 等式编码（int→real→bool 三级回退）。+10 测试。
+
+### Phase E: 冻结与 RC（0.31.45–0.31.46）
+
+- **0.31.45 DEBUG 周期 + Interpreter dual-path**：`run_dual_path()` 同时运行 AST 和 Resolved 解释器，比较结果；`DualPathResult` 枚举（Match / ResolvedUnsupported / ResolvedFailed / BothFailed / AstFailedResolvedOk / Mismatch）；`values_equal_for_test()` 深度值比较。28 项 dual-interpreter 等价测试覆盖：基础算术、控制流、函数、递归、数据结构、模式匹配、记录/变体、Option/Result、字符串、合约、推导、闭包。关键发现：ResolvedInterpreter 支持闭包，不支持 FFI。
+- **0.31.46 最终敌对审查**：
+  - **Trap Tests**（+26 测试）：IEEE-754 边界（NaN/Inf/除零/负零）、整数溢出（i32/i64 MIN/MAX/wrap）、OOB 访问（列表/字符串/嵌套）。关键发现：Mimi 不遵循 IEEE-754 除零语义（抛 DivisionByZero 而非 Inf/NaN）；NaN 比较抛错而非返回 false；列表支持 Python-style 负索引。
+  - **type_folder 测试补充**（2→18 项）：RemapFolder / CollectVarsFolder / NamedSubstitutionFolder 全覆盖，含 ForAll binder 遮蔽、链式替换、环检测（P1-13）。
+  - **诊断输出确定性**：Checker::check() 对 errors/warnings 按 (start_line, start_col, message) 排序，消除 HashMap 迭代非确定性。
+  - **0.31.30–38 深度审查修复**：BUG-1 c_header.rs 数字开头标识符净化死代码；BUG-2 codegen_e2e.rs 测试空转；LIE-1/LIE-2 文档撒谎修正；GAP-2 serialize.rs 静默降级警告；GAP-5 AllocLedger DoubleAlloc 检测；GAP-7 wire.rs contains_handle_depth 保守返回。
+
 ### Phase C: Component 边界（0.31.30–0.31.36 完善）
 
 - **0.31.30 Component IR**（COMPONENT-IR-001）：`ComponentIr` 单一语义源（identity/exports/imports/types）+ `AbiGenerator` 类型化注册表（`register_core_runtime_abi` 覆盖 RC/list/map/set/string/io/concurrency/fs/time ~40 函数）+ `.mimiabi` JSON 序列化 round-trip + BLAKE3 防篡改哈希。Codegen debug 构建对发射的 runtime 调用做 Component IR 校验。
