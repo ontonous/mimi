@@ -156,7 +156,7 @@ fn canonical_impl_method_signature_inherits_impl_binder() {
     ));
     assert!(matches!(
         program.resolved_types().get(&signature.parameters[0].ty),
-        Some(crate::core::ResolvedType::Nominal { item, arguments })
+        Some(crate::core::ResolvedType::Nominal { item, arguments, .. })
             if item.as_str() == "builtin:type:List"
                 && matches!(
                     arguments.as_slice(),
@@ -1972,7 +1972,7 @@ func main() -> i32 { 0 }
     let right = &pair.members[1];
     assert!(matches!(
         program.resolved_types().get(&right.ty),
-        Some(crate::core::ResolvedType::Nominal { item, arguments })
+        Some(crate::core::ResolvedType::Nominal { item, arguments, .. })
             if item.as_str() == "builtin:type:List"
                 && matches!(
                     arguments.as_slice(),

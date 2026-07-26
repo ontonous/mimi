@@ -2892,9 +2892,9 @@ impl BodyLowerer<'_> {
     ) -> Result<Option<ResolvedCall>, Vec<ResolvedBodyError>> {
         let result = self.expression_type(node_id)?;
         let (owner, type_arguments) = match self.types.get(&result) {
-            Some(ResolvedType::Nominal { item, arguments }) => {
-                (NodeId(item.as_str().to_string()), arguments.clone())
-            }
+            Some(ResolvedType::Nominal {
+                item, arguments, ..
+            }) => (NodeId(item.as_str().to_string()), arguments.clone()),
             _ => return Ok(None),
         };
         let Some(definition) = self.type_defs.get(&owner) else {
@@ -3428,9 +3428,9 @@ impl BodyLowerer<'_> {
                     Some(ResolvedType::Array { element, length }) if *length == patterns.len() => {
                         element.clone()
                     }
-                    Some(ResolvedType::Nominal { item, arguments })
-                        if item.as_str() == "builtin:type:List" && arguments.len() == 1 =>
-                    {
+                    Some(ResolvedType::Nominal {
+                        item, arguments, ..
+                    }) if item.as_str() == "builtin:type:List" && arguments.len() == 1 => {
                         arguments[0].clone()
                     }
                     _ => {
@@ -3452,9 +3452,9 @@ impl BodyLowerer<'_> {
                 let element = match self.types.get(&ty) {
                     Some(ResolvedType::Array { element, .. })
                     | Some(ResolvedType::Slice(element)) => element.clone(),
-                    Some(ResolvedType::Nominal { item, arguments })
-                        if item.as_str() == "builtin:type:List" && arguments.len() == 1 =>
-                    {
+                    Some(ResolvedType::Nominal {
+                        item, arguments, ..
+                    }) if item.as_str() == "builtin:type:List" && arguments.len() == 1 => {
                         arguments[0].clone()
                     }
                     _ => return self.unsupported(&node_id, "slice pattern on non-sequence type"),
@@ -3572,47 +3572,53 @@ impl BodyLowerer<'_> {
                     error.clone(),
                 )],
             )),
-            ("Some", Some(ResolvedType::Nominal { item, arguments }))
-                if item.as_str() == "builtin:type:Option" && arguments.len() == 1 =>
-            {
-                Some((
-                    "builtin:variant:Option::Some",
-                    vec![(
-                        "_0".to_string(),
-                        NodeId("builtin:variant:Option::Some/payload:0".into()),
-                        arguments[0].clone(),
-                    )],
-                ))
-            }
-            ("None", Some(ResolvedType::Nominal { item, arguments }))
-                if item.as_str() == "builtin:type:Option" && arguments.len() == 1 =>
-            {
+            (
+                "Some",
+                Some(ResolvedType::Nominal {
+                    item, arguments, ..
+                }),
+            ) if item.as_str() == "builtin:type:Option" && arguments.len() == 1 => Some((
+                "builtin:variant:Option::Some",
+                vec![(
+                    "_0".to_string(),
+                    NodeId("builtin:variant:Option::Some/payload:0".into()),
+                    arguments[0].clone(),
+                )],
+            )),
+            (
+                "None",
+                Some(ResolvedType::Nominal {
+                    item, arguments, ..
+                }),
+            ) if item.as_str() == "builtin:type:Option" && arguments.len() == 1 => {
                 Some(("builtin:variant:Option::None", Vec::new()))
             }
-            ("Ok", Some(ResolvedType::Nominal { item, arguments }))
-                if item.as_str() == "builtin:type:Result" && arguments.len() == 2 =>
-            {
-                Some((
-                    "builtin:variant:Result::Ok",
-                    vec![(
-                        "_0".to_string(),
-                        NodeId("builtin:variant:Result::Ok/payload:0".into()),
-                        arguments[0].clone(),
-                    )],
-                ))
-            }
-            ("Err", Some(ResolvedType::Nominal { item, arguments }))
-                if item.as_str() == "builtin:type:Result" && arguments.len() == 2 =>
-            {
-                Some((
-                    "builtin:variant:Result::Err",
-                    vec![(
-                        "_0".to_string(),
-                        NodeId("builtin:variant:Result::Err/payload:0".into()),
-                        arguments[1].clone(),
-                    )],
-                ))
-            }
+            (
+                "Ok",
+                Some(ResolvedType::Nominal {
+                    item, arguments, ..
+                }),
+            ) if item.as_str() == "builtin:type:Result" && arguments.len() == 2 => Some((
+                "builtin:variant:Result::Ok",
+                vec![(
+                    "_0".to_string(),
+                    NodeId("builtin:variant:Result::Ok/payload:0".into()),
+                    arguments[0].clone(),
+                )],
+            )),
+            (
+                "Err",
+                Some(ResolvedType::Nominal {
+                    item, arguments, ..
+                }),
+            ) if item.as_str() == "builtin:type:Result" && arguments.len() == 2 => Some((
+                "builtin:variant:Result::Err",
+                vec![(
+                    "_0".to_string(),
+                    NodeId("builtin:variant:Result::Err/payload:0".into()),
+                    arguments[1].clone(),
+                )],
+            )),
             _ => None,
         };
         let Some((variant, declared)) = builtin else {
@@ -3916,7 +3922,10 @@ impl BodyLowerer<'_> {
         declaration_ty: &ResolvedTypeId,
     ) -> Result<ResolvedTypeId, Vec<ResolvedBodyError>> {
         let mut substitutions = BTreeMap::new();
-        if let Some(ResolvedType::Nominal { item, arguments }) = self.types.get(owner_ty) {
+        if let Some(ResolvedType::Nominal {
+            item, arguments, ..
+        }) = self.types.get(owner_ty)
+        {
             let owner = NodeId(item.as_str().to_string());
             if let Some(definition) = self.type_defs.get(&owner) {
                 if definition.generic_parameters.len() != arguments.len() {
@@ -3997,12 +4006,17 @@ impl BodyLowerer<'_> {
                     )]
                 })
             }
-            ResolvedType::Nominal { item, arguments } => ResolvedType::Nominal {
+            ResolvedType::Nominal {
+                item,
+                arguments,
+                is_linear,
+            } => ResolvedType::Nominal {
                 item: item.clone(),
                 arguments: arguments
                     .iter()
                     .map(substitute)
                     .collect::<Result<Vec<_>, _>>()?,
+                is_linear: *is_linear,
             },
             ResolvedType::Reference {
                 lifetime,
@@ -4107,11 +4121,12 @@ impl BodyLowerer<'_> {
             Some(ResolvedType::Array { element, .. }) | Some(ResolvedType::Slice(element)) => {
                 Ok(element.clone())
             }
-            Some(ResolvedType::Nominal { item, arguments })
-                if matches!(
-                    item.as_str(),
-                    "builtin:type:List" | "builtin:type:Set" | "builtin:type:Range"
-                ) && arguments.len() == 1 =>
+            Some(ResolvedType::Nominal {
+                item, arguments, ..
+            }) if matches!(
+                item.as_str(),
+                "builtin:type:List" | "builtin:type:Set" | "builtin:type:Range"
+            ) && arguments.len() == 1 =>
             {
                 Ok(arguments[0].clone())
             }
@@ -4127,14 +4142,14 @@ impl BodyLowerer<'_> {
         match self.types.get(ty) {
             Some(ResolvedType::Option(inner)) => Ok(inner.clone()),
             Some(ResolvedType::Result { ok, .. }) => Ok(ok.clone()),
-            Some(ResolvedType::Nominal { item, arguments })
-                if item.as_str() == "builtin:type:Option" && arguments.len() == 1 =>
-            {
+            Some(ResolvedType::Nominal {
+                item, arguments, ..
+            }) if item.as_str() == "builtin:type:Option" && arguments.len() == 1 => {
                 Ok(arguments[0].clone())
             }
-            Some(ResolvedType::Nominal { item, arguments })
-                if item.as_str() == "builtin:type:Result" && arguments.len() == 2 =>
-            {
+            Some(ResolvedType::Nominal {
+                item, arguments, ..
+            }) if item.as_str() == "builtin:type:Result" && arguments.len() == 2 => {
                 Ok(arguments[0].clone())
             }
             _ => self.unsupported(node_id, "optional chain on non-Option/Result type"),
@@ -4170,10 +4185,12 @@ impl BodyLowerer<'_> {
                 ResolvedType::Nominal {
                     item: left_item,
                     arguments: left,
+                    ..
                 },
                 ResolvedType::Nominal {
                     item: right_item,
                     arguments: right,
+                    ..
                 },
             ) => {
                 left_item == right_item
@@ -4476,8 +4493,8 @@ impl BodyLowerer<'_> {
         matches!(
             (self.types.get(expected), self.types.get(observed)),
             (
-                Some(ResolvedType::Nominal { item: state, arguments }),
-                Some(ResolvedType::Nominal { item: builtin, arguments: builtin_arguments }),
+                Some(ResolvedType::Nominal { item: state, arguments, .. }),
+                Some(ResolvedType::Nominal { item: builtin, arguments: builtin_arguments, .. }),
             ) if state.as_str().starts_with("state:")
                 && state.as_str().ends_with("::Fault")
                 && arguments.is_empty()
@@ -4495,7 +4512,7 @@ impl BodyLowerer<'_> {
             (self.types.get(expected), self.types.get(observed)),
             (
                 Some(ResolvedType::FlowStateSet { states, .. }),
-                Some(ResolvedType::Nominal { item, arguments }),
+                Some(ResolvedType::Nominal { item, arguments, .. }),
             ) if arguments.is_empty() && states.contains(item)
         )
     }
@@ -4512,7 +4529,7 @@ impl BodyLowerer<'_> {
         if matches!(
             (self.types.get(from), self.types.get(to)),
             (
-                Some(ResolvedType::Nominal { item, arguments }),
+                Some(ResolvedType::Nominal { item, arguments, .. }),
                 Some(ResolvedType::FlowStateSet { states, .. }),
             ) if arguments.is_empty() && states.contains(item)
         ) {

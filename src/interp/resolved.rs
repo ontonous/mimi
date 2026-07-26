@@ -1207,9 +1207,9 @@ fn encode_checked_json(
         .ok_or_else(|| unsupported(node, "JSON argument type is absent from ResolvedTypeTable"))?;
     match ty {
         ResolvedType::Primitive(primitive) => encode_json_primitive(node, *primitive, value),
-        ResolvedType::Nominal { item, arguments } => {
-            encode_json_nominal(program, node, item.as_str(), arguments, value, depth + 1)
-        }
+        ResolvedType::Nominal {
+            item, arguments, ..
+        } => encode_json_nominal(program, node, item.as_str(), arguments, value, depth + 1),
         ResolvedType::Option(inner) => {
             encode_json_variant(program, node, value, "Some", "None", inner, depth + 1)
         }
@@ -1584,9 +1584,9 @@ fn decode_checked_json(
         .ok_or_else(|| unsupported(node, "JSON target type is absent from ResolvedTypeTable"))?;
     match ty {
         ResolvedType::Primitive(primitive) => decode_json_primitive(*primitive, json),
-        ResolvedType::Nominal { item, arguments } => {
-            decode_json_nominal(program, node, item.as_str(), arguments, json, depth + 1)
-        }
+        ResolvedType::Nominal {
+            item, arguments, ..
+        } => decode_json_nominal(program, node, item.as_str(), arguments, json, depth + 1),
         ResolvedType::Option(inner) => decode_json_option(program, node, json, inner, depth + 1),
         ResolvedType::Result { ok, error } => {
             decode_json_result(program, node, json, ok, error, depth + 1)

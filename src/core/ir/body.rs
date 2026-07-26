@@ -1224,7 +1224,7 @@ impl BodyValidator<'_> {
             let valid = matches!(
                 (self.types.get(&conversion.from), self.types.get(&conversion.to)),
                 (
-                    Some(ResolvedType::Nominal { item, arguments }),
+                    Some(ResolvedType::Nominal { item, arguments, .. }),
                     Some(ResolvedType::FlowStateSet { states, .. }),
                 ) if arguments.is_empty() && states.contains(item)
             );
