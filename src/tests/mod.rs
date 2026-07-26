@@ -101,6 +101,9 @@ pub(crate) mod fuzz;
 // === Dual-backend equivalence tests ===
 pub(crate) mod dual_backend;
 
+// === Dual-interpreter equivalence tests (0.31.45) ===
+pub(crate) mod dual_interp;
+
 // === Benchmark modules ===
 pub(crate) mod benchmarks;
 pub(crate) mod lsp_e2e;
@@ -455,6 +458,207 @@ pub(crate) fn run_source_with_trace(src: &str) -> (interp::Value, Vec<crate::tra
     let val = interp.run().expect("run_source_with_trace failed");
     let events = interp.trace_collector.take_events();
     (val, events)
+}
+
+/// 0.31.45: Run the ResolvedInterpreter on a CheckedProgram.
+/// Returns Ok(value) on success, Err(message) on failure.
+/// "unsupported" errors are expected for programs using FFI/actors/flows.
+pub(crate) fn run_resolved(program: &core::CheckedProgram) -> Result<interp::Value, String> {
+    let mut interp = interp::resolved::ResolvedInterpreter::new(program);
+    interp.run_main().map_err(|e| e.message().to_string())
+}
+
+/// 0.31.45: Dual-path result comparing AST interpreter and ResolvedInterpreter.
+#[derive(Debug)]
+pub(crate) enum DualPathResult {
+    /// Both interpreters succeeded and produced equal results.
+    Match(interp::Value),
+    /// AST interpreter succeeded, ResolvedInterpreter returned "unsupported".
+    /// This is expected for programs using FFI/actors/flows/closures.
+    ResolvedUnsupported {
+        ast_value: interp::Value,
+        reason: String,
+    },
+    /// Both interpreters failed (expected for invalid programs).
+    BothFailed {
+        ast_error: String,
+        resolved_error: String,
+    },
+    /// AST interpreter failed but ResolvedInterpreter succeeded (bug!).
+    AstFailedResolvedOk {
+        resolved_value: interp::Value,
+        ast_error: String,
+    },
+    /// Both succeeded but produced different results (bug!).
+    Mismatch {
+        ast_value: interp::Value,
+        resolved_value: interp::Value,
+    },
+}
+
+/// 0.31.45: Run both AST interpreter and ResolvedInterpreter, compare results.
+/// This is the core dual-path validation for the interpreter migration.
+pub(crate) fn run_dual_path(src: &str) -> DualPathResult {
+    let file = parse(src);
+    let program = match core::check_program(&file) {
+        Ok(program) => program,
+        Err(diags) => {
+            let msg = diags
+                .iter()
+                .map(|d| format!("{}", d))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return DualPathResult::BothFailed {
+                ast_error: format!("type check failed: {}", msg),
+                resolved_error: format!("type check failed: {}", msg),
+            };
+        }
+    };
+
+    // Run AST interpreter
+    let mut ast_interp = interp::Interpreter::from_checked(&program);
+    ast_interp.verify_contracts = true;
+    let ast_result = ast_interp.run();
+
+    // Run ResolvedInterpreter
+    let resolved_result = run_resolved(&program);
+
+    match (ast_result, resolved_result) {
+        (Ok(ast_val), Ok(resolved_val)) => {
+            if values_equal_for_test(&ast_val, &resolved_val) {
+                DualPathResult::Match(ast_val)
+            } else {
+                DualPathResult::Mismatch {
+                    ast_value: ast_val,
+                    resolved_value: resolved_val,
+                }
+            }
+        }
+        (Ok(ast_val), Err(resolved_err)) => {
+            if resolved_err.contains("outside the typed scalar execution subset")
+                || resolved_err.contains("not yet in the typed scalar execution subset")
+                || resolved_err.contains("callable has no ResolvedBody")
+            {
+                DualPathResult::ResolvedUnsupported {
+                    ast_value: ast_val,
+                    reason: resolved_err,
+                }
+            } else {
+                // ResolvedInterpreter failed with a real error - this is a bug
+                DualPathResult::Mismatch {
+                    ast_value: ast_val,
+                    resolved_value: interp::Value::Unit, // placeholder
+                }
+            }
+        }
+        (Err(ast_err), Ok(resolved_val)) => DualPathResult::AstFailedResolvedOk {
+            resolved_value: resolved_val,
+            ast_error: ast_err.message().to_string(),
+        },
+        (Err(ast_err), Err(resolved_err)) => DualPathResult::BothFailed {
+            ast_error: ast_err.message().to_string(),
+            resolved_error: resolved_err,
+        },
+    }
+}
+
+/// 0.31.45: Compare two Values for equality in dual-path tests.
+/// Handles the common cases; falls back to debug format comparison.
+fn values_equal_for_test(a: &interp::Value, b: &interp::Value) -> bool {
+    use interp::Value;
+    match (a, b) {
+        (Value::Unit, Value::Unit) => true,
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => (x - y).abs() < 1e-9,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::List(xs), Value::List(ys)) => {
+            xs.len() == ys.len()
+                && xs
+                    .iter()
+                    .zip(ys.iter())
+                    .all(|(x, y)| values_equal_for_test(x, y))
+        }
+        (Value::Tuple(xs), Value::Tuple(ys)) => {
+            xs.len() == ys.len()
+                && xs
+                    .iter()
+                    .zip(ys.iter())
+                    .all(|(x, y)| values_equal_for_test(x, y))
+        }
+        (Value::Record(name_a, fields_a), Value::Record(name_b, fields_b)) => {
+            name_a == name_b
+                && fields_a.len() == fields_b.len()
+                && fields_a
+                    .iter()
+                    .zip(fields_b.iter())
+                    .all(|((ka, va), (kb, vb))| ka == kb && values_equal_for_test(va, vb))
+        }
+        (Value::Variant(name_a, args_a), Value::Variant(name_b, args_b)) => {
+            name_a == name_b
+                && args_a.len() == args_b.len()
+                && args_a
+                    .iter()
+                    .zip(args_b.iter())
+                    .all(|(x, y)| values_equal_for_test(x, y))
+        }
+        (Value::Newtype(id_a, val_a), Value::Newtype(id_b, val_b)) => {
+            id_a == id_b && values_equal_for_test(val_a, val_b)
+        }
+        (Value::Set(xs), Value::Set(ys)) => {
+            xs.len() == ys.len()
+                && xs
+                    .iter()
+                    .zip(ys.iter())
+                    .all(|(x, y)| values_equal_for_test(x, y))
+        }
+        (Value::Error(x), Value::Error(y)) => x == y,
+        // Fallback: compare debug representations
+        _ => format!("{:?}", a) == format!("{:?}", b),
+    }
+}
+
+/// 0.31.45: Assert that dual-path produces a match (both interpreters agree).
+/// Panics on mismatch or unexpected failure.
+#[allow(dead_code)]
+pub(crate) fn assert_dual_path_match(src: &str) -> interp::Value {
+    match run_dual_path(src) {
+        DualPathResult::Match(val) => val,
+        DualPathResult::ResolvedUnsupported { ast_value, reason } => {
+            // For plain function tests, unsupported is a failure
+            panic!(
+                "ResolvedInterpreter should support this program but returned unsupported: {}\nAST value: {:?}",
+                reason, ast_value
+            );
+        }
+        DualPathResult::Mismatch {
+            ast_value,
+            resolved_value,
+        } => {
+            panic!(
+                "Dual-path mismatch!\nAST:      {:?}\nResolved: {:?}",
+                ast_value, resolved_value
+            );
+        }
+        DualPathResult::AstFailedResolvedOk {
+            resolved_value,
+            ast_error,
+        } => {
+            panic!(
+                "AST interpreter failed but ResolvedInterpreter succeeded!\nAST error: {}\nResolved: {:?}",
+                ast_error, resolved_value
+            );
+        }
+        DualPathResult::BothFailed {
+            ast_error,
+            resolved_error,
+        } => {
+            panic!(
+                "Both interpreters failed!\nAST:      {}\nResolved: {}",
+                ast_error, resolved_error
+            );
+        }
+    }
 }
 
 /// End-to-end codegen test: compile Mimi source -> LLVM -> native binary -> execute -> return stdout

@@ -12,7 +12,7 @@ mod ops;
 mod pattern;
 pub(crate) mod pool;
 mod quote;
-mod resolved;
+pub(crate) mod resolved;
 mod scope_env;
 mod value;
 
