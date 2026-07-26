@@ -3385,6 +3385,7 @@ pub(crate) fn type_kind(ty: &Type) -> &'static str {
         Type::WeakLocal(_) => "type.weak_local",
         Type::Newtype(_, _) => "type.newtype",
         Type::Nothing => "type.nothing",
+        Type::TyErr => "type.error",
         Type::Allocator => "type.allocator",
         Type::Array(_, _) => "type.array",
         Type::Slice(_) => "type.slice",
@@ -3549,6 +3550,7 @@ fn collect_type_meta(
         | Type::DynTrait(_)
         | Type::RawString
         | Type::Infer
+        | Type::TyErr
         | Type::TypeVar(_) => {}
         Type::Located { .. } => unreachable!("Type::unlocated returned Located"),
     }
@@ -7924,7 +7926,7 @@ fn build_canonical_function_signatures(
         for (node_id, annotation) in annotated_types {
             if matches!(
                 annotation.unlocated(),
-                Type::Infer | Type::TypeVar(_) | Type::ForAll(_, _)
+                Type::Infer | Type::TypeVar(_) | Type::ForAll(_, _) | Type::TyErr
             ) {
                 continue;
             }
@@ -8884,7 +8886,7 @@ fn canonicalize_declaration_member<R>(
 
 fn contains_unresolved_type(ty: &Type) -> bool {
     crate::core::type_folder::type_any(ty, &|t| match t {
-        Type::Infer | Type::TypeVar(_) => true,
+        Type::Infer | Type::TypeVar(_) | Type::TyErr => true,
         Type::ForAll(_, _) => true,
         Type::Name(name, _) => name == "Any" || name == "_" || name == "unknown",
         _ => false,

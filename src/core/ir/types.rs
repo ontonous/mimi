@@ -613,6 +613,11 @@ impl ResolvedTypeTable {
             Type::Infer => return Err(ResolvedTypeError::ResidualInference("Infer")),
             Type::TypeVar(_) => return Err(ResolvedTypeError::ResidualInference("TypeVar")),
             Type::ForAll(_, _) => return Err(ResolvedTypeError::ResidualInference("ForAll")),
+            Type::TyErr => {
+                return Err(ResolvedTypeError::ResidualInference(
+                    "TyErr poison type cannot be interned",
+                ))
+            }
             Type::Name(name, arguments) if name == "_" || name == "unknown" => {
                 return Err(ResolvedTypeError::ResidualInference("Unknown"));
             }

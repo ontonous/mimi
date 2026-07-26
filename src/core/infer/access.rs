@@ -94,7 +94,8 @@ fn subst_with_depth(ty: &Type, subst: &HashMap<String, Type>, depth: u32) -> Typ
         | Type::RawString
         | Type::Cap(_)
         | Type::ImplTrait(_)
-        | Type::DynTrait(_) => ty.clone(),
+        | Type::DynTrait(_)
+        | Type::TyErr => ty.clone(),
     }
 }
 

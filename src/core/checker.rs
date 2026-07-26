@@ -566,6 +566,25 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// 0.31.42: Returns the TyErr poison type for cascading error suppression.
+    ///
+    /// After a type mismatch is detected, callers can replace the offending
+    /// type with `Type::TyErr` to suppress downstream cascading errors.
+    /// TyErr unifies with any type (poison semantics) but is rejected by
+    /// the zonk phase (`scan_residual`), so it never reaches codegen.
+    ///
+    /// Usage pattern:
+    /// ```ignore
+    /// if !self.unify_types(&expected, &actual) {
+    ///     let actual = Type::TyErr; // poison: suppress cascading errors
+    ///     // ... continue checking with poisoned type
+    /// }
+    /// ```
+    #[allow(dead_code)] // Gradual migration: call sites adopted incrementally
+    pub(crate) fn poison(&self) -> Type {
+        Type::TyErr
+    }
+
     /// C4: Generalize a type — wrap free TypeVars not in the environment in ForAll.
     ///
     /// After solving a let binding, call this to make the type polymorphic.

@@ -114,6 +114,7 @@ fn occurs_check(name: &str, ty: &Type, _generics: &[GenericParam]) -> bool {
         | Type::ImplTrait(_)
         | Type::DynTrait(_)
         | Type::TypeVar(_)
+        | Type::TyErr
         | Type::ForAll(_, _) => false,
     }
 }
@@ -199,9 +200,12 @@ pub fn subst_type_params(
             name.clone(),
             Box::new(subst_type_params(inner, generics, type_map)),
         ),
-        Type::Cap(_) | Type::Nothing | Type::RawString | Type::Allocator | Type::Infer => {
-            ty.clone()
-        }
+        Type::Cap(_)
+        | Type::Nothing
+        | Type::RawString
+        | Type::Allocator
+        | Type::Infer
+        | Type::TyErr => ty.clone(),
         Type::ExternFunc(args, ret) => Type::ExternFunc(
             args.iter()
                 .map(|a| subst_type_params(a, generics, type_map))
@@ -554,6 +558,7 @@ pub fn fmt_type(t: &Type) -> String {
             }
         }
         Type::Nothing => "nothing".to_string(),
+        Type::TyErr => "«error»".to_string(),
         Type::Allocator => "Allocator".to_string(),
         Type::Array(inner, size) => format!("[{}; {}]", fmt_type(inner), size),
         Type::Slice(inner) => format!("[{}]", fmt_type(inner)),

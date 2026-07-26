@@ -617,6 +617,7 @@ impl LspServer {
             Type::Cap(name) => format!("cap {}", name),
             Type::CBuffer(inner) => format!("CBuffer<{}>", Self::type_display(inner)),
             Type::Nothing => "!".to_string(),
+            Type::TyErr => "«error»".to_string(),
             Type::Allocator => "Allocator".to_string(),
             Type::Infer => "_".to_string(),
             Type::TypeVar(id) => format!("?T{}", id),
