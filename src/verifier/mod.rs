@@ -105,6 +105,7 @@ pub fn verify_ffi_checked(
                 ensures: signature.ensures.clone(),
                 variadic: signature.variadic,
                 no_panic: signature.no_panic || block.no_panic,
+                returns_errno: false,
             };
             if externs
                 .insert(signature.name.clone(), declaration)

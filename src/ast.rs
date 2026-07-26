@@ -147,6 +147,10 @@ pub struct ExternBlock {
     /// This is an escape hatch for users who need to interface with
     /// C libraries that don't fit the passport-type model.
     pub unsafe_: bool,
+    /// SD-3: if true, all functions in this block have errno checking
+    /// enabled by default. Individual functions can override with
+    /// their own `returns_errno` field.
+    pub returns_errno: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +168,10 @@ pub struct ExternFunc {
     /// If true, FFI calls to this function are wrapped in catch_unwind
     /// (Rust panics) and signal handlers (C crashes).
     pub no_panic: bool,
+    /// SD-3: if true, the FFI runtime captures errno after this call
+    /// when the return value indicates an error (negative / -1).
+    /// Replaces the legacy `ERRNO_CHECK_FUNC_NAMES` name-guessing.
+    pub returns_errno: bool,
 }
 
 #[derive(Debug, Clone)]

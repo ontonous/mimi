@@ -70,6 +70,7 @@ mod tests {
                 ensures: None,
                 variadic: false,
                 no_panic: false,
+                returns_errno: false,
             },
             ExternFunc {
                 meta: fixture_meta(),
@@ -85,6 +86,7 @@ mod tests {
                 ensures: None,
                 variadic: false,
                 no_panic: false,
+                returns_errno: false,
             },
             ExternFunc {
                 meta: fixture_meta(),
@@ -100,6 +102,7 @@ mod tests {
                 ensures: None,
                 variadic: false,
                 no_panic: false,
+                returns_errno: false,
             },
             ExternFunc {
                 meta: fixture_meta(),
@@ -129,6 +132,7 @@ mod tests {
                 ensures: None,
                 variadic: false,
                 no_panic: false,
+                returns_errno: false,
             },
         ]
     }
@@ -317,6 +321,7 @@ mod tests {
             ensures: None,
             variadic: false,
             no_panic: false,
+            returns_errno: false,
         }];
         let out = gen.generate(&funcs).unwrap();
         // Regression: callback argument/return marshalling must be type-aware.

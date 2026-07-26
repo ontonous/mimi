@@ -248,6 +248,7 @@ fn emit_py_bindings_with_mimi_lib() {
                         ensures: None,
                         variadic: false,
                         no_panic: false,
+                        returns_errno: false,
                     };
                     extern_funcs.push(extern_func);
                     exported_funcs.push(f.clone());

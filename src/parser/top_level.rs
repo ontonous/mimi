@@ -68,12 +68,14 @@ impl Parser {
         } else {
             false
         };
-        // Parse optional #[derive(...)], #[repr(...)], and #[no_panic] attributes
+        // Parse optional #[derive(...)], #[repr(...)], #[no_panic], and #[errno] attributes
         let mut derives = Vec::new();
         let mut attributes = Vec::new();
         let mut no_panic_block = false;
+        let mut errno_block = false;
         let mut type_attribute_token = None;
         let mut no_panic_attribute_token = None;
+        let mut errno_attribute_token = None;
         while self.at(&TokenKind::Hash)
             && self.pos + 1 < self.tokens.len()
             && self.tokens[self.pos + 1].kind == TokenKind::LBracket
@@ -144,6 +146,10 @@ impl Parser {
                 no_panic_attribute_token.get_or_insert_with(|| self.peek().clone());
                 self.advance(); // skip "no_panic"
                 no_panic_block = true;
+            } else if self.at(&TokenKind::Ident("errno".to_string())) {
+                errno_attribute_token.get_or_insert_with(|| self.peek().clone());
+                self.advance(); // skip "errno"
+                errno_block = true;
             } else {
                 let token = self.peek().clone();
                 return Err(self.attribute_error(
@@ -170,6 +176,14 @@ impl Parser {
                 return Err(self.attribute_error(
                     token,
                     "attribute `no_panic` is only supported on extern blocks",
+                ));
+            }
+        }
+        if let Some(token) = &errno_attribute_token {
+            if !matches!(self.peek_kind(), TokenKind::Extern | TokenKind::Unsafe) {
+                return Err(self.attribute_error(
+                    token,
+                    "attribute `errno` is only supported on extern blocks (SD-3)",
                 ));
             }
         }
@@ -252,7 +266,8 @@ impl Parser {
                 // unsafe extern "C" { ... } — bypass passport-type checking
                 self.advance(); // consume `unsafe`
                 self.skip_newlines();
-                let mut extern_block = self.parse_extern_block_with_no_panic(no_panic_block)?;
+                let mut extern_block =
+                    self.parse_extern_block_with_attrs(no_panic_block, errno_block)?;
                 extern_block.unsafe_ = true;
                 Ok(Item::ExternBlock(extern_block))
             }
@@ -290,9 +305,10 @@ impl Parser {
                         return Ok(Item::Func(f));
                     }
                 }
-                Ok(Item::ExternBlock(
-                    self.parse_extern_block_with_no_panic(no_panic_block)?,
-                ))
+                Ok(Item::ExternBlock(self.parse_extern_block_with_attrs(
+                    no_panic_block,
+                    errno_block,
+                )?))
             }
             _ => {
                 let tok = self.peek();
@@ -442,9 +458,10 @@ impl Parser {
         })
     }
 
-    fn parse_extern_block_with_no_panic(
+    fn parse_extern_block_with_attrs(
         &mut self,
         no_panic: bool,
+        block_errno: bool,
     ) -> Result<ExternBlock, ParseError> {
         let start_pos = self.pos;
         self.expect(TokenKind::Extern, "`extern`")?;
@@ -470,6 +487,30 @@ impl Parser {
             self.skip_newlines();
             if self.at(&TokenKind::RBrace) || self.at(&TokenKind::Eof) {
                 break;
+            }
+            // SD-3: parse optional per-function #[errno] attribute
+            let mut func_errno = block_errno;
+            while self.at(&TokenKind::Hash)
+                && self.pos + 1 < self.tokens.len()
+                && self.tokens[self.pos + 1].kind == TokenKind::LBracket
+            {
+                self.advance(); // skip #
+                self.advance(); // skip [
+                if self.at(&TokenKind::Ident("errno".to_string())) {
+                    self.advance(); // skip "errno"
+                    func_errno = true;
+                } else {
+                    let token = self.peek().clone();
+                    return Err(self.attribute_error(
+                        &token,
+                        format!(
+                            "unknown attribute `{}` in extern block; supported: errno",
+                            token.kind.source_text()
+                        ),
+                    ));
+                }
+                self.expect(TokenKind::RBracket, "`]`")?;
+                self.skip_newlines();
             }
             // Parse extern function signature
             let func_start = self.pos;
@@ -553,6 +594,7 @@ impl Parser {
                 ensures,
                 variadic,
                 no_panic,
+                returns_errno: func_errno,
             });
         }
         self.expect(TokenKind::RBrace, "`}`")?;
@@ -562,6 +604,7 @@ impl Parser {
             funcs,
             no_panic,
             unsafe_: false,
+            returns_errno: block_errno,
         })
     }
 

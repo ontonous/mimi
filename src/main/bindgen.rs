@@ -50,6 +50,7 @@ pub(crate) fn run(path: &Path, output_dir: &Path) -> Result<(), String> {
             ensures: None,
             variadic: false,
             no_panic: false,
+            returns_errno: false,
         };
         extern_funcs.push(extern_func);
     }
