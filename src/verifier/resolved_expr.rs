@@ -4,11 +4,6 @@
 //! instead of `Expr`, enabling the verifier to work from CheckedProgram
 //! without `legacy_body_file()`.
 //!
-//! # Status
-//! Foundation layer: encoding functions implemented and unit-tested.
-//! Integration into `verify_func()` is the next step (0.31.44+).
-#![allow(dead_code)]
-//!
 //! # Mapping (AST → Resolved IR)
 //!
 //! | AST (`Expr`)              | Resolved IR (`ResolvedExprKind`)       |
@@ -198,7 +193,7 @@ pub(crate) fn resolved_to_z3_bool(
             vars.get_bool(&name).cloned()
         }
         ResolvedExprKind::Binary { op, left, right } => {
-            // Try int comparison first, then real
+            // Try int comparison first, then real, then bool equality
             if let (Some(l), Some(r)) = (
                 resolved_to_z3_int(left, body, vars),
                 resolved_to_z3_int(right, body, vars),
@@ -235,6 +230,17 @@ pub(crate) fn resolved_to_z3_bool(
                     ResolvedBinaryOp::Greater => Some(l.gt(&r)),
                     ResolvedBinaryOp::LessEqual => Some(l.le(&r)),
                     ResolvedBinaryOp::GreaterEqual => Some(l.ge(&r)),
+                    _ => None,
+                };
+            }
+            // Fall back to bool equality (P1 fix: bool == bool)
+            if let (Some(l), Some(r)) = (
+                resolved_to_z3_bool(left, body, vars),
+                resolved_to_z3_bool(right, body, vars),
+            ) {
+                return match op {
+                    ResolvedBinaryOp::Equal => Some(l.eq(&r)),
+                    ResolvedBinaryOp::NotEqual => Some(l.eq(&r).not()),
                     _ => None,
                 };
             }
@@ -407,6 +413,17 @@ fn create_parameter_vars(
 /// These limitations mean the Resolved IR path currently handles
 /// simple requires/ensures contracts on pure functions. Complex
 /// contracts still use the AST path.
+///
+/// # Soundness
+/// If the body return expression cannot be encoded, `result` is left
+/// unconstrained. To prevent false Disproven verdicts from an
+/// unconstrained `result`, the function returns `NotInTrustedSubset`
+/// whenever body encoding fails and ensures obligations exist.
+/// Similarly, any contract encoding failure causes an immediate
+/// `NotInTrustedSubset` return, regardless of whether a violation
+/// was found (the violation could be an artifact of missing constraints).
+// Integration into verify_func() is pending; currently used by tests only.
+#[allow(dead_code)]
 pub(crate) fn verify_contracts_from_resolved(
     callable: &crate::core::ir::ResolvedCallable,
     types: &crate::core::ir::ResolvedTypeTable,
@@ -421,9 +438,30 @@ pub(crate) fn verify_contracts_from_resolved(
     // 1. Create parameter variables
     create_parameter_vars(body, types, &mut vars, session);
 
-    // 2. Create result variable (default to Int)
-    let result_var = Z3Int::new_const("result");
-    vars.insert_int("result", result_var.clone());
+    // 2. Create result variable with type inferred from signature (P1 fix).
+    let result_category = z3_type_category(&callable.signature.result, types);
+    match result_category {
+        Z3TypeCategory::Real => {
+            vars.insert_real("result", Z3Real::new_const("result"));
+        }
+        Z3TypeCategory::Bool => {
+            vars.insert_bool("result", Z3Bool::new_const("result"));
+        }
+        Z3TypeCategory::Int => {
+            let rv = Z3Int::new_const("result");
+            vars.insert_int("result", rv.clone());
+            // V-H4: constrain i32 result to machine range
+            if let Some(crate::core::ir::ResolvedType::Primitive(
+                crate::core::ir::PrimitiveType::I32,
+            )) = types.get(&callable.signature.result)
+            {
+                let lo = Z3Int::from_i64(i32::MIN as i64);
+                let hi = Z3Int::from_i64(i32::MAX as i64);
+                session.solver.assert(rv.ge(&lo));
+                session.solver.assert(rv.le(&hi));
+            }
+        }
+    }
 
     // 3. Assert old(param) == param equalities
     for param_id in &body.parameters {
@@ -486,16 +524,46 @@ pub(crate) fn verify_contracts_from_resolved(
         }
     }
 
-    // 6. Encode body return → result (if available)
+    // 6. Encode body return → result.
+    //    P0 fix: track whether body encoding succeeded. If it fails and
+    //    ensures exist, result is unconstrained → NotInTrustedSubset.
+    let mut body_encoded = false;
     if let Some(ref result_expr) = body.root.result {
-        if let Some(body_z3) = resolved_to_z3_int(result_expr, body, &mut vars) {
-            session.solver.assert(result_var.eq(&body_z3));
-        }
+        let encoded = match result_category {
+            Z3TypeCategory::Int => {
+                resolved_to_z3_int(result_expr, body, &mut vars).map(|body_z3| {
+                    if let Some(rv) = vars.get_int("result").cloned() {
+                        session.solver.assert(rv.eq(&body_z3));
+                    }
+                })
+            }
+            Z3TypeCategory::Real => {
+                resolved_to_z3_real(result_expr, body, &mut vars).map(|body_z3| {
+                    if let Some(rv) = vars.get_real("result").cloned() {
+                        session.solver.assert(rv.eq(&body_z3));
+                    }
+                })
+            }
+            Z3TypeCategory::Bool => {
+                resolved_to_z3_bool(result_expr, body, &mut vars).map(|body_z3| {
+                    if let Some(rv) = vars.get_bool("result").cloned() {
+                        session.solver.assert(rv.eq(&body_z3));
+                    }
+                })
+            }
+        };
+        body_encoded = encoded.is_some();
     }
 
     // 7. Check each ensures independently
     if ensures.is_empty() {
         return Some(crate::verifier::ctx::VerifStatus::NoObligations);
+    }
+
+    // P0 fix: if body encoding failed, result is unconstrained.
+    // Any verdict would be unsound → bail out.
+    if !body_encoded {
+        return Some(crate::verifier::ctx::VerifStatus::NotInTrustedSubset);
     }
 
     let mut found_violation = false;
@@ -518,7 +586,10 @@ pub(crate) fn verify_contracts_from_resolved(
         }
     }
 
-    if encoding_failures > 0 && !found_violation {
+    // P0 fix: any encoding failure → NotInTrustedSubset, regardless of
+    // whether a violation was found. The violation could be an artifact
+    // of missing constraints from the failed encoding.
+    if encoding_failures > 0 {
         return Some(crate::verifier::ctx::VerifStatus::NotInTrustedSubset);
     }
     if found_violation {
@@ -754,5 +825,75 @@ func main() -> i32 { 0 }
         let status =
             verify_contracts_from_resolved(callable, program.resolved_types(), &mut session);
         assert_eq!(status, None, "no contracts → None (skip verification)");
+    }
+
+    // === P0 soundness regression tests ===
+
+    #[test]
+    fn e2e_resolved_contract_bool_result() {
+        // P1 fix: result variable type inferred from signature (Bool).
+        // Bool equality in ensures now supported (int → real → bool fallback).
+        let source = r#"
+func is_positive(x: i32) -> bool {
+    requires: x >= -1000
+    ensures: result == true
+    x > 0
+}
+func main() -> i32 { 0 }
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+
+        let owner = NodeId("function:is_positive".into());
+        let callable = program.callables().get(&owner).expect("callable");
+
+        let mut session = crate::verifier::ctx::SolverSession::new(5000).expect("solver");
+        let status =
+            verify_contracts_from_resolved(callable, program.resolved_types(), &mut session);
+        // x > 0 does NOT always equal true (e.g. x = -1 satisfies requires but x > 0 is false).
+        // So ensures: result == true should be Disproven.
+        assert_eq!(
+            status,
+            Some(crate::verifier::ctx::VerifStatus::Disproven),
+            "ensures: result == true with body: x > 0 → Disproven (x can be negative)"
+        );
+    }
+
+    #[test]
+    fn e2e_resolved_contract_unencodable_body_not_in_trusted_subset() {
+        // P0 fix: when body encoding fails, return NotInTrustedSubset
+        // instead of checking ensures with an unconstrained result.
+        // A function call in the body is not encodable by the simple
+        // resolved_to_z3_int encoder.
+        let source = r#"
+func helper(x: i32) -> i32 { x + 1 }
+func caller(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result >= 0
+    helper(x)
+}
+func main() -> i32 { 0 }
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+
+        let owner = NodeId("function:caller".into());
+        let callable = program.callables().get(&owner).expect("callable");
+
+        let mut session = crate::verifier::ctx::SolverSession::new(5000).expect("solver");
+        let status =
+            verify_contracts_from_resolved(callable, program.resolved_types(), &mut session);
+        // Body is a function call → not encodable → NotInTrustedSubset
+        assert_eq!(
+            status,
+            Some(crate::verifier::ctx::VerifStatus::NotInTrustedSubset),
+            "unencodable body (function call) → NotInTrustedSubset, not Disproven"
+        );
     }
 }
