@@ -11,6 +11,8 @@ source_filename = "golden_test"
 @str.7 = private unnamed_addr constant [11 x i8] c"peer_fault\00", align 1
 @str.8 = private unnamed_addr constant [1 x i8] zeroinitializer, align 1
 @str.9 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
+@op_name = private unnamed_addr constant [12 x i8] c"subtraction\00", align 1
+@op_name.10 = private unnamed_addr constant [15 x i8] c"multiplication\00", align 1
 
 declare i32 @printf(ptr, ...)
 
@@ -735,6 +737,12 @@ declare i32 @mimi_quote_argc(ptr)
 
 declare ptr @mimi_quote_list_child(ptr, i64)
 
+declare void @mimi_trap_overflow(ptr)
+
+declare void @mimi_trap_div_by_zero()
+
+declare void @mimi_trap_div_overflow()
+
 define i32 @fact(i32 %0) {
 entry:
   %n = alloca i32, align 4
@@ -751,17 +759,35 @@ else:                                             ; preds = %entry
   %n2 = load i32, ptr %n, align 4
   %n3 = load i32, ptr %n, align 4
   %promote4 = sext i32 %n3 to i64
-  %sub = sub i64 %promote4, 1
-  %trunc = trunc i64 %sub to i32
-  %call = call i32 @fact(i32 %trunc)
-  %mul = mul i32 %n2, %call
-  %func_if_else_sext = sext i32 %mul to i64
-  br label %ifcont
+  %checked_op = call { i64, i1 } @llvm.ssub.with.overflow.i64(i64 %promote4, i64 1)
+  %op_result = extractvalue { i64, i1 } %checked_op, 0
+  %op_overflow = extractvalue { i64, i1 } %checked_op, 1
+  br i1 %op_overflow, label %trap_overflow, label %op_ok
 
-ifcont:                                           ; preds = %else, %then
-  %if_result = phi i64 [ 1, %then ], [ %func_if_else_sext, %else ]
-  %trunc5 = trunc i64 %if_result to i32
-  ret i32 %trunc5
+ifcont:                                           ; preds = %op_ok9, %then
+  %if_result = phi i64 [ 1, %then ], [ %func_if_else_sext, %op_ok9 ]
+  %trunc10 = trunc i64 %if_result to i32
+  ret i32 %trunc10
+
+trap_overflow:                                    ; preds = %else
+  call void @mimi_trap_overflow(ptr @op_name)
+  unreachable
+
+op_ok:                                            ; preds = %else
+  %trunc = trunc i64 %op_result to i32
+  %call = call i32 @fact(i32 %trunc)
+  %checked_op5 = call { i32, i1 } @llvm.smul.with.overflow.i32(i32 %n2, i32 %call)
+  %op_result6 = extractvalue { i32, i1 } %checked_op5, 0
+  %op_overflow7 = extractvalue { i32, i1 } %checked_op5, 1
+  br i1 %op_overflow7, label %trap_overflow8, label %op_ok9
+
+trap_overflow8:                                   ; preds = %op_ok
+  call void @mimi_trap_overflow(ptr @op_name.10)
+  unreachable
+
+op_ok9:                                           ; preds = %op_ok
+  %func_if_else_sext = sext i32 %op_result6 to i64
+  br label %ifcont
 }
 
 define i32 @main() {
@@ -916,4 +942,11 @@ entry:
   ret { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load
 }
 
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare { i64, i1 } @llvm.ssub.with.overflow.i64(i64, i64) #1
+
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare { i32, i1 } @llvm.smul.with.overflow.i32(i32, i32) #1
+
 attributes #0 = { noreturn }
+attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }

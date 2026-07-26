@@ -14,7 +14,9 @@ source_filename = "golden_test"
 @malloc_call_oom_msg = private unnamed_addr constant [14 x i8] c"out of memory\00", align 1
 @oob_msg = private unnamed_addr constant [50 x i8] c"list index out of bounds: index read (idx >= len)\00", align 1
 @oob_msg.10 = private unnamed_addr constant [50 x i8] c"list index out of bounds: index read (idx >= len)\00", align 1
+@op_name = private unnamed_addr constant [9 x i8] c"addition\00", align 1
 @oob_msg.11 = private unnamed_addr constant [50 x i8] c"list index out of bounds: index read (idx >= len)\00", align 1
+@op_name.12 = private unnamed_addr constant [9 x i8] c"addition\00", align 1
 
 declare i32 @printf(ptr, ...)
 
@@ -739,6 +741,12 @@ declare i32 @mimi_quote_argc(ptr)
 
 declare ptr @mimi_quote_list_child(ptr, i64)
 
+declare void @mimi_trap_overflow(ptr)
+
+declare void @mimi_trap_div_by_zero()
+
+declare void @mimi_trap_div_overflow()
+
 define i32 @main() {
 entry:
   %xs = alloca ptr, align 8
@@ -793,7 +801,20 @@ bounds_ok10:                                      ; preds = %bounds_fail11, %bou
   %data14 = load ptr, ptr %list.data13, align 8
   %elem15 = getelementptr inbounds i64, ptr %data14, i64 1
   %elem_val16 = load i64, ptr %elem15, align 4
-  %add = add i64 %elem_val, %elem_val16
+  %checked_op = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %elem_val, i64 %elem_val16)
+  %op_result = extractvalue { i64, i1 } %checked_op, 0
+  %op_overflow = extractvalue { i64, i1 } %checked_op, 1
+  br i1 %op_overflow, label %trap_overflow, label %op_ok
+
+bounds_fail11:                                    ; preds = %bounds_ok
+  call void @mimi_runtime_abort(ptr @oob_msg.10)
+  br label %bounds_ok10
+
+trap_overflow:                                    ; preds = %bounds_ok10
+  call void @mimi_trap_overflow(ptr @op_name)
+  unreachable
+
+op_ok:                                            ; preds = %bounds_ok10
   %xs17 = load ptr, ptr %xs, align 8
   %list.len_check18 = getelementptr inbounds { i64, ptr }, ptr %xs17, i32 0, i32 0
   %list_len19 = getelementptr inbounds { i64, ptr }, ptr %xs17, i32 0, i32 0
@@ -801,25 +822,30 @@ bounds_ok10:                                      ; preds = %bounds_fail11, %bou
   %oob23 = icmp uge i64 2, %list_len_val20
   br i1 %oob23, label %bounds_fail22, label %bounds_ok21
 
-bounds_fail11:                                    ; preds = %bounds_ok
-  call void @mimi_runtime_abort(ptr @oob_msg.10)
-  br label %bounds_ok10
-
-bounds_ok21:                                      ; preds = %bounds_fail22, %bounds_ok10
+bounds_ok21:                                      ; preds = %bounds_fail22, %op_ok
   %list.data24 = getelementptr inbounds { i64, ptr }, ptr %xs17, i32 0, i32 1
   %data25 = load ptr, ptr %list.data24, align 8
   %elem26 = getelementptr inbounds i64, ptr %data25, i64 2
   %elem_val27 = load i64, ptr %elem26, align 4
-  %add28 = add i64 %add, %elem_val27
-  %trunc = trunc i64 %add28 to i32
+  %checked_op28 = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %op_result, i64 %elem_val27)
+  %op_result29 = extractvalue { i64, i1 } %checked_op28, 0
+  %op_overflow30 = extractvalue { i64, i1 } %checked_op28, 1
+  br i1 %op_overflow30, label %trap_overflow31, label %op_ok32
+
+bounds_fail22:                                    ; preds = %op_ok
+  call void @mimi_runtime_abort(ptr @oob_msg.11)
+  br label %bounds_ok21
+
+trap_overflow31:                                  ; preds = %bounds_ok21
+  call void @mimi_trap_overflow(ptr @op_name.12)
+  unreachable
+
+op_ok32:                                          ; preds = %bounds_ok21
+  %trunc = trunc i64 %op_result29 to i32
   %heap_slot_gep = getelementptr inbounds { i64, ptr }, ptr %list, i32 0, i32 1
   %heap_slot = load ptr, ptr %heap_slot_gep, align 8
   call void @free(ptr %heap_slot)
   ret i32 %trunc
-
-bounds_fail22:                                    ; preds = %bounds_ok10
-  call void @mimi_runtime_abort(ptr @oob_msg.11)
-  br label %bounds_ok21
 }
 
 define {} @Main__run__from_Single({} %0) {
@@ -971,4 +997,8 @@ entry:
 ; Function Attrs: noreturn
 declare void @mimi_runtime_abort(ptr) #0
 
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64) #1
+
 attributes #0 = { noreturn }
+attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }

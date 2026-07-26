@@ -60,27 +60,30 @@ fn ir_void_main() {
 #[test]
 fn ir_i32_add() {
     let ir = compile_to_ir("func main(a: i32, b: i32) -> i32 { a + b }");
+    // SD-7 (0.31.51a): checked arithmetic uses LLVM overflow intrinsics.
     assert!(
-        ir.contains("add i32"),
-        "i32 add uses native i32 (A1 restoration)"
+        ir.contains("llvm.sadd.with.overflow.i32"),
+        "i32 add uses checked arithmetic intrinsic (SD-7)"
     );
 }
 
 #[test]
 fn ir_i32_mul() {
     let ir = compile_to_ir("func main(a: i32, b: i32) -> i32 { a * b }");
+    // SD-7 (0.31.51a): checked arithmetic uses LLVM overflow intrinsics.
     assert!(
-        ir.contains("mul i32"),
-        "i32 mul uses native i32 (A1 restoration)"
+        ir.contains("llvm.smul.with.overflow.i32"),
+        "i32 mul uses checked arithmetic intrinsic (SD-7)"
     );
 }
 
 #[test]
 fn ir_sdiv() {
     let ir = compile_to_ir("func main(a: i32, b: i32) -> i32 { a / b }");
+    // SD-8 (0.31.51a): division still uses sdiv but with zero/MIN-1 checks.
     assert!(
         ir.contains("sdiv "),
-        "signed integer division uses native i32 (A1 restoration)"
+        "signed integer division uses native sdiv (SD-8 with guards)"
     );
 }
 

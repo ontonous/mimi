@@ -11,6 +11,9 @@ source_filename = "golden_test"
 @str.7 = private unnamed_addr constant [11 x i8] c"peer_fault\00", align 1
 @str.8 = private unnamed_addr constant [1 x i8] zeroinitializer, align 1
 @str.9 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
+@op_name = private unnamed_addr constant [12 x i8] c"subtraction\00", align 1
+@op_name.10 = private unnamed_addr constant [12 x i8] c"subtraction\00", align 1
+@op_name.11 = private unnamed_addr constant [9 x i8] c"addition\00", align 1
 
 declare i32 @printf(ptr, ...)
 
@@ -735,6 +738,12 @@ declare i32 @mimi_quote_argc(ptr)
 
 declare ptr @mimi_quote_list_child(ptr, i64)
 
+declare void @mimi_trap_overflow(ptr)
+
+declare void @mimi_trap_div_by_zero()
+
+declare void @mimi_trap_div_overflow()
+
 define i32 @fib(i32 %0) {
 entry:
   %n = alloca i32, align 4
@@ -751,20 +760,47 @@ then:                                             ; preds = %entry
 else:                                             ; preds = %entry
   %n3 = load i32, ptr %n, align 4
   %promote4 = sext i32 %n3 to i64
-  %sub = sub i64 %promote4, 1
-  %trunc = trunc i64 %sub to i32
+  %checked_op = call { i64, i1 } @llvm.ssub.with.overflow.i64(i64 %promote4, i64 1)
+  %op_result = extractvalue { i64, i1 } %checked_op, 0
+  %op_overflow = extractvalue { i64, i1 } %checked_op, 1
+  br i1 %op_overflow, label %trap_overflow, label %op_ok
+
+ifcont:                                           ; preds = %op_ok18, %then
+  %if_result = phi i32 [ %n2, %then ], [ %op_result15, %op_ok18 ]
+  ret i32 %if_result
+
+trap_overflow:                                    ; preds = %else
+  call void @mimi_trap_overflow(ptr @op_name)
+  unreachable
+
+op_ok:                                            ; preds = %else
+  %trunc = trunc i64 %op_result to i32
   %call = call i32 @fib(i32 %trunc)
   %n5 = load i32, ptr %n, align 4
   %promote6 = sext i32 %n5 to i64
-  %sub7 = sub i64 %promote6, 2
-  %trunc8 = trunc i64 %sub7 to i32
-  %call9 = call i32 @fib(i32 %trunc8)
-  %add = add i32 %call, %call9
-  br label %ifcont
+  %checked_op7 = call { i64, i1 } @llvm.ssub.with.overflow.i64(i64 %promote6, i64 2)
+  %op_result8 = extractvalue { i64, i1 } %checked_op7, 0
+  %op_overflow9 = extractvalue { i64, i1 } %checked_op7, 1
+  br i1 %op_overflow9, label %trap_overflow10, label %op_ok11
 
-ifcont:                                           ; preds = %else, %then
-  %if_result = phi i32 [ %n2, %then ], [ %add, %else ]
-  ret i32 %if_result
+trap_overflow10:                                  ; preds = %op_ok
+  call void @mimi_trap_overflow(ptr @op_name.10)
+  unreachable
+
+op_ok11:                                          ; preds = %op_ok
+  %trunc12 = trunc i64 %op_result8 to i32
+  %call13 = call i32 @fib(i32 %trunc12)
+  %checked_op14 = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %call, i32 %call13)
+  %op_result15 = extractvalue { i32, i1 } %checked_op14, 0
+  %op_overflow16 = extractvalue { i32, i1 } %checked_op14, 1
+  br i1 %op_overflow16, label %trap_overflow17, label %op_ok18
+
+trap_overflow17:                                  ; preds = %op_ok11
+  call void @mimi_trap_overflow(ptr @op_name.11)
+  unreachable
+
+op_ok18:                                          ; preds = %op_ok11
+  br label %ifcont
 }
 
 define i32 @main() {
@@ -919,4 +955,11 @@ entry:
   ret { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load
 }
 
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare { i64, i1 } @llvm.ssub.with.overflow.i64(i64, i64) #1
+
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare { i32, i1 } @llvm.sadd.with.overflow.i32(i32, i32) #1
+
 attributes #0 = { noreturn }
+attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }

@@ -18282,6 +18282,67 @@ pub extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
     std::process::abort();
 }
 
+// ── SD-7/SD-8 (0.31.51a): Arithmetic trap functions ──────────────────
+// Trap = synchronous arithmetic failure (E08xx). These are NOT Faults
+// (Flow state machine invariant violations). Different channels.
+
+/// SD-7: Integer overflow trap. Called when checked arithmetic detects
+/// overflow in add/sub/mul. Prints diagnostic and aborts.
+#[no_mangle]
+pub extern "C" fn mimi_trap_overflow(op: *const std::ffi::c_char) -> ! {
+    extern "C" {
+        fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
+    }
+    const PREFIX: &[u8] = b"[E0801] integer overflow in ";
+    const SUFFIX: &[u8] =
+        b"\nHint: use wrapping_add/wrapping_sub/wrapping_mul for wrap-around semantics.\n";
+    // SAFETY: writing static byte buffers to stderr (fd 2) is async-signal-safe.
+    unsafe {
+        let _ = write(2, PREFIX.as_ptr() as *const std::ffi::c_void, PREFIX.len());
+        if !op.is_null() {
+            let mut len = 0usize;
+            let base = op as *const u8;
+            const MAX_MSG: usize = 64;
+            while len < MAX_MSG && *base.add(len) != 0 {
+                len += 1;
+            }
+            let _ = write(2, op as *const std::ffi::c_void, len);
+        }
+        let _ = write(2, SUFFIX.as_ptr() as *const std::ffi::c_void, SUFFIX.len());
+    }
+    std::process::abort();
+}
+
+/// SD-8: Division by zero trap. Called when integer division or modulo
+/// has a zero divisor. Prints diagnostic and aborts.
+#[no_mangle]
+pub extern "C" fn mimi_trap_div_by_zero() -> ! {
+    extern "C" {
+        fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
+    }
+    const MSG: &[u8] = b"[E0801] integer division by zero\n";
+    // SAFETY: writing static byte buffer to stderr (fd 2) is async-signal-safe.
+    unsafe {
+        let _ = write(2, MSG.as_ptr() as *const std::ffi::c_void, MSG.len());
+    }
+    std::process::abort();
+}
+
+/// SD-8: MIN/-1 division trap. Called when i32::MIN / -1 or i64::MIN / -1
+/// is attempted (result overflows the signed range).
+#[no_mangle]
+pub extern "C" fn mimi_trap_div_overflow() -> ! {
+    extern "C" {
+        fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
+    }
+    const MSG: &[u8] = b"[E0801] integer division overflow (MIN / -1)\n";
+    // SAFETY: writing static byte buffer to stderr (fd 2) is async-signal-safe.
+    unsafe {
+        let _ = write(2, MSG.as_ptr() as *const std::ffi::c_void, MSG.len());
+    }
+    std::process::abort();
+}
+
 /// DEAD: 架构修正案条款 10 废除同步 pinned timeout。此函数仅供已废止的看门狗使用。
 /// 清理排入后续 sprint。
 /// v0.29.32: Wall-clock timestamp in milliseconds since UNIX epoch.
