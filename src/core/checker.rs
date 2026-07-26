@@ -304,20 +304,25 @@ impl<'a> Checker<'a> {
         };
         let mut zonked = std::collections::BTreeMap::new();
         for (key, ty) in expression_types {
-            match crate::core::phase::ZonkedTy::from_expression_type(
-                &ty,
-                &mut self.unification,
-            ) {
+            match crate::core::phase::ZonkedTy::from_expression_type(&ty, &mut self.unification) {
                 Ok(ty) => {
                     zonked.insert(key, ty);
                 }
-                Err(error) => self.errors.push(Diagnostic::error(
-                    format!(
-                        "TOOL-RESOLUTION-001: expression {:?} in '{}' did not finalize to a monotype: {}",
-                        key, owner.0, error
-                    ),
-                    self.diagnostic_span(),
-                )),
+                Err(error) => {
+                    // 0.31.46: suppress TOOL-RESOLUTION-001 cascade noise when
+                    // real errors already exist. These are internal resolution
+                    // failures that add no user-facing value when the root cause
+                    // (e.g. undefined function, type mismatch) is already reported.
+                    if self.errors.is_empty() {
+                        self.errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: expression in '{}' did not finalize to a monotype: {}",
+                                owner.0, error
+                            ),
+                            self.diagnostic_span(),
+                        ));
+                    }
+                }
             }
         }
         self.zonked_expr_types.insert(owner, zonked);
