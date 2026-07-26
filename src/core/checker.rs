@@ -548,6 +548,9 @@ impl<'a> Checker<'a> {
     }
 
     /// C2: Unify two types, emitting a diagnostic on failure.
+    ///
+    /// The diagnostic span is set from `current_span` via `diagnostic_span()`,
+    /// providing provenance for where the constraint was generated.
     pub(crate) fn unify_types(&mut self, expected: &Type, actual: &Type) -> bool {
         match self.unification.unify(expected, actual) {
             Ok(()) => true,
