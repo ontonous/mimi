@@ -92,6 +92,52 @@ impl VerifStatus {
             VerifStatus::SolverUnknown | VerifStatus::Timeout | VerifStatus::InfrastructureError
         )
     }
+
+    /// 0.31.42: Plain-language description for non-expert users.
+    ///
+    /// Translates the SMT/verification jargon into actionable guidance.
+    /// Used by CLI display and LSP hover.
+    pub fn plain_language(&self) -> &'static str {
+        match self {
+            VerifStatus::Proven => "contract verified — the function always satisfies its ensures clause when the requires clause holds",
+            VerifStatus::Disproven => "contract violated — there exist inputs satisfying requires that break ensures",
+            VerifStatus::NotInTrustedSubset => "not verifiable — the function uses features outside the verified subset (loops, heap, FFI, actors, etc.)",
+            VerifStatus::SolverUnknown => "inconclusive — the solver could not determine correctness (try simplifying the contract or adding lemmas)",
+            VerifStatus::Timeout => "timed out — the solver exceeded its time budget (try simplifying the contract or increasing the timeout)",
+            VerifStatus::InfrastructureError => "infrastructure error — the solver is unavailable or crashed (check Z3 installation)",
+            VerifStatus::RuntimeOnlyContract => "runtime-only contract — the contract references mutable state that cannot be verified statically",
+            VerifStatus::NoObligations => "no obligations — the function has no requires/ensures to verify",
+        }
+    }
+
+    /// 0.31.42: Actionable hint for the user.
+    ///
+    /// Returns `None` for Proven/NoObligations (no action needed).
+    pub fn hint(&self) -> Option<&'static str> {
+        match self {
+            VerifStatus::Proven | VerifStatus::NoObligations => None,
+            VerifStatus::Disproven => Some("check the counterexample below — it shows specific inputs that violate the contract"),
+            VerifStatus::NotInTrustedSubset => Some("consider extracting the verifiable logic into a pure helper function"),
+            VerifStatus::SolverUnknown => Some("try adding intermediate assertions (math:) to guide the solver"),
+            VerifStatus::Timeout => Some("try breaking the contract into smaller lemmas or increasing --timeout"),
+            VerifStatus::InfrastructureError => Some("install Z3: apt install z3 / brew install z3"),
+            VerifStatus::RuntimeOnlyContract => Some("consider using a pure function for the verifiable invariant"),
+        }
+    }
+
+    /// 0.31.42: CLI icon for compact display.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            VerifStatus::Proven => "✓",
+            VerifStatus::Disproven => "✗",
+            VerifStatus::NotInTrustedSubset => "⊘",
+            VerifStatus::SolverUnknown => "?",
+            VerifStatus::Timeout => "⏱",
+            VerifStatus::InfrastructureError => "⚠",
+            VerifStatus::RuntimeOnlyContract => "↻",
+            VerifStatus::NoObligations => "·",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1758,5 +1804,84 @@ impl VerifierCtx {
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── 0.31.42: Z3 error translation tests ──
+
+    #[test]
+    fn verif_status_plain_language_all_variants() {
+        let statuses = [
+            VerifStatus::Proven,
+            VerifStatus::Disproven,
+            VerifStatus::NotInTrustedSubset,
+            VerifStatus::SolverUnknown,
+            VerifStatus::Timeout,
+            VerifStatus::InfrastructureError,
+            VerifStatus::RuntimeOnlyContract,
+            VerifStatus::NoObligations,
+        ];
+        for status in &statuses {
+            let desc = status.plain_language();
+            assert!(!desc.is_empty(), "{:?} has empty plain_language", status);
+            // Should not contain obscure SMT jargon (Z3 is OK — it's actionable)
+            assert!(
+                !desc.contains("quantifier") && !desc.contains("instantiation"),
+                "{:?} plain_language contains jargon: {}",
+                status,
+                desc
+            );
+        }
+    }
+
+    #[test]
+    fn verif_status_hints() {
+        // Proven and NoObligations need no action
+        assert!(VerifStatus::Proven.hint().is_none());
+        assert!(VerifStatus::NoObligations.hint().is_none());
+
+        // All others have actionable hints
+        assert!(VerifStatus::Disproven.hint().is_some());
+        assert!(VerifStatus::NotInTrustedSubset.hint().is_some());
+        assert!(VerifStatus::SolverUnknown.hint().is_some());
+        assert!(VerifStatus::Timeout.hint().is_some());
+        assert!(VerifStatus::InfrastructureError.hint().is_some());
+        assert!(VerifStatus::RuntimeOnlyContract.hint().is_some());
+    }
+
+    #[test]
+    fn verif_status_icons() {
+        assert_eq!(VerifStatus::Proven.icon(), "✓");
+        assert_eq!(VerifStatus::Disproven.icon(), "✗");
+        assert_eq!(VerifStatus::NotInTrustedSubset.icon(), "⊘");
+        assert_eq!(VerifStatus::SolverUnknown.icon(), "?");
+        assert_eq!(VerifStatus::Timeout.icon(), "⏱");
+        assert_eq!(VerifStatus::InfrastructureError.icon(), "⚠");
+        assert_eq!(VerifStatus::RuntimeOnlyContract.icon(), "↻");
+        assert_eq!(VerifStatus::NoObligations.icon(), "·");
+    }
+
+    #[test]
+    fn verif_status_disproven_message_is_actionable() {
+        let desc = VerifStatus::Disproven.plain_language();
+        assert!(desc.contains("inputs"), "should mention inputs");
+        assert!(desc.contains("requires"), "should mention requires");
+        assert!(desc.contains("ensures"), "should mention ensures");
+
+        let hint = VerifStatus::Disproven.hint().unwrap();
+        assert!(
+            hint.contains("counterexample"),
+            "hint should mention counterexample"
+        );
+    }
+
+    #[test]
+    fn verif_status_backward_compat_aliases() {
+        assert_eq!(VerifStatus::Verified, VerifStatus::Proven);
+        assert_eq!(VerifStatus::Failed, VerifStatus::Disproven);
     }
 }
