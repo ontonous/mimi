@@ -3,6 +3,12 @@
 //
 // Linear capability tokens: mimi_cap_register issues a fresh cap id bound to a
 // name; mimi_cap_check / mimi_cap_consume verify / consume it exactly once.
+//
+// R-4 (0.31.52): KNOWN LIMITATION — CAP_TABLE is thread-local. A capability
+// registered on thread A cannot be checked/consumed on thread B (returns false
+// / no-op). This is by design for single-threaded Flow execution. Cross-thread
+// capability transfer requires explicit serialization (send cap id + name over
+// a Channel, re-register on the receiving thread). Documented, not a bug.
 // ===========================================================================
 
 use super::cstr_to_string;
