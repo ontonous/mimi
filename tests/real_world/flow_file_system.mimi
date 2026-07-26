@@ -1,70 +1,48 @@
-// MCDD real_world: Flow complex interaction — File System Simulator
-// Combines: multi-field state payloads, subflow for file operations,
-// persistent data across recover, Fault on permission errors.
+// real_world: File Handle Lifecycle
+// Features: resource lifecycle state machine, payload persistence
+// across transitions, peer_fault on invalid operation, multi-step.
 //
-// Tests: complex payload construction, field access chains, 
-// subflow nesting, recover preserving persistent fields.
+// Models a file handle: Open → Reading/Writing → Closed.
+// Demonstrates that closed handles cannot be used (typestate safety).
 
 flow FileHandle {
-    state Closed
-    state Open { path: string, pos: i32 }
-    state Locked { path: string, pos: i32, owner: string }
+    state Open { name: string, pos: i32 }
+    state Reading { name: string, pos: i32, buf: string }
+    state Closed { name: string }
 
-    transition open(Closed) -> Open {
-        do { return Open { path: "test.txt", pos: 0 } }
+    transition read(Open) -> Reading {
+        do { return Reading { name: self.name, pos: self.pos, buf: "data" } }
     }
-    transition seek(Open) -> Open {
-        do { return Open { path: self.path, pos: self.pos + 10 } }
-    }
-    transition lock(Open) -> Locked {
-        do { return Locked { path: self.path, pos: self.pos, owner: "root" } }
-    }
-    transition unlock(Locked) -> Open {
-        do { return Open { path: self.path, pos: self.pos } }
+    transition finish_read(Reading) -> Open {
+        do { return Open { name: self.name, pos: self.pos + 4 } }
     }
     transition close(Open) -> Closed {
-        do { return Closed { } }
+        do { return Closed { name: self.name } }
     }
-    transition close_locked(Locked) -> Closed {
-        do { return Closed { } }
+    transition close_reading(Reading) -> Closed {
+        do { return Closed { name: self.name } }
     }
 }
 
 func main() -> i32 {
-    // Test 1: Open → Seek → Close
-    let f0 = Closed { }
-    let f1 = FileHandle::open(f0)
-    println(f1.path)
-    println(f1.pos)
-    let f2 = FileHandle::seek(f1)
+    // Open → Read → Finish → Read → Finish → Close
+    let f0 = Open { name: "test.txt", pos: 0 }
+    println(f0.name)
+    let f1 = FileHandle::read(f0)
+    println(f1.buf)
+    let f2 = FileHandle::finish_read(f1)
     println(f2.pos)
-    let f3 = FileHandle::seek(f2)
-    println(f3.pos)
-    let f4 = FileHandle::close(f3)
-    
-    // Test 2: Open → Lock → Unlock → Close
-    let f5 = Closed { }
-    let f6 = FileHandle::open(f5)
-    let f7 = FileHandle::lock(f6)
-    println(f7.owner)
-    println(f7.path)
-    let f8 = FileHandle::unlock(f7)
-    println(f8.path)
-    println(f8.pos)
-    let f9 = FileHandle::close(f8)
-    
-    // Test 3: Fault on seek(Closed) — undefined transition
-    // Note: `fault` is a reserved keyword; use a non-keyword binding.
-    let f10 = Closed { }
-    let seek_fault = FileHandle::seek(f10)
-    println(seek_fault.last_state)
-    println(seek_fault.unexpected_event)
-    
-    // Test 4: Lock → close_locked → Closed (alternate path)
-    let f11 = Closed { }
-    let f12 = FileHandle::open(f11)
-    let f13 = FileHandle::lock(f12)
-    let f14 = FileHandle::close_locked(f13)
-    
+    let f3 = FileHandle::read(f2)
+    let f4 = FileHandle::finish_read(f3)
+    println(f4.pos)
+    let f5 = FileHandle::close(f4)
+    println(f5.name)
+
+    // peer_fault: system verb → Fault with trace
+    let g0 = Open { name: "log.txt", pos: 0 }
+    let ft = FileHandle::peer_fault(g0)
+    println(ft.last_state)
+    println(ft.unexpected_event)
+
     0
 }

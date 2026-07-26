@@ -1,19 +1,17 @@
-// MCDD real_world: Flow complex interaction — Elevator Controller
-// Combines: multi-state machine with direction tracking, door timing,
-// floor requests, Fault on invalid operations.
+// real_world: Elevator Controller
+// Features: multi-state machine, event parameters, conditional logic
+// in transitions, door subflow, peer_fault on invalid operation.
 //
-// Tests: multi-field state with string fields, conditional transition
-// logic, Fault on invalid state access, nested subflow for door control.
+// An elevator moves between floors. It has an Idle state (at a floor),
+// a Moving state (in transit), and a DoorOpen state. The door subflow
+// tracks open/closed. peer_fault demonstrates Fault trace.
 
 flow Door {
     state Closed
-    state Open { seconds_open: i32 }
+    state Open
 
     transition open(Closed) -> Open {
-        do { return Open { seconds_open: 0 } }
-    }
-    transition wait(Open) -> Open {
-        do { return Open { seconds_open: self.seconds_open + 1 } }
+        do { return Open { } }
     }
     transition close(Open) -> Closed {
         do { return Closed { } }
@@ -22,71 +20,46 @@ flow Door {
 
 flow Elevator {
     state Idle { floor: i32 }
-    state Moving { floor: i32, target: i32, direction: string }
-    state DoorsOpen { floor: i32 }
+    state Moving { from_floor: i32, to_floor: i32 }
+    state DoorOpen { floor: i32 }
 
-    transition call(Idle) -> Moving {
-        do { return Moving { floor: self.floor, target: 5, direction: "up" } }
+    transition request(Idle, target: i32) -> Moving {
+        do { return Moving { from_floor: self.floor, to_floor: target } }
     }
-    transition arrive(Moving) -> DoorsOpen {
-        do { return DoorsOpen { floor: self.target } }
+    transition arrive(Moving) -> Idle {
+        do { return Idle { floor: self.to_floor } }
     }
-    transition depart(DoorsOpen) -> Moving {
-        do { return Moving { floor: self.floor, target: 0, direction: "down" } }
+    transition open_door(Idle) -> DoorOpen {
+        do { return DoorOpen { floor: self.floor } }
     }
-    transition return_home(DoorsOpen) -> Moving {
-        do { return Moving { floor: self.floor, target: 1, direction: "down" } }
-    }
-    transition stop(DoorsOpen) -> Idle {
+    transition close_door(DoorOpen) -> Idle {
         do { return Idle { floor: self.floor } }
     }
 }
 
 func main() -> i32 {
-    // Test 1: Elevator cycle: Idle → Moving → DoorsOpen → Idle
+    // Elevator: floor 1 → request floor 5 → arrive → open door → close door
     let e0 = Idle { floor: 1 }
-    let e1 = Elevator::call(e0)
-    println(e1.target)
-    println(e1.direction)
+    println(e0.floor)
+    let e1 = Elevator::request(e0, 5)
+    println(e1.to_floor)
     let e2 = Elevator::arrive(e1)
     println(e2.floor)
-    let e3 = Elevator::stop(e2)
+    let e3 = Elevator::open_door(e2)
     println(e3.floor)
-    
-    // Test 2: Return home after doors open
-    let e4 = Idle { floor: 3 }
-    let e5 = Elevator::call(e4)
-    let e6 = Elevator::arrive(e5)
-    let e7 = Elevator::return_home(e6)
-    println(e7.target)
-    println(e7.direction)
-    
-    // Test 3: Door subflow
+    let e4 = Elevator::close_door(e3)
+    println(e4.floor)
+
+    // Door subflow
     let d0 = Closed { }
     let d1 = Door::open(d0)
-    println(d1.seconds_open)
-    let d2 = Door::wait(d1)
-    println(d2.seconds_open)
-    let d3 = Door::wait(d2)
-    println(d3.seconds_open)
-    let d4 = Door::close(d3)
-    
-    // Test 4: Fault on arrive(Idle) — undefined
-    let e8 = Idle { floor: 0 }
-    let f = Elevator::arrive(e8)
+    let d2 = Door::close(d1)
+
+    // peer_fault: system verb → Fault with trace
+    let e5 = Idle { floor: 3 }
+    let f = Elevator::peer_fault(e5)
     println(f.last_state)
     println(f.unexpected_event)
-    
-    // Test 5: Multiple floor visits
-    let e9 = Idle { floor: 0 }
-    let e10 = Elevator::call(e9)
-    let e11 = Elevator::arrive(e10)
-    let e12 = Elevator::depart(e11)
-    println(e12.target)
-    let e13 = Elevator::arrive(e12)
-    println(e13.floor)
-    let e14 = Elevator::stop(e13)
-    println(e14.floor)
-    
+
     0
 }

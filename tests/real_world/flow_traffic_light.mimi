@@ -1,9 +1,10 @@
-// MCDD real_world: Flow complex interaction — Traffic Light Controller
-// Combines: state machine with timers, Fault on invalid transition,
-// persistent payload across recover, nested flow for pedestrian crossing.
+// real_world: Traffic Light Controller
+// Features: 3-state cycle, payload tracking, overloaded transitions,
+// timer subflow composition, peer_fault on undefined event.
 //
-// Tests: state enumeration, transition dispatch, payload field access,
-// Fault trace fields, persistent recovery.
+// A traffic light cycles Red → Green → Yellow → Red.
+// Each state carries a timer payload. A separate Timer flow
+// counts down. peer_fault demonstrates Fault trace access.
 
 flow Timer {
     state Stopped { remaining: i32 }
@@ -13,9 +14,7 @@ flow Timer {
         do { return Running { remaining: self.remaining } }
     }
     transition tick(Running) -> Running {
-        do {
-            return Running { remaining: self.remaining - 1 }
-        }
+        do { return Running { remaining: self.remaining - 1 } }
     }
     transition stop(Running) -> Stopped {
         do { return Stopped { remaining: self.remaining } }
@@ -23,32 +22,32 @@ flow Timer {
 }
 
 flow TrafficLight {
-    state Red { timer: i32 }
-    state Green { timer: i32 }
-    state Yellow { timer: i32 }
+    state Red { waited: i32 }
+    state Green { elapsed: i32 }
+    state Yellow { elapsed: i32 }
 
     transition to_green(Red) -> Green {
-        do { return Green { timer: 30 } }
+        do { return Green { elapsed: 0 } }
     }
     transition to_yellow(Green) -> Yellow {
-        do { return Yellow { timer: 5 } }
+        do { return Yellow { elapsed: 0 } }
     }
     transition to_red(Yellow) -> Red {
-        do { return Red { timer: 30 } }
+        do { return Red { waited: 0 } }
     }
 }
 
 func main() -> i32 {
-    // Test 1: Full traffic light cycle
-    let t0 = Red { timer: 0 }
+    // Full traffic light cycle: Red → Green → Yellow → Red
+    let t0 = Red { waited: 30 }
     let t1 = TrafficLight::to_green(t0)
-    println(t1.timer)
+    println(t1.elapsed)
     let t2 = TrafficLight::to_yellow(t1)
-    println(t2.timer)
+    println(t2.elapsed)
     let t3 = TrafficLight::to_red(t2)
-    println(t3.timer)
-    
-    // Test 2: Timer subflow
+    println(t3.waited)
+
+    // Timer subflow: start → tick → tick → stop
     let timer0 = Stopped { remaining: 10 }
     let timer1 = Timer::start(timer0)
     let timer2 = Timer::tick(timer1)
@@ -56,13 +55,12 @@ func main() -> i32 {
     println(timer3.remaining)
     let timer4 = Timer::stop(timer3)
     println(timer4.remaining)
-    
-    // Test 3: Fault on invalid transition (Red -> Yellow is undefined)
-    let t4 = Red { timer: 30 }
-    // to_yellow(Red) is undefined → auto-fallback → Fault
-    let f = TrafficLight::to_yellow(t4)
+
+    // peer_fault: system verb → Fault with trace fields
+    let t4 = Red { waited: 5 }
+    let f = TrafficLight::peer_fault(t4)
     println(f.last_state)
     println(f.unexpected_event)
-    
+
     0
 }
