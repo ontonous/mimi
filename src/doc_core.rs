@@ -78,6 +78,7 @@ fn type_to_string(ty: &Type) -> String {
         Type::WeakLocal(inner) => format!("weak_local<{}>", type_to_string(inner)),
         Type::Newtype(name, inner) => format!("{} /* newtype({}) */", name, type_to_string(inner)),
         Type::Nothing => "!".to_string(),
+        Type::TyErr => "«error»".to_string(),
         Type::Allocator => "allocator".to_string(),
         Type::Array(inner, size) => format!("[{}; {}]", type_to_string(inner), size),
         Type::Slice(inner) => format!("&[{}]", type_to_string(inner)),

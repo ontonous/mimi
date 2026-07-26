@@ -76,6 +76,7 @@ impl<'a> Checker<'a> {
             Type::Array(inner, size) => Type::Array(Box::new(self.resolve_type(inner)), *size),
             Type::Slice(inner) => Type::Slice(Box::new(self.resolve_type(inner))),
             Type::Nothing => Type::Nothing,
+            Type::TyErr => Type::TyErr,
             Type::Infer => Type::Infer,
             Type::ImplTrait(traits) => Type::ImplTrait(traits.clone()),
             Type::DynTrait(traits) => Type::DynTrait(traits.clone()),
@@ -149,7 +150,7 @@ impl<'a> Checker<'a> {
             }
             Type::ImplTrait(_) => false,
             Type::DynTrait(_) => false,
-            Type::Nothing | Type::Allocator | Type::Infer => false,
+            Type::Nothing | Type::Allocator | Type::Infer | Type::TyErr => false,
             Type::TypeVar(_) | Type::ForAll(_, _) => false,
         }
     }
@@ -315,7 +316,7 @@ impl<'a> Checker<'a> {
                 }
                 self.check_type_well_formed_inner(inner, context, allow_passport);
             }
-            Type::Cap(_) | Type::Nothing | Type::Allocator | Type::Infer => {}
+            Type::Cap(_) | Type::Nothing | Type::Allocator | Type::Infer | Type::TyErr => {}
             Type::Array(inner, _) | Type::Slice(inner) => {
                 self.check_type_well_formed_inner(inner, context, allow_passport);
             }
@@ -385,7 +386,7 @@ impl<'a> Checker<'a> {
             }
             Type::CBuffer(inner) => Self::type_contains_passport(inner),
             Type::Newtype(_, inner) => Self::type_contains_passport(inner),
-            Type::Cap(_) | Type::Nothing | Type::Allocator | Type::Infer => false,
+            Type::Cap(_) | Type::Nothing | Type::Allocator | Type::Infer | Type::TyErr => false,
             Type::ImplTrait(_) => false,
             Type::DynTrait(_) => false,
             Type::TypeVar(_) => false,

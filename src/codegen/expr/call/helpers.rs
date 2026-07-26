@@ -356,6 +356,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             | Type::ImplTrait(_)
             | Type::DynTrait(_)
             | Type::RawString
+            | Type::TyErr
             | Type::TypeVar(_)
             | Type::ForAll(_, _) => false,
         }

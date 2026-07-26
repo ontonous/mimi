@@ -808,6 +808,7 @@ fn remap_type_spans(ty: &mut Type, remap: &SourceIdRemap) -> Result<(), String> 
         | Type::DynTrait(_)
         | Type::RawString
         | Type::Infer
+        | Type::TyErr
         | Type::TypeVar(_) => Ok(()),
     }
 }
@@ -1460,6 +1461,7 @@ mod tests {
             | Type::DynTrait(_)
             | Type::RawString
             | Type::Infer
+            | Type::TyErr
             | Type::TypeVar(_) => {}
         }
     }

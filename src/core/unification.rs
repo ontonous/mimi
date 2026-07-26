@@ -325,7 +325,8 @@ impl UnificationTable {
             | Type::RawString
             | Type::Cap(_)
             | Type::ImplTrait(_)
-            | Type::DynTrait(_) => ty.clone(),
+            | Type::DynTrait(_)
+            | Type::TyErr => ty.clone(),
         };
         Ok(resolved)
     }
@@ -449,6 +450,12 @@ impl UnificationTable {
             (_, Type::Name(n, _)) if n == "_" => Ok(()),
             (Type::Name(n, _), _) if n == "Any" => Ok(()),
             (_, Type::Name(n, _)) if n == "Any" => Ok(()),
+
+            // 0.31.42: TyErr poison type — unifies with everything.
+            // Once a type error is detected, TyErr replaces the offending type
+            // to suppress cascading downstream errors. TyErr must never reach
+            // codegen (zonk phase rejects it).
+            (Type::TyErr, _) | (_, Type::TyErr) => Ok(()),
             // L12: single-sided "unknown" must not unify (helpers already reject);
             // both-unknown is allowed as a cascade placeholder only.
             (Type::Name(na, _), Type::Name(nb, _)) if na == "unknown" && nb != "unknown" => Err(
@@ -636,6 +643,9 @@ pub fn scan_residual(ty: &Type) -> Result<(), ResolveError> {
         Type::Infer => Err(ResolveError::ResidualType("Infer placeholder".into())),
         Type::Name(name, _) if name == "_" || name == "unknown" => Err(ResolveError::ResidualType(
             format!("non-final type name '{name}'"),
+        )),
+        Type::TyErr => Err(ResolveError::ResidualType(
+            "TyErr poison type in finalized output".into(),
         )),
         _ => Ok(()),
     })
@@ -883,5 +893,72 @@ mod tests {
             table.zonk(&Type::Name("unknown".into(), vec![])),
             Err(ResolveError::ResidualType(_))
         ));
+    }
+
+    // ── 0.31.42: TyErr poison type tests ──
+
+    #[test]
+    fn tyerr_unifies_with_any_type() {
+        let mut table = UnificationTable::new();
+        // TyErr unifies with primitives
+        assert!(table.unify(&Type::TyErr, &i32_ty()).is_ok());
+        assert!(table.unify(&string_ty(), &Type::TyErr).is_ok());
+        // TyErr unifies with complex types
+        assert!(table
+            .unify(&Type::TyErr, &Type::Option(Box::new(i32_ty())))
+            .is_ok());
+        // TyErr unifies with TyErr
+        assert!(table.unify(&Type::TyErr, &Type::TyErr).is_ok());
+    }
+
+    #[test]
+    fn tyerr_unifies_with_typevar() {
+        let mut table = UnificationTable::new();
+        let var = table.fresh_var();
+        // TyErr binds to TypeVar
+        assert!(table.unify(&Type::TypeVar(var), &Type::TyErr).is_ok());
+        // Resolving the var gives TyErr
+        assert_eq!(table.resolve(&Type::TypeVar(var)), Type::TyErr);
+    }
+
+    #[test]
+    fn zonk_rejects_tyerr() {
+        let mut table = UnificationTable::new();
+        // TyErr must not survive zonk (invariant: never reaches codegen)
+        assert!(matches!(
+            table.zonk(&Type::TyErr),
+            Err(ResolveError::ResidualType(_))
+        ));
+    }
+
+    #[test]
+    fn zonk_rejects_nested_tyerr() {
+        let mut table = UnificationTable::new();
+        // TyErr nested inside Option must also be rejected
+        let nested = Type::Option(Box::new(Type::TyErr));
+        assert!(matches!(
+            table.zonk(&nested),
+            Err(ResolveError::ResidualType(_))
+        ));
+    }
+
+    #[test]
+    fn tyerr_displays_as_error() {
+        assert_eq!(crate::core::helpers::fmt_type(&Type::TyErr), "«error»");
+    }
+
+    #[test]
+    fn tyerr_equality() {
+        assert_eq!(Type::TyErr, Type::TyErr);
+        assert_ne!(Type::TyErr, Type::Nothing);
+        assert_ne!(Type::TyErr, i32_ty());
+    }
+
+    #[test]
+    fn tyerr_is_infer_artifact() {
+        assert!(crate::core::phase::contains_infer_artifacts(&Type::TyErr));
+        assert!(crate::core::phase::contains_infer_artifacts(&Type::Option(
+            Box::new(Type::TyErr)
+        )));
     }
 }

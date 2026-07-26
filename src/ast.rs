@@ -861,6 +861,15 @@ pub enum Type {
     TypeVar(u32),
     /// Polymorphic type: forall T. Body
     ForAll(Vec<String>, Box<Type>),
+    /// 0.31.42: Poison type — injected when type inference fails.
+    ///
+    /// TyErr unifies with *any* type (poison semantics): once a type error
+    /// is detected, TyErr replaces the offending type to suppress cascading
+    /// downstream errors. Displayed as `«error»` in diagnostics.
+    ///
+    /// Invariant: TyErr must never reach codegen. The checker's zonk phase
+    /// rejects residual TyErr (same as residual TypeVar/Infer).
+    TyErr,
 }
 
 impl Type {
@@ -937,6 +946,7 @@ impl Type {
                 Type::Newtype(name, Box::new((*inner).deep_reorigin(meta)))
             }
             Type::Nothing => Type::Nothing,
+            Type::TyErr => Type::TyErr,
             Type::Allocator => Type::Allocator,
             Type::Array(inner, size) => Type::Array(Box::new((*inner).deep_reorigin(meta)), size),
             Type::Slice(inner) => Type::Slice(Box::new((*inner).deep_reorigin(meta))),
@@ -1024,7 +1034,8 @@ impl PartialEq for Type {
             (Nothing, Nothing)
             | (Allocator, Allocator)
             | (RawString, RawString)
-            | (Infer, Infer) => true,
+            | (Infer, Infer)
+            | (TyErr, TyErr) => true,
             (Array(a, a_len), Array(b, b_len)) => a_len == b_len && a == b,
             (ImplTrait(a), ImplTrait(b)) | (DynTrait(a), DynTrait(b)) => a == b,
             (TypeVar(a), TypeVar(b)) => a == b,

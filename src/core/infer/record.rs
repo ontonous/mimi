@@ -95,7 +95,8 @@ fn subst_with_depth(ty: &Type, subst: &HashMap<String, Type>, depth: usize) -> T
         | Type::RawString
         | Type::Cap(_)
         | Type::ImplTrait(_)
-        | Type::DynTrait(_) => {
+        | Type::DynTrait(_)
+        | Type::TyErr => {
             mimi_debug_assert!(
                 !matches!(ty.unlocated(), Type::Infer),
                 "substitute_type_params: unexpected Infer leaf type"

@@ -229,9 +229,9 @@ impl From<BackendTy> for Type {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn contains_infer_artifacts(ty: &Type) -> bool {
+pub(crate) fn contains_infer_artifacts(ty: &Type) -> bool {
     crate::core::type_folder::type_any(ty, &|t| match t {
-        Type::TypeVar(_) | Type::ForAll(..) | Type::Infer => true,
+        Type::TypeVar(_) | Type::ForAll(..) | Type::Infer | Type::TyErr => true,
         Type::Name(n, _) if n == "_" || n == "unknown" => true,
         _ => false,
     })
@@ -274,7 +274,8 @@ fn contains_dynamic_type(ty: &Type) -> bool {
         | Type::RawString
         | Type::Cap(_)
         | Type::ImplTrait(_)
-        | Type::DynTrait(_) => false,
+        | Type::DynTrait(_)
+        | Type::TyErr => false,
     }
 }
 

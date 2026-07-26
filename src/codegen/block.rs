@@ -648,6 +648,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     | Type::CBorrowMut(..)
                                                     | Type::RawString
                                                     | Type::Infer
+                                                    | Type::TyErr
                                                     | Type::TypeVar(..)
                                                     | Type::ForAll(..) => {}
                                                 }

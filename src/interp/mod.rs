@@ -2054,6 +2054,7 @@ impl<'a> Interpreter<'a> {
             }
             Type::Newtype(name, _) => name.clone(),
             Type::Nothing => "nothing".into(),
+            Type::TyErr => "«error»".into(),
             Type::Allocator => "Allocator".into(),
             Type::Array(inner, size) => format!("[{}; {}]", self.resolve_type_name(inner), size),
             Type::Slice(inner) => format!("[{}]", self.resolve_type_name(inner)),
