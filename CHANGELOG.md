@@ -2,6 +2,16 @@
 
 ## [Unreleased] — 0.1.1-dev
 
+### Phase F: Soundness（0.31.49–0.31.54）
+
+- **0.31.49 类型系统 `let _ =` 漏洞修复（T-1~T-4）**：push() 统一检查（`push(list_of_i32, "hello")` 被拒绝）；slice 索引整数验证；range 表达式整数验证（防御深度）；reduce() 签名验证（累加器/元素/返回类型三路统一）。Slice<X> 兼容 X（slice view 运行时强制）。+6 L2 测试。
+- **0.31.50 结构性缺口修复（T-6/T-7/T-8）**：resolve() 静默回退添加 debug_assert!；resolve_type 10 个所有权 wrapper 递归解析内部类型（Shared<MyAlias> 别名解析）；ExternFunc 泛型替换保留 ABI 标记（不再静默转为 Func）。
+- **0.31.51a SD-7/SD-8 整数 Trap**：add/sub/mul 使用 LLVM 溢出内建（llvm.sX.with.overflow）+ mimi_trap_overflow；div/mod 检查除零（mimi_trap_div_by_zero）和 MIN/-1（mimi_trap_div_overflow）。之前除零返回 0（静默），现在 Trap（显式失败）。21 个黄金文件重新生成。
+- **0.31.51b SD-9/10/12 浮点语义统一**：SD-9 codegen 浮点 NaN/Inf trap（fcmp UNO + llvm.fabs + OEQ vs Inf，mimi_trap_float_not_finite）；SD-10 解释器 float == 改为精确比较（消除 epsilon L1 divergence）；SD-12 json get_float → Result<f64, string>（消除 0.0/0.0 NaN 哨兵）+ str_parse_float 拒绝 "NaN"/"inf"。
+- **0.31.52 Runtime 安全（R-1/R-4）**：ERROR_HANDLER 函数指针存储 UB 修复（AtomicPtr<ErrorHandler> → AtomicPtr<()> + usize round-trip）；Capability 表 thread-local 限制文档化。
+- **0.31.53 Verifier 健全性（V-2）**：不可编码的 requires/ensures 改为 fail-closed（返回 NotInTrustedSubset），防止约束不完整时产生假 Proven。
+- **0.31.54 Interpreter/Quote（Q-1/I-4）**：QuotedAst::Return 设置 early_return（之前是空操作）；QuotedAst::For 每次迭代 push_scope/pop_scope（修复循环变量泄漏）。
+
 ### Phase D: 工具与隔离（0.31.42–0.31.44）
 
 - **0.31.42 TyErr 毒药类型 + Z3 报错翻译**：`TyErr` 毒药类型防止级联错误刷屏（18 文件 / 31 match arms）；`VerifStatus::plain_language()` + `hint()` + `icon()` 将 Z3 验证状态翻译为用户可读语言。+12 测试。
