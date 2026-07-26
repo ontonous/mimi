@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::core::checker::Checker;
-use crate::core::helpers::fmt_type;
+use crate::core::helpers::{fmt_type, is_int};
 use std::collections::HashMap;
 
 impl<'a> Checker<'a> {
@@ -244,10 +244,31 @@ impl<'a> Checker<'a> {
             }
         }
         if let Some(s) = start {
-            let _ = self.infer_expr(s, scopes);
+            // T-2 (0.31.49): validate slice index is integer.
+            let start_ty = self.infer_expr(s, scopes);
+            if !is_int(&start_ty) && !matches!(start_ty.unlocated(), Type::TypeVar(_) | Type::Infer)
+            {
+                self.emit_code(
+                    crate::diagnostic::codes::E0242,
+                    format!(
+                        "slice start index must be an integer, found {}",
+                        fmt_type(&start_ty)
+                    ),
+                );
+            }
         }
         if let Some(e) = end {
-            let _ = self.infer_expr(e, scopes);
+            // T-2 (0.31.49): validate slice index is integer.
+            let end_ty = self.infer_expr(e, scopes);
+            if !is_int(&end_ty) && !matches!(end_ty.unlocated(), Type::TypeVar(_) | Type::Infer) {
+                self.emit_code(
+                    crate::diagnostic::codes::E0242,
+                    format!(
+                        "slice end index must be an integer, found {}",
+                        fmt_type(&end_ty)
+                    ),
+                );
+            }
         }
         Type::Slice(Box::new(target_ty))
     }
@@ -258,8 +279,24 @@ impl<'a> Checker<'a> {
         end: &Expr,
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        let _ = self.infer_expr(start, scopes);
-        let _ = self.infer_expr(end, scopes);
+        // T-3 (0.31.49): validate range bounds are integers.
+        let start_ty = self.infer_expr(start, scopes);
+        if !is_int(&start_ty) && !matches!(start_ty.unlocated(), Type::TypeVar(_) | Type::Infer) {
+            self.emit_code(
+                crate::diagnostic::codes::E0242,
+                format!(
+                    "range start must be an integer, found {}",
+                    fmt_type(&start_ty)
+                ),
+            );
+        }
+        let end_ty = self.infer_expr(end, scopes);
+        if !is_int(&end_ty) && !matches!(end_ty.unlocated(), Type::TypeVar(_) | Type::Infer) {
+            self.emit_code(
+                crate::diagnostic::codes::E0242,
+                format!("range end must be an integer, found {}", fmt_type(&end_ty)),
+            );
+        }
         Type::Name("Range".into(), vec![])
     }
 

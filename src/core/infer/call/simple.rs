@@ -245,9 +245,29 @@ impl<'a> Checker<'a> {
                     let value_ty = self.infer_expr(&args[1], scopes);
                     if let Type::Name(name, elements) = list_ty.unlocated() {
                         if name == "List" && elements.len() == 1 {
-                            // Preserve the existing runtime-polymorphic push
-                            // surface while still constraining empty-list vars.
-                            let _ = self.unification.unify(&elements[0], &value_ty);
+                            // T-1 (0.31.49): unify element type with value type.
+                            // Previously `let _ =` silently dropped the result,
+                            // allowing push(list_of_i32, "hello") to pass.
+                            // Slice<X> is compatible with X (slice views are
+                            // coerced to their target type at runtime).
+                            let value_for_unify = match value_ty.unlocated() {
+                                Type::Slice(inner) => *inner.clone(),
+                                _ => value_ty.clone(),
+                            };
+                            if self
+                                .unification
+                                .unify(&elements[0], &value_for_unify)
+                                .is_err()
+                            {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0242,
+                                    format!(
+                                        "push expects value of type {}, found {}",
+                                        fmt_type(&elements[0]),
+                                        fmt_type(&value_ty)
+                                    ),
+                                );
+                            }
                         }
                     }
                 }
@@ -576,9 +596,70 @@ impl<'a> Checker<'a> {
                         "reduce expects 3 arguments",
                     );
                 } else {
-                    self.infer_expr(&args[0], scopes);
-                    self.infer_expr(&args[1], scopes);
+                    let list_ty = self.infer_expr(&args[0], scopes);
+                    let func_ty = self.infer_expr(&args[1], scopes);
                     let init_ty = self.infer_expr(&args[2], scopes);
+                    // T-4 (0.31.49): validate reduce signature.
+                    // reduce(list: List<T>, f: func(U, T) -> U, init: U) -> U
+                    // The accumulator type U is independent of element type T.
+                    let elem_ty = match list_ty.unlocated() {
+                        Type::Name(n, inner) if n == "List" && inner.len() == 1 => inner[0].clone(),
+                        _ => Type::Name("unknown".into(), vec![]),
+                    };
+                    // Validate the reducer function signature: func(U, T) -> U.
+                    if let Type::Func(params, ret) = func_ty.unlocated() {
+                        if params.len() == 2 {
+                            // Unify accumulator param with init type.
+                            if self.unification.unify(&params[0], &init_ty).is_err() {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0242,
+                                    format!(
+                                        "reduce init type {} does not match accumulator type {}",
+                                        fmt_type(&init_ty),
+                                        fmt_type(&params[0])
+                                    ),
+                                );
+                            }
+                            // Unify element param with list element type.
+                            if self.unification.unify(&params[1], &elem_ty).is_err() {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0242,
+                                    format!(
+                                        "reduce function element type {} does not match list element type {}",
+                                        fmt_type(&params[1]),
+                                        fmt_type(&elem_ty)
+                                    ),
+                                );
+                            }
+                            // Unify return type with accumulator type.
+                            if self.unification.unify(ret, &params[0]).is_err() {
+                                self.emit_code(
+                                    crate::diagnostic::codes::E0242,
+                                    format!(
+                                        "reduce function return type {} does not match accumulator type {}",
+                                        fmt_type(ret),
+                                        fmt_type(&params[0])
+                                    ),
+                                );
+                            }
+                            return init_ty;
+                        }
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!(
+                                "reduce expects a function with 2 parameters, found {}",
+                                params.len()
+                            ),
+                        );
+                    } else {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!(
+                                "reduce expects a function as second argument, found {}",
+                                fmt_type(&func_ty)
+                            ),
+                        );
+                    }
                     return init_ty;
                 }
                 return Type::Name("unknown".into(), vec![]);
