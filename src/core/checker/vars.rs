@@ -198,7 +198,16 @@ impl<'a> Checker<'a> {
                     .map(|e| Self::replace_generic_names_with_typevars(e, names))
                     .collect(),
             ),
-            Type::Func(args, ret) | Type::ExternFunc(args, ret) => Type::Func(
+            // T-8 (0.31.50): preserve ExternFunc variant during generic substitution.
+            // Previously ExternFunc was silently converted to Func, losing the
+            // ABI distinction needed for FFI boundary validation.
+            Type::Func(args, ret) => Type::Func(
+                args.iter()
+                    .map(|a| Self::replace_generic_names_with_typevars(a, names))
+                    .collect(),
+                Box::new(Self::replace_generic_names_with_typevars(ret, names)),
+            ),
+            Type::ExternFunc(args, ret) => Type::ExternFunc(
                 args.iter()
                     .map(|a| Self::replace_generic_names_with_typevars(a, names))
                     .collect(),
