@@ -1,15 +1,20 @@
 // real_world: Order Processing System
-// Features: business process state machine, fails E + ? in transition
-// body, event parameters, multi-step workflow, peer_fault trace.
+// Features: business process state machine, fails E for payment
+// failure via ? operator, Result matching on transition return,
+// event parameters, multi-step workflow.
 //
 // Order lifecycle: Pending → Paid → Shipped → Delivered.
 // The pay transition uses `fails string` + ? to model payment rejection.
+// fails E returns Result<Target, (Source, E)> — the caller matches on
+// the Result to handle success (continue pipeline) or failure (inspect
+// source state + error message).
 //
-// Known limitation: matching on Result<Target, (Source, E)> in user code
-// triggers E0304 (linear resource consumed on only some CFG paths) because
-// the Ok arm consumes the state through transitions while the Err arm
-// reads fields. This is a resource analysis gap, not a test issue.
-// The fails E mechanism itself works correctly within transition bodies.
+// ⚠ KNOWN LIMITATION (E0304): matching on Result<Target, (Source, E)>
+// triggers "resource consumed on only some CFG paths" because the Ok arm
+// consumes the state through transitions while the Err arm reads fields.
+// This is a resource analysis gap — match arms are mutually exclusive,
+// so consumption on one arm should not require consumption on the other.
+// When fixed, this test should pass without modification.
 
 func validate_price(price: i32) -> Result<i32, string> {
     if price <= 0 {
@@ -24,7 +29,6 @@ flow Order {
     state Shipped { item: string, tracking: string }
     state Delivered { item: string }
 
-    // fails E: ? on validate_price failure returns Err((Pending, string))
     transition pay(Pending, txn_id: string) -> Paid fails string {
         do {
             let valid_price = validate_price(self.price)?
@@ -41,20 +45,34 @@ flow Order {
 
 func main() -> i32 {
     // Happy path: Pending → Paid → Shipped → Delivered
-    // Note: pay returns Result<Paid, (Pending, string)> due to fails E.
-    // We call it and let the Result drop (happy path doesn't need to match).
     let o0 = Pending { item: "book", price: 25 }
-    let _pay_result = Order::pay(o0, "TXN-42")
+    let pay_result = Order::pay(o0, "TXN-42")
+    match pay_result {
+        Ok(o1) => {
+            println(o1.txn)
+            let o2 = Order::ship(o1)
+            println(o2.tracking)
+            let o3 = Order::deliver(o2)
+            println(o3.item)
+        },
+        Err((src, e)) => {
+            // Rejected path: source state returned, error message available.
+            // The caller can inspect src to decide retry logic.
+            println(e)
+            println(src.item)
+        },
+    }
 
-    // Direct transition chain (without fails E) for the rest
-    let p0 = Pending { item: "pen", price: 5 }
-    // Use a non-fails transition to get a Paid state directly
-    // (pay has fails E, so we demonstrate the chain via peer_fault instead)
-
-    // peer_fault: system-level Fault with trace fields
-    let f = Order::peer_fault(p0)
-    println(f.last_state)
-    println(f.unexpected_event)
+    // Failure path: price <= 0 triggers ? → Rejected
+    let bad = Pending { item: "free", price: 0 }
+    let bad_result = Order::pay(bad, "TXN-99")
+    match bad_result {
+        Ok(o) => println(o.price),
+        Err((src, e)) => {
+            println(e)
+            println(src.price)
+        },
+    }
 
     0
 }
