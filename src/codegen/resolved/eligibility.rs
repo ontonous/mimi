@@ -275,7 +275,9 @@ fn require_conversion(
 ) -> Result<(), UnsupportedResolvedNode> {
     if matches!(
         conversion,
-        CheckedConversionKind::Identity | CheckedConversionKind::NumericWiden
+        CheckedConversionKind::Identity
+            | CheckedConversionKind::NumericWiden
+            | CheckedConversionKind::NumericNarrowChecked
     ) {
         Ok(())
     } else {
