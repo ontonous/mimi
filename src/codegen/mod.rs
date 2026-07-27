@@ -1661,6 +1661,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.heap_allocs.borrow_mut().push(Vec::new());
     }
 
+    /// Pop the current heap scope WITHOUT freeing any allocations.
+    /// Used by the resolved emitter when returning string values:
+    /// the caller takes ownership of the heap data.
+    pub(super) fn drain_heap_scope(&self) {
+        self.heap_allocs.borrow_mut().pop();
+    }
+
     /// G10: Pop scope level and emit `free(ptr)` for each registered heap allocation.
     ///
     /// For all entry types the heap pointer is loaded from an entry-block alloca
