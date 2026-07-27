@@ -1814,6 +1814,7 @@ fn resolved_type_display_name(program: &CheckedProgram, ty: &ResolvedTypeId) -> 
 
 #[cfg(test)]
 mod tests {
+    use super::eligibility::require_resolved_native_callable;
     use super::*;
 
     #[test]
@@ -2139,6 +2140,228 @@ func main() -> i32 {
         assert!(
             ir.contains("hello resolved"),
             "expected string constant in IR: {ir}"
+        );
+    }
+
+    /// Diagnostic: dispatch distribution across representative programs.
+    /// Run with `--nocapture` to see the per-function eligibility report.
+    /// This test documents the current resolved-native coverage and identifies
+    /// the most common ineligibility reasons for 0.1.2 Phase A planning.
+    #[test]
+    fn dispatch_diagnostic_coverage_report() {
+        let probes: Vec<(&str, &str)> = vec![
+            (
+                "pure_scalar",
+                r#"
+func add(a: i32, b: i32) -> i32 { a + b }
+func main() -> i32 { add(1, 2) }
+"#,
+            ),
+            (
+                "tuple_return",
+                r#"
+func divmod(a: i64, b: i64) -> (i64, i64) { (a / b, a % b) }
+func main() -> i32 { let (q, r) = divmod(17, 5); 0 }
+"#,
+            ),
+            (
+                "while_loop",
+                r#"
+func sum_to(n: i32) -> i32 {
+    let mut s = 0
+    let mut i = 0
+    while i < n { s = s + i; i = i + 1 }
+    s
+}
+func main() -> i32 { sum_to(10) }
+"#,
+            ),
+            (
+                "if_else_expr",
+                r#"
+func abs(x: i32) -> i32 { if x < 0 { 0 - x } else { x } }
+func main() -> i32 { abs(0 - 5) }
+"#,
+            ),
+            (
+                "match_literal",
+                r#"
+func classify(x: i32) -> i32 {
+    match x { 0 => 10, 1 => 20, _ => 30 }
+}
+func main() -> i32 { classify(1) }
+"#,
+            ),
+            (
+                "builtin_math",
+                r#"
+func compute() -> f64 { sqrt(16.0) }
+func main() -> i32 { let r = compute(); if r == 4.0 { 1 } else { 0 } }
+"#,
+            ),
+            (
+                "println_scalar",
+                r#"
+func main() -> i32 { println(42); 0 }
+"#,
+            ),
+            (
+                "list_param",
+                r#"
+func sum(xs: List<i64>) -> i64 {
+    let mut t: i64 = 0
+    let mut i: i64 = 0
+    while i < len(xs) { t = t + xs[i]; i = i + 1 }
+    t
+}
+func main() -> i32 { 0 }
+"#,
+            ),
+            (
+                "string_param",
+                r#"
+func greet(name: string) -> string { name }
+func main() -> i32 { 0 }
+"#,
+            ),
+            (
+                "closure_param",
+                r#"
+func apply_twice(x: i32) -> i32 { x + x }
+func main() -> i32 { apply_twice(5) }
+"#,
+            ),
+            (
+                "option_return",
+                r#"
+func find(xs: List<i64>, target: i64) -> Option<i64> {
+    let mut i: i64 = 0
+    while i < len(xs) {
+        if xs[i] == target { return Some(i) }
+        i = i + 1
+    }
+    None
+}
+func main() -> i32 { 0 }
+"#,
+            ),
+            (
+                "fstring",
+                r#"
+func main() -> i32 {
+    let x = 42
+    println(f"x = {x}")
+    0
+}
+"#,
+            ),
+            (
+                "multi_func_chain",
+                r#"
+func step1(x: i32) -> i32 { x + 1 }
+func step2(x: i32) -> i32 { x * 2 }
+func pipeline(x: i32) -> i32 { step2(step1(x)) }
+func main() -> i32 { pipeline(5) }
+"#,
+            ),
+            (
+                "early_return",
+                r#"
+func guard(x: i32) -> i32 {
+    if x < 0 { return 0 - 1 }
+    x
+}
+func main() -> i32 { guard(5) }
+"#,
+            ),
+            (
+                "nested_calls",
+                r#"
+func double(x: i32) -> i32 { x * 2 }
+func quadruple(x: i32) -> i32 { double(double(x)) }
+func main() -> i32 { quadruple(3) }
+"#,
+            ),
+        ];
+
+        let mut total_functions = 0;
+        let mut total_eligible = 0;
+        let mut rejection_reasons: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+
+        for (name, source) in &probes {
+            let program = checked(source);
+            let all_fns: Vec<_> = program
+                .functions()
+                .values()
+                .filter(|f| !f.is_comptime)
+                .collect();
+            let eligible = eligible_function_ids(&program);
+
+            let eligible_set = match &eligible {
+                Ok(set) => set.clone(),
+                Err(e) => {
+                    eprintln!(
+                        "  [{name}] PROGRAM-LEVEL REJECT: {}",
+                        e.reason
+                    );
+                    *rejection_reasons
+                        .entry(format!("program-level: {}", e.reason))
+                        .or_insert(0) += 1;
+                    total_functions += all_fns.len();
+                    continue;
+                }
+            };
+
+            let mut eligible_names = Vec::new();
+            let mut ineligible_names = Vec::new();
+            for f in &all_fns {
+                total_functions += 1;
+                if eligible_set.contains(&f.node_id) {
+                    total_eligible += 1;
+                    eligible_names.push(f.qualified_name.as_str());
+                } else {
+                    ineligible_names.push(f.qualified_name.as_str());
+                    // Determine rejection reason by re-checking individually
+                    if let Some(callable) = program.callable(&f.node_id) {
+                        if let Err(e) =
+                            require_resolved_native_callable(&program, callable)
+                        {
+                            *rejection_reasons
+                                .entry(e.reason.clone())
+                                .or_insert(0) += 1;
+                        } else {
+                            *rejection_reasons
+                                .entry("origin/generics/qualified filter".into())
+                                .or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            eprintln!(
+                "  [{name}] eligible: {:?}  ineligible: {:?}",
+                eligible_names, ineligible_names
+            );
+        }
+
+        eprintln!("\n=== DISPATCH DIAGNOSTIC SUMMARY ===");
+        eprintln!(
+            "  Functions: {total_eligible}/{total_functions} eligible ({}%)",
+            if total_functions > 0 {
+                total_eligible * 100 / total_functions
+            } else {
+                0
+            }
+        );
+        eprintln!("  Rejection reasons:");
+        for (reason, count) in rejection_reasons.iter().rev() {
+            eprintln!("    {count}x {reason}");
+        }
+
+        // Sanity: pure scalar programs must be 100% eligible
+        assert!(
+            total_eligible > 0,
+            "at least some probe functions should be eligible"
         );
     }
 }
