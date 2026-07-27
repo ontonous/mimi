@@ -18,9 +18,9 @@ use crate::codegen::{CallSiteValueExt, CodeGenerator};
 use crate::core::ir::{ResolvedBinaryOp, ResolvedUnaryOp};
 use crate::core::{
     CheckedConversion, CheckedConversionKind, CheckedProgram, NodeId, ResolvedBlock, ResolvedBody,
-    ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLiteral, ResolvedLocalId,
-    ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedStmtKind, ResolvedType,
-    ResolvedTypeId,
+    ResolvedCallee, ResolvedConstValue, ResolvedExpr, ResolvedExprKind, ResolvedLiteral,
+    ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedStmtKind,
+    ResolvedType, ResolvedTypeId,
 };
 use crate::diagnostic::Diagnostic;
 use crate::error::CompileError;
@@ -463,6 +463,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         match &expression.kind {
             ResolvedExprKind::Literal(literal) => self.emit_literal(&expression.ty, literal),
+            ResolvedExprKind::Constant(node_id) => {
+                let constant = self.program.constants().get(node_id).ok_or_else(|| {
+                    CompileError::Unsupported(format!(
+                        "resolved constant '{}' is absent from catalog",
+                        node_id.0
+                    ))
+                })?;
+                self.emit_const_value(&expression.ty, &constant.value)
+            }
             ResolvedExprKind::Load(place) => {
                 let entry = self.root_place(frame, place)?;
                 self.generator
@@ -595,6 +604,40 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             }
             _ => Err(CompileError::Unsupported(
                 "resolved literal does not match its canonical type".into(),
+            )),
+        }
+    }
+
+    fn emit_const_value(
+        &mut self,
+        ty: &ResolvedTypeId,
+        value: &ResolvedConstValue,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let llvm_type =
+            llvm_type_for_resolved(self.generator.context, self.program.resolved_types(), ty)?;
+        match (value, llvm_type) {
+            (ResolvedConstValue::Int(v), BasicTypeEnum::IntType(integer)) => {
+                Ok(integer.const_int(*v as u64, true).into())
+            }
+            (ResolvedConstValue::Bool(v), BasicTypeEnum::IntType(integer)) => {
+                Ok(integer.const_int(u64::from(*v), false).into())
+            }
+            (ResolvedConstValue::Float(v), BasicTypeEnum::FloatType(float)) => {
+                Ok(float.const_float(*v).into())
+            }
+            (ResolvedConstValue::Unit, BasicTypeEnum::IntType(integer)) => {
+                Ok(integer.const_zero().into())
+            }
+            (ResolvedConstValue::String(text), BasicTypeEnum::PointerType(_)) => {
+                let global = self
+                    .generator
+                    .builder
+                    .build_global_string_ptr(text, "resolved_const_str")
+                    .map_err(|e| CompileError::LlvmError(format!("const string: {e}")))?;
+                Ok(global.as_pointer_value().into())
+            }
+            _ => Err(CompileError::Unsupported(
+                "resolved constant value does not match its canonical type".into(),
             )),
         }
     }
