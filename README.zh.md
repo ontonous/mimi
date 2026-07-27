@@ -4,7 +4,7 @@
 
 **Flow-first、面向类型状态（Typestate-Oriented）的系统编程语言**
 
-[![Version](https://img.shields.io/badge/version-0.1.1--dev-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.1.2--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-4100%2B-brightgreen.svg)](#)
 [![Semantics](https://img.shields.io/badge/semantics-Pre--1.0-orange.svg)](#)
@@ -227,7 +227,7 @@ Source → Lexer → Parser → AST
   (from_checked) (compile_checked) (verify_checked)
 ```
 
-**铁律**：后端不能回退 raw AST。`CheckedProgram::file()` 已收紧为 crate 内 `legacy_body_file()`——函数体向 Resolved IR 的迁移按 body class 在 0.1.1 sprint 中追踪。
+**铁律**：后端不能回退 raw AST。`CheckedProgram::file()` 已收紧为 crate 内 `legacy_body_file()`——函数体 per-function dispatch 已激活（eligible 函数经 resolved emitter，ineligible 经显式 legacy arm）。全量迁移排入 0.1.2 (0.32)。
 
 ### 依赖主链
 
@@ -416,7 +416,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ## 路线图（0.1.1）
 
-0.1.1 是长周期版本，覆盖 41 个内部 sprint（0.31.8–0.31.48）。期间不打中间 tag。当前进度：**0.31.24**（Soundness 阶段）。
+0.1.1 是长周期版本，覆盖 51 个内部 sprint（0.31.8–0.31.58）。期间不打中间 tag。Codegen per-function dispatch 已激活（eligible slice：标量/tuple/string/控制流）；全量迁移推迟到 0.1.2。
 
 | 阶段 | Sprint | 主题 |
 |------|--------|------|
@@ -427,6 +427,11 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 | **C** | 0.31.30–0.31.38 | Component 边界：Component IR + ABI 生成器、Native ABI + 胖指针、稳定检查点、Wire Schema、Rust SDK conformance、XPU FFI 验证、SDK 加固 |
 | **D** | 0.31.39–0.31.44 | 工具与隔离：迁移、fmt/LSP/probes、Provenance/TyErr/Z3 翻译、experimental 隔离 |
 | **E** | 0.31.45–0.31.48 | 冻结：DEBUG + L1 强化 + Interpreter 瘦身、最终敌对审查 + Trap Tests、RC1、RC2 |
+| **F** | 0.31.49–0.31.54 | Soundness：类型系统、算术语义、Runtime、Verifier、Interpreter/Stdlib/Quote |
+| **G** | 0.31.55–0.31.56 | Completeness：Flow/Session/Actor + 系统性模式修复 + 测试基础设施 |
+| **H** | 0.31.57–0.31.58 | Release：RC1、RC2、0.1.1 tag |
+
+**下一步：0.1.2 (0.32.1–0.32.30)** — Codegen 全量迁移（`legacy_body_file()` 删除）+ 迁移后审计。
 
 ### 关键文档
 
@@ -448,7 +453,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 | 版本 | 里程碑 |
 |------|--------|
-| **0.1.1-dev** | **当前**。41 sprint 路线图：Flow 核心闭环、地基深修、Runtime Efficiency、Soundness、语言冻结、Component 边界、工具链、RC。架构修正案（13 条款）。九轮盲审。 |
+| **0.1.1-dev** | **当前**。51 sprint 路线图：Flow 核心闭环、地基深修、Runtime Efficiency、Soundness、语言冻结、Component 边界、工具链、RC。架构修正案（13 条款）。九轮盲审。Codegen per-function dispatch 已激活。 |
 | **0.1.0** | 基线稳定：CheckedProgram 语义中枢、Typed Resolved IR、HM 统一、CFG/ownership 分析、runtime/resolved 拆分、semver 切换、4063 测试绿 |
 | **v0.30.0** | 止血：零新特性——15 项架构债务清零（sprintf→snprintf、路径安全、malloc 检查、fmt 分词） |
 | **v0.29.0–41** | Flow 范式：编译器内部 Flow 替换（7 个模块）+ 语言级 Flow 语义 + 白皮书 38 项能力 |
