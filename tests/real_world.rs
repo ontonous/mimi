@@ -295,11 +295,12 @@ fn real_world_array_module() {
         func main() -> i32 {
             let xs = ["a", "b", "c", "d"]
             println(array_slice(xs, 1, 3))
+            println(array_concat(array_take(xs, 1), array_drop(xs, 3)))
             println(array_len(xs))
             0
         }
     "#,
-        "[b, c]\n4",
+        "[b, c]\n[a, d]\n4",
     );
 }
 

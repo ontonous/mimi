@@ -203,6 +203,17 @@ pub struct MimiList {
     element_kind: ListElementKind,
 }
 
+/// Prefix shared with native codegen's by-value `{len, data}` list ABI.
+///
+/// Codegen-owned lists do not contain the runtime-only ownership and element
+/// metadata fields, so ABI helpers must view such pointers through this type
+/// instead of creating a reference to the larger `MimiList`.
+#[repr(C)]
+struct MimiListAbiPrefix {
+    len: i64,
+    data: *mut *mut std::ffi::c_char,
+}
+
 impl MimiList {
     /// 0.31.23: Create a new empty MimiList with the specified element kind.
     pub fn new_with_kind(kind: ListElementKind) -> Self {
@@ -1935,19 +1946,17 @@ pub extern "C" fn mimi_str_join(
 /// heap-allocated C string. Used by the codegen `to_string` builtin
 /// when it encounters a list value.
 ///
-/// 0.31.23: Uses element_kind to format elements correctly:
-/// - I64: format as integer
-/// - F64: format as float
-/// - Bool: format as true/false
-/// - String: format as string (current behavior)
-/// - Unknown: fallback to string interpretation (legacy compatibility)
+/// This ABI entry point is string-list-specific. Native codegen passes the
+/// stable two-field `{len, data}` list layout, which has no `element_kind`
+/// tail field. Numeric and structured lists use their dedicated formatters.
 #[no_mangle]
 pub extern "C" fn mimi_list_to_string(list: *const MimiList) -> *mut std::ffi::c_char {
     if list.is_null() {
         return alloc_c_string("[]");
     }
-    // SAFETY: caller ensures `list` is a valid `*const MimiList` or null.
-    let lst = unsafe { &*list };
+    // SAFETY: both runtime MimiList and native codegen lists begin with the
+    // repr(C) `{len, data}` prefix, and the null case was handled above.
+    let lst = unsafe { &*list.cast::<MimiListAbiPrefix>() };
     if lst.data.is_null() || lst.len == 0 {
         return alloc_c_string("[]");
     }
@@ -1960,40 +1969,13 @@ pub extern "C" fn mimi_list_to_string(list: *const MimiList) -> *mut std::ffi::c
         if i > 0 {
             parts.push(String::from(", "));
         }
-        // 0.31.23: Format based on element_kind.
-        let formatted = match lst.element_kind {
-            ListElementKind::I64 => {
-                let val = unsafe { *(lst.data as *const i64).offset(i) };
-                format!("{}", val)
-            }
-            ListElementKind::F64 => {
-                let val = unsafe { *(lst.data as *const f64).offset(i) };
-                format!("{}", val)
-            }
-            ListElementKind::Bool => {
-                let val = unsafe { *(lst.data as *const i64).offset(i) };
-                if val != 0 {
-                    "true".to_string()
-                } else {
-                    "false".to_string()
-                }
-            }
-            ListElementKind::String | ListElementKind::Unknown => {
-                // `lst.data` is `*mut *mut c_char`; dereference to a C string.
-                let item_ptr = unsafe { *lst.data.offset(i) };
-                if item_ptr.is_null() {
-                    String::from("null")
-                } else {
-                    unsafe { cstr_to_string(item_ptr) }
-                }
-            }
-            _ => {
-                // For other types (Map, Set, List, Record), show the pointer value.
-                let item_ptr = unsafe { *lst.data.offset(i) };
-                format!("<{:?}>", item_ptr)
-            }
-        };
-        parts.push(formatted);
+        // `lst.data` is `*mut *mut c_char`; dereference to a C string.
+        let item_ptr = unsafe { *lst.data.offset(i) };
+        if item_ptr.is_null() {
+            parts.push(String::from("null"));
+        } else {
+            parts.push(unsafe { cstr_to_string(item_ptr) });
+        }
     }
     parts.push(String::from("]"));
     alloc_c_string(&parts.join(""))
