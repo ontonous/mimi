@@ -485,6 +485,53 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.generator
                     .build_load(entry.llvm_type, entry.storage, "resolved_load")
             }
+            ResolvedExprKind::Tuple(elements) => {
+                let llvm_type = llvm_type_for_resolved(
+                    self.generator.context,
+                    self.program.resolved_types(),
+                    &expression.ty,
+                )?;
+                let BasicTypeEnum::StructType(struct_type) = llvm_type else {
+                    return Err(CompileError::Unsupported(
+                        "tuple type did not lower to LLVM struct".into(),
+                    ));
+                };
+                let alloca = self.generator.build_alloca(struct_type, "tuple_alloc")?;
+                for (index, element) in elements.iter().enumerate() {
+                    let value = self.emit_expr(element, frame)?;
+                    let field_ptr = self
+                        .generator
+                        .builder
+                        .build_struct_gep(struct_type, alloca, index as u32, "tuple_field")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("tuple gep: {e}"))
+                        })?;
+                    let field_type = struct_type.get_field_type_at_index(index as u32).ok_or_else(|| {
+                        CompileError::LlvmError(format!("tuple field {index} type absent"))
+                    })?;
+                    let value = self.numeric_convert(value, field_type)?;
+                    self.generator.build_store(field_ptr, value)?;
+                }
+                self.generator
+                    .build_load(struct_type, alloca, "tuple_val")
+            }
+            ResolvedExprKind::Project { value, projection } => {
+                let crate::core::ir::ResolvedValueProjection::Tuple(index) = projection else {
+                    return Err(CompileError::Unsupported(
+                        "non-tuple value projection escaped eligibility".into(),
+                    ));
+                };
+                let agg = self.emit_expr(value, frame)?;
+                let BasicValueEnum::StructValue(struct_val) = agg else {
+                    return Err(CompileError::Unsupported(
+                        "projected value is not a struct".into(),
+                    ));
+                };
+                let field = struct_val.get_field_at_index(*index as u32).ok_or_else(|| {
+                    CompileError::LlvmError(format!("tuple field {index} absent"))
+                })?;
+                Ok(field)
+            }
             ResolvedExprKind::Binary { op, left, right } => {
                 let left = self.emit_expr(left, frame)?;
                 let right = self.emit_expr(right, frame)?;
@@ -801,20 +848,47 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     }
 
     fn root_place(
-        &self,
+        &mut self,
         frame: &ResolvedFrame<'ctx>,
         place: &ResolvedPlace,
     ) -> Result<ResolvedVarEntry<'ctx>, CompileError> {
-        if !place.projections.is_empty() {
-            return Err(CompileError::Unsupported(
-                "projected place escaped scalar eligibility".into(),
-            ));
-        }
-        frame.locals.get(&place.base).copied().ok_or_else(|| {
+        let base_entry = frame.locals.get(&place.base).copied().ok_or_else(|| {
             CompileError::Unsupported(format!(
                 "resolved local '{}' is not bound in '{}'",
                 place.base.0 .0, frame.owner.0
             ))
+        })?;
+        if place.projections.is_empty() {
+            return Ok(base_entry);
+        }
+        // Walk tuple projections via struct GEP.
+        let mut current_ptr = base_entry.storage;
+        let mut current_type = base_entry.llvm_type;
+        for projection in &place.projections {
+            let crate::core::ir::ResolvedProjection::Tuple { index, ty } = projection else {
+                return Err(CompileError::Unsupported(
+                    "non-tuple place projection escaped eligibility".into(),
+                ));
+            };
+            let BasicTypeEnum::StructType(struct_type) = current_type else {
+                return Err(CompileError::Unsupported(
+                    "tuple projection on non-struct place".into(),
+                ));
+            };
+            current_ptr = self
+                .generator
+                .builder
+                .build_struct_gep(struct_type, current_ptr, *index as u32, "place_gep")
+                .map_err(|e| CompileError::LlvmError(format!("place gep: {e}")))?;
+            current_type = llvm_type_for_resolved(
+                self.generator.context,
+                self.program.resolved_types(),
+                ty,
+            )?;
+        }
+        Ok(ResolvedVarEntry {
+            storage: current_ptr,
+            llvm_type: current_type,
         })
     }
 

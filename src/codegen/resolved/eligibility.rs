@@ -136,6 +136,12 @@ fn require_scalar_type(
             | PrimitiveType::Unit
             | PrimitiveType::String,
         )) => Ok(()),
+        Some(ResolvedType::Tuple(elements)) => {
+            for element in elements {
+                require_scalar_type(program, owner, element)?;
+            }
+            Ok(())
+        }
         Some(other) => Err(UnsupportedResolvedNode::new(
             owner,
             owner,
@@ -290,15 +296,19 @@ fn require_root_place(
     node: &NodeId,
     place: &ResolvedPlace,
 ) -> Result<(), UnsupportedResolvedNode> {
-    if place.projections.is_empty() {
-        Ok(())
-    } else {
-        Err(UnsupportedResolvedNode::new(
-            owner,
-            node,
-            "projected places are not in the resolved native slice",
-        ))
+    for projection in &place.projections {
+        match projection {
+            crate::core::ir::ResolvedProjection::Tuple { .. } => {}
+            other => {
+                return Err(UnsupportedResolvedNode::new(
+                    owner,
+                    node,
+                    format!("projection {other:?} is not in the resolved native slice"),
+                ))
+            }
+        }
     }
+    Ok(())
 }
 
 fn require_conversion(
@@ -339,6 +349,25 @@ fn require_expr(
         ResolvedExprKind::Literal(_) => Ok(()),
         ResolvedExprKind::Constant(_) => Ok(()),
         ResolvedExprKind::Load(place) => require_root_place(owner, &expression.node_id, place),
+        ResolvedExprKind::Tuple(elements) => {
+            for element in elements {
+                require_expr(program, owner, element)?;
+            }
+            Ok(())
+        }
+        ResolvedExprKind::Project { value, projection } => {
+            match projection {
+                crate::core::ir::ResolvedValueProjection::Tuple(_) => {}
+                other => {
+                    return Err(UnsupportedResolvedNode::new(
+                        owner,
+                        &expression.node_id,
+                        format!("value projection {other:?} is not in the resolved native slice"),
+                    ))
+                }
+            }
+            require_expr(program, owner, value)
+        }
         ResolvedExprKind::Binary { left, right, .. } => {
             require_expr(program, owner, left)?;
             require_expr(program, owner, right)
