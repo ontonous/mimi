@@ -202,18 +202,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             })?;
             self.declare_callable(callable)?;
         }
-        // Also declare ineligible functions so eligible ones can call them
-        // (the legacy emitter will fill in their bodies later).
-        for function in self.program.functions().values() {
-            if function.is_comptime || eligible.contains(&function.node_id) {
-                continue;
-            }
-            if let Some(callable) = self.program.callable(&function.node_id) {
-                // Best-effort declaration; skip if it fails (legacy will handle).
-                let _ = self.declare_callable(callable);
-            }
-        }
-        let count = functions.len();
+        // Emit eligible functions. If a function fails (e.g., calls an
+        // unimplemented builtin), skip it — the legacy emitter will handle it.
+        // The compile_func skip guard (count_basic_blocks != 0) ensures the
+        // legacy emitter won't re-emit successfully compiled functions.
+        let mut count = 0;
         for function in functions {
             let callable = self.program.callable(&function.node_id).ok_or_else(|| {
                 CompileError::Unsupported(format!(
@@ -221,7 +214,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     function.node_id.0
                 ))
             })?;
-            self.emit_callable(callable)?;
+            match self.emit_callable(callable) {
+                Ok(()) => count += 1,
+                Err(_) => {
+                    // Function failed to emit through resolved path.
+                    // Legacy emitter will compile it (0 basic blocks → not skipped).
+                }
+            }
         }
         Ok(count)
     }
@@ -685,7 +684,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 .map(|arg| resolved_type_display_name(self.program, &arg.value.ty))
                                 .collect();
                         }
-                        self.generator.compile_builtin_call(name, &arguments)
+                        let result = self.generator.compile_builtin_call(name, &arguments)?;
+                        // ABI bridge: builtins return raw ptr for strings, but the
+                        // resolved emitter expects {ptr, i64} structs. Wrap if needed.
+                        self.wrap_builtin_string_result(result, &call.result)
                     }
                     _ => Err(CompileError::Unsupported(format!(
                         "resolved callee {:?} escaped resolved native eligibility at '{}'",
@@ -855,15 +857,21 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 .builder
                 .build_global_string_ptr(&text, "resolved_fstr")
                 .map_err(|e| CompileError::LlvmError(format!("fstring literal: {e}")))?;
-            let ptr_ty = self.generator.context.ptr_type(inkwell::AddressSpace::default());
+            let ptr_ty = self
+                .generator
+                .context
+                .ptr_type(inkwell::AddressSpace::default());
             let i64_ty = self.generator.context.i64_type();
             let struct_ty = self.generator.context.struct_type(
-                &[BasicTypeEnum::PointerType(ptr_ty), BasicTypeEnum::IntType(i64_ty)],
+                &[
+                    BasicTypeEnum::PointerType(ptr_ty),
+                    BasicTypeEnum::IntType(i64_ty),
+                ],
                 false,
             );
             let len_val = i64_ty.const_int(text.len() as u64, false);
-            let agg = struct_ty
-                .const_named_struct(&[global.as_pointer_value().into(), len_val.into()]);
+            let agg =
+                struct_ty.const_named_struct(&[global.as_pointer_value().into(), len_val.into()]);
             return Ok(agg.into());
         }
 
@@ -926,10 +934,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
 
         // Return {ptr, i64} string struct (ptr to buffer, len=0 placeholder;
         // runtime uses null terminator for actual string operations).
-        let ptr_ty = self.generator.context.ptr_type(inkwell::AddressSpace::default());
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
         let i64_ty = self.generator.context.i64_type();
         let struct_ty = self.generator.context.struct_type(
-            &[BasicTypeEnum::PointerType(ptr_ty), BasicTypeEnum::IntType(i64_ty)],
+            &[
+                BasicTypeEnum::PointerType(ptr_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
             false,
         );
         let str_alloca = self.generator.build_alloca(struct_ty, "fstr_ret")?;
@@ -945,8 +959,52 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .map_err(|e| CompileError::LlvmError(format!("fstr gep1: {e}")))?;
         self.generator.build_store(ptr_field, buf_ptr)?;
         self.generator.build_store(len_field, i64_ty.const_zero())?;
-        self.generator
-            .build_load(struct_ty, str_alloca, "fstr_val")
+        self.generator.build_load(struct_ty, str_alloca, "fstr_val")
+    }
+
+    /// ABI bridge: if the expected result type is String ({ptr, i64}) but the
+    /// builtin returned a raw pointer, wrap it in a string struct.
+    fn wrap_builtin_string_result(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        expected_ty: &ResolvedTypeId,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let is_string = matches!(
+            self.program.resolved_types().get(expected_ty),
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::String))
+        );
+        if is_string {
+            if let BasicValueEnum::PointerValue(ptr) = value {
+                // Wrap raw ptr into {ptr, i64} struct.
+                let ptr_ty = self
+                    .generator
+                    .context
+                    .ptr_type(inkwell::AddressSpace::default());
+                let i64_ty = self.generator.context.i64_type();
+                let struct_ty = self.generator.context.struct_type(
+                    &[
+                        BasicTypeEnum::PointerType(ptr_ty),
+                        BasicTypeEnum::IntType(i64_ty),
+                    ],
+                    false,
+                );
+                let alloca = self.generator.build_alloca(struct_ty, "builtin_str_wrap")?;
+                let ptr_field = self
+                    .generator
+                    .builder
+                    .build_struct_gep(struct_ty, alloca, 0, "str_ptr_f")
+                    .map_err(|e| CompileError::LlvmError(format!("str wrap gep0: {e}")))?;
+                let len_field = self
+                    .generator
+                    .builder
+                    .build_struct_gep(struct_ty, alloca, 1, "str_len_f")
+                    .map_err(|e| CompileError::LlvmError(format!("str wrap gep1: {e}")))?;
+                self.generator.build_store(ptr_field, ptr)?;
+                self.generator.build_store(len_field, i64_ty.const_zero())?;
+                return self.generator.build_load(struct_ty, alloca, "str_wrapped");
+            }
+        }
+        Ok(value)
     }
 
     /// Map a canonical type to its printf format specifier.

@@ -525,11 +525,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         if super::resolved::supports_resolved_native(program) {
             return self.compile_resolved_native(program);
         }
-        // Per-function dispatch infrastructure is in place (eligible_function_ids,
-        // compile_resolved_subset, compile_func skip guard). Activation requires
-        // wrapping builtin return values: compile_builtin_call returns raw ptr
-        // for strings, but the resolved emitter expects {ptr, i64} structs.
-        // TODO(S8b): add post-call wrapping in the Builtin arm of emit_expr.
+        // Per-function dispatch (S8): infrastructure ready (eligible_function_ids,
+        // compile_resolved_subset with error-tolerant emission, compile_func skip
+        // guard, String ABI unified, builtin string wrapping). Blocked on
+        // declaration lifecycle: resolved declares with resolved types, legacy
+        // re-declares with legacy types → LLVM type conflict on shared symbols.
+        // Requires unified type lowering or per-symbol ABI negotiation.
         self.compile_file(program.legacy_body_file())
             .map_err(|error| {
                 let mut diagnostic = error.to_diagnostic();
