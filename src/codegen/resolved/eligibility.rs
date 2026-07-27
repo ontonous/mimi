@@ -114,6 +114,12 @@ pub(super) fn eligible_function_ids(
     program: &CheckedProgram,
 ) -> Result<std::collections::BTreeSet<NodeId>, UnsupportedResolvedNode> {
     // Program-level blockers that prevent ANY resolved compilation.
+    // Traits/impls/externs block per-function dispatch because the legacy
+    // emitter's compile_file setup phase (vtable construction, extern
+    // registration, impl method compilation) must run before any function
+    // body is compiled. Running compile_resolved_subset before compile_file
+    // causes SIGSEGV when eligible functions call imported symbols that
+    // haven't been declared yet.
     let user_flow_count = program
         .flows()
         .values()
