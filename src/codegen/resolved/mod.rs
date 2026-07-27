@@ -22,6 +22,7 @@ use crate::core::{
     ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedStmtKind,
     ResolvedType, ResolvedTypeId,
 };
+use crate::core::ir::ResolvedFStringPart;
 use crate::diagnostic::Diagnostic;
 use crate::error::CompileError;
 
@@ -655,6 +656,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     ))
                 })
             }
+            ResolvedExprKind::FString(parts) => self.emit_fstring(parts, frame),
             other => Err(CompileError::Unsupported(format!(
                 "resolved expression {other:?} escaped resolved native eligibility at '{}'",
                 expression.node_id.0
@@ -728,6 +730,31 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 "resolved constant value does not match its canonical type".into(),
             )),
         }
+    }
+
+    fn emit_fstring(
+        &mut self,
+        parts: &[ResolvedFStringPart],
+        _frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // Text-only f-string: concatenate all text parts into a single global.
+        let mut text = String::new();
+        for part in parts {
+            match part {
+                ResolvedFStringPart::Text(t) => text.push_str(t),
+                ResolvedFStringPart::Interpolation(_) => {
+                    return Err(CompileError::Unsupported(
+                        "f-string interpolation escaped resolved native eligibility".into(),
+                    ))
+                }
+            }
+        }
+        let global = self
+            .generator
+            .builder
+            .build_global_string_ptr(&text, "resolved_fstr")
+            .map_err(|e| CompileError::LlvmError(format!("fstring literal: {e}")))?;
+        Ok(global.as_pointer_value().into())
     }
 
     fn emit_unary(
