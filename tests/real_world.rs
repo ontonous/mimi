@@ -350,6 +350,60 @@ fn real_world_csv_module() {
 
 // ===================== Flow paradigm MCDD (v0.29.9–0.29.25) =====================
 
+// ===================== Per-function dispatch (S9) =====================
+
+/// Exercises the per-function dispatch path: eligible functions (scalar,
+/// tuple, control flow) are compiled through the resolved native emitter
+/// while ineligible functions (List, closures) fall back to legacy.
+/// L1 equivalence is enforced between interpreter and codegen.
+#[test]
+fn real_world_per_function_dispatch() {
+    run_both(
+        r#"
+        // Eligible: pure scalar + control flow + tuple
+        func fib(n: i64) -> i64 {
+            let mut a: i64 = 0
+            let mut b: i64 = 1
+            let mut i: i64 = 0
+            while i < n {
+                let tmp = a + b
+                a = b
+                b = tmp
+                i = i + 1
+            }
+            a
+        }
+
+        // Eligible: tuple construction + projection
+        func divmod(a: i64, b: i64) -> (i64, i64) {
+            (a / b, a % b)
+        }
+
+        // Ineligible: uses List (not in resolved native slice)
+        func sum_list(xs: List<i64>) -> i64 {
+            let mut total: i64 = 0
+            let mut i: i64 = 0
+            while i < len(xs) {
+                total = total + xs[i]
+                i = i + 1
+            }
+            total
+        }
+
+        func main() -> i32 {
+            println(fib(10))
+            let (q, r) = divmod(17, 5)
+            println(q)
+            println(r)
+            let nums: List<i64> = [10, 20, 30]
+            println(sum_list(nums))
+            0
+        }
+    "#,
+        "55\n3\n2\n60",
+    );
+}
+
 /// Dual-backend regression for every `tests/real_world/flow_*.mimi`.
 ///
 /// Requires `cc` for the codegen path. Compares normalized stdout so L1
