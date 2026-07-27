@@ -1,14 +1,12 @@
 # Changelog
 
-## [Unreleased] — 0.1.2-dev
-
-### Phase A: Codegen 全量迁移（0.32.1–0.32.15）
-
-（进行中）
-
----
-
 ## [0.1.1] — 2026-07-28
+
+### 审计修复（发布前深度审计）
+
+- **P1-1 Origin::User 过滤**：`require_resolved_native_program()` 添加 `Origin::User` 检查。non-User-origin 函数（stdlib 导入/runtime 生成）触发 all-or-nothing 路径拒绝，强制走 per-function dispatch。修复窄触发 SIGSEGV（纯函数 + `use std::xxx` 程序）。
+- **P1-4 per-function LLVM verify**：`compile_subset()` 每个成功发射的函数调用 `llvm_fn.verify()`。验证失败视为发射失败，回退到 legacy emitter。防止无效 LLVM IR 溜过。
+- **P2-2 死代码删除**：`compile.rs:888` `let _ = &flow.persistent_fields` 无操作引用删除。
 
 ### Phase H: RC + 发布（0.31.57–0.31.58）
 
