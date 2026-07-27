@@ -242,6 +242,7 @@ fn require_scalar_type(
         // 0.32.2: Builtin collection types (List/Map/Set) are lowerable
         // in types.rs. Accept them so the resolved emitter can handle
         // collection-typed parameters, return values, and local bindings.
+        // 0.32.5: User-defined record types are also accepted.
         Some(ResolvedType::Nominal { item, arguments, .. }) => {
             match item.as_str() {
                 "builtin:type:List" | "builtin:type:Map" | "builtin:type:Set" => {
@@ -250,11 +251,38 @@ fn require_scalar_type(
                     }
                     Ok(())
                 }
-                other => Err(UnsupportedResolvedNode::new(
-                    owner,
-                    owner,
-                    format!("nominal type '{other}' is not in the resolved native slice"),
-                )),
+                _ => {
+                    // User-defined nominal: accept only Record kinds.
+                    // Look up the type definition by matching the
+                    // NominalTypeId string against type_defs entries.
+                    let item_str = item.as_str();
+                    let is_record = program.type_defs().values().any(|td| {
+                        // NominalTypeId is "type:Name"; qualified_name is "Name".
+                        let matches_name = item_str
+                            .strip_prefix("type:")
+                            .is_some_and(|n| td.qualified_name == n)
+                            || td.qualified_name == item_str;
+                        matches_name
+                            && matches!(
+                                td.kind,
+                                crate::core::resolved::ResolvedTypeKind::Record
+                            )
+                    });
+                    if is_record {
+                        for arg in arguments {
+                            require_scalar_type(program, owner, arg)?;
+                        }
+                        Ok(())
+                    } else {
+                        Err(UnsupportedResolvedNode::new(
+                            owner,
+                            owner,
+                            format!(
+                                "nominal type '{item_str}' is not a record in the resolved native slice"
+                            ),
+                        ))
+                    }
+                }
             }
         }
         Some(other) => Err(UnsupportedResolvedNode::new(
@@ -422,6 +450,8 @@ fn require_root_place(
             crate::core::ir::ResolvedProjection::Tuple { .. } => {}
             // 0.32.2: Index projections for List/Map element access.
             crate::core::ir::ResolvedProjection::Index { .. } => {}
+            // 0.32.5: Field projections for record field access.
+            crate::core::ir::ResolvedProjection::Field { .. } => {}
             other => {
                 return Err(UnsupportedResolvedNode::new(
                     owner,
@@ -485,6 +515,13 @@ fn require_expr(
             }
             Ok(())
         }
+        // 0.32.5: Record construction.
+        ResolvedExprKind::Record { fields, .. } => {
+            for field in fields {
+                require_expr(program, owner, &field.value)?;
+            }
+            Ok(())
+        }
         ResolvedExprKind::Project { value, projection } => {
             match projection {
                 crate::core::ir::ResolvedValueProjection::Tuple(_) => {}
@@ -493,6 +530,8 @@ fn require_expr(
                 crate::core::ir::ResolvedValueProjection::Index(index_expr) => {
                     require_expr(program, owner, index_expr)?;
                 }
+                // 0.32.5: Field value projections for record rvalue access.
+                crate::core::ir::ResolvedValueProjection::Field(_) => {}
                 other => {
                     return Err(UnsupportedResolvedNode::new(
                         owner,

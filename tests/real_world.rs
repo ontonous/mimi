@@ -669,6 +669,34 @@ fn real_world_resolved_list_index() {
     );
 }
 
+/// User-defined record construction and field access through the resolved
+/// native emitter. 0.32.5: Nominal record types are now eligible.
+#[test]
+fn real_world_resolved_record_field() {
+    run_both(
+        r#"
+        type Point { x: i64, y: i64 }
+
+        func make_point(a: i64, b: i64) -> Point {
+            Point { x: a, y: b }
+        }
+
+        func distance_sq(p: Point) -> i64 {
+            p.x * p.x + p.y * p.y
+        }
+
+        func main() -> i32 {
+            let p = make_point(3, 4)
+            println(distance_sq(p))
+            println(p.x)
+            println(p.y)
+            0
+        }
+    "#,
+        "25\n3\n4",
+    );
+}
+
 /// Dual-backend regression for every `tests/real_world/flow_*.mimi`.
 ///
 /// Requires `cc` for the codegen path. Compares normalized stdout so L1
