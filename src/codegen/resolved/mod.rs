@@ -607,16 +607,90 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         match conversion.kind {
             CheckedConversionKind::Identity => Ok(value),
-            CheckedConversionKind::NumericWiden => {
+            CheckedConversionKind::NumericWiden | CheckedConversionKind::NumericNarrowChecked => {
                 let target = llvm_type_for_resolved(
                     self.generator.context,
                     self.program.resolved_types(),
                     &conversion.to,
                 )?;
-                self.coerce_to(value, target)
+                self.numeric_convert(value, target)
             }
             other => Err(CompileError::Unsupported(format!(
-                "resolved conversion {other:?} escaped scalar eligibility"
+                "resolved conversion {other:?} escaped resolved native eligibility"
+            ))),
+        }
+    }
+
+    /// General numeric conversion: handles widen, narrow, int↔float.
+    fn numeric_convert(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        target: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        if value.get_type() == target {
+            return Ok(value);
+        }
+        match (value, target) {
+            // int → int
+            (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(target_ty)) => {
+                let src_width = iv.get_type().get_bit_width();
+                let dst_width = target_ty.get_bit_width();
+                if src_width > dst_width {
+                    self.generator
+                        .builder
+                        .build_int_truncate(iv, target_ty, "resolved_narrow")
+                        .map(BasicValueEnum::from)
+                        .map_err(|e| CompileError::LlvmError(format!("int truncate: {e}")))
+                } else if src_width == 1 {
+                    // bool → wider int: zext (avoid sign-extending true to -1)
+                    self.generator
+                        .builder
+                        .build_int_z_extend(iv, target_ty, "resolved_bool_ext")
+                        .map(BasicValueEnum::from)
+                        .map_err(|e| CompileError::LlvmError(format!("bool zext: {e}")))
+                } else {
+                    self.generator
+                        .builder
+                        .build_int_s_extend(iv, target_ty, "resolved_widen")
+                        .map(BasicValueEnum::from)
+                        .map_err(|e| CompileError::LlvmError(format!("int widen: {e}")))
+                }
+            }
+            // float → int
+            (BasicValueEnum::FloatValue(fv), BasicTypeEnum::IntType(target_ty)) => self
+                .generator
+                .builder
+                .build_float_to_signed_int(fv, target_ty, "resolved_fptosi")
+                .map(BasicValueEnum::from)
+                .map_err(|e| CompileError::LlvmError(format!("fptosi: {e}"))),
+            // int → float
+            (BasicValueEnum::IntValue(iv), BasicTypeEnum::FloatType(target_ty)) => self
+                .generator
+                .builder
+                .build_signed_int_to_float(iv, target_ty, "resolved_sitofp")
+                .map(BasicValueEnum::from)
+                .map_err(|e| CompileError::LlvmError(format!("sitofp: {e}"))),
+            // float → float
+            (BasicValueEnum::FloatValue(fv), BasicTypeEnum::FloatType(target_ty)) => {
+                let src_width = fv.get_type().get_bit_width();
+                let dst_width = target_ty.get_bit_width();
+                if src_width > dst_width {
+                    self.generator
+                        .builder
+                        .build_float_trunc(fv, target_ty, "resolved_fptrunc")
+                        .map(BasicValueEnum::from)
+                        .map_err(|e| CompileError::LlvmError(format!("fptrunc: {e}")))
+                } else {
+                    self.generator
+                        .builder
+                        .build_float_ext(fv, target_ty, "resolved_fpext")
+                        .map(BasicValueEnum::from)
+                        .map_err(|e| CompileError::LlvmError(format!("fpext: {e}")))
+                }
+            }
+            _ => Err(CompileError::Unsupported(format!(
+                "resolved numeric conversion {:?} → {target:?} is not supported",
+                value.get_type()
             ))),
         }
     }
@@ -626,32 +700,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         value: BasicValueEnum<'ctx>,
         target: BasicTypeEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        if value.get_type() == target {
-            return Ok(value);
-        }
-        match (value, target) {
-            (BasicValueEnum::IntValue(value), BasicTypeEnum::IntType(target)) => {
-                let source_width = value.get_type().get_bit_width();
-                let target_width = target.get_bit_width();
-                if source_width < target_width {
-                    self.generator
-                        .builder
-                        .build_int_s_extend(value, target, "resolved_widen")
-                        .map(BasicValueEnum::from)
-                        .map_err(|error| {
-                            CompileError::LlvmError(format!("integer widen failed: {error}"))
-                        })
-                } else {
-                    Err(CompileError::Unsupported(format!(
-                        "resolved scalar slice refuses implicit integer narrowing {source_width}->{target_width}"
-                    )))
-                }
-            }
-            _ => Err(CompileError::Unsupported(format!(
-                "resolved scalar value {:?} cannot convert to {target:?}",
-                value.get_type()
-            ))),
-        }
+        self.numeric_convert(value, target)
     }
 
     fn root_place(
@@ -1298,5 +1347,27 @@ func main() -> i32 {
             .compile_resolved_native(&program)
             .expect("is_nan builtin in if condition is valid");
         generator.module.verify().expect("valid LLVM");
+    }
+
+    #[test]
+    fn numeric_narrow_cast_emits_from_resolved_ir() {
+        let program = checked(
+            r#"
+func main() -> i32 {
+    let x = sqrt(16.0)
+    let y = floor(x)
+    let z = y as i32
+    z
+}
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_narrow");
+        generator
+            .compile_resolved_native(&program)
+            .expect("f64→i32 narrowing cast is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+        let ir = generator.module.print_to_string().to_string();
+        assert!(ir.contains("fptosi"), "expected fptosi instruction: {ir}");
     }
 }
