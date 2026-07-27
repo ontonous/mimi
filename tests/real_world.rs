@@ -640,6 +640,35 @@ fn real_world_resolved_option_construct() {
     );
 }
 
+/// List<i64> construction, indexing, and len() through the resolved native
+/// emitter. 0.32.2: List/Map/Set nominal types are now eligible.
+#[test]
+fn real_world_resolved_list_index() {
+    run_both(
+        r#"
+        func sum(xs: List<i64>) -> i64 {
+            let mut total: i64 = 0
+            let mut i: i64 = 0
+            while i < len(xs) {
+                total = total + xs[i]
+                i = i + 1
+            }
+            total
+        }
+
+        func main() -> i32 {
+            let nums: List<i64> = [10, 20, 30]
+            println(sum(nums))
+            println(len(nums))
+            println(nums[0])
+            println(nums[2])
+            0
+        }
+    "#,
+        "60\n3\n10\n30",
+    );
+}
+
 /// Dual-backend regression for every `tests/real_world/flow_*.mimi`.
 ///
 /// Requires `cc` for the codegen path. Compares normalized stdout so L1

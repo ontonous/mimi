@@ -239,6 +239,24 @@ fn require_scalar_type(
             require_scalar_type(program, owner, ok)?;
             require_scalar_type(program, owner, error)
         }
+        // 0.32.2: Builtin collection types (List/Map/Set) are lowerable
+        // in types.rs. Accept them so the resolved emitter can handle
+        // collection-typed parameters, return values, and local bindings.
+        Some(ResolvedType::Nominal { item, arguments, .. }) => {
+            match item.as_str() {
+                "builtin:type:List" | "builtin:type:Map" | "builtin:type:Set" => {
+                    for arg in arguments {
+                        require_scalar_type(program, owner, arg)?;
+                    }
+                    Ok(())
+                }
+                other => Err(UnsupportedResolvedNode::new(
+                    owner,
+                    owner,
+                    format!("nominal type '{other}' is not in the resolved native slice"),
+                )),
+            }
+        }
         Some(other) => Err(UnsupportedResolvedNode::new(
             owner,
             owner,
@@ -402,6 +420,8 @@ fn require_root_place(
     for projection in &place.projections {
         match projection {
             crate::core::ir::ResolvedProjection::Tuple { .. } => {}
+            // 0.32.2: Index projections for List/Map element access.
+            crate::core::ir::ResolvedProjection::Index { .. } => {}
             other => {
                 return Err(UnsupportedResolvedNode::new(
                     owner,
@@ -458,9 +478,21 @@ fn require_expr(
             }
             Ok(())
         }
+        // 0.32.2: List literals.
+        ResolvedExprKind::List(elements) => {
+            for element in elements {
+                require_expr(program, owner, element)?;
+            }
+            Ok(())
+        }
         ResolvedExprKind::Project { value, projection } => {
             match projection {
                 crate::core::ir::ResolvedValueProjection::Tuple(_) => {}
+                // 0.32.2: Index value projections for List element access
+                // on rvalues (e.g. get_list()[0]).
+                crate::core::ir::ResolvedValueProjection::Index(index_expr) => {
+                    require_expr(program, owner, index_expr)?;
+                }
                 other => {
                     return Err(UnsupportedResolvedNode::new(
                         owner,

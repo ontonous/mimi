@@ -67,6 +67,9 @@ struct NativeResolvedEmitter<'program, 'generator, 'ctx> {
     program: &'program CheckedProgram,
     generator: &'generator mut CodeGenerator<'ctx>,
     loop_stack: Vec<LoopContext<'ctx>>,
+    /// Per-callable place inputs (dynamic index expressions). Set before
+    /// emitting each function body, cleared after.
+    place_inputs: BTreeMap<NodeId, crate::core::ResolvedExpr>,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -88,6 +91,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             program,
             generator: self,
             loop_stack: Vec::new(),
+            place_inputs: BTreeMap::new(),
         }
         .compile_program()
         .map_err(|error| {
@@ -112,6 +116,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             program,
             generator: self,
             loop_stack: Vec::new(),
+            place_inputs: BTreeMap::new(),
         }
         .compile_subset(eligible)
         .map_err(|error| {
@@ -321,6 +326,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         &mut self,
         callable: &crate::core::ResolvedCallable,
     ) -> Result<(), CompileError> {
+        // Install per-callable place inputs (dynamic index expressions).
+        self.place_inputs = callable.body.place_inputs.clone();
         let symbol = self.callable_symbol(&callable.owner)?.to_string();
         let function = self.generator.module.get_function(&symbol).ok_or_else(|| {
             CompileError::LlvmError(format!("resolved declaration '{symbol}' is absent"))
@@ -656,24 +663,87 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 }
                 self.generator.build_load(struct_type, alloca, "tuple_val")
             }
+            // 0.32.2: List literal construction. Mirrors the legacy
+            // compile_list_expr: malloc data buffer, store elements as i64,
+            // build {i64 len, ptr data} struct.
+            ResolvedExprKind::List(elements) => {
+                let count = elements.len() as u64;
+                let i64_ty = self.generator.context.i64_type();
+                let len_val = i64_ty.const_int(count, false);
+                // Allocate data buffer: count * 8 bytes.
+                let sizeof_i64 = i64_ty.const_int(8, false);
+                let alloc_size = self
+                    .generator
+                    .builder
+                    .build_int_mul(len_val, sizeof_i64, "list_alloc_size")
+                    .map_err(|e| CompileError::LlvmError(format!("list alloc mul: {e}")))?;
+                let data_ptr = self.generator.malloc_or_abort(alloc_size, "list_malloc")?;
+                // Store each element as i64.
+                for (i, element) in elements.iter().enumerate() {
+                    let value = self.emit_expr(element, frame)?;
+                    let iv = self.coerce_to_i64(value)?;
+                    let idx = i64_ty.const_int(i as u64, false);
+                    let elem_ptr = self
+                        .generator
+                        .build_in_bounds_gep(i64_ty, data_ptr, &[idx], "list_elem")?;
+                    self.generator.build_store(elem_ptr, iv)?;
+                }
+                // build_list_struct returns a pointer to the alloca'd struct.
+                // Load the struct value so the resolved emitter can store it
+                // in local variables (matching tuple semantics).
+                let list_ptr = self.generator.build_list_struct(len_val, data_ptr)?;
+                let list_ty = self.generator.list_struct_type();
+                self.generator.build_load(
+                    BasicTypeEnum::StructType(list_ty),
+                    list_ptr.into_pointer_value(),
+                    "list_val",
+                )
+            }
             ResolvedExprKind::Project { value, projection } => {
-                let crate::core::ir::ResolvedValueProjection::Tuple(index) = projection else {
-                    return Err(CompileError::Unsupported(
-                        "non-tuple value projection escaped eligibility".into(),
-                    ));
-                };
                 let agg = self.emit_expr(value, frame)?;
-                let BasicValueEnum::StructValue(struct_val) = agg else {
-                    return Err(CompileError::Unsupported(
-                        "projected value is not a struct".into(),
-                    ));
-                };
-                let field = struct_val
-                    .get_field_at_index(*index as u32)
-                    .ok_or_else(|| {
-                        CompileError::LlvmError(format!("tuple field {index} absent"))
-                    })?;
-                Ok(field)
+                match projection {
+                    crate::core::ir::ResolvedValueProjection::Tuple(index) => {
+                        let BasicValueEnum::StructValue(struct_val) = agg else {
+                            return Err(CompileError::Unsupported(
+                                "tuple projection on non-struct value".into(),
+                            ));
+                        };
+                        let field = struct_val
+                            .get_field_at_index(*index as u32)
+                            .ok_or_else(|| {
+                                CompileError::LlvmError(format!("tuple field {index} absent"))
+                            })?;
+                        Ok(field)
+                    }
+                    // 0.32.2: Index value projection for List rvalue access.
+                    crate::core::ir::ResolvedValueProjection::Index(index_expr) => {
+                        let BasicValueEnum::StructValue(struct_val) = agg else {
+                            return Err(CompileError::Unsupported(
+                                "index projection on non-struct (list) value".into(),
+                            ));
+                        };
+                        // Extract data pointer (field 1).
+                        let data_ptr = struct_val
+                            .get_field_at_index(1)
+                            .ok_or_else(|| {
+                                CompileError::LlvmError("list data field absent".into())
+                            })?
+                            .into_pointer_value();
+                        // Evaluate index.
+                        let idx_val = self.emit_expr(index_expr, frame)?.into_int_value();
+                        // GEP + load.
+                        let i64_ty = self.generator.context.i64_type();
+                        let elem_ptr = self.generator.build_in_bounds_gep(
+                            i64_ty, data_ptr, &[idx_val], "list_val_idx",
+                        )?;
+                        self.generator.build_load(
+                            BasicTypeEnum::IntType(i64_ty), elem_ptr, "list_val_load",
+                        )
+                    }
+                    other => Err(CompileError::Unsupported(format!(
+                        "value projection {other:?} escaped resolved native eligibility"
+                    ))),
+                }
             }
             ResolvedExprKind::Binary { op, left, right } => {
                 let left = self.emit_expr(left, frame)?;
@@ -1366,9 +1436,57 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         self.numeric_convert(value, target)
     }
 
+    /// Coerce a value to i64 for list element storage. Handles int
+    /// sign/zero-extension, float-to-int, and bool zext.
+    fn coerce_to_i64(
+        &self,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        match value {
+            BasicValueEnum::IntValue(iv) => {
+                let bw = iv.get_type().get_bit_width();
+                if bw == 1 {
+                    // Bool: zero-extend.
+                    Ok(self
+                        .generator
+                        .builder
+                        .build_int_z_extend(iv, i64_ty, "list_bool_zext")
+                        .map_err(|e| CompileError::LlvmError(format!("bool zext: {e}")))?)
+                } else if bw < 64 {
+                    Ok(self
+                        .generator
+                        .builder
+                        .build_int_s_extend(iv, i64_ty, "list_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("sext: {e}")))?)
+                } else if bw > 64 {
+                    Ok(self
+                        .generator
+                        .builder
+                        .build_int_truncate(iv, i64_ty, "list_trunc")
+                        .map_err(|e| CompileError::LlvmError(format!("trunc: {e}")))?)
+                } else {
+                    Ok(iv)
+                }
+            }
+            BasicValueEnum::FloatValue(fv) => {
+                // Float → i64 bitcast (store raw bits).
+                Ok(self
+                    .generator
+                    .builder
+                    .build_bit_cast(fv, i64_ty, "list_float_bits")
+                    .map_err(|e| CompileError::LlvmError(format!("float bitcast: {e}")))?
+                    .into_int_value())
+            }
+            other => Err(CompileError::Unsupported(format!(
+                "cannot coerce {other:?} to i64 for list storage"
+            ))),
+        }
+    }
+
     fn root_place(
         &mut self,
-        frame: &ResolvedFrame<'ctx>,
+        frame: &mut ResolvedFrame<'ctx>,
         place: &ResolvedPlace,
     ) -> Result<ResolvedVarEntry<'ctx>, CompileError> {
         let base_entry = frame.locals.get(&place.base).copied().ok_or_else(|| {
@@ -1380,35 +1498,93 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         if place.projections.is_empty() {
             return Ok(base_entry);
         }
-        // Walk tuple projections via struct GEP.
+        // Walk projections: Tuple via struct GEP, Index via list data GEP.
         let mut current_ptr = base_entry.storage;
         let mut current_type = base_entry.llvm_type;
         for projection in &place.projections {
-            let crate::core::ir::ResolvedProjection::Tuple { index, ty: _ } = projection else {
-                return Err(CompileError::Unsupported(
-                    "non-tuple place projection escaped eligibility".into(),
-                ));
-            };
-            let BasicTypeEnum::StructType(struct_type) = current_type else {
-                return Err(CompileError::Unsupported(
-                    "tuple projection on non-struct place".into(),
-                ));
-            };
-            current_ptr = self
-                .generator
-                .builder
-                .build_struct_gep(struct_type, current_ptr, *index as u32, "place_gep")
-                .map_err(|e| CompileError::LlvmError(format!("place gep: {e}")))?;
-            // Use the actual struct field type (which may be widened to i64
-            // for legacy ABI compatibility) rather than re-lowering the
-            // resolved type identity.
-            current_type = struct_type
-                .get_field_type_at_index(*index as u32)
-                .ok_or_else(|| {
-                    CompileError::LlvmError(format!(
-                        "tuple field {index} absent in place projection"
-                    ))
-                })?;
+            match projection {
+                crate::core::ir::ResolvedProjection::Tuple { index, ty: _ } => {
+                    let BasicTypeEnum::StructType(struct_type) = current_type else {
+                        return Err(CompileError::Unsupported(
+                            "tuple projection on non-struct place".into(),
+                        ));
+                    };
+                    current_ptr = self
+                        .generator
+                        .builder
+                        .build_struct_gep(
+                            struct_type,
+                            current_ptr,
+                            *index as u32,
+                            "place_gep",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("place gep: {e}")))?;
+                    current_type = struct_type
+                        .get_field_type_at_index(*index as u32)
+                        .ok_or_else(|| {
+                            CompileError::LlvmError(format!(
+                                "tuple field {index} absent in place projection"
+                            ))
+                        })?;
+                }
+                // 0.32.2: Index projection for List element access.
+                // List is {i64 len, ptr data}; load data ptr, GEP by index.
+                crate::core::ir::ResolvedProjection::Index { index, ty } => {
+                    let BasicTypeEnum::StructType(struct_type) = current_type else {
+                        return Err(CompileError::Unsupported(
+                            "index projection on non-struct (list) place".into(),
+                        ));
+                    };
+                    // Load the data pointer (field 1).
+                    let data_gep = self
+                        .generator
+                        .builder
+                        .build_struct_gep(struct_type, current_ptr, 1, "list_data_gep")
+                        .map_err(|e| CompileError::LlvmError(format!("list data gep: {e}")))?;
+                    let ptr_ty = self
+                        .generator
+                        .context
+                        .ptr_type(inkwell::AddressSpace::default());
+                    let data_ptr = self
+                        .generator
+                        .build_load(BasicTypeEnum::PointerType(ptr_ty), data_gep, "list_data_ptr")?
+                        .into_pointer_value();
+                    // Evaluate the index expression.
+                    let idx_val = match index {
+                        crate::core::ir::ResolvedIndex::Constant(c) => {
+                            self.generator.context.i64_type().const_int(*c as u64, false)
+                        }
+                        crate::core::ir::ResolvedIndex::Dynamic(expr_id) => {
+                            // Look up the index expression from place_inputs
+                            // and emit it. Clone to release the immutable
+                            // borrow on self before calling emit_expr.
+                            let idx_expr = self.place_inputs.get(expr_id).cloned().ok_or_else(|| {
+                                CompileError::Unsupported(format!(
+                                    "dynamic index expression '{}' not in place_inputs",
+                                    expr_id.0
+                                ))
+                            })?;
+                            self.emit_expr(&idx_expr, frame)?.into_int_value()
+                        }
+                    };
+                    // GEP into the data buffer.
+                    let i64_ty = self.generator.context.i64_type();
+                    current_ptr = self.generator.build_in_bounds_gep(
+                        i64_ty, data_ptr, &[idx_val], "list_idx_gep",
+                    )?;
+                    // Element type: lower the resolved type identity.
+                    current_type = llvm_type_for_resolved(
+                        self.generator.context,
+                        self.program.resolved_types(),
+                        ty,
+                    )?;
+                }
+                other => {
+                    return Err(CompileError::Unsupported(format!(
+                        "projection {other:?} escaped resolved native eligibility"
+                    )))
+                }
+            }
         }
         Ok(ResolvedVarEntry {
             storage: current_ptr,
@@ -1915,7 +2091,11 @@ func main() -> i32 {
     }
 
     #[test]
-    fn unsupported_list_fails_without_surface_fallback() {
+    /// 0.32.2: List literals and indexing are now in the resolved native
+    /// slice. This test was previously a rejection test; now it verifies
+    /// successful compilation.
+    #[test]
+    fn list_literal_compiles_through_resolved_emitter() {
         let program = checked(
             r#"
 func main() -> i32 {
@@ -1925,18 +2105,11 @@ func main() -> i32 {
 "#,
         );
         let context = inkwell::context::Context::create();
-        let mut generator = CodeGenerator::new(&context, "resolved_reject");
-        let diagnostics = generator
+        let mut generator = CodeGenerator::new(&context, "resolved_list_lit");
+        generator
             .compile_resolved_native(&program)
-            .expect_err("list literal is outside the current slice");
-        assert!(
-            diagnostics[0]
-                .message
-                .contains("resolved native slice rejected"),
-            "{}",
-            diagnostics[0].message
-        );
-        assert!(generator.module.get_function("main").is_none());
+            .expect("list literal is now in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
     }
 
     #[test]
@@ -2179,6 +2352,36 @@ func main() -> i32 { 0 }
         generator
             .compile_resolved_native(&program)
             .expect("Option<i64> return is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+    }
+
+    /// 0.32.2: List<i64> construction, indexing, and len() through the
+    /// resolved native emitter. Verifies LLVM IR is valid.
+    #[test]
+    fn list_construct_index_emits_from_resolved_ir() {
+        let program = checked(
+            r#"
+func sum(xs: List<i64>) -> i64 {
+    let mut total: i64 = 0
+    let mut i: i64 = 0
+    while i < len(xs) {
+        total = total + xs[i]
+        i = i + 1
+    }
+    total
+}
+func main() -> i32 {
+    let nums: List<i64> = [10, 20, 30]
+    let s = sum(nums)
+    if s == 60 { 0 } else { 1 }
+}
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_list");
+        generator
+            .compile_resolved_native(&program)
+            .expect("List construct/index is in the resolved native slice");
         generator.module.verify().expect("valid LLVM");
     }
 
