@@ -128,14 +128,7 @@ fn require_scalar_type(
     ty: &ResolvedTypeId,
 ) -> Result<(), UnsupportedResolvedNode> {
     match program.resolved_types().get(ty) {
-        Some(ResolvedType::Primitive(
-            PrimitiveType::I32
-            | PrimitiveType::I64
-            | PrimitiveType::F64
-            | PrimitiveType::Bool
-            | PrimitiveType::Unit
-            | PrimitiveType::String,
-        )) => Ok(()),
+        Some(ResolvedType::Primitive(_)) => Ok(()),
         Some(ResolvedType::Tuple(elements)) => {
             for element in elements {
                 require_scalar_type(program, owner, element)?;
