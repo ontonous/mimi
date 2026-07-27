@@ -319,7 +319,12 @@ fn require_expr(
             require_conversion(owner, &expression.node_id, conversion.kind)?;
             require_expr(program, owner, value)
         }
-        ResolvedExprKind::Call(call) if matches!(call.callee, ResolvedCallee::Function(_)) => {
+        ResolvedExprKind::Call(call)
+            if matches!(
+                call.callee,
+                ResolvedCallee::Function(_) | ResolvedCallee::Builtin(_)
+            ) =>
+        {
             for argument in &call.arguments {
                 require_conversion(owner, &argument.value.node_id, argument.conversion.kind)?;
                 require_expr(program, owner, &argument.value)?;
