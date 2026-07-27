@@ -1,6 +1,19 @@
 # Changelog
 
-## [Unreleased] — 0.1.1-dev
+## [0.1.1] — 2026-07-28
+
+### Phase H: RC + 发布（0.31.57–0.31.58）
+
+- **CODEGEN Typed Resolved IR 迁移 S8–S13（per-function dispatch 激活）**：
+  - S8: String ABI 统一（`{ptr, i64}` struct，消除 resolved/legacy 双 ABI 漂移）
+  - S8b: Builtin string 返回值包装（`wrap_builtin_string_result`，raw ptr → `{ptr, i64}`）
+  - S9: Per-function dispatch 激活 + Tuple ABI 统一（sub-64-bit int → i64，匹配 legacy `mimi_type_to_llvm`）
+  - S10: E2E 双后端测试 `real_world_per_function_dispatch`（fib/divmod eligible，sum_list ineligible via List）
+  - S11: 文档化 traits/impls/externs 阻断根因（impl method body 调用 builtin 传 `{ptr,i64}` struct 但 builtin 期望 raw ptr → SIGSEGV）
+  - S12: `compile_resolved_subset` 移入 `compile_file_inner`（setup 之后、legacy body pass 之前），确保所有符号声明先于 resolved 发射
+  - S13: Origin-based filtering（`Origin::User(_)` 检查）+ 精确文档化剩余阻断
+- **Silent fallback → verbose warning**：per-function resolved emitter fallback 不再静默。`MIMI_VERBOSE=1` 输出逐函数 fallback 详情和聚合计数。默认输出不变。满足 0.1.1 硬门禁：codegen dispatch 路径无 silent fallback。
+- **退出标准修订**：`devdocs/v0.31/README.md` §9 "只消费 Typed Resolved IR" → 精确分层描述（声明层全量 typed IR / 函数体 per-function dispatch + 显式 legacy arm）。SD-6 `legacy_body_file()` 删除推迟到 0.1.2 (0.32)。
 
 ### Phase H: RC1 阻断修复（0.31.57，进行中）
 
