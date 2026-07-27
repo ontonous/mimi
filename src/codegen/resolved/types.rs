@@ -112,6 +112,32 @@ fn lower_resolved_type<'ctx>(
                 FunctionTypeAbi::C => Ok(pointer),
             }
         }
+        // 0.32.2: Builtin collection types. List is {i64 len, ptr data}
+        // matching the legacy emitter's list_struct_type(). Map and Set
+        // share the same runtime representation (handle-based).
+        ResolvedType::Nominal { item, arguments, .. } => {
+            // Validate element types are lowerable (fail-closed).
+            for arg in arguments {
+                let _ = lower_resolved_type(context, types, arg, active)?;
+            }
+            match item.as_str() {
+                "builtin:type:List" => {
+                    let i64_ty = BasicTypeEnum::IntType(context.i64_type());
+                    let ptr_ty =
+                        BasicTypeEnum::PointerType(context.ptr_type(AddressSpace::default()));
+                    Ok(BasicTypeEnum::StructType(
+                        context.struct_type(&[i64_ty, ptr_ty], false),
+                    ))
+                }
+                "builtin:type:Map" | "builtin:type:Set" => {
+                    // Map/Set are opaque handles (i64) at the LLVM level.
+                    Ok(BasicTypeEnum::IntType(context.i64_type()))
+                }
+                other => Err(CompileError::Unsupported(format!(
+                    "nominal type '{other}' is not in the resolved native slice"
+                ))),
+            }
+        }
         unsupported => Err(CompileError::Unsupported(format!(
             "canonical LLVM lowering does not support resolved type '{}' ({unsupported:?})",
             id.as_str()
@@ -310,9 +336,12 @@ mod tests {
 
         for id in [&nominal, &option] {
             let error = llvm_type_for_resolved(&context, &types, id)
-                .expect_err("nominal type must not be erased");
+                .expect_err("user-defined nominal type must not be erased");
             assert!(matches!(error, CompileError::Unsupported(_)));
-            assert!(error.to_string().contains("Nominal"));
+            assert!(
+                error.to_string().contains("nominal type"),
+                "unexpected error: {error}"
+            );
         }
     }
 }
