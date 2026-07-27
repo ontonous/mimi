@@ -34,7 +34,6 @@ pub(super) fn require_resolved_native_program(
         || !program.sessions().is_empty()
         || !program.protocols().is_empty()
         || !program.capabilities().is_empty()
-        || !program.constants().is_empty()
         || !program.traits().is_empty()
         || !program.impls().is_empty()
         || !program.type_defs().is_empty()
@@ -65,6 +64,16 @@ pub(super) fn require_resolved_native_program(
                 program.extern_blocks().len(),
             ),
         ));
+    }
+    // Constants are allowed, but only materializable (non-Complex) values.
+    for constant in program.constants().values() {
+        if matches!(constant.value, crate::core::ResolvedConstValue::Complex) {
+            return Err(UnsupportedResolvedNode::new(
+                &constant.node_id,
+                &constant.node_id,
+                "constant with non-materializable value is not in the resolved native slice",
+            ));
+        }
     }
     for function in program.functions().values() {
         if function.is_comptime {
@@ -316,6 +325,7 @@ fn require_expr(
     require_scalar_type(program, &expression.node_id, &expression.ty)?;
     match &expression.kind {
         ResolvedExprKind::Literal(_) => Ok(()),
+        ResolvedExprKind::Constant(_) => Ok(()),
         ResolvedExprKind::Load(place) => require_root_place(owner, &expression.node_id, place),
         ResolvedExprKind::Binary { left, right, .. } => {
             require_expr(program, owner, left)?;
