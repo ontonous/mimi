@@ -781,7 +781,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         // and vtables are set up. The legacy compile_func skip guard
         // (count_basic_blocks != 0) prevents double-emission in the fifth pass.
         if let Some((program, Some(eligible))) = resolved_ctx {
-            let _ = self.compile_resolved_subset(program, eligible);
+            if let Err(diagnostics) = self.compile_resolved_subset(program, eligible) {
+                if std::env::var("MIMI_VERBOSE").is_ok() {
+                    for d in &diagnostics {
+                        eprintln!("warning: resolved subset issue: {}", d.message);
+                    }
+                }
+            }
         }
         // Fifth pass: compile user functions, actors, and flow transitions.
         // v0.28.21 — `comptime func` items are folded at codegen-start by
