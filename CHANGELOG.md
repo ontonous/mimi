@@ -4,6 +4,10 @@
 
 ### Phase H: RC1 阻断修复（0.31.57，进行中）
 
+- **CODEGEN Typed Resolved IR 迁移 S0/S1**：新增 `codegen::resolved` 生产 emitter，首批 primitive scalar leaf callable 直接消费 `CheckedProgram` 中的 `ResolvedCallable` / `ResolvedTypeId` / `ResolvedLocalId` / `ResolvedCallee`；支持 canonical 类型降低、稳定 local identity、标量运算/转换与直接函数调用。生产入口仅对静态 eligibility 通过的 body class 切换；typed emitter 一旦入选则 fail-closed，禁止失败后回退 raw AST。毒化 `legacy_file` 的回归测试已证明该 cohort 不读 surface body。
+- **CODEGEN Typed Resolved IR 迁移 S2（控制流）**：resolved native emitter 新增 `If`/`Block` 表达式与 `While`/`For(Range)`/`Break`/`Continue` 语句的 LLVM 发射；eligibility scanner 同步扩展（`require_resolved_native_program`）。If 使用 alloca+merge 模式，While/For 使用 header/body/exit 三块 + loop_stack 支持 break/continue。For 仅接受 Range iterable（checker resolved body lowering 尚不支持 range 语法，emitter 代码预留）。Match/WhileLet/Loop/Scope 仍 fail-closed。12 项 resolved codegen 测试全绿。
+- **CODEGEN 迁移结构门禁**：`src/codegen/resolved/` 禁止调用 `legacy_body_file()` / `compile_file()`，禁止导入 surface body AST（仅允许复用无语义身份的 `BinOp` 运算符枚举）。未迁移 body class 仍保留显式 legacy arm，不计入 Typed IR 完成度。
+- **测试并发文档校正**：全量日常门禁改为 `cargo test -- --test-threads=4`（性能优化后约 42 秒）；Z3 验证专项仍使用单线程，极端内存受限环境可退回单线程。
 - **Native `List<string>` ABI 修复**：`mimi_list_to_string` 不再读取 native codegen 两字段 `{len, data}` 布局中不存在的 `element_kind` 尾字段；`std::array` 的真实 List 返回 API 补齐 codegen 类型识别。修复 `println(array_slice(...))` 输出地址而非字符串的 silent miscompilation，并用 real-world 双后端回归覆盖 slice/take/drop/concat。
 - **路线图机器契约修复**：校验器识别 `soundness`/`completeness` milestone kind；R1/R2/R3 审查不变量不再冒充语言 requirement ID；README/RC 分册同步到权威 `last = 58`。
 

@@ -1,0 +1,1234 @@
+//! Native lowering directly from checker-owned Typed Resolved IR.
+//!
+//! This module is a capability boundary: it accepts `CheckedProgram` and
+//! canonical identities only. Surface `File`/`FuncDef`/`Stmt`/`Expr` are not
+//! imported here, and unsupported nodes fail closed instead of falling back to
+//! the legacy emitter.
+
+mod eligibility;
+mod types;
+
+use std::collections::BTreeMap;
+
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, PointerValue};
+
+use crate::ast::BinOp;
+use crate::codegen::{CallSiteValueExt, CodeGenerator};
+use crate::core::ir::{ResolvedBinaryOp, ResolvedUnaryOp};
+use crate::core::{
+    CheckedConversion, CheckedConversionKind, CheckedProgram, NodeId, ResolvedBlock, ResolvedBody,
+    ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLiteral, ResolvedLocalId,
+    ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedStmtKind, ResolvedType,
+    ResolvedTypeId,
+};
+use crate::diagnostic::Diagnostic;
+use crate::error::CompileError;
+
+use self::eligibility::{require_resolved_native_program, UnsupportedResolvedNode};
+use self::types::llvm_type_for_resolved;
+
+pub(super) fn supports_resolved_native(program: &CheckedProgram) -> bool {
+    require_resolved_native_program(program).is_ok()
+}
+
+#[derive(Clone, Copy)]
+struct ResolvedVarEntry<'ctx> {
+    storage: PointerValue<'ctx>,
+    llvm_type: BasicTypeEnum<'ctx>,
+}
+
+struct ResolvedFrame<'ctx> {
+    owner: NodeId,
+    locals: BTreeMap<ResolvedLocalId, ResolvedVarEntry<'ctx>>,
+}
+
+/// Loop context for `break`/`continue` lowering.
+#[derive(Clone, Copy)]
+struct LoopContext<'ctx> {
+    header: inkwell::basic_block::BasicBlock<'ctx>,
+    exit: inkwell::basic_block::BasicBlock<'ctx>,
+}
+
+struct NativeResolvedEmitter<'program, 'generator, 'ctx> {
+    program: &'program CheckedProgram,
+    generator: &'generator mut CodeGenerator<'ctx>,
+    loop_stack: Vec<LoopContext<'ctx>>,
+}
+
+impl<'ctx> CodeGenerator<'ctx> {
+    /// Migration entry point for the resolved native Typed IR emitter.
+    ///
+    /// Unlike `compile_checked`, this function has no surface-AST fallback.
+    /// It currently accepts primitive scalar callables with control flow
+    /// (if/while/for/break/continue); extending the accepted schema is done
+    /// slice by slice in `codegen::resolved`.
+    pub fn compile_resolved_native(
+        &mut self,
+        program: &CheckedProgram,
+    ) -> Result<(), Vec<Diagnostic>> {
+        program.validate_backend(crate::core::BackendProfile::Native)?;
+        if let Err(error) = require_resolved_native_program(program) {
+            return Err(vec![unsupported_diagnostic(program, error)]);
+        }
+        NativeResolvedEmitter {
+            program,
+            generator: self,
+            loop_stack: Vec::new(),
+        }
+        .compile_program()
+        .map_err(|error| {
+            let mut diagnostic = error.to_diagnostic();
+            if let Some(span) = program.entry_span() {
+                diagnostic = diagnostic.with_span(span);
+            }
+            vec![diagnostic]
+        })
+    }
+}
+
+fn unsupported_diagnostic(program: &CheckedProgram, error: UnsupportedResolvedNode) -> Diagnostic {
+    let mut diagnostic = CompileError::Unsupported(format!(
+        "resolved native slice rejected owner '{}' node '{}': {}",
+        error.owner.0, error.node.0, error.reason
+    ))
+    .to_diagnostic();
+    if let Some(span) = program
+        .node_meta()
+        .get(&error.node)
+        .map(|meta| meta.origin.user_span())
+        .or_else(|| program.entry_span())
+    {
+        diagnostic = diagnostic.with_span(span);
+    }
+    diagnostic
+}
+
+impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ctx> {
+    fn compile_program(&mut self) -> Result<(), CompileError> {
+        let mut functions: Vec<_> = self
+            .program
+            .functions()
+            .values()
+            .filter(|function| !function.is_comptime)
+            .collect();
+        functions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+
+        for function in &functions {
+            let callable = self.program.callable(&function.node_id).ok_or_else(|| {
+                CompileError::Unsupported(format!(
+                    "resolved callable '{}' is absent",
+                    function.node_id.0
+                ))
+            })?;
+            self.declare_callable(callable)?;
+        }
+        for function in functions {
+            let callable = self.program.callable(&function.node_id).ok_or_else(|| {
+                CompileError::Unsupported(format!(
+                    "resolved callable '{}' is absent",
+                    function.node_id.0
+                ))
+            })?;
+            self.emit_callable(callable)?;
+        }
+        self.generator.module.verify().map_err(|message| {
+            CompileError::LlvmError(format!(
+                "resolved native module verification failed: {message}"
+            ))
+        })
+    }
+
+    fn callable_symbol(&self, owner: &NodeId) -> Result<&str, CompileError> {
+        let function = self.program.functions().get(owner).ok_or_else(|| {
+            CompileError::Unsupported(format!("function catalog has no owner '{}'", owner.0))
+        })?;
+        if function.qualified_name.contains("::") {
+            return Err(CompileError::Unsupported(format!(
+                "qualified symbol '{}' is not in the scalar-leaf slice",
+                function.qualified_name
+            )));
+        }
+        Ok(&function.qualified_name)
+    }
+
+    fn declare_callable(
+        &mut self,
+        callable: &crate::core::ResolvedCallable,
+    ) -> Result<(), CompileError> {
+        let symbol = self.callable_symbol(&callable.owner)?.to_string();
+        let result = llvm_type_for_resolved(
+            self.generator.context,
+            self.program.resolved_types(),
+            &callable.signature.result,
+        )?;
+        let parameters = callable
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                llvm_type_for_resolved(
+                    self.generator.context,
+                    self.program.resolved_types(),
+                    &parameter.ty,
+                )
+                .map(BasicMetadataTypeEnum::from)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let function_type = match result {
+            BasicTypeEnum::IntType(ty) => ty.fn_type(&parameters, false),
+            BasicTypeEnum::FloatType(ty) => ty.fn_type(&parameters, false),
+            BasicTypeEnum::PointerType(ty) => ty.fn_type(&parameters, false),
+            BasicTypeEnum::StructType(ty) => ty.fn_type(&parameters, false),
+            BasicTypeEnum::ArrayType(ty) => ty.fn_type(&parameters, false),
+            other => {
+                return Err(CompileError::Unsupported(format!(
+                    "resolved callable '{}' has unsupported LLVM result {other:?}",
+                    callable.owner.0
+                )))
+            }
+        };
+        if self.generator.module.get_function(&symbol).is_none() {
+            self.generator
+                .module
+                .add_function(&symbol, function_type, None);
+        }
+        Ok(())
+    }
+
+    fn emit_callable(
+        &mut self,
+        callable: &crate::core::ResolvedCallable,
+    ) -> Result<(), CompileError> {
+        let symbol = self.callable_symbol(&callable.owner)?.to_string();
+        let function = self.generator.module.get_function(&symbol).ok_or_else(|| {
+            CompileError::LlvmError(format!("resolved declaration '{symbol}' is absent"))
+        })?;
+        if function.count_basic_blocks() != 0 {
+            return Err(CompileError::LlvmError(format!(
+                "resolved callable '{symbol}' was emitted more than once"
+            )));
+        }
+        let entry = self.generator.context.append_basic_block(function, "entry");
+        self.generator.builder.position_at_end(entry);
+        let mut frame = ResolvedFrame {
+            owner: callable.owner.clone(),
+            locals: BTreeMap::new(),
+        };
+        self.bind_parameters(callable, function, &mut frame)?;
+        let value = self.emit_block(&callable.body, &callable.body.root, &mut frame)?;
+        if self.current_block_terminated() {
+            return Ok(());
+        }
+        let result_type = llvm_type_for_resolved(
+            self.generator.context,
+            self.program.resolved_types(),
+            &callable.signature.result,
+        )?;
+        let value = match value {
+            Some(value) => value,
+            None if matches!(
+                self.program
+                    .resolved_types()
+                    .get(&callable.signature.result),
+                Some(ResolvedType::Primitive(crate::core::PrimitiveType::Unit))
+            ) =>
+            {
+                result_type.const_zero()
+            }
+            None => {
+                return Err(CompileError::Unsupported(format!(
+                    "resolved callable '{}' has no value for its non-unit result",
+                    callable.owner.0
+                )))
+            }
+        };
+        let value = self.coerce_to(value, result_type)?;
+        self.generator.build_return(Some(&value))
+    }
+
+    fn bind_parameters(
+        &mut self,
+        callable: &crate::core::ResolvedCallable,
+        function: inkwell::values::FunctionValue<'ctx>,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<(), CompileError> {
+        for (index, local_id) in callable.body.parameters.iter().enumerate() {
+            let local = callable.body.locals.get(local_id).ok_or_else(|| {
+                CompileError::Unsupported(format!(
+                    "resolved parameter local '{}' is absent",
+                    local_id.0 .0
+                ))
+            })?;
+            let llvm_type = llvm_type_for_resolved(
+                self.generator.context,
+                self.program.resolved_types(),
+                &local.ty,
+            )?;
+            let value = function.get_nth_param(index as u32).ok_or_else(|| {
+                CompileError::LlvmError(format!(
+                    "resolved parameter {index} is absent from '{}'",
+                    callable.owner.0
+                ))
+            })?;
+            let storage = self
+                .generator
+                .build_alloca(llvm_type, &local.display_name)?;
+            self.generator.build_store(storage, value)?;
+            frame
+                .locals
+                .insert(local_id.clone(), ResolvedVarEntry { storage, llvm_type });
+        }
+        Ok(())
+    }
+
+    fn emit_block(
+        &mut self,
+        body: &ResolvedBody,
+        block: &ResolvedBlock,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        let mut last = None;
+        for statement in &block.statements {
+            last = self.emit_statement(body, statement, frame)?;
+            if self.current_block_terminated() {
+                return Ok(last);
+            }
+        }
+        if let Some(result) = &block.result {
+            last = Some(self.emit_expr(result, frame)?);
+        }
+        Ok(last)
+    }
+
+    fn emit_statement(
+        &mut self,
+        body: &ResolvedBody,
+        statement: &crate::core::ResolvedStmt,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        match &statement.kind {
+            ResolvedStmtKind::Bind {
+                pattern,
+                initializer: Some(initializer),
+            } => {
+                let value = self.emit_expr(initializer, frame)?;
+                self.bind_pattern(body, pattern, value, frame)?;
+                Ok(None)
+            }
+            ResolvedStmtKind::Assign {
+                target,
+                value,
+                conversion,
+            } => {
+                let value = self.emit_expr(value, frame)?;
+                let value = self.apply_conversion(value, conversion)?;
+                let target = self.root_place(frame, target)?;
+                let value = self.coerce_to(value, target.llvm_type)?;
+                self.generator.build_store(target.storage, value)?;
+                Ok(None)
+            }
+            ResolvedStmtKind::Return { value, conversion } => {
+                let value = value
+                    .as_ref()
+                    .map(|value| self.emit_expr(value, frame))
+                    .transpose()?;
+                let value = match (value, conversion) {
+                    (Some(value), Some(conversion)) => {
+                        Some(self.apply_conversion(value, conversion)?)
+                    }
+                    (value, None) => value,
+                    (None, Some(_)) => {
+                        return Err(CompileError::Unsupported(format!(
+                            "resolved return '{}' has a conversion without a value",
+                            statement.node_id.0
+                        )))
+                    }
+                };
+                let function = self
+                    .generator
+                    .builder
+                    .get_insert_block()
+                    .and_then(|block| block.get_parent())
+                    .ok_or_else(|| CompileError::LlvmError("return outside function".into()))?;
+                let result_type = function.get_type().get_return_type().ok_or_else(|| {
+                    CompileError::LlvmError("resolved function has void return".into())
+                })?;
+                let value = value
+                    .map(|value| self.coerce_to(value, result_type))
+                    .transpose()?;
+                self.generator.build_return(
+                    value
+                        .as_ref()
+                        .map(|value| value as &dyn inkwell::values::BasicValue<'ctx>),
+                )?;
+                Ok(value)
+            }
+            ResolvedStmtKind::Expr(expression) => self.emit_expr(expression, frame).map(Some),
+            ResolvedStmtKind::Bind {
+                pattern,
+                initializer: None,
+            } => {
+                self.bind_pattern_uninitialized(body, pattern, frame)?;
+                Ok(None)
+            }
+            ResolvedStmtKind::While {
+                condition,
+                body: loop_body,
+            } => {
+                self.emit_while(body, condition, loop_body, frame)?;
+                Ok(None)
+            }
+            ResolvedStmtKind::For {
+                pattern,
+                iterable,
+                body: loop_body,
+            } => {
+                self.emit_for(body, pattern, iterable, loop_body, frame)?;
+                Ok(None)
+            }
+            ResolvedStmtKind::Break(_) => {
+                let loop_ctx = self
+                    .loop_stack
+                    .last()
+                    .ok_or_else(|| CompileError::Unsupported("break outside loop".into()))?;
+                self.generator.build_br(loop_ctx.exit)?;
+                Ok(None)
+            }
+            ResolvedStmtKind::Continue => {
+                let loop_ctx = self
+                    .loop_stack
+                    .last()
+                    .ok_or_else(|| CompileError::Unsupported("continue outside loop".into()))?;
+                self.generator.build_br(loop_ctx.header)?;
+                Ok(None)
+            }
+            other => Err(CompileError::Unsupported(format!(
+                "resolved statement {other:?} escaped resolved native eligibility for '{}'",
+                frame.owner.0
+            ))),
+        }
+    }
+
+    fn bind_pattern(
+        &mut self,
+        body: &ResolvedBody,
+        pattern: &ResolvedPattern,
+        value: BasicValueEnum<'ctx>,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<(), CompileError> {
+        match &pattern.kind {
+            ResolvedPatternKind::Wildcard => Ok(()),
+            ResolvedPatternKind::Binding {
+                local,
+                by_reference: None,
+            } => {
+                let metadata = body.locals.get(local).ok_or_else(|| {
+                    CompileError::Unsupported(format!(
+                        "resolved binding local '{}' is absent",
+                        local.0 .0
+                    ))
+                })?;
+                let llvm_type = llvm_type_for_resolved(
+                    self.generator.context,
+                    self.program.resolved_types(),
+                    &metadata.ty,
+                )?;
+                let value = self.coerce_to(value, llvm_type)?;
+                let storage = self
+                    .generator
+                    .build_alloca(llvm_type, &metadata.display_name)?;
+                self.generator.build_store(storage, value)?;
+                frame
+                    .locals
+                    .insert(local.clone(), ResolvedVarEntry { storage, llvm_type });
+                Ok(())
+            }
+            _ => Err(CompileError::Unsupported(format!(
+                "resolved pattern '{}' escaped scalar eligibility",
+                pattern.node_id.0
+            ))),
+        }
+    }
+
+    fn emit_expr(
+        &mut self,
+        expression: &ResolvedExpr,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match &expression.kind {
+            ResolvedExprKind::Literal(literal) => self.emit_literal(&expression.ty, literal),
+            ResolvedExprKind::Load(place) => {
+                let entry = self.root_place(frame, place)?;
+                self.generator
+                    .build_load(entry.llvm_type, entry.storage, "resolved_load")
+            }
+            ResolvedExprKind::Binary { op, left, right } => {
+                let left = self.emit_expr(left, frame)?;
+                let right = self.emit_expr(right, frame)?;
+                self.generator.compile_binop(binary_op(*op), left, right)
+            }
+            ResolvedExprKind::Unary { op, operand } => {
+                let value = self.emit_expr(operand, frame)?;
+                self.emit_unary(*op, value)
+            }
+            ResolvedExprKind::Cast { value, conversion } => {
+                let value = self.emit_expr(value, frame)?;
+                self.apply_conversion(value, conversion)
+            }
+            ResolvedExprKind::Call(call) => {
+                let ResolvedCallee::Function(owner) = &call.callee else {
+                    return Err(CompileError::Unsupported(format!(
+                        "resolved non-function callee escaped resolved native eligibility at '{}'",
+                        expression.node_id.0
+                    )));
+                };
+                let symbol = self.callable_symbol(owner)?.to_string();
+                let callee = self.generator.module.get_function(&symbol).ok_or_else(|| {
+                    CompileError::LlvmError(format!("resolved callee '{symbol}' is undeclared"))
+                })?;
+                let mut arguments = Vec::with_capacity(call.arguments.len());
+                for argument in &call.arguments {
+                    let value = self.emit_expr(&argument.value, frame)?;
+                    let value = self.apply_conversion(value, &argument.conversion)?;
+                    arguments.push(BasicMetadataValueEnum::from(value));
+                }
+                self.generator
+                    .build_call(callee, &arguments, "resolved_call")?
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| {
+                        CompileError::LlvmError(format!("resolved callee '{symbol}' returned void"))
+                    })
+            }
+            ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => self.emit_if(expression, condition, then_block, else_block, frame),
+            ResolvedExprKind::Block(block) => {
+                // A nested block expression: emit inline and return its value.
+                let value = self.emit_block(
+                    &self
+                        .program
+                        .callable(&frame.owner)
+                        .ok_or_else(|| {
+                            CompileError::Unsupported(format!(
+                                "resolved callable '{}' is absent for block expression",
+                                frame.owner.0
+                            ))
+                        })?
+                        .body,
+                    block,
+                    frame,
+                )?;
+                value.ok_or_else(|| {
+                    CompileError::Unsupported(format!(
+                        "resolved block expression '{}' produced no value",
+                        expression.node_id.0
+                    ))
+                })
+            }
+            other => Err(CompileError::Unsupported(format!(
+                "resolved expression {other:?} escaped resolved native eligibility at '{}'",
+                expression.node_id.0
+            ))),
+        }
+    }
+
+    fn emit_literal(
+        &self,
+        ty: &ResolvedTypeId,
+        literal: &ResolvedLiteral,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let llvm_type =
+            llvm_type_for_resolved(self.generator.context, self.program.resolved_types(), ty)?;
+        match (literal, llvm_type) {
+            (ResolvedLiteral::Int(value), BasicTypeEnum::IntType(integer)) => {
+                Ok(integer.const_int(*value as u64, true).into())
+            }
+            (ResolvedLiteral::Bool(value), BasicTypeEnum::IntType(integer)) => {
+                Ok(integer.const_int(u64::from(*value), false).into())
+            }
+            (ResolvedLiteral::FloatBits(bits), BasicTypeEnum::FloatType(float)) => {
+                Ok(float.const_float(f64::from_bits(*bits)).into())
+            }
+            (ResolvedLiteral::Unit, BasicTypeEnum::IntType(integer)) => {
+                Ok(integer.const_zero().into())
+            }
+            _ => Err(CompileError::Unsupported(
+                "resolved literal does not match its canonical scalar type".into(),
+            )),
+        }
+    }
+
+    fn emit_unary(
+        &self,
+        op: ResolvedUnaryOp,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match (op, value) {
+            (ResolvedUnaryOp::Negate, BasicValueEnum::IntValue(value)) => {
+                let zero = value.get_type().const_zero();
+                self.generator
+                    .compile_binop(BinOp::Sub, zero.into(), value.into())
+            }
+            (ResolvedUnaryOp::Negate, BasicValueEnum::FloatValue(value)) => {
+                let zero = value.get_type().const_zero();
+                self.generator
+                    .compile_binop(BinOp::Sub, zero.into(), value.into())
+            }
+            (ResolvedUnaryOp::Not, BasicValueEnum::IntValue(value)) => self
+                .generator
+                .builder
+                .build_not(value, "resolved_not")
+                .map(BasicValueEnum::from)
+                .map_err(|error| CompileError::LlvmError(format!("not error: {error}"))),
+            _ => Err(CompileError::Unsupported(
+                "resolved unary operator is not in the scalar-leaf slice".into(),
+            )),
+        }
+    }
+
+    fn apply_conversion(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        conversion: &CheckedConversion,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match conversion.kind {
+            CheckedConversionKind::Identity => Ok(value),
+            CheckedConversionKind::NumericWiden => {
+                let target = llvm_type_for_resolved(
+                    self.generator.context,
+                    self.program.resolved_types(),
+                    &conversion.to,
+                )?;
+                self.coerce_to(value, target)
+            }
+            other => Err(CompileError::Unsupported(format!(
+                "resolved conversion {other:?} escaped scalar eligibility"
+            ))),
+        }
+    }
+
+    fn coerce_to(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        target: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        if value.get_type() == target {
+            return Ok(value);
+        }
+        match (value, target) {
+            (BasicValueEnum::IntValue(value), BasicTypeEnum::IntType(target)) => {
+                let source_width = value.get_type().get_bit_width();
+                let target_width = target.get_bit_width();
+                if source_width < target_width {
+                    self.generator
+                        .builder
+                        .build_int_s_extend(value, target, "resolved_widen")
+                        .map(BasicValueEnum::from)
+                        .map_err(|error| {
+                            CompileError::LlvmError(format!("integer widen failed: {error}"))
+                        })
+                } else {
+                    Err(CompileError::Unsupported(format!(
+                        "resolved scalar slice refuses implicit integer narrowing {source_width}->{target_width}"
+                    )))
+                }
+            }
+            _ => Err(CompileError::Unsupported(format!(
+                "resolved scalar value {:?} cannot convert to {target:?}",
+                value.get_type()
+            ))),
+        }
+    }
+
+    fn root_place(
+        &self,
+        frame: &ResolvedFrame<'ctx>,
+        place: &ResolvedPlace,
+    ) -> Result<ResolvedVarEntry<'ctx>, CompileError> {
+        if !place.projections.is_empty() {
+            return Err(CompileError::Unsupported(
+                "projected place escaped scalar eligibility".into(),
+            ));
+        }
+        frame.locals.get(&place.base).copied().ok_or_else(|| {
+            CompileError::Unsupported(format!(
+                "resolved local '{}' is not bound in '{}'",
+                place.base.0 .0, frame.owner.0
+            ))
+        })
+    }
+
+    fn current_block_terminated(&self) -> bool {
+        self.generator
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_terminator())
+            .is_some()
+    }
+
+    fn current_function(&self) -> Result<inkwell::values::FunctionValue<'ctx>, CompileError> {
+        self.generator
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("no current function for block creation".into()))
+    }
+
+    /// Ensure a value is `i1` for use as a branch condition.
+    fn ensure_bool(
+        &self,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        match value {
+            BasicValueEnum::IntValue(int) if int.get_type().get_bit_width() == 1 => Ok(int),
+            BasicValueEnum::IntValue(int) => {
+                let zero = int.get_type().const_zero();
+                self.generator
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::NE, int, zero, "to_bool")
+                    .map_err(|e| CompileError::LlvmError(format!("bool conversion: {e}")))
+            }
+            _ => Err(CompileError::Unsupported(
+                "condition value is not an integer".into(),
+            )),
+        }
+    }
+
+    fn emit_if(
+        &mut self,
+        expression: &ResolvedExpr,
+        condition: &ResolvedExpr,
+        then_block: &ResolvedBlock,
+        else_block: &ResolvedBlock,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let result_type = llvm_type_for_resolved(
+            self.generator.context,
+            self.program.resolved_types(),
+            &expression.ty,
+        )?;
+        let result_alloca = self.generator.build_alloca(result_type, "if_result")?;
+
+        let cond_value = self.emit_expr(condition, frame)?;
+        let cond_bool = self.ensure_bool(cond_value)?;
+
+        let function = self.current_function()?;
+        let then_bb = self.generator.context.append_basic_block(function, "then");
+        let else_bb = self.generator.context.append_basic_block(function, "else");
+        let merge_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "if_merge");
+
+        self.generator.build_cond_br(cond_bool, then_bb, else_bb)?;
+
+        // Then branch
+        self.generator.builder.position_at_end(then_bb);
+        let body = self.program.callable(&frame.owner).ok_or_else(|| {
+            CompileError::Unsupported(format!(
+                "resolved callable '{}' is absent for if",
+                frame.owner.0
+            ))
+        })?;
+        let then_value = self.emit_block(&body.body, then_block, frame)?;
+        let then_terminated = self.current_block_terminated();
+        if !then_terminated {
+            if let Some(value) = then_value {
+                let value = self.coerce_to(value, result_type)?;
+                self.generator.build_store(result_alloca, value)?;
+            } else {
+                self.generator
+                    .build_store(result_alloca, result_type.const_zero())?;
+            }
+            self.generator.build_br(merge_bb)?;
+        }
+
+        // Else branch
+        self.generator.builder.position_at_end(else_bb);
+        let else_value = self.emit_block(&body.body, else_block, frame)?;
+        let else_terminated = self.current_block_terminated();
+        if !else_terminated {
+            if let Some(value) = else_value {
+                let value = self.coerce_to(value, result_type)?;
+                self.generator.build_store(result_alloca, value)?;
+            } else {
+                self.generator
+                    .build_store(result_alloca, result_type.const_zero())?;
+            }
+            self.generator.build_br(merge_bb)?;
+        }
+
+        // Merge
+        self.generator.builder.position_at_end(merge_bb);
+        self.generator
+            .build_load(result_type, result_alloca, "if_val")
+    }
+
+    fn emit_while(
+        &mut self,
+        body: &ResolvedBody,
+        condition: &ResolvedExpr,
+        loop_body: &ResolvedBlock,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<(), CompileError> {
+        let function = self.current_function()?;
+        let header = self
+            .generator
+            .context
+            .append_basic_block(function, "while_header");
+        let body_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "while_body");
+        let exit = self
+            .generator
+            .context
+            .append_basic_block(function, "while_exit");
+
+        self.generator.build_br(header)?;
+
+        // Header: evaluate condition
+        self.generator.builder.position_at_end(header);
+        let cond = self.emit_expr(condition, frame)?;
+        let cond = self.ensure_bool(cond)?;
+        self.generator.build_cond_br(cond, body_bb, exit)?;
+
+        // Body
+        self.generator.builder.position_at_end(body_bb);
+        self.loop_stack.push(LoopContext { header, exit });
+        self.emit_block(body, loop_body, frame)?;
+        self.loop_stack.pop();
+        if !self.current_block_terminated() {
+            self.generator.build_br(header)?;
+        }
+
+        // Exit
+        self.generator.builder.position_at_end(exit);
+        Ok(())
+    }
+
+    fn emit_for(
+        &mut self,
+        body: &ResolvedBody,
+        pattern: &ResolvedPattern,
+        iterable: &ResolvedExpr,
+        loop_body: &ResolvedBlock,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<(), CompileError> {
+        let ResolvedExprKind::Range { start, end } = &iterable.kind else {
+            return Err(CompileError::Unsupported(
+                "non-range iterable escaped resolved native eligibility".into(),
+            ));
+        };
+
+        let start_value = self.emit_expr(start, frame)?;
+        let end_value = self.emit_expr(end, frame)?;
+
+        // Bind the loop variable (pattern) to an alloca
+        let ResolvedPatternKind::Binding {
+            local,
+            by_reference: None,
+        } = &pattern.kind
+        else {
+            return Err(CompileError::Unsupported(
+                "non-binding for-loop pattern escaped eligibility".into(),
+            ));
+        };
+        let metadata = body.locals.get(local).ok_or_else(|| {
+            CompileError::Unsupported(format!(
+                "resolved for-loop local '{}' is absent",
+                local.0 .0
+            ))
+        })?;
+        let llvm_type = llvm_type_for_resolved(
+            self.generator.context,
+            self.program.resolved_types(),
+            &metadata.ty,
+        )?;
+        let storage = self
+            .generator
+            .build_alloca(llvm_type, &metadata.display_name)?;
+        let start_value = self.coerce_to(start_value, llvm_type)?;
+        self.generator.build_store(storage, start_value)?;
+        frame
+            .locals
+            .insert(local.clone(), ResolvedVarEntry { storage, llvm_type });
+
+        let end_value = self.coerce_to(end_value, llvm_type)?;
+        let end_int = match end_value {
+            BasicValueEnum::IntValue(int) => int,
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "for-loop end is not an integer".into(),
+                ))
+            }
+        };
+
+        // Determine signedness from the start expression's canonical type
+        let predicate = if is_signed_integer_type(self.program, &start.ty) {
+            inkwell::IntPredicate::SLT
+        } else {
+            inkwell::IntPredicate::ULT
+        };
+
+        let function = self.current_function()?;
+        let header = self
+            .generator
+            .context
+            .append_basic_block(function, "for_header");
+        let body_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "for_body");
+        let exit = self
+            .generator
+            .context
+            .append_basic_block(function, "for_exit");
+
+        self.generator.build_br(header)?;
+
+        // Header: compare counter < end
+        self.generator.builder.position_at_end(header);
+        let counter = self
+            .generator
+            .build_load(llvm_type, storage, "for_counter")?;
+        let counter_int = match counter {
+            BasicValueEnum::IntValue(int) => int,
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "for-loop counter is not an integer".into(),
+                ))
+            }
+        };
+        let cond = self
+            .generator
+            .builder
+            .build_int_compare(predicate, counter_int, end_int, "for_cond")
+            .map_err(|e| CompileError::LlvmError(format!("for compare: {e}")))?;
+        self.generator.build_cond_br(cond, body_bb, exit)?;
+
+        // Body
+        self.generator.builder.position_at_end(body_bb);
+        self.loop_stack.push(LoopContext { header, exit });
+        self.emit_block(body, loop_body, frame)?;
+        self.loop_stack.pop();
+
+        // Increment and loop back
+        if !self.current_block_terminated() {
+            let current = self
+                .generator
+                .build_load(llvm_type, storage, "for_reload")?;
+            let current_int = match current {
+                BasicValueEnum::IntValue(int) => int,
+                _ => {
+                    return Err(CompileError::Unsupported(
+                        "for-loop counter is not an integer".into(),
+                    ))
+                }
+            };
+            let one = current_int.get_type().const_int(1, false);
+            let next = self
+                .generator
+                .builder
+                .build_int_add(current_int, one, "for_next")
+                .map_err(|e| CompileError::LlvmError(format!("for increment: {e}")))?;
+            self.generator.build_store(storage, next)?;
+            self.generator.build_br(header)?;
+        }
+
+        // Exit
+        self.generator.builder.position_at_end(exit);
+        Ok(())
+    }
+
+    fn bind_pattern_uninitialized(
+        &mut self,
+        body: &ResolvedBody,
+        pattern: &ResolvedPattern,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<(), CompileError> {
+        match &pattern.kind {
+            ResolvedPatternKind::Wildcard => Ok(()),
+            ResolvedPatternKind::Binding {
+                local,
+                by_reference: None,
+            } => {
+                let metadata = body.locals.get(local).ok_or_else(|| {
+                    CompileError::Unsupported(format!(
+                        "resolved binding local '{}' is absent",
+                        local.0 .0
+                    ))
+                })?;
+                let llvm_type = llvm_type_for_resolved(
+                    self.generator.context,
+                    self.program.resolved_types(),
+                    &metadata.ty,
+                )?;
+                let storage = self
+                    .generator
+                    .build_alloca(llvm_type, &metadata.display_name)?;
+                frame
+                    .locals
+                    .insert(local.clone(), ResolvedVarEntry { storage, llvm_type });
+                Ok(())
+            }
+            _ => Err(CompileError::Unsupported(format!(
+                "resolved pattern '{}' escaped resolved native eligibility",
+                pattern.node_id.0
+            ))),
+        }
+    }
+}
+
+fn binary_op(op: ResolvedBinaryOp) -> BinOp {
+    match op {
+        ResolvedBinaryOp::Add => BinOp::Add,
+        ResolvedBinaryOp::Subtract => BinOp::Sub,
+        ResolvedBinaryOp::Multiply => BinOp::Mul,
+        ResolvedBinaryOp::Divide => BinOp::Div,
+        ResolvedBinaryOp::Remainder => BinOp::Mod,
+        ResolvedBinaryOp::Power => BinOp::Pow,
+        ResolvedBinaryOp::Equal => BinOp::EqCmp,
+        ResolvedBinaryOp::NotEqual => BinOp::NeCmp,
+        ResolvedBinaryOp::Less => BinOp::Lt,
+        ResolvedBinaryOp::Greater => BinOp::Gt,
+        ResolvedBinaryOp::LessEqual => BinOp::Le,
+        ResolvedBinaryOp::GreaterEqual => BinOp::Ge,
+        ResolvedBinaryOp::LogicalAnd => BinOp::And,
+        ResolvedBinaryOp::LogicalOr => BinOp::Or,
+        ResolvedBinaryOp::BitAnd => BinOp::BitAnd,
+        ResolvedBinaryOp::BitOr => BinOp::BitOr,
+        ResolvedBinaryOp::BitXor => BinOp::BitXor,
+        ResolvedBinaryOp::ShiftLeft => BinOp::Shl,
+        ResolvedBinaryOp::ShiftRight => BinOp::Shr,
+    }
+}
+
+fn is_signed_integer_type(program: &CheckedProgram, ty: &ResolvedTypeId) -> bool {
+    use crate::core::PrimitiveType;
+    matches!(
+        program.resolved_types().get(ty),
+        Some(ResolvedType::Primitive(
+            PrimitiveType::I8
+                | PrimitiveType::I16
+                | PrimitiveType::I32
+                | PrimitiveType::I64
+                | PrimitiveType::I128
+                | PrimitiveType::Isize
+        ))
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_codegen_boundary_has_no_surface_body_backdoor() {
+        let sources = [
+            ("mod.rs", include_str!("mod.rs")),
+            ("eligibility.rs", include_str!("eligibility.rs")),
+            ("types.rs", include_str!("types.rs")),
+        ];
+        let retained_body_accessor = concat!("legacy_body", "_file(");
+        let surface_emitter_entry = concat!("compile_", "file(");
+
+        for (name, source) in sources {
+            assert!(
+                !source.contains(retained_body_accessor),
+                "{name} must not recover the retained surface body"
+            );
+            assert!(
+                !source.contains(surface_emitter_entry),
+                "{name} must not enter the surface emitter"
+            );
+            for line in source.lines().map(str::trim) {
+                if line.starts_with("use crate::ast") {
+                    assert_eq!(
+                        line, "use crate::ast::BinOp;",
+                        "{name} may reuse only the representation-free BinOp enum"
+                    );
+                }
+            }
+        }
+    }
+
+    fn checked(source: &str) -> CheckedProgram {
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        crate::core::check_program(&file).expect("check")
+    }
+
+    #[test]
+    fn scalar_leaf_emits_from_resolved_callables() {
+        let program = checked(
+            r#"
+func add(left: i32, right: i32) -> i32 { left + right }
+func main() -> i32 { add(40, 2) }
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_scalar");
+        generator
+            .compile_resolved_native(&program)
+            .expect("resolved native compile");
+        generator.module.verify().expect("valid LLVM");
+        let ir = generator.module.print_to_string().to_string();
+        assert!(ir.contains("define i32 @add(i32"), "{ir}");
+        assert!(ir.contains("define i32 @main()"), "{ir}");
+        assert!(ir.contains("call i32 @add"), "{ir}");
+    }
+
+    #[test]
+    fn unsupported_match_fails_without_surface_fallback() {
+        let program = checked(
+            r#"
+func main() -> i32 {
+    let x = 1
+    match x {
+        1 => 10,
+        _ => 20,
+    }
+}
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_reject");
+        let diagnostics = generator
+            .compile_resolved_native(&program)
+            .expect_err("match expression is outside the current slice");
+        assert!(
+            diagnostics[0]
+                .message
+                .contains("resolved native slice rejected"),
+            "{}",
+            diagnostics[0].message
+        );
+        assert!(generator.module.get_function("main").is_none());
+    }
+
+    #[test]
+    fn parameters_and_bindings_use_resolved_local_identities() {
+        let program = checked(
+            r#"
+func increment(input: i32) -> i32 {
+    let output = input + 1
+    output
+}
+func main() -> i32 { increment(41) }
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_shadow");
+        generator
+            .compile_resolved_native(&program)
+            .expect("parameters and bindings use stable local IDs");
+        generator.module.verify().expect("valid LLVM");
+    }
+
+    #[test]
+    fn if_else_expression_emits_from_resolved_ir() {
+        let program = checked(
+            r#"
+func abs_value(x: i32) -> i32 {
+    if x < 0 { 0 - x } else { x }
+}
+func main() -> i32 { abs_value(0 - 7) }
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_if");
+        generator
+            .compile_resolved_native(&program)
+            .expect("if/else is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+        let ir = generator.module.print_to_string().to_string();
+        assert!(ir.contains("then"), "{ir}");
+        assert!(ir.contains("else"), "{ir}");
+        assert!(ir.contains("if_merge"), "{ir}");
+    }
+
+    #[test]
+    fn while_loop_emits_from_resolved_ir() {
+        let program = checked(
+            r#"
+func sum_to(n: i32) -> i32 {
+    let mut i = 0
+    let mut sum = 0
+    while i < n {
+        sum = sum + i
+        i = i + 1
+    }
+    sum
+}
+func main() -> i32 { sum_to(5) }
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_while");
+        generator
+            .compile_resolved_native(&program)
+            .expect("while loop is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+        let ir = generator.module.print_to_string().to_string();
+        assert!(ir.contains("while_header"), "{ir}");
+        assert!(ir.contains("while_body"), "{ir}");
+        assert!(ir.contains("while_exit"), "{ir}");
+    }
+
+    #[test]
+    fn nested_if_inside_while_compiles() {
+        // NOTE: `for i in 0..n` is not testable here because the checker's
+        // resolved body lowering does not yet support range iterables
+        // (CHECKER-GAP: TOOL-RESOLUTION-001 binary sugar). The For/Range
+        // emitter code is retained for when the checker catches up.
+        let program = checked(
+            r#"
+func count_eq(n: i32) -> i32 {
+    let mut i = 0
+    let mut count = 0
+    while i < n {
+        if i == 3 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+func main() -> i32 { count_eq(5) }
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_nested");
+        generator
+            .compile_resolved_native(&program)
+            .expect("nested if inside while is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+    }
+
+    #[test]
+    fn early_return_inside_if_skips_merge() {
+        let program = checked(
+            r#"
+func guard(x: i32) -> i32 {
+    if x < 0 {
+        return 0 - 1
+    }
+    x
+}
+func main() -> i32 { guard(5) }
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_early_ret");
+        generator
+            .compile_resolved_native(&program)
+            .expect("early return inside if is valid");
+        generator.module.verify().expect("valid LLVM");
+    }
+}

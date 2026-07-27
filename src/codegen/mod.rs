@@ -6,6 +6,7 @@ mod expr;
 mod func;
 pub mod gep;
 mod registry;
+mod resolved;
 mod scope;
 pub mod types;
 

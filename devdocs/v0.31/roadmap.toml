@@ -1063,6 +1063,20 @@ version = "0.31.57"
 kind = "rc"
 title = "RC1"
 requirements = []
+# 【RC 阻断追加：CODEGEN Typed Resolved IR 迁移】
+# S0/S1 已落地：primitive scalar leaf callable 从 CheckedProgram 的
+# ResolvedCallable/ResolvedTypeId/ResolvedLocalId/ResolvedCallee 直接发射 LLVM。
+# S2 已落地：If/Block 表达式 + While/For(Range)/Break/Continue 语句 LLVM 发射；
+# eligibility scanner 重命名为 require_resolved_native_program。
+# 生产 compile_checked() 通过纯 eligibility scanner 选择 body class；入选后
+# fail-closed，不存在 typed error -> raw AST 自动回退。未迁移类别暂留
+# 显式 legacy arm，不计入完成度。毒化 legacy_file 的生产入口测试已通过。
+# 已知 checker 限制：resolved body lowering 不支持 range iterable（TOOL-RESOLUTION-001），
+# 资源分析不认 break 的 CFG 路径。For/Break/Continue emitter 代码预留。
+# 后续 slice：canonical builtin/call -> aggregate/place/pattern ->
+# closure/generic -> FFI/concurrency -> Flow/Actor/Session -> comptime artifact。
+# 最终退出：src/codegen 生产路径无 legacy_body_file()/compile_file(&File)，
+# typed emitter 无 surface Expr/Stmt/Block/FuncDef，无 comptime_file 隐形后门。
 
 [[milestone]]
 version = "0.31.58"
