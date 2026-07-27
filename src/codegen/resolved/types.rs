@@ -70,7 +70,21 @@ fn lower_resolved_type<'ctx>(
         ResolvedType::Tuple(elements) => {
             let elements = elements
                 .iter()
-                .map(|element| lower_resolved_type(context, types, element, active))
+                .map(|element| -> Result<BasicTypeEnum<'ctx>, CompileError> {
+                    let lowered = lower_resolved_type(context, types, element, active)?;
+                    // Match legacy ABI: widen sub-64-bit integer fields (except
+                    // i1/bool) to i64 in tuple layout. This ensures per-function
+                    // dispatch compatibility between resolved and legacy emitters
+                    // (legacy mimi_type_to_llvm applies the same widening).
+                    Ok(match lowered {
+                        BasicTypeEnum::IntType(it)
+                            if it.get_bit_width() > 1 && it.get_bit_width() < 64 =>
+                        {
+                            BasicTypeEnum::IntType(context.i64_type())
+                        }
+                        other => other,
+                    })
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(BasicTypeEnum::StructType(
                 context.struct_type(&elements, false),
@@ -238,7 +252,8 @@ mod tests {
         let BasicTypeEnum::StructType(tuple) = result_fields[1] else {
             panic!("result payload must be tuple")
         };
-        assert_eq!(int_width(tuple.get_field_types()[0]), 32);
+        // Tuple fields widen sub-64-bit ints to i64 (legacy ABI compatibility).
+        assert_eq!(int_width(tuple.get_field_types()[0]), 64);
     }
 
     #[test]

@@ -37,7 +37,6 @@ pub(super) fn supports_resolved_native(program: &CheckedProgram) -> bool {
 
 /// Returns the set of function NodeIds eligible for resolved native compilation.
 /// Returns None if program-level blockers prevent any resolved compilation.
-#[allow(dead_code)] // Infrastructure for per-function dispatch (blocked by String ABI unification).
 pub(super) fn resolved_eligible_functions(
     program: &CheckedProgram,
 ) -> Option<std::collections::BTreeSet<NodeId>> {
@@ -103,7 +102,6 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Compile only the eligible subset of functions through the resolved
     /// emitter. Ineligible functions are left for the legacy emitter.
     /// Returns the number of functions compiled.
-    #[allow(dead_code)] // Infrastructure for per-function dispatch (blocked by String ABI unification).
     pub fn compile_resolved_subset(
         &mut self,
         program: &CheckedProgram,
@@ -1331,7 +1329,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         let mut current_ptr = base_entry.storage;
         let mut current_type = base_entry.llvm_type;
         for projection in &place.projections {
-            let crate::core::ir::ResolvedProjection::Tuple { index, ty } = projection else {
+            let crate::core::ir::ResolvedProjection::Tuple { index, ty: _ } = projection else {
                 return Err(CompileError::Unsupported(
                     "non-tuple place projection escaped eligibility".into(),
                 ));
@@ -1346,8 +1344,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 .builder
                 .build_struct_gep(struct_type, current_ptr, *index as u32, "place_gep")
                 .map_err(|e| CompileError::LlvmError(format!("place gep: {e}")))?;
-            current_type =
-                llvm_type_for_resolved(self.generator.context, self.program.resolved_types(), ty)?;
+            // Use the actual struct field type (which may be widened to i64
+            // for legacy ABI compatibility) rather than re-lowering the
+            // resolved type identity.
+            current_type = struct_type
+                .get_field_type_at_index(*index as u32)
+                .ok_or_else(|| {
+                    CompileError::LlvmError(format!(
+                        "tuple field {index} absent in place projection"
+                    ))
+                })?;
         }
         Ok(ResolvedVarEntry {
             storage: current_ptr,
