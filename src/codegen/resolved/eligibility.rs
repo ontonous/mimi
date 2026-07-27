@@ -243,6 +243,16 @@ fn require_block(
             ResolvedStmtKind::Loop(body) => {
                 require_block(program, owner, body)?;
             }
+            // Specification-level statements: no codegen output, accept unconditionally.
+            ResolvedStmtKind::Drop(_) => {}
+            ResolvedStmtKind::Contract { condition, .. } => {
+                require_expr(program, owner, condition)?;
+            }
+            ResolvedStmtKind::Math(conditions) => {
+                for condition in conditions {
+                    require_expr(program, owner, condition)?;
+                }
+            }
             other => {
                 return Err(UnsupportedResolvedNode::new(
                     owner,
