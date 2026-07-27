@@ -404,6 +404,213 @@ fn real_world_per_function_dispatch() {
     );
 }
 
+// ===================== Resolved emitter expanded coverage (0.32.1) =====================
+//
+// The dispatch diagnostic (dispatch_diagnostic_coverage_report) showed 93%
+// eligibility for scalar/tuple/string/control-flow programs. These tests
+// verify L1 equivalence for the eligible features that go through the
+// resolved native emitter.
+
+/// String parameters and return values are PrimitiveType::String — eligible.
+#[test]
+fn real_world_resolved_string_param_return() {
+    run_both(
+        r#"
+        func greet(name: string) -> string {
+            f"hello, {name}"
+        }
+        func main() -> i32 {
+            println(greet("mimi"))
+            0
+        }
+    "#,
+        "hello, mimi",
+    );
+}
+
+/// FString interpolation with multiple variables.
+#[test]
+fn real_world_resolved_fstring_multi_var() {
+    run_both(
+        r#"
+        func describe(x: i64, y: i64) -> string {
+            f"x={x} y={y} sum={x + y}"
+        }
+        func main() -> i32 {
+            println(describe(3, 7))
+            0
+        }
+    "#,
+        "x=3 y=7 sum=10",
+    );
+}
+
+/// Multi-function call chain: pipeline(x) = step2(step1(x)).
+#[test]
+fn real_world_resolved_call_chain() {
+    run_both(
+        r#"
+        func step1(x: i64) -> i64 { x + 1 }
+        func step2(x: i64) -> i64 { x * 2 }
+        func step3(x: i64) -> i64 { x - 3 }
+        func pipeline(x: i64) -> i64 { step3(step2(step1(x))) }
+        func main() -> i32 {
+            println(pipeline(5))
+            0
+        }
+    "#,
+        "9",
+    );
+}
+
+/// Tuple destructuring in let binding.
+#[test]
+fn real_world_resolved_tuple_destructure() {
+    run_both(
+        r#"
+        func minmax(a: i64, b: i64) -> (i64, i64) {
+            if a < b { (a, b) } else { (b, a) }
+        }
+        func main() -> i32 {
+            let (lo, hi) = minmax(9, 4)
+            println(lo)
+            println(hi)
+            0
+        }
+    "#,
+        "4\n9",
+    );
+}
+
+/// Match with literal patterns and wildcard.
+#[test]
+fn real_world_resolved_match_literals() {
+    run_both(
+        r#"
+        func day_name(d: i32) -> string {
+            match d {
+                1 => "mon",
+                2 => "tue",
+                3 => "wed",
+                4 => "thu",
+                5 => "fri",
+                _ => "weekend",
+            }
+        }
+        func main() -> i32 {
+            println(day_name(3))
+            println(day_name(7))
+            0
+        }
+    "#,
+        "wed\nweekend",
+    );
+}
+
+/// Early return inside nested if/while.
+#[test]
+fn real_world_resolved_early_return() {
+    run_both(
+        r#"
+        func first_ge(xs_len: i64, threshold: i64) -> i64 {
+            let mut i: i64 = 0
+            while i < xs_len {
+                if i >= threshold {
+                    return i
+                }
+                i = i + 1
+            }
+            0 - 1
+        }
+        func main() -> i32 {
+            println(first_ge(10, 5))
+            println(first_ge(3, 7))
+            0
+        }
+    "#,
+        "5\n-1",
+    );
+}
+
+/// Builtin math chain: sqrt → floor → cast.
+#[test]
+fn real_world_resolved_builtin_math_chain() {
+    run_both(
+        r#"
+        func isqrt(n: f64) -> i64 {
+            let s = sqrt(n)
+            let f = floor(s)
+            f as i64
+        }
+        func main() -> i32 {
+            println(isqrt(144.0))
+            println(isqrt(2.0))
+            0
+        }
+    "#,
+        "12\n1",
+    );
+}
+
+/// While loop with mutable accumulator and nested if.
+#[test]
+fn real_world_resolved_while_nested_if() {
+    run_both(
+        r#"
+        func count_even_below(n: i64) -> i64 {
+            let mut count: i64 = 0
+            let mut i: i64 = 0
+            while i < n {
+                if i % 2 == 0 {
+                    count = count + 1
+                }
+                i = i + 1
+            }
+            count
+        }
+        func main() -> i32 {
+            println(count_even_below(10))
+            0
+        }
+    "#,
+        "5",
+    );
+}
+
+/// Mixed eligible + ineligible: scalar functions go resolved, List function
+/// goes legacy. Both must produce identical output (L1 equivalence).
+#[test]
+fn real_world_resolved_mixed_dispatch() {
+    run_both(
+        r#"
+        func square(x: i64) -> i64 { x * x }
+
+        func sum_squares(n: i64) -> i64 {
+            let mut total: i64 = 0
+            let mut i: i64 = 1
+            while i <= n {
+                total = total + square(i)
+                i = i + 1
+            }
+            total
+        }
+
+        func describe_result(n: i64, total: i64) -> string {
+            f"sum of squares 1..{n} = {total}"
+        }
+
+        func main() -> i32 {
+            let n: i64 = 5
+            let total = sum_squares(n)
+            println(describe_result(n, total))
+            println(square(7))
+            0
+        }
+    "#,
+        "sum of squares 1..5 = 55\n49",
+    );
+}
+
 /// Dual-backend regression for every `tests/real_world/flow_*.mimi`.
 ///
 /// Requires `cc` for the codegen path. Compares normalized stdout so L1
