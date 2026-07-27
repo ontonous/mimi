@@ -204,7 +204,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // unimplemented builtin), skip it — the legacy emitter will handle it.
         // The compile_func skip guard (count_basic_blocks != 0) ensures the
         // legacy emitter won't re-emit successfully compiled functions.
+        // Set MIMI_VERBOSE=1 to see per-function fallback details.
         let mut count = 0;
+        let mut failed = 0;
         for function in functions {
             let callable = self.program.callable(&function.node_id).ok_or_else(|| {
                 CompileError::Unsupported(format!(
@@ -214,11 +216,26 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             })?;
             match self.emit_callable(callable) {
                 Ok(()) => count += 1,
-                Err(_) => {
+                Err(e) => {
                     // Function failed to emit through resolved path.
                     // Legacy emitter will compile it (0 basic blocks → not skipped).
+                    if std::env::var("MIMI_VERBOSE").is_ok() {
+                        eprintln!(
+                            "warning: resolved emitter fallback for '{}': {}",
+                            function.qualified_name, e
+                        );
+                    }
+                    failed += 1;
                 }
             }
+        }
+        if std::env::var("MIMI_VERBOSE").is_ok() && failed > 0 {
+            eprintln!(
+                "info: resolved emitter compiled {}/{} function(s), {} fell back to legacy",
+                count,
+                count + failed,
+                failed
+            );
         }
         Ok(count)
     }
