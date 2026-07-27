@@ -26,11 +26,19 @@ use crate::core::ir::ResolvedFStringPart;
 use crate::diagnostic::Diagnostic;
 use crate::error::CompileError;
 
-use self::eligibility::{require_resolved_native_program, UnsupportedResolvedNode};
+use self::eligibility::{require_resolved_native_program, eligible_function_ids, UnsupportedResolvedNode};
 use self::types::llvm_type_for_resolved;
 
 pub(super) fn supports_resolved_native(program: &CheckedProgram) -> bool {
     require_resolved_native_program(program).is_ok()
+}
+
+/// Returns the set of function NodeIds eligible for resolved native compilation.
+/// Returns None if program-level blockers prevent any resolved compilation.
+pub(super) fn resolved_eligible_functions(
+    program: &CheckedProgram,
+) -> Option<std::collections::BTreeSet<NodeId>> {
+    eligible_function_ids(program).ok().filter(|set| !set.is_empty())
 }
 
 #[derive(Clone, Copy)]
@@ -78,6 +86,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             loop_stack: Vec::new(),
         }
         .compile_program()
+        .map_err(|error| {
+            let mut diagnostic = error.to_diagnostic();
+            if let Some(span) = program.entry_span() {
+                diagnostic = diagnostic.with_span(span);
+            }
+            vec![diagnostic]
+        })
+    }
+
+    /// Compile only the eligible subset of functions through the resolved
+    /// emitter. Ineligible functions are left for the legacy emitter.
+    /// Returns the number of functions compiled.
+    pub fn compile_resolved_subset(
+        &mut self,
+        program: &CheckedProgram,
+        eligible: &std::collections::BTreeSet<NodeId>,
+    ) -> Result<usize, Vec<Diagnostic>> {
+        program.validate_backend(crate::core::BackendProfile::Native)?;
+        NativeResolvedEmitter {
+            program,
+            generator: self,
+            loop_stack: Vec::new(),
+        }
+        .compile_subset(eligible)
         .map_err(|error| {
             let mut diagnostic = error.to_diagnostic();
             if let Some(span) = program.entry_span() {
@@ -138,6 +170,54 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 "resolved native module verification failed: {message}"
             ))
         })
+    }
+
+    /// Compile only the functions in the eligible set. Does NOT verify the
+    /// module (the legacy emitter will add remaining functions afterwards).
+    fn compile_subset(
+        &mut self,
+        eligible: &std::collections::BTreeSet<NodeId>,
+    ) -> Result<usize, CompileError> {
+        let mut functions: Vec<_> = self
+            .program
+            .functions()
+            .values()
+            .filter(|function| !function.is_comptime && eligible.contains(&function.node_id))
+            .collect();
+        functions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+
+        // Declare all eligible functions first (for mutual recursion).
+        for function in &functions {
+            let callable = self.program.callable(&function.node_id).ok_or_else(|| {
+                CompileError::Unsupported(format!(
+                    "resolved callable '{}' is absent",
+                    function.node_id.0
+                ))
+            })?;
+            self.declare_callable(callable)?;
+        }
+        // Also declare ineligible functions so eligible ones can call them
+        // (the legacy emitter will fill in their bodies later).
+        for function in self.program.functions().values() {
+            if function.is_comptime || eligible.contains(&function.node_id) {
+                continue;
+            }
+            if let Some(callable) = self.program.callable(&function.node_id) {
+                // Best-effort declaration; skip if it fails (legacy will handle).
+                let _ = self.declare_callable(callable);
+            }
+        }
+        let count = functions.len();
+        for function in functions {
+            let callable = self.program.callable(&function.node_id).ok_or_else(|| {
+                CompileError::Unsupported(format!(
+                    "resolved callable '{}' is absent",
+                    function.node_id.0
+                ))
+            })?;
+            self.emit_callable(callable)?;
+        }
+        Ok(count)
     }
 
     fn callable_symbol(&self, owner: &NodeId) -> Result<&str, CompileError> {

@@ -104,6 +104,68 @@ pub(super) fn require_resolved_native_program(
     Ok(())
 }
 
+/// Per-function eligibility: returns the set of function NodeIds that can be
+/// compiled through the resolved native emitter. Functions that fail the
+/// per-function check are simply excluded (not an error).
+///
+/// Program-level blockers (flows, actors, sessions) still cause a full
+/// rejection because they require special compilation infrastructure.
+pub(super) fn eligible_function_ids(
+    program: &CheckedProgram,
+) -> Result<std::collections::BTreeSet<NodeId>, UnsupportedResolvedNode> {
+    // Program-level blockers that prevent ANY resolved compilation.
+    let user_flow_count = program
+        .flows()
+        .values()
+        .filter(|flow| matches!(flow.origin, crate::core::Origin::User(_)))
+        .count();
+    if user_flow_count != 0
+        || !program.actors().is_empty()
+        || !program.sessions().is_empty()
+        || !program.protocols().is_empty()
+        || !program.capabilities().is_empty()
+    {
+        let owner = program
+            .functions()
+            .values()
+            .next()
+            .map(|function| function.node_id.clone())
+            .unwrap_or_else(|| NodeId("resolved-native:program".into()));
+        return Err(UnsupportedResolvedNode::new(
+            &owner,
+            &owner,
+            "program contains flows/actors/sessions/protocols/capabilities",
+        ));
+    }
+    // Constants must be materializable.
+    for constant in program.constants().values() {
+        if matches!(constant.value, crate::core::ResolvedConstValue::Complex) {
+            return Err(UnsupportedResolvedNode::new(
+                &constant.node_id,
+                &constant.node_id,
+                "constant with non-materializable value",
+            ));
+        }
+    }
+    // Per-function eligibility check.
+    let mut eligible = std::collections::BTreeSet::new();
+    for function in program.functions().values() {
+        if function.is_comptime || function.is_async || function.extern_abi.is_some() {
+            continue;
+        }
+        if !function.generics.is_empty() || function.qualified_name.contains("::") {
+            continue;
+        }
+        let Some(callable) = program.callable(&function.node_id) else {
+            continue;
+        };
+        if require_resolved_native_callable(program, callable).is_ok() {
+            eligible.insert(function.node_id.clone());
+        }
+    }
+    Ok(eligible)
+}
+
 pub(super) fn require_resolved_native_callable(
     program: &CheckedProgram,
     callable: &ResolvedCallable,
