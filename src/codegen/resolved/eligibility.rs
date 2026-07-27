@@ -228,6 +228,17 @@ fn require_scalar_type(
             }
             Ok(())
         }
+        // 0.32.1: Option/Result are already lowerable in types.rs
+        // ({i1, T} and {i1, T, E} structs). Accept them in the eligibility
+        // gate so the resolved emitter can handle Option/Result-typed
+        // parameters, return values, and local bindings.
+        Some(ResolvedType::Option(payload)) => {
+            require_scalar_type(program, owner, payload)
+        }
+        Some(ResolvedType::Result { ok, error }) => {
+            require_scalar_type(program, owner, ok)?;
+            require_scalar_type(program, owner, error)
+        }
         Some(other) => Err(UnsupportedResolvedNode::new(
             owner,
             owner,

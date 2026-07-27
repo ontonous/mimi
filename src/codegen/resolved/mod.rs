@@ -609,6 +609,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         match &expression.kind {
             ResolvedExprKind::Literal(literal) => self.emit_literal(&expression.ty, literal),
             ResolvedExprKind::Constant(node_id) => {
+                // Builtin constants (None, true, false) are not in the
+                // program's constants catalog. Handle them directly.
+                if node_id.0 == "builtin:value:None" {
+                    return self.generator.compile_constructor("None", vec![]);
+                }
                 let constant = self.program.constants().get(node_id).ok_or_else(|| {
                     CompileError::Unsupported(format!(
                         "resolved constant '{}' is absent from catalog",
@@ -711,6 +716,19 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     }
                     ResolvedCallee::Builtin(builtin_id) => {
                         let name = builtin_id.as_str();
+                        // Option/Result constructors are handled by the legacy
+                        // compile_constructor path, not compile_builtin_call.
+                        if matches!(name, "Some" | "None" | "Ok" | "Err") {
+                            let ctor_args: Vec<BasicValueEnum<'ctx>> = call
+                                .arguments
+                                .iter()
+                                .map(|arg| -> Result<_, CompileError> {
+                                    let value = self.emit_expr(&arg.value, frame)?;
+                                    self.apply_conversion(value, &arg.conversion)
+                                })
+                                .collect::<Result<_, _>>()?;
+                            return self.generator.compile_constructor(name, ctor_args);
+                        }
                         // Print-family builtins need arg type hints for formatting dispatch.
                         if matches!(name, "println" | "print" | "eprintln" | "format") {
                             self.generator.pending_print_arg_types = call
@@ -2143,6 +2161,27 @@ func main() -> i32 {
         );
     }
 
+    /// 0.32.1: Option<i64> return type is now eligible (types.rs already
+    /// lowers Option to {i1, T}). Verify the emitter handles Some/None
+    /// construction and Option-typed return values.
+    #[test]
+    fn option_return_emits_from_resolved_ir() {
+        let program = checked(
+            r#"
+func maybe_double(x: i64, flag: bool) -> Option<i64> {
+    if flag { Some(x * 2) } else { None }
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_option");
+        generator
+            .compile_resolved_native(&program)
+            .expect("Option<i64> return is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+    }
+
     /// Diagnostic: dispatch distribution across representative programs.
     /// Run with `--nocapture` to see the per-function eligibility report.
     /// This test documents the current resolved-native coverage and identifies
@@ -2241,6 +2280,15 @@ func find(xs: List<i64>, target: i64) -> Option<i64> {
         i = i + 1
     }
     None
+}
+func main() -> i32 { 0 }
+"#,
+            ),
+            (
+                "pure_option",
+                r#"
+func maybe_double(x: i64, flag: bool) -> Option<i64> {
+    if flag { Some(x * 2) } else { None }
 }
 func main() -> i32 { 0 }
 "#,
