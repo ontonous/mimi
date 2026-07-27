@@ -477,28 +477,39 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.apply_conversion(value, conversion)
             }
             ResolvedExprKind::Call(call) => {
-                let ResolvedCallee::Function(owner) = &call.callee else {
-                    return Err(CompileError::Unsupported(format!(
-                        "resolved non-function callee escaped resolved native eligibility at '{}'",
-                        expression.node_id.0
-                    )));
-                };
-                let symbol = self.callable_symbol(owner)?.to_string();
-                let callee = self.generator.module.get_function(&symbol).ok_or_else(|| {
-                    CompileError::LlvmError(format!("resolved callee '{symbol}' is undeclared"))
-                })?;
+                // Evaluate arguments (shared by all callee kinds)
                 let mut arguments = Vec::with_capacity(call.arguments.len());
                 for argument in &call.arguments {
                     let value = self.emit_expr(&argument.value, frame)?;
                     let value = self.apply_conversion(value, &argument.conversion)?;
                     arguments.push(BasicMetadataValueEnum::from(value));
                 }
-                self.generator
-                    .build_call(callee, &arguments, "resolved_call")?
-                    .try_as_basic_value_opt()
-                    .ok_or_else(|| {
-                        CompileError::LlvmError(format!("resolved callee '{symbol}' returned void"))
-                    })
+                match &call.callee {
+                    ResolvedCallee::Function(owner) => {
+                        let symbol = self.callable_symbol(owner)?.to_string();
+                        let callee =
+                            self.generator.module.get_function(&symbol).ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "resolved callee '{symbol}' is undeclared"
+                                ))
+                            })?;
+                        self.generator
+                            .build_call(callee, &arguments, "resolved_call")?
+                            .try_as_basic_value_opt()
+                            .ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "resolved callee '{symbol}' returned void"
+                                ))
+                            })
+                    }
+                    ResolvedCallee::Builtin(builtin_id) => self
+                        .generator
+                        .compile_builtin_call(builtin_id.as_str(), &arguments),
+                    _ => Err(CompileError::Unsupported(format!(
+                        "resolved callee {:?} escaped resolved native eligibility at '{}'",
+                        call.callee, expression.node_id.0
+                    ))),
+                }
             }
             ResolvedExprKind::If {
                 condition,
@@ -1229,6 +1240,63 @@ func main() -> i32 { guard(5) }
         generator
             .compile_resolved_native(&program)
             .expect("early return inside if is valid");
+        generator.module.verify().expect("valid LLVM");
+    }
+
+    #[test]
+    fn builtin_call_wrapping_add_emits_from_resolved_ir() {
+        let program = checked(
+            r#"
+func main() -> i64 {
+    wrapping_add(40, 2)
+}
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_builtin_add");
+        generator
+            .compile_resolved_native(&program)
+            .expect("wrapping_add builtin is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+    }
+
+    #[test]
+    fn builtin_math_chain_emits_from_resolved_ir() {
+        let program = checked(
+            r#"
+func compute() -> f64 {
+    let x = sqrt(16.0)
+    let y = floor(x)
+    y
+}
+func main() -> i32 {
+    let r = compute()
+    if r == 4.0 { 1 } else { 0 }
+}
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_builtin_math");
+        generator
+            .compile_resolved_native(&program)
+            .expect("sqrt/floor builtins are in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+    }
+
+    #[test]
+    fn builtin_predicate_in_if_condition() {
+        let program = checked(
+            r#"
+func main() -> i32 {
+    if is_nan(0.0) { 1 } else { 0 }
+}
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_builtin_pred");
+        generator
+            .compile_resolved_native(&program)
+            .expect("is_nan builtin in if condition is valid");
         generator.module.verify().expect("valid LLVM");
     }
 }
