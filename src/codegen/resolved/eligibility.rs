@@ -110,6 +110,7 @@ pub(super) fn require_resolved_native_program(
 ///
 /// Program-level blockers (flows, actors, sessions) still cause a full
 /// rejection because they require special compilation infrastructure.
+#[allow(dead_code)] // Infrastructure for per-function dispatch (blocked by String ABI unification).
 pub(super) fn eligible_function_ids(
     program: &CheckedProgram,
 ) -> Result<std::collections::BTreeSet<NodeId>, UnsupportedResolvedNode> {
