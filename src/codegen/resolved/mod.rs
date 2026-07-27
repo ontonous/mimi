@@ -215,7 +215,27 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 ))
             })?;
             match self.emit_callable(callable) {
-                Ok(()) => count += 1,
+                Ok(()) => {
+                    // P1-4 fix: verify each emitted function individually.
+                    // compile_subset() cannot call module.verify() because the
+                    // legacy emitter will add remaining functions later. But
+                    // each function we emit must be valid LLVM IR on its own.
+                    let symbol = function.qualified_name.clone();
+                    if let Some(llvm_fn) = self.generator.module.get_function(&symbol) {
+                        let verbose = std::env::var("MIMI_VERBOSE").is_ok();
+                        if !llvm_fn.verify(verbose) {
+                            if verbose {
+                                eprintln!(
+                                    "warning: resolved emitter verification failed for '{}'",
+                                    symbol
+                                );
+                            }
+                            failed += 1;
+                            continue;
+                        }
+                    }
+                    count += 1;
+                }
                 Err(e) => {
                     // Function failed to emit through resolved path.
                     // Legacy emitter will compile it (0 basic blocks → not skipped).
