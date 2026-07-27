@@ -1904,10 +1904,27 @@ impl VerifierCtx {
                 trusted_subset_domain: None,
             })
         } else {
+            // V-1 (0.31.55): check if any postcondition contains checked
+            // arithmetic. With unbounded Z3 Int, overflow/div-by-zero are
+            // not modeled — the proof assumes definedness. Report this
+            // assumption transparently instead of claiming unconditional Proven.
+            let has_arith = vfunc
+                .postconditions
+                .iter()
+                .any(|post| post.contains_checked_arith());
+            let (status, message) = if has_arith {
+                (
+                    VerifStatus::Proven,
+                    "postconditions verified (VIR, assumes no overflow/div-by-zero — i64 modeled as unbounded Int)"
+                        .into(),
+                )
+            } else {
+                (VerifStatus::Proven, "postconditions verified (VIR)".into())
+            };
             Some(VerificationResult {
                 func_name: func.name.clone(),
-                status: VerifStatus::Proven,
-                message: "postconditions verified (VIR)".into(),
+                status,
+                message,
                 diagnostic: None,
                 duration_us: start.elapsed().as_micros() as u64,
                 constraint_count,
