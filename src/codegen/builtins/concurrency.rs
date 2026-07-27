@@ -1139,7 +1139,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_int_truncate(args[1].into_int_value(), self.context.i8_type(), "tag_i8")
             .map_err(|e| format!("trunc: {}", e))?;
-        let label_ptr = args[2].into_pointer_value();
+        let label_ptr = match &args[2] {
+            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+            BasicMetadataValueEnum::StructValue(sv) => self
+                .builder
+                .build_extract_value(*sv, 0, "label_str_ptr")
+                .map_err(|e| CompileError::LlvmError(format!("extract label ptr: {}", e)))?
+                .into_pointer_value(),
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "shadow_alloc: label must be string".to_string(),
+                ))
+            }
+        };
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let usize_ty = self.context.i64_type(); // size_t on 64-bit
         let fn_ty = usize_ty.fn_type(

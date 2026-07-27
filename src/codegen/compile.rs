@@ -525,12 +525,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         if super::resolved::supports_resolved_native(program) {
             return self.compile_resolved_native(program);
         }
-        // Per-function dispatch (S8): infrastructure ready (eligible_function_ids,
-        // compile_resolved_subset with error-tolerant emission, compile_func skip
-        // guard, String ABI unified, builtin string wrapping). Blocked on
-        // declaration lifecycle: resolved declares with resolved types, legacy
-        // re-declares with legacy types → LLVM type conflict on shared symbols.
-        // Requires unified type lowering or per-symbol ABI negotiation.
+        // Per-function dispatch (S9): compile eligible functions through the
+        // resolved emitter first, then let the legacy emitter handle the rest.
+        // The legacy compile_func skip guard (count_basic_blocks != 0) prevents
+        // double-emission. Type ABI is unified (String {ptr,i64}, tuple widening)
+        // so declarations from either emitter are interchangeable.
+        if let Some(eligible) = super::resolved::resolved_eligible_functions(program) {
+            // Best-effort: if subset compilation fails entirely, fall through
+            // to pure legacy. Successfully emitted functions are skipped by the
+            // legacy emitter via the count_basic_blocks guard.
+            let _ = self.compile_resolved_subset(program, &eligible);
+        }
         self.compile_file(program.legacy_body_file())
             .map_err(|error| {
                 let mut diagnostic = error.to_diagnostic();
