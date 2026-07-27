@@ -1025,6 +1025,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             "listdir" | "walk_dir" | "str_split" | "keys" | "values" | "sort_str" => {
                 return Some("List<string>".to_string())
             }
+            // Deprecated std::array wrappers are loaded from another source file,
+            // so their declarations are not always present in `func_defs` here.
+            "array_new" | "array_set" | "array_fill" | "array_slice" | "array_reverse"
+            | "array_rotate_left" | "array_rotate_right" | "array_concat" | "array_take"
+            | "array_drop" => return Some("List<string>".to_string()),
             "sort_f64" => return Some("List<f64>".to_string()),
             "exec" | "exec_safe" => return Some("ExecResult".to_string()),
             "file_stat" => return Some("StatResult".to_string()),

@@ -11,8 +11,29 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ROADMAP = ROOT / "devdocs/v0.31/roadmap.toml"
 REQUIREMENTS = ROOT / "docs/language-requirements.toml"
-KINDS = {"baseline", "implementation", "stabilization", "evidence", "audit", "debug", "rc", "spike", "deferred"}
-NO_FEATURE_KINDS = {"stabilization", "audit", "debug", "rc", "spike", "deferred"}
+KINDS = {
+    "baseline",
+    "implementation",
+    "stabilization",
+    "evidence",
+    "audit",
+    "debug",
+    "rc",
+    "spike",
+    "deferred",
+    "soundness",
+    "completeness",
+}
+NO_FEATURE_KINDS = {
+    "stabilization",
+    "audit",
+    "debug",
+    "rc",
+    "spike",
+    "deferred",
+    "soundness",
+    "completeness",
+}
 
 
 def main() -> int:

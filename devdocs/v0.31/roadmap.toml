@@ -921,7 +921,8 @@ requirements = []
 version = "0.31.49"
 kind = "soundness"
 title = "类型系统健全性 I — let _ = 漏洞"
-requirements = ["R2"]
+# Invariant class: R2. This is not a language requirement ID.
+requirements = []
 # T-1: push() unification 结果被 let _ = 丢弃 → push(list_of_i32, "hello") 通过
 # T-2: slice start/end 不验证是整数 → x["hello".."world"] 通过
 # T-3: range start..end 接受任意类型
@@ -932,7 +933,8 @@ requirements = ["R2"]
 version = "0.31.50"
 kind = "soundness"
 title = "类型系统健全性 II — 结构性缺口"
-requirements = ["R2"]
+# Invariant class: R2. This is not a language requirement ID.
+requirements = []
 # T-5:  Newtype 透明化 — UserId(i32) 和 OrderId(i32) 都能和裸 i32 unify
 # T-6:  resolve() DepthOverflow/BindingCycle 静默返回原始类型（19 个生产路径）
 # T-7:  resolve_type 不递归进 10 个所有权 wrapper（Shared[MyAlias] 别名不解析）
@@ -947,7 +949,8 @@ requirements = ["R2"]
 version = "0.31.51"
 kind = "soundness"
 title = "语义裁决 + Interpreter 对齐（L1 分歧）"
-requirements = ["R1"]
+# Invariant class: R1. This is not a language requirement ID.
+requirements = []
 # 拆分为两阶段：
 #
 # 0.31.51a：SD-7/8（整数 Trap）
@@ -977,7 +980,8 @@ requirements = ["R1"]
 version = "0.31.52"
 kind = "soundness"
 title = "Runtime 安全"
-requirements = ["R3"]
+# Invariant class: R3. This is not a language requirement ID.
+requirements = []
 # R-1: ERROR_HANDLER 函数指针当数据指针存 → SIGSEGV/任意代码执行（安全漏洞）
 # R-2: PENDING_C_STRINGS 4096 drain → C 调用者悬垂指针
 # R-3: "统一分配器"不变量是假的 — 4 处直接 libc::malloc/free
@@ -989,7 +993,8 @@ requirements = ["R3"]
 version = "0.31.53"
 kind = "soundness"
 title = "Verifier 健全性"
-requirements = ["R2"]
+# Invariant class: R2. This is not a language requirement ID.
+requirements = []
 # V-1: i64 建模为无界整数 → 溢出/除零不生成 VC → 错误 Proven
 # V-2: 不可编码的 requires 被静默丢弃 → 约束不足
 # V-3: Disproven 不检查 parse_errors → 假反例 → 正确程序被错误拒绝
@@ -1003,7 +1008,8 @@ requirements = ["R2"]
 version = "0.31.54"
 kind = "soundness"
 title = "Interpreter / Stdlib / Quote 修复"
-requirements = ["R1", "R2"]
+# Invariant classes: R1 + R2. These are not language requirement IDs.
+requirements = []
 # Q-1: QuotedAst::Return 不设置 early_return → return 是空操作
 # Q-2: Stmt::Invariant 被静默过滤（0.31.22 漏修）
 # I-1: QuotedAst::Defer 立即执行而非延迟
@@ -1025,7 +1031,8 @@ requirements = ["R1", "R2"]
 version = "0.31.55"
 kind = "completeness"
 title = "Flow/Session/Actor + 设计缺口"
-requirements = ["R2"]
+# Invariant class: R2. This is not a language requirement ID.
+requirements = []
 # S-1: Session 协议顺序检查对表达式分支是瞎的（match arm / if-as-expr）
 # S-2: 泛型参数绕过线性检查 — func consume<T>(x: T) { drop(x); drop(x) } 通过
 # S-3: Flow generation counter 硬编码 0 → 运行时不强制状态新鲜度

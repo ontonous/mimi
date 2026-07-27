@@ -38,10 +38,10 @@ Span/Origin -> HM -> CFG/ownership -> CheckedProgram/Resolved IR
 | 外部版本 | 内部 sprint | 阶段主题 |
 |---|---|---|
 | **0.1.0** | 0.31.0–0.31.7 | 基线稳定：CheckedProgram、Span、HM、CFG、Resolved IR、consumer 迁移、止血 I/II |
-| **0.1.1** | 0.31.8–0.31.45（全部） | 内部路线图 0.31 彻底完成：Flow 核心闭环、地基深修、**Runtime Efficiency I/II**、语言冻结、Component 边界、自举与工具、冻结审查、RC |
+| **0.1.1** | 0.31.8–0.31.58（全部） | 内部路线图 0.31 彻底完成：Flow 核心闭环、地基深修、**Runtime Efficiency I/II**、语言冻结、Component 边界、工具与隔离、Soundness/Completeness 修复、双 RC |
 | **1.0.0** | — | 发布：API 冻结 + 迁移指南 + 生态基线 |
 
-> **发布纪律**：0.1.1 是唯一一个覆盖完整内部路线图的长周期版本。内部 41 个 sprint（0.31.8–0.31.48）全部验收通过后才打 `0.1.1` tag。期间不打任何中间外部 tag。
+> **发布纪律**：0.1.1 是唯一一个覆盖完整内部路线图的长周期版本。内部 51 个 sprint（0.31.8–0.31.58）全部验收通过后才打 `0.1.1` tag。期间不打任何中间外部 tag。
 >
 > 内部按阶段划分里程碑（仅用于进度追踪，不打 tag）：
 >
@@ -52,12 +52,16 @@ Span/Origin -> HM -> CFG/ownership -> CheckedProgram/Resolved IR
 > | Phase B | 0.31.22–0.31.26 | 语言冻结：语法收敛、**type walker 合并**、Verification IR fail-closed、VC artifact、攻击审查 II + **假双后端标记** |
 > | Phase C | 0.31.27–0.31.38 | Component 边界：Component IR、Native ABI、**稳定检查点**、Wire Schema、Rust SDK conformance、**XPU FFI 验证**、**SDK 加固** |
 > | Phase D | 0.31.39–0.31.44 | 工具与隔离：~~自举（deferred to post-1.0）~~、迁移、Tooling 全覆盖（Provenance/TyErr/Z3 翻译）、**Body 迁移闭环 + is_linear 结构化（SD-1/6）**、**FFI 加固（SD-3 errno 属性 + SD-4 fork 删除）**、experimental 隔离 |
-> | Phase E | 0.31.45–0.31.48 | 冻结：DEBUG + **L1 强化** + Interpreter 瘦身、最终敌对审查 + **Trap Tests**、RC1、RC2 |
+> | Phase E | 0.31.45–0.31.48 | 冻结：DEBUG + **L1 强化**、最终敌对审查 + **Trap Tests**、RC 准备、全量攻击性审查 |
+> | Phase F | 0.31.49–0.31.54 | Soundness：类型系统、算术语义、Runtime、Verifier、Interpreter/Stdlib/Quote |
+> | Phase G | 0.31.55–0.31.56 | Completeness：Flow/Session/Actor + 系统性模式与测试基础设施 |
+> | Phase H | 0.31.57–0.31.58 | Release：RC1、RC2 与 0.1.1 发布 |
 >
 > **加粗**为 v2 路线图新增 sprint（共 +6：0.31.16–18 地基深修、0.31.28 Component 稳定检查点、0.31.34 SDK 加固、0.31.35 自举 spike）。
 > **v3 变更**：0.31.19 追加 B（性能 quick wins）；插入 0.31.20（Runtime Efficiency）；原 0.31.20–43 顺延为 0.31.21–44；0.31.35–37（自举）标记 `deferred`；0.31.32 替换为 XPU FFI 验证；0.31.18 增加 CI 防护（gas limit）；0.31.19 增加 ABI 前置验证。
 > **v4 变更**：插入 0.31.21（Runtime Efficiency II：Value clone + O1 修复）；原 0.31.21–44 顺延为 0.31.22–45；AD-5（type walker）吸收进 0.31.22；假双后端标记吸收进 0.31.26；Interpreter 瘦身吸收进 0.31.42；call_named dispatch 推迟 post-1.0（Rust match 已高效）。
 > **v5 变更**（2026-07-27）：插入 0.31.22–24（Soundness 止血 + Runtime 架构 + 错误模型），last = 48；语义裁决 SD-1~6 排期落地（SD-1/6 → 0.31.43，SD-3/4 → 0.31.44）；0.31.35（Rust Safe SDK）deferred 合并到 0.31.38；FLOW-MULTI-001 补入 0.31.25 requirements + stability 升 stable；body 迁移（legacy_body_file 删除）显式归入 0.31.43。
+> **v6 变更**（2026-07-27）：全量攻击性审查后追加 Phase F–H（0.31.49–0.31.58），覆盖 Soundness、Completeness 和双 RC，`last = 58`。机器权威以 `roadmap.toml` 为准。
 
 详细版本及 requirement 分配见 `roadmap.toml` 和 `requirements-matrix.md`。
 

@@ -10,16 +10,22 @@
 - **0.31.29 Component 稳定检查点**：ABI fuzz + handle race + 回归。
 - **0.31.34 Component 审查**：ABI/Wire/callback/async。
 - **0.31.35 SDK conformance 加固**：双 SDK E2E + Wire fuzz。
-- **0.31.42 DEBUG**：组合 fuzz、MCDD reference model、性能/内存、flake、standalone binary strip 验证。
-- **0.31.43 最终敌对审查**：P0、逃生口、silent fallback、unsupported warning。
-- **0.31.44 RC1**：冻结全部 stable profile，只修阻断缺陷。
-- **0.31.45 RC2**：第二次干净环境、跨平台、迁移和 SDK E2E。
+- **0.31.42 Tooling 全覆盖**：迁移工具、Provenance、TyErr 与 Z3 报错翻译。
+- **0.31.43–0.31.44 语义中枢/隔离**：线性分析结构化、Body 迁移地基、experimental 与 FFI 加固、ResolvedExpr Z3 编码。
+- **0.31.45 DEBUG**：dual-path、组合 fuzz、性能/内存、flake、standalone binary strip 验证。
+- **0.31.46 最终敌对审查**：Trap Tests、P0、逃生口、silent fallback、unsupported warning。
+- **0.31.47 RC1 准备**：CHANGELOG 与门禁预跑，不发布。
+- **0.31.48 全量攻击性审查**：real-world oracle 重写并登记跨子系统缺口。
+- **0.31.49–0.31.54 Soundness**：类型系统、算术语义、Runtime、Verifier、Interpreter/Stdlib/Quote 修复。
+- **0.31.55–0.31.56 Completeness**：Flow/Session/Actor 与系统性模式/测试基础设施修复。
+- **0.31.57 RC1**：冻结全部 stable profile，只修阻断缺陷。
+- **0.31.58 RC2**：第二次干净环境、跨平台、迁移和 SDK E2E；通过后发布 0.1.1。
 
 ## 基线门禁顺序
 
 ```bash
 LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test --no-run
-ulimit -v 20000000 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test -- --test-threads=1
+ulimit -v 20000000 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test -- --test-threads=4
 LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test v1_2_verification -- --test-threads=1
 LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
 cargo fmt -- --check
