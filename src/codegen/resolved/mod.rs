@@ -15,6 +15,7 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, PointerValue};
 
 use crate::ast::BinOp;
 use crate::codegen::{CallSiteValueExt, CodeGenerator};
+use crate::core::ir::ResolvedFStringPart;
 use crate::core::ir::{ResolvedBinaryOp, ResolvedUnaryOp};
 use crate::core::{
     CheckedConversion, CheckedConversionKind, CheckedProgram, NodeId, ResolvedBlock, ResolvedBody,
@@ -22,11 +23,12 @@ use crate::core::{
     ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedStmtKind,
     ResolvedType, ResolvedTypeId,
 };
-use crate::core::ir::ResolvedFStringPart;
 use crate::diagnostic::Diagnostic;
 use crate::error::CompileError;
 
-use self::eligibility::{require_resolved_native_program, eligible_function_ids, UnsupportedResolvedNode};
+use self::eligibility::{
+    eligible_function_ids, require_resolved_native_program, UnsupportedResolvedNode,
+};
 use self::types::llvm_type_for_resolved;
 
 pub(super) fn supports_resolved_native(program: &CheckedProgram) -> bool {
@@ -35,10 +37,13 @@ pub(super) fn supports_resolved_native(program: &CheckedProgram) -> bool {
 
 /// Returns the set of function NodeIds eligible for resolved native compilation.
 /// Returns None if program-level blockers prevent any resolved compilation.
+#[allow(dead_code)] // Infrastructure for per-function dispatch (blocked by String ABI unification).
 pub(super) fn resolved_eligible_functions(
     program: &CheckedProgram,
 ) -> Option<std::collections::BTreeSet<NodeId>> {
-    eligible_function_ids(program).ok().filter(|set| !set.is_empty())
+    eligible_function_ids(program)
+        .ok()
+        .filter(|set| !set.is_empty())
 }
 
 #[derive(Clone, Copy)]
@@ -98,6 +103,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Compile only the eligible subset of functions through the resolved
     /// emitter. Ineligible functions are left for the legacy emitter.
     /// Returns the number of functions compiled.
+    #[allow(dead_code)] // Infrastructure for per-function dispatch (blocked by String ABI unification).
     pub fn compile_resolved_subset(
         &mut self,
         program: &CheckedProgram,
@@ -484,7 +490,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.generator.build_br(loop_ctx.header)?;
                 Ok(None)
             }
-            ResolvedStmtKind::Scope { body: scope_block, .. } => {
+            ResolvedStmtKind::Scope {
+                body: scope_block, ..
+            } => {
                 // Lexical scope: emit the inner block inline.
                 self.emit_block(body, scope_block, frame)?;
                 Ok(None)
@@ -598,17 +606,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         .generator
                         .builder
                         .build_struct_gep(struct_type, alloca, index as u32, "tuple_field")
-                        .map_err(|e| {
-                            CompileError::LlvmError(format!("tuple gep: {e}"))
+                        .map_err(|e| CompileError::LlvmError(format!("tuple gep: {e}")))?;
+                    let field_type = struct_type
+                        .get_field_type_at_index(index as u32)
+                        .ok_or_else(|| {
+                            CompileError::LlvmError(format!("tuple field {index} type absent"))
                         })?;
-                    let field_type = struct_type.get_field_type_at_index(index as u32).ok_or_else(|| {
-                        CompileError::LlvmError(format!("tuple field {index} type absent"))
-                    })?;
                     let value = self.numeric_convert(value, field_type)?;
                     self.generator.build_store(field_ptr, value)?;
                 }
-                self.generator
-                    .build_load(struct_type, alloca, "tuple_val")
+                self.generator.build_load(struct_type, alloca, "tuple_val")
             }
             ResolvedExprKind::Project { value, projection } => {
                 let crate::core::ir::ResolvedValueProjection::Tuple(index) = projection else {
@@ -622,9 +629,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         "projected value is not a struct".into(),
                     ));
                 };
-                let field = struct_val.get_field_at_index(*index as u32).ok_or_else(|| {
-                    CompileError::LlvmError(format!("tuple field {index} absent"))
-                })?;
+                let field = struct_val
+                    .get_field_at_index(*index as u32)
+                    .ok_or_else(|| {
+                        CompileError::LlvmError(format!("tuple field {index} absent"))
+                    })?;
                 Ok(field)
             }
             ResolvedExprKind::Binary { op, left, right } => {
@@ -673,12 +682,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             self.generator.pending_print_arg_types = call
                                 .arguments
                                 .iter()
-                                .map(|arg| {
-                                    resolved_type_display_name(
-                                        self.program,
-                                        &arg.value.ty,
-                                    )
-                                })
+                                .map(|arg| resolved_type_display_name(self.program, &arg.value.ty))
                                 .collect();
                         }
                         self.generator.compile_builtin_call(name, &arguments)
@@ -717,7 +721,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     ))
                 })
             }
-            ResolvedExprKind::Scope { body: scope_block, .. } => {
+            ResolvedExprKind::Scope {
+                body: scope_block, ..
+            } => {
                 let callable_body = &self
                     .program
                     .callable(&frame.owner)
@@ -877,7 +883,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .builder
             .build_pointer_cast(
                 buf,
-                self.generator.context.ptr_type(inkwell::AddressSpace::default()),
+                self.generator
+                    .context
+                    .ptr_type(inkwell::AddressSpace::default()),
                 "fstr_buf_ptr",
             )
             .map_err(|e| CompileError::LlvmError(format!("fstr buf cast: {e}")))?;
@@ -925,21 +933,27 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     }
 
     fn get_or_declare_snprintf(&self) -> inkwell::values::FunctionValue<'ctx> {
-        self.generator.module.get_function("snprintf").unwrap_or_else(|| {
-            let ptr = self.generator.context.ptr_type(inkwell::AddressSpace::default());
-            let i64 = self.generator.context.i64_type();
-            let fn_type = i64.fn_type(
-                &[
-                    BasicMetadataTypeEnum::from(ptr),
-                    BasicMetadataTypeEnum::from(i64),
-                    BasicMetadataTypeEnum::from(ptr),
-                ],
-                true, // variadic
-            );
-            self.generator
-                .module
-                .add_function("snprintf", fn_type, None)
-        })
+        self.generator
+            .module
+            .get_function("snprintf")
+            .unwrap_or_else(|| {
+                let ptr = self
+                    .generator
+                    .context
+                    .ptr_type(inkwell::AddressSpace::default());
+                let i64 = self.generator.context.i64_type();
+                let fn_type = i64.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::from(ptr),
+                        BasicMetadataTypeEnum::from(i64),
+                        BasicMetadataTypeEnum::from(ptr),
+                    ],
+                    true, // variadic
+                );
+                self.generator
+                    .module
+                    .add_function("snprintf", fn_type, None)
+            })
     }
 
     fn emit_match(
@@ -1035,7 +1049,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
 
             // Emit arm body.
             self.generator.builder.position_at_end(arm_bb);
-            if let ResolvedPatternKind::Binding { by_reference: None, .. } = &arm.pattern.kind {
+            if let ResolvedPatternKind::Binding {
+                by_reference: None, ..
+            } = &arm.pattern.kind
+            {
                 let callable_body = &self
                     .program
                     .callable(&frame.owner)
@@ -1226,11 +1243,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 .builder
                 .build_struct_gep(struct_type, current_ptr, *index as u32, "place_gep")
                 .map_err(|e| CompileError::LlvmError(format!("place gep: {e}")))?;
-            current_type = llvm_type_for_resolved(
-                self.generator.context,
-                self.program.resolved_types(),
-                ty,
-            )?;
+            current_type =
+                llvm_type_for_resolved(self.generator.context, self.program.resolved_types(), ty)?;
         }
         Ok(ResolvedVarEntry {
             storage: current_ptr,
