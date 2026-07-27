@@ -406,15 +406,9 @@ fn require_expr(
         }
         ResolvedExprKind::Block(block) => require_block(program, owner, block),
         ResolvedExprKind::FString(parts) => {
-            // Only text-only f-strings are in the resolved native slice.
-            // Interpolation requires dynamic string building (snprintf/malloc).
             for part in parts {
-                if let crate::core::ir::ResolvedFStringPart::Interpolation(_) = part {
-                    return Err(UnsupportedResolvedNode::new(
-                        owner,
-                        &expression.node_id,
-                        "f-string interpolation is not in the resolved native slice",
-                    ));
+                if let crate::core::ir::ResolvedFStringPart::Interpolation(expr) = part {
+                    require_expr(program, owner, expr)?;
                 }
             }
             Ok(())

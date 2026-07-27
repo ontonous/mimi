@@ -735,26 +735,128 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     fn emit_fstring(
         &mut self,
         parts: &[ResolvedFStringPart],
-        _frame: &mut ResolvedFrame<'ctx>,
+        frame: &mut ResolvedFrame<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        // Text-only f-string: concatenate all text parts into a single global.
-        let mut text = String::new();
+        // Fast path: text-only f-string → global constant.
+        let all_text: Option<String> = parts
+            .iter()
+            .map(|p| match p {
+                ResolvedFStringPart::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        if let Some(text) = all_text {
+            let global = self
+                .generator
+                .builder
+                .build_global_string_ptr(&text, "resolved_fstr")
+                .map_err(|e| CompileError::LlvmError(format!("fstring literal: {e}")))?;
+            return Ok(global.as_pointer_value().into());
+        }
+
+        // Interpolation path: build format string + snprintf into stack buffer.
+        let mut fmt_str = String::new();
+        let mut args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+
         for part in parts {
             match part {
-                ResolvedFStringPart::Text(t) => text.push_str(t),
-                ResolvedFStringPart::Interpolation(_) => {
-                    return Err(CompileError::Unsupported(
-                        "f-string interpolation escaped resolved native eligibility".into(),
-                    ))
+                ResolvedFStringPart::Text(t) => {
+                    // Escape '%' in text parts for printf format.
+                    fmt_str.push_str(&t.replace('%', "%%"));
+                }
+                ResolvedFStringPart::Interpolation(expr) => {
+                    let value = self.emit_expr(expr, frame)?;
+                    let spec = self.fstring_format_spec(&expr.ty)?;
+                    fmt_str.push_str(spec);
+                    args.push(BasicMetadataValueEnum::from(value));
                 }
             }
         }
-        let global = self
+
+        // Emit format string as global constant.
+        let fmt_global = self
             .generator
             .builder
-            .build_global_string_ptr(&text, "resolved_fstr")
-            .map_err(|e| CompileError::LlvmError(format!("fstring literal: {e}")))?;
-        Ok(global.as_pointer_value().into())
+            .build_global_string_ptr(&fmt_str, "fstr_fmt")
+            .map_err(|e| CompileError::LlvmError(format!("fstring fmt: {e}")))?;
+
+        // Allocate stack buffer (4096 bytes).
+        let buf_size: u64 = 4096;
+        let buf_type = self.generator.context.i8_type().array_type(buf_size as u32);
+        let buf = self.generator.build_alloca(buf_type, "fstr_buf")?;
+
+        // Get or declare snprintf.
+        let snprintf = self.get_or_declare_snprintf();
+
+        // Call snprintf(buf, size, fmt, args...)
+        let buf_ptr = self
+            .generator
+            .builder
+            .build_pointer_cast(
+                buf,
+                self.generator.context.ptr_type(inkwell::AddressSpace::default()),
+                "fstr_buf_ptr",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("fstr buf cast: {e}")))?;
+        let size_val = self.generator.context.i64_type().const_int(buf_size, false);
+        let mut call_args: Vec<BasicMetadataValueEnum<'ctx>> = vec![
+            BasicMetadataValueEnum::from(buf_ptr),
+            BasicMetadataValueEnum::from(size_val),
+            BasicMetadataValueEnum::from(fmt_global.as_pointer_value()),
+        ];
+        call_args.extend(args);
+
+        self.generator
+            .build_call(snprintf, &call_args, "fstr_snprintf")?;
+
+        // Return buffer pointer (null-terminated C string).
+        Ok(buf_ptr.into())
+    }
+
+    /// Map a canonical type to its printf format specifier.
+    fn fstring_format_spec(&self, ty: &ResolvedTypeId) -> Result<&'static str, CompileError> {
+        use crate::core::PrimitiveType;
+        match self.program.resolved_types().get(ty) {
+            Some(ResolvedType::Primitive(
+                PrimitiveType::I32 | PrimitiveType::U32 | PrimitiveType::Char,
+            )) => Ok("%d"),
+            Some(ResolvedType::Primitive(
+                PrimitiveType::I8 | PrimitiveType::U8 | PrimitiveType::I16 | PrimitiveType::U16,
+            )) => Ok("%d"),
+            Some(ResolvedType::Primitive(
+                PrimitiveType::I64
+                | PrimitiveType::U64
+                | PrimitiveType::Isize
+                | PrimitiveType::Usize
+                | PrimitiveType::I128
+                | PrimitiveType::U128,
+            )) => Ok("%ld"),
+            Some(ResolvedType::Primitive(PrimitiveType::F32 | PrimitiveType::F64)) => Ok("%g"),
+            Some(ResolvedType::Primitive(PrimitiveType::String)) => Ok("%s"),
+            Some(ResolvedType::Primitive(PrimitiveType::Bool)) => Ok("%d"),
+            _ => Err(CompileError::Unsupported(format!(
+                "f-string interpolation type '{}' is not supported",
+                ty.as_str()
+            ))),
+        }
+    }
+
+    fn get_or_declare_snprintf(&self) -> inkwell::values::FunctionValue<'ctx> {
+        self.generator.module.get_function("snprintf").unwrap_or_else(|| {
+            let ptr = self.generator.context.ptr_type(inkwell::AddressSpace::default());
+            let i64 = self.generator.context.i64_type();
+            let fn_type = i64.fn_type(
+                &[
+                    BasicMetadataTypeEnum::from(ptr),
+                    BasicMetadataTypeEnum::from(i64),
+                    BasicMetadataTypeEnum::from(ptr),
+                ],
+                true, // variadic
+            );
+            self.generator
+                .module
+                .add_function("snprintf", fn_type, None)
+        })
     }
 
     fn emit_unary(
