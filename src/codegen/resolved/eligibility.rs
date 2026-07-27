@@ -114,12 +114,13 @@ pub(super) fn eligible_function_ids(
     program: &CheckedProgram,
 ) -> Result<std::collections::BTreeSet<NodeId>, UnsupportedResolvedNode> {
     // Program-level blockers that prevent ANY resolved compilation.
-    // Traits/impls/externs block per-function dispatch because the legacy
-    // emitter's compile_file setup phase (vtable construction, extern
-    // registration, impl method compilation) must run before any function
-    // body is compiled. Running compile_resolved_subset before compile_file
-    // causes SIGSEGV when eligible functions call imported symbols that
-    // haven't been declared yet.
+    // Flows/actors/sessions/protocols/capabilities require special compilation
+    // infrastructure that the resolved emitter does not provide.
+    // Traits/impls/externs: although S12 moved resolved compilation inside
+    // compile_file (after setup), programs with stdlib imports bring in
+    // functions whose bodies reference runtime symbols not yet tracked by the
+    // resolved emitter. Keep the blocker until the resolved emitter can handle
+    // imported function bodies or the eligibility check can reliably exclude them.
     let user_flow_count = program
         .flows()
         .values()
@@ -460,6 +461,22 @@ fn require_expr(
                 ResolvedCallee::Function(_) | ResolvedCallee::Builtin(_)
             ) =>
         {
+            // Reject calls to qualified (imported) functions — the resolved
+            // emitter only handles unqualified local symbols.
+            if let ResolvedCallee::Function(ref callee_owner) = call.callee {
+                if let Some(callee_fn) = program.functions().get(callee_owner) {
+                    if callee_fn.qualified_name.contains("::") {
+                        return Err(UnsupportedResolvedNode::new(
+                            owner,
+                            &expression.node_id,
+                            format!(
+                                "call to qualified function '{}' is not in the resolved native slice",
+                                callee_fn.qualified_name
+                            ),
+                        ));
+                    }
+                }
+            }
             for argument in &call.arguments {
                 require_conversion(owner, &argument.value.node_id, argument.conversion.kind)?;
                 require_expr(program, owner, &argument.value)?;
