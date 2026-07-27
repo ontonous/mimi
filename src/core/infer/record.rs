@@ -132,7 +132,8 @@ impl<'a> Checker<'a> {
                         crate::diagnostic::codes::E0421,
                         format!(
                             "flow state '{}' cannot be constructed outside a transition body; \
-                             only the root state of a flow may be directly instantiated",
+                             only the root state of a flow may be directly instantiated. \
+                             Hint: use FlowName::transition_name(state) to invoke a transition",
                             type_name
                         ),
                     );
