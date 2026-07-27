@@ -93,6 +93,9 @@ pub struct Interpreter<'a> {
     /// Each scope level contains defer blocks registered in that scope
     /// Push a new scope when entering a block, pop when exiting (always runs)
     defer_stack: Vec<Vec<Block>>,
+    /// I-1 (0.31.55): deferred QuotedAst bodies for LIFO execution at
+    /// quoted block exit. Separate from defer_stack (which uses Block).
+    deferred_quoted: Vec<QuotedAst>,
     /// Arena memory blocks (arena_id -> Arena)
     arenas: Vec<Arena>,
     /// Current arena scope depth (track nesting for error messages)
@@ -1342,6 +1345,7 @@ impl<'a> Interpreter<'a> {
             compensation_stack: Vec::new(),
             compensation_error_count: 0,
             defer_stack: Vec::new(),
+            deferred_quoted: Vec::new(),
             arenas: Vec::new(),
             arena_depth: 0,
             verify_contracts: true,
