@@ -359,6 +359,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         }
         let entry = self.generator.context.append_basic_block(function, "entry");
         self.generator.builder.position_at_end(entry);
+        // Push a heap scope so fstring/string allocations are tracked and
+        // freed at function exit (matching legacy emitter behavior).
+        self.generator.push_heap_scope();
         let mut frame = ResolvedFrame {
             owner: callable.owner.clone(),
             locals: BTreeMap::new(),
@@ -366,6 +369,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         self.bind_parameters(callable, function, &mut frame)?;
         let value = self.emit_block(&callable.body, &callable.body.root, &mut frame)?;
         if self.current_block_terminated() {
+            // Early return already emitted; still need to balance the heap
+            // scope. Pop without freeing — the early return path is
+            // responsible for its own cleanup.
+            let _ = self.generator.free_heap_allocs();
             return Ok(());
         }
         let result_type = self.lower_type(&callable.signature.result)?;
@@ -388,6 +395,20 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             }
         };
         let value = self.coerce_to(value, result_type)?;
+        // If returning a string ({ptr, i64} struct), drain the heap scope
+        // WITHOUT freeing. The caller takes ownership of the string data.
+        // For non-string returns, free all heap allocations normally.
+        let is_string_ret = matches!(result_type, BasicTypeEnum::StructType(st) if {
+            let f = st.get_field_types();
+            f.len() == 2
+                && matches!(f[0], BasicTypeEnum::PointerType(_))
+                && matches!(f[1], BasicTypeEnum::IntType(_))
+        });
+        if is_string_ret {
+            self.generator.drain_heap_scope();
+        } else {
+            self.generator.free_heap_allocs()?;
+        }
         self.generator.build_return(Some(&value))
     }
 
