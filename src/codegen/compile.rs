@@ -522,6 +522,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // propagate directly; there is deliberately no typed-error → AST
         // fallback. Unmigrated body classes remain on the explicit legacy arm
         // until their slice is implemented and its oracle tests are green.
+        //
+        // NOTE: per-function dispatch (compile_resolved_subset) is blocked by
+        // the String ABI inconsistency: resolved uses opaque ptr, legacy uses
+        // {ptr, i64}. Until the ABI is unified, dispatch remains all-or-nothing.
         if super::resolved::supports_resolved_native(program) {
             return self.compile_resolved_native(program);
         }

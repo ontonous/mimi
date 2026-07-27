@@ -2848,6 +2848,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         let (function, ret_type) = self.declare_func(func)?;
+        // Skip functions already compiled by the resolved native emitter.
+        if function.count_basic_blocks() != 0 {
+            return Ok(());
+        }
         // Set calling convention for extern "C" / extern "stdcall" etc.
         if let Some(ref abi) = func.extern_abi {
             let cc = crate::ffi::abi_to_llvm_call_conv(abi);
