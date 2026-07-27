@@ -221,6 +221,17 @@ fn require_block(
                 }
             }
             ResolvedStmtKind::Continue => {}
+            ResolvedStmtKind::Scope { kind, body } => {
+                // Only plain lexical scopes are in the resolved native slice.
+                if !matches!(kind, crate::core::ir::ResolvedScopeKind::Lexical) {
+                    return Err(UnsupportedResolvedNode::new(
+                        owner,
+                        &statement.node_id,
+                        format!("scope kind {kind:?} is not in the resolved native slice"),
+                    ));
+                }
+                require_block(program, owner, body)?;
+            }
             other => {
                 return Err(UnsupportedResolvedNode::new(
                     owner,

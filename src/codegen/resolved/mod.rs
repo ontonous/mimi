@@ -403,6 +403,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.generator.build_br(loop_ctx.header)?;
                 Ok(None)
             }
+            ResolvedStmtKind::Scope { body: scope_block, .. } => {
+                // Lexical scope: emit the inner block inline.
+                self.emit_block(body, scope_block, frame)?;
+                Ok(None)
+            }
             other => Err(CompileError::Unsupported(format!(
                 "resolved statement {other:?} escaped resolved native eligibility for '{}'",
                 frame.owner.0
