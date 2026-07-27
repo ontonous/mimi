@@ -1107,6 +1107,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_cond_br(guard_bool, arm_body_bb, env.else_bb)?;
                 self.builder.position_at_end(arm_body_bb);
                 let arm_val = self.compile_expr(&arm.body, &local_vars)?;
+                // MATCH-STRFIX: if the arm body produces a heap-allocated
+                // string (fstring, concat, etc.), detach the heap slot so
+                // free_heap_allocs doesn't free data the caller still needs.
+                self.claim_match_arm_string(&arm.body, &arm_val);
                 let guarded_body_bb = self.builder.get_insert_block().ok_or_else(|| {
                     CompileError::LlvmError("no insert block after guard arm body".to_string())
                 })?;
@@ -1115,6 +1119,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             None => {
                 let arm_val = self.compile_expr(&arm.body, &local_vars)?;
+                // MATCH-STRFIX: same as above for unguarded arms.
+                self.claim_match_arm_string(&arm.body, &arm_val);
                 let body_bb = self.builder.get_insert_block().ok_or_else(|| {
                     CompileError::LlvmError("no insert block after arm body".to_string())
                 })?;
@@ -1292,5 +1298,56 @@ impl<'ctx> CodeGenerator<'ctx> {
             .collect();
         phi.add_incoming(&phi_incoming);
         Ok(phi.as_basic_value())
+    }
+
+    /// MATCH-STRFIX: if a match arm body produces a heap-allocated string
+    /// (fstring, string concat, etc.), pop the heap slot so that
+    /// `free_heap_allocs` at function exit does not free data the caller
+    /// will receive through the match result / phi node.
+    fn claim_match_arm_string(&self, body: &Expr, _val: &BasicValueEnum<'ctx>) {
+        if self.is_string_producing_expr(body) {
+            // The fstring emitter registers TWO heap entries: a Slot for
+            // the snprintf temp buffer and a Ptr for the final string buffer.
+            // pop_last_heap_ptr pops entries until it finds a Ptr, so one
+            // call removes the Ptr but leaves the Slot. The Slot's snprintf
+            // temp is only allocated in ONE match arm; when a different arm
+            // is taken, free_heap_allocs would free an undefined pointer.
+            // Call twice to drain both entries.
+            let _ = self.pop_last_heap_ptr();
+            let _ = self.pop_last_heap_ptr();
+        }
+    }
+
+    /// Check if an expression produces a heap-allocated string, looking
+    /// through Block wrappers.
+    fn is_string_producing_expr(&self, expr: &Expr) -> bool {
+        match expr.unlocated() {
+            Expr::Literal(Lit::FString(_)) => true,
+            Expr::Binary(BinOp::Add, _, _) => true,
+            Expr::Call(callee, _) => {
+                matches!(
+                    callee.unlocated(),
+                    Expr::Ident(name) if matches!(
+                        name.as_str(),
+                        "str_concat" | "str_repeat" | "str_slice"
+                            | "str_trim" | "str_join" | "str_from"
+                            | "to_string" | "format"
+                    )
+                )
+            }
+            // Look through block wrappers: { f"..." } or { let x = ...; f"..." }
+            Expr::Block(stmts) => {
+                // Check the last statement's expression (the block result).
+                if let Some(last) = stmts.last() {
+                    match last.unlocated() {
+                        Stmt::Expr(e) => self.is_string_producing_expr(e),
+                        _ => false,
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
     }
 }

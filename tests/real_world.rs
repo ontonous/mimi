@@ -724,6 +724,60 @@ fn real_world_resolved_option_match_ctor() {
     );
 }
 
+/// Match arms returning fstring through the legacy emitter. Regression
+/// test for the match+fstring double free bug: the fstring emitter
+/// registers two heap entries (snprintf temp + string buffer), and
+/// free_heap_allocs would free the snprintf temp even when a different
+/// match arm was taken (undefined pointer → double free).
+#[test]
+fn real_world_match_fstring_return() {
+    run_both(
+        r#"
+        func safe_div(a: i64, b: i64) -> Option<i64> {
+            if b == 0 { None } else { Some(a / b) }
+        }
+
+        func describe(opt: Option<i64>) -> string {
+            match opt {
+                Some(v) => f"value={v}",
+                None => "nothing",
+            }
+        }
+
+        func main() -> i32 {
+            println(describe(safe_div(10, 3)))
+            println(describe(safe_div(10, 0)))
+            0
+        }
+    "#,
+        "value=3\nnothing",
+    );
+}
+
+/// Match with literal patterns returning fstring. Same root cause as
+/// the Constructor pattern variant above.
+#[test]
+fn real_world_match_literal_fstring_return() {
+    run_both(
+        r#"
+        func classify(x: i32) -> string {
+            match x {
+                1 => f"one ({x})",
+                2 => f"two ({x})",
+                _ => f"many ({x})",
+            }
+        }
+
+        func main() -> i32 {
+            println(classify(1))
+            println(classify(5))
+            0
+        }
+    "#,
+        "one (1)\nmany (5)",
+    );
+}
+
 /// Dual-backend regression for every `tests/real_world/flow_*.mimi`.
 ///
 /// Requires `cc` for the codegen path. Compares normalized stdout so L1
