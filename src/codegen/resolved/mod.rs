@@ -657,6 +657,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 })
             }
             ResolvedExprKind::FString(parts) => self.emit_fstring(parts, frame),
+            ResolvedExprKind::Match { scrutinee, arms } => {
+                self.emit_match(expression, scrutinee, arms, frame)
+            }
             other => Err(CompileError::Unsupported(format!(
                 "resolved expression {other:?} escaped resolved native eligibility at '{}'",
                 expression.node_id.0
@@ -857,6 +860,126 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 .module
                 .add_function("snprintf", fn_type, None)
         })
+    }
+
+    fn emit_match(
+        &mut self,
+        expression: &ResolvedExpr,
+        scrutinee: &ResolvedExpr,
+        arms: &[crate::core::ir::MatchArm],
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let result_type = llvm_type_for_resolved(
+            self.generator.context,
+            self.program.resolved_types(),
+            &expression.ty,
+        )?;
+        let result_alloca = self.generator.build_alloca(result_type, "match_result")?;
+        let scrutinee_val = self.emit_expr(scrutinee, frame)?;
+
+        let function = self.current_function()?;
+        let merge_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "match_merge");
+
+        // Track the fallthrough block: where the next arm's comparison is emitted.
+        // Initially it's the current block (entry). After each non-wildcard arm,
+        // it becomes the `next_bb` that the cond_br falls through to.
+        let mut fallthrough_bb = self
+            .generator
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::LlvmError("no insert block for match".into()))?;
+
+        for (arm_index, arm) in arms.iter().enumerate() {
+            let is_last = arm_index == arms.len() - 1;
+
+            let always_matches = matches!(
+                arm.pattern.kind,
+                ResolvedPatternKind::Wildcard | ResolvedPatternKind::Binding { .. }
+            ) && arm.guard.is_none();
+
+            let arm_bb = self
+                .generator
+                .context
+                .append_basic_block(function, &format!("match_arm{arm_index}"));
+
+            // Position at fallthrough to emit comparison or unconditional br.
+            self.generator.builder.position_at_end(fallthrough_bb);
+
+            if !always_matches {
+                let pattern_matches = match &arm.pattern.kind {
+                    ResolvedPatternKind::Literal(lit) => {
+                        let lit_val = self.emit_literal(&arm.pattern.ty, lit)?;
+                        let cmp =
+                            self.generator
+                                .compile_binop(BinOp::EqCmp, scrutinee_val, lit_val)?;
+                        self.ensure_bool(cmp)?
+                    }
+                    ResolvedPatternKind::Wildcard | ResolvedPatternKind::Binding { .. } => {
+                        self.generator.context.bool_type().const_all_ones()
+                    }
+                    _ => {
+                        return Err(CompileError::Unsupported(
+                            "match pattern escaped resolved native eligibility".into(),
+                        ))
+                    }
+                };
+
+                let cond = if let Some(guard) = &arm.guard {
+                    let guard_val = self.emit_expr(guard, frame)?;
+                    let guard_bool = self.ensure_bool(guard_val)?;
+                    self.generator
+                        .builder
+                        .build_and(pattern_matches, guard_bool, "match_guard_and")
+                        .map_err(|e| CompileError::LlvmError(format!("guard and: {e}")))?
+                } else {
+                    pattern_matches
+                };
+
+                if is_last {
+                    self.generator.build_cond_br(cond, arm_bb, merge_bb)?;
+                } else {
+                    let next_bb = self
+                        .generator
+                        .context
+                        .append_basic_block(function, &format!("match_next{arm_index}"));
+                    self.generator.build_cond_br(cond, arm_bb, next_bb)?;
+                    fallthrough_bb = next_bb;
+                }
+            } else {
+                // Unconditional match.
+                self.generator.build_br(arm_bb)?;
+            }
+
+            // Emit arm body.
+            self.generator.builder.position_at_end(arm_bb);
+            if let ResolvedPatternKind::Binding { by_reference: None, .. } = &arm.pattern.kind {
+                let callable_body = &self
+                    .program
+                    .callable(&frame.owner)
+                    .ok_or_else(|| {
+                        CompileError::Unsupported("callable absent for match binding".into())
+                    })?
+                    .body;
+                self.bind_pattern(callable_body, &arm.pattern, scrutinee_val, frame)?;
+            }
+            let arm_value = self.emit_expr(&arm.body, frame)?;
+            if !self.current_block_terminated() {
+                let arm_value = self.coerce_to(arm_value, result_type)?;
+                self.generator.build_store(result_alloca, arm_value)?;
+                self.generator.build_br(merge_bb)?;
+            }
+
+            if always_matches {
+                break;
+            }
+        }
+
+        self.generator.builder.position_at_end(merge_bb);
+        self.generator
+            .build_load(result_type, result_alloca, "match_val")
     }
 
     fn emit_unary(
@@ -1512,7 +1635,7 @@ func main() -> i32 { add(40, 2) }
     }
 
     #[test]
-    fn unsupported_match_fails_without_surface_fallback() {
+    fn match_literal_patterns_emit_from_resolved_ir() {
         let program = checked(
             r#"
 func main() -> i32 {
@@ -1525,10 +1648,28 @@ func main() -> i32 {
 "#,
         );
         let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_match");
+        generator
+            .compile_resolved_native(&program)
+            .expect("match with literal patterns is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+    }
+
+    #[test]
+    fn unsupported_list_fails_without_surface_fallback() {
+        let program = checked(
+            r#"
+func main() -> i32 {
+    let xs = [1, 2, 3]
+    xs[0]
+}
+"#,
+        );
+        let context = inkwell::context::Context::create();
         let mut generator = CodeGenerator::new(&context, "resolved_reject");
         let diagnostics = generator
             .compile_resolved_native(&program)
-            .expect_err("match expression is outside the current slice");
+            .expect_err("list literal is outside the current slice");
         assert!(
             diagnostics[0]
                 .message

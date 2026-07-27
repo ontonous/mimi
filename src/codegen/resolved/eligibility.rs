@@ -413,6 +413,17 @@ fn require_expr(
             }
             Ok(())
         }
+        ResolvedExprKind::Match { scrutinee, arms } => {
+            require_expr(program, owner, scrutinee)?;
+            for arm in arms {
+                require_match_pattern(owner, &arm.pattern)?;
+                if let Some(guard) = &arm.guard {
+                    require_condition(program, owner, guard)?;
+                }
+                require_expr(program, owner, &arm.body)?;
+            }
+            Ok(())
+        }
         ResolvedExprKind::Scope { kind, body } => {
             if !matches!(kind, crate::core::ir::ResolvedScopeKind::Lexical) {
                 return Err(UnsupportedResolvedNode::new(
@@ -427,6 +438,25 @@ fn require_expr(
             owner,
             &expression.node_id,
             format!("expression {other:?} is not in the resolved native slice"),
+        )),
+    }
+}
+
+/// Match arm patterns: only literals, wildcards, and simple bindings.
+fn require_match_pattern(
+    owner: &NodeId,
+    pattern: &ResolvedPattern,
+) -> Result<(), UnsupportedResolvedNode> {
+    match &pattern.kind {
+        ResolvedPatternKind::Wildcard
+        | ResolvedPatternKind::Literal(_)
+        | ResolvedPatternKind::Binding {
+            by_reference: None, ..
+        } => Ok(()),
+        _ => Err(UnsupportedResolvedNode::new(
+            owner,
+            &pattern.node_id,
+            "only literal, wildcard, and binding match patterns are in the resolved native slice",
         )),
     }
 }
