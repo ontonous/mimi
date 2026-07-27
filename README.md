@@ -410,7 +410,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
 LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 ```
 
-> **Memory note**: `cargo test` in debug mode can use ~12 GB RAM. Use `ulimit -v 20000000` and `--test-threads=1` on memory-constrained systems. See [AGENTS.md](AGENTS.md) for details.
+> **Test note**: after the test-performance work, the normal full gate is `ulimit -v 20000000 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test -- --test-threads=4` (about 42 seconds). Keep Z3 verification subsets single-threaded; extremely memory-constrained systems may fall back to `--test-threads=1`. Debug builds can still use about 12 GB RAM. See [AGENTS.md](AGENTS.md) for details.
 
 ---
 

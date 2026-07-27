@@ -517,6 +517,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             self.component_ir = Some(gen.build());
         }
+        // CODEGEN Typed IR migration: body classes enter the resolved
+        // emitter only after a pure eligibility scan. Once selected, errors
+        // propagate directly; there is deliberately no typed-error → AST
+        // fallback. Unmigrated body classes remain on the explicit legacy arm
+        // until their slice is implemented and its oracle tests are green.
+        if super::resolved::supports_resolved_native(program) {
+            return self.compile_resolved_native(program);
+        }
         self.compile_file(program.legacy_body_file())
             .map_err(|error| {
                 let mut diagnostic = error.to_diagnostic();

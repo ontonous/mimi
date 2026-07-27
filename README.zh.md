@@ -410,7 +410,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
 LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 ```
 
-> **内存提示**：debug 模式下 `cargo test` 最高可达 ~12 GB 内存。内存受限环境请使用 `ulimit -v 20000000` 和 `--test-threads=1`。详见 [AGENTS.md](AGENTS.md)。
+> **测试提示**：完成测试性能优化后，日常全量门禁为 `ulimit -v 20000000 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test -- --test-threads=4`（约 42 秒）。Z3 验证子集仍使用单线程；极端内存受限环境可退回 `--test-threads=1`。debug 模式仍可使用约 12 GB 内存。详见 [AGENTS.md](AGENTS.md)。
 
 ---
 

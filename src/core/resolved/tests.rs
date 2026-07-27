@@ -97,6 +97,23 @@ fn checked_program_owns_its_migration_body_input() {
 }
 
 #[test]
+fn resolved_native_scalar_codegen_ignores_poisoned_legacy_body() {
+    let file = parse("func main() -> i32 { 42 }");
+    let mut program = crate::core::check_program(&file).expect("check");
+    program.legacy_file.items.clear();
+    assert!(program.legacy_file.items.is_empty());
+
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "resolved_poison");
+    codegen
+        .compile_checked(&program)
+        .expect("production typed cohort must not inspect legacy body");
+    let ir = codegen.module.print_to_string().to_string();
+    assert!(ir.contains("define i32 @main()"), "{ir}");
+    assert!(ir.contains("ret i32 42"), "{ir}");
+}
+
+#[test]
 fn checked_program_materializes_canonical_function_signature() {
     let file = parse("func choose(value: List<i32>, fallback: i32) -> i32 { fallback }");
     let program = crate::core::check_program(&file).expect("check");
