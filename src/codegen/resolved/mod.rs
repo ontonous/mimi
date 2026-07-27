@@ -408,6 +408,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.emit_block(body, scope_block, frame)?;
                 Ok(None)
             }
+            ResolvedStmtKind::Loop(loop_body) => {
+                self.emit_loop(body, loop_body, frame)?;
+                Ok(None)
+            }
             other => Err(CompileError::Unsupported(format!(
                 "resolved statement {other:?} escaped resolved native eligibility for '{}'",
                 frame.owner.0
@@ -563,6 +567,25 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 value.ok_or_else(|| {
                     CompileError::Unsupported(format!(
                         "resolved block expression '{}' produced no value",
+                        expression.node_id.0
+                    ))
+                })
+            }
+            ResolvedExprKind::Scope { body: scope_block, .. } => {
+                let callable_body = &self
+                    .program
+                    .callable(&frame.owner)
+                    .ok_or_else(|| {
+                        CompileError::Unsupported(format!(
+                            "resolved callable '{}' is absent for scope expression",
+                            frame.owner.0
+                        ))
+                    })?
+                    .body;
+                let value = self.emit_block(callable_body, scope_block, frame)?;
+                value.ok_or_else(|| {
+                    CompileError::Unsupported(format!(
+                        "resolved scope expression '{}' produced no value",
                         expression.node_id.0
                     ))
                 })
@@ -936,6 +959,38 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         }
 
         // Exit
+        self.generator.builder.position_at_end(exit);
+        Ok(())
+    }
+
+    fn emit_loop(
+        &mut self,
+        body: &ResolvedBody,
+        loop_body: &ResolvedBlock,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<(), CompileError> {
+        let function = self.current_function()?;
+        let header = self
+            .generator
+            .context
+            .append_basic_block(function, "loop_header");
+        let exit = self
+            .generator
+            .context
+            .append_basic_block(function, "loop_exit");
+
+        self.generator.build_br(header)?;
+
+        // Header: unconditional entry to body (infinite loop)
+        self.generator.builder.position_at_end(header);
+        self.loop_stack.push(LoopContext { header, exit });
+        self.emit_block(body, loop_body, frame)?;
+        self.loop_stack.pop();
+        if !self.current_block_terminated() {
+            self.generator.build_br(header)?;
+        }
+
+        // Exit (only reachable via break)
         self.generator.builder.position_at_end(exit);
         Ok(())
     }
