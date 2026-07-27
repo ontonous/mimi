@@ -116,11 +116,13 @@ pub(super) fn eligible_function_ids(
     // Program-level blockers that prevent ANY resolved compilation.
     // Flows/actors/sessions/protocols/capabilities require special compilation
     // infrastructure that the resolved emitter does not provide.
-    // Traits/impls/externs: although S12 moved resolved compilation inside
-    // compile_file (after setup), programs with stdlib imports bring in
-    // functions whose bodies reference runtime symbols not yet tracked by the
-    // resolved emitter. Keep the blocker until the resolved emitter can handle
-    // imported function bodies or the eligibility check can reliably exclude them.
+    // Traits/impls/externs: S12 moved resolved compilation inside compile_file
+    // (after setup), but programs with stdlib imports bring imported functions
+    // into the program catalog. The per-function eligibility check cannot yet
+    // reliably exclude all imported function bodies (they may pass the scalar
+    // check while referencing runtime symbols the resolved emitter doesn't
+    // track). Keep the blocker until imported functions are either excluded by
+    // origin or the resolved emitter gains full runtime symbol awareness.
     let user_flow_count = program
         .flows()
         .values()
