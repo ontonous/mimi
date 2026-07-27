@@ -1251,6 +1251,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         let result_type = self.lower_type(&expression.ty)?;
         let result_alloca = self.generator.build_alloca(result_type, "match_result")?;
         let scrutinee_val = self.emit_expr(scrutinee, frame)?;
+        // If the scrutinee is a pointer (e.g. an alloca), load the struct
+        // value so Constructor patterns can extract fields.
+        let scrutinee_val = if let BasicValueEnum::PointerValue(pv) = scrutinee_val {
+            let sty = self.lower_type(&scrutinee.ty)?;
+            self.generator.build_load(sty, pv, "match_scrutinee")?
+        } else {
+            scrutinee_val
+        };
 
         let function = self.current_function()?;
         let merge_bb = self
@@ -1295,6 +1303,73 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     ResolvedPatternKind::Wildcard | ResolvedPatternKind::Binding { .. } => {
                         self.generator.context.bool_type().const_all_ones()
                     }
+                    // 0.32.6: Constructor pattern — check the discriminant
+                    // (field 0) of the Option/Result struct.
+                    ResolvedPatternKind::Constructor { variant, .. } => {
+                        let variant_name = self.lookup_variant_name(variant)?;
+                        let disc_expected = match variant_name.as_str() {
+                            "Some" | "Ok" => true,
+                            "None" | "Err" => false,
+                            other => {
+                                return Err(CompileError::Unsupported(format!(
+                                    "constructor variant '{other}' is not Option/Result"
+                                )))
+                            }
+                        };
+                        // Get the scrutinee as a struct value. If it's a
+                        // pointer (alloca), load it first.
+                        let sv = match scrutinee_val {
+                            BasicValueEnum::StructValue(sv) => sv,
+                            BasicValueEnum::PointerValue(pv) => {
+                                let sty = self.lower_type(&scrutinee.ty)?;
+                                self.generator
+                                    .build_load(sty, pv, "ctor_scrutinee")?
+                                    .into_struct_value()
+                            }
+                            _ => {
+                                return Err(CompileError::Unsupported(
+                                    "constructor match on non-struct scrutinee".into(),
+                                ))
+                            }
+                        };
+                        // Use extractvalue for non-constant structs.
+                        let disc = self
+                            .generator
+                            .builder
+                            .build_extract_value(sv, 0, "ctor_disc")
+                            .map_err(|e| CompileError::LlvmError(format!("extract disc: {e}")))?;
+                        let bool_ty = self.generator.context.bool_type();
+                        let expected = bool_ty.const_int(disc_expected as u64, false);
+                        // Discriminant may be i1 or pointer-sized; handle both.
+                        let disc_int = match disc {
+                            BasicValueEnum::IntValue(iv) => iv,
+                            BasicValueEnum::PointerValue(pv) => {
+                                // Shouldn't happen for Option/Result, but handle gracefully.
+                                self.generator
+                                    .builder
+                                    .build_ptr_to_int(
+                                        pv,
+                                        bool_ty,
+                                        "disc_ptr2int",
+                                    )
+                                    .map_err(|e| CompileError::LlvmError(format!("disc ptr2int: {e}")))?
+                            }
+                            _ => {
+                                return Err(CompileError::LlvmError(
+                                    "discriminant is not an integer".into(),
+                                ))
+                            }
+                        };
+                        self.generator
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::EQ,
+                                disc_int,
+                                expected,
+                                "ctor_disc_cmp",
+                            )
+                            .map_err(|e| CompileError::LlvmError(format!("disc cmp: {e}")))?
+                    }
                     _ => {
                         return Err(CompileError::Unsupported(
                             "match pattern escaped resolved native eligibility".into(),
@@ -1330,18 +1405,83 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
 
             // Emit arm body.
             self.generator.builder.position_at_end(arm_bb);
-            if let ResolvedPatternKind::Binding {
-                by_reference: None, ..
-            } = &arm.pattern.kind
-            {
-                let callable_body = &self
-                    .program
-                    .callable(&frame.owner)
-                    .ok_or_else(|| {
-                        CompileError::Unsupported("callable absent for match binding".into())
-                    })?
-                    .body;
-                self.bind_pattern(callable_body, &arm.pattern, scrutinee_val, frame)?;
+            match &arm.pattern.kind {
+                ResolvedPatternKind::Binding {
+                    by_reference: None, ..
+                } => {
+                    let callable_body = &self
+                        .program
+                        .callable(&frame.owner)
+                        .ok_or_else(|| {
+                            CompileError::Unsupported("callable absent for match binding".into())
+                        })?
+                        .body;
+                    self.bind_pattern(callable_body, &arm.pattern, scrutinee_val, frame)?;
+                }
+                // 0.32.6: Constructor pattern — extract payload fields and
+                // bind sub-patterns. Option: {i1, T}; Result: {i1, T, E}.
+                ResolvedPatternKind::Constructor { variant, fields } => {
+                    let variant_name = self.lookup_variant_name(variant)?;
+                    // Get the scrutinee as a struct value.
+                    let sv = match scrutinee_val {
+                        BasicValueEnum::StructValue(sv) => sv,
+                        BasicValueEnum::PointerValue(pv) => {
+                            let sty = self.lower_type(&scrutinee.ty)?;
+                            self.generator
+                                .build_load(sty, pv, "ctor_bind_scrutinee")?
+                                .into_struct_value()
+                        }
+                        _ => {
+                            return Err(CompileError::Unsupported(
+                                "constructor match on non-struct scrutinee".into(),
+                            ))
+                        }
+                    };
+                    // Determine which struct field holds the payload.
+                    // Some/Ok → field 1; Err → field 2; None → no payload.
+                    let payload_field_index: Option<u32> = match variant_name.as_str() {
+                        "Some" | "Ok" => Some(1),
+                        "Err" => Some(2),
+                        "None" => None,
+                        other => {
+                            return Err(CompileError::Unsupported(format!(
+                                "constructor variant '{other}' payload extraction unsupported"
+                            )))
+                        }
+                    };
+                    let callable_body = &self
+                        .program
+                        .callable(&frame.owner)
+                        .ok_or_else(|| {
+                            CompileError::Unsupported("callable absent for ctor binding".into())
+                        })?
+                        .body;
+                    for (i, (_field_id, sub_pattern)) in fields.iter().enumerate() {
+                        let field_idx = payload_field_index
+                            .map(|base| base + i as u32)
+                            .unwrap_or(i as u32);
+                        let payload_val = self
+                            .generator
+                            .builder
+                            .build_extract_value(
+                                sv,
+                                field_idx,
+                                &format!("ctor_payload_{field_idx}"),
+                            )
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!(
+                                    "extract payload field {field_idx}: {e}"
+                                ))
+                            })?;
+                        self.bind_pattern(
+                            callable_body,
+                            sub_pattern,
+                            payload_val,
+                            frame,
+                        )?;
+                    }
+                }
+                _ => {}
             }
             let arm_value = self.emit_expr(&arm.body, frame)?;
             if !self.current_block_terminated() {
@@ -1533,6 +1673,28 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 "cannot coerce {other:?} to i64 for list storage"
             ))),
         }
+    }
+
+    /// Look up the variant name from a variant NodeId by searching type definitions.
+    fn lookup_variant_name(&self, variant_id: &NodeId) -> Result<String, CompileError> {
+        for td in self.program.type_defs().values() {
+            for (name, id) in &td.variant_ids {
+                if id == variant_id {
+                    return Ok(name.clone());
+                }
+            }
+        }
+        // Fallback: check if the NodeId string contains a known variant name.
+        let id_str = &variant_id.0;
+        for name in ["Some", "None", "Ok", "Err"] {
+            if id_str.contains(name) {
+                return Ok(name.to_string());
+            }
+        }
+        Err(CompileError::Unsupported(format!(
+            "variant '{}' not found in any type definition",
+            variant_id.0
+        )))
     }
 
     /// Look up the field name from a field NodeId by searching type definitions.
@@ -2599,6 +2761,35 @@ func main() -> i32 {
         generator
             .compile_resolved_native(&program)
             .expect("Record construct/field access is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+    }
+
+    /// 0.32.6: Option match with Constructor patterns (Some/None) through
+    /// the resolved native emitter.
+    #[test]
+    fn option_match_constructor_emits_from_resolved_ir() {
+        let program = checked(
+            r#"
+func safe_div(a: i64, b: i64) -> Option<i64> {
+    if b == 0 { None } else { Some(a / b) }
+}
+func unwrap_or(opt: Option<i64>, default: i64) -> i64 {
+    match opt {
+        Some(v) => v,
+        None => default,
+    }
+}
+func main() -> i32 {
+    let r = unwrap_or(safe_div(10, 3), 0 - 1)
+    if r == 3 { 0 } else { 1 }
+}
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_opt_match");
+        generator
+            .compile_resolved_native(&program)
+            .expect("Option match with Constructor patterns is in the resolved native slice");
         generator.module.verify().expect("valid LLVM");
     }
 

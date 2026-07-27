@@ -644,10 +644,18 @@ fn require_match_pattern(
         | ResolvedPatternKind::Binding {
             by_reference: None, ..
         } => Ok(()),
+        // 0.32.6: Constructor patterns for Option/Result match arms.
+        // Field sub-patterns must also be in the slice.
+        ResolvedPatternKind::Constructor { fields, .. } => {
+            for (_, sub_pattern) in fields {
+                require_match_pattern(owner, sub_pattern)?;
+            }
+            Ok(())
+        }
         _ => Err(UnsupportedResolvedNode::new(
             owner,
             &pattern.node_id,
-            "only literal, wildcard, and binding match patterns are in the resolved native slice",
+            "only literal, wildcard, binding, and constructor match patterns are in the resolved native slice",
         )),
     }
 }

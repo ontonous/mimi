@@ -697,6 +697,33 @@ fn real_world_resolved_record_field() {
     );
 }
 
+/// Option match with Constructor patterns (Some/None) through the resolved
+/// native emitter. 0.32.6: Constructor patterns are now eligible.
+#[test]
+fn real_world_resolved_option_match_ctor() {
+    run_both(
+        r#"
+        func safe_div(a: i64, b: i64) -> Option<i64> {
+            if b == 0 { None } else { Some(a / b) }
+        }
+
+        func unwrap_or(opt: Option<i64>, default: i64) -> i64 {
+            match opt {
+                Some(v) => v,
+                None => default,
+            }
+        }
+
+        func main() -> i32 {
+            println(unwrap_or(safe_div(10, 3), 0 - 1))
+            println(unwrap_or(safe_div(10, 0), 0 - 1))
+            0
+        }
+    "#,
+        "3\n-1",
+    );
+}
+
 /// Dual-backend regression for every `tests/real_world/flow_*.mimi`.
 ///
 /// Requires `cc` for the codegen path. Compares normalized stdout so L1
