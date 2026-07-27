@@ -18,10 +18,10 @@ use crate::codegen::{CallSiteValueExt, CodeGenerator};
 use crate::core::ir::ResolvedFStringPart;
 use crate::core::ir::{ResolvedBinaryOp, ResolvedUnaryOp};
 use crate::core::{
-    CheckedConversion, CheckedConversionKind, CheckedProgram, NodeId, ResolvedBlock, ResolvedBody,
-    ResolvedCallee, ResolvedConstValue, ResolvedExpr, ResolvedExprKind, ResolvedLiteral,
-    ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedStmtKind,
-    ResolvedType, ResolvedTypeId,
+    CheckedConversion, CheckedConversionKind, CheckedProgram, NodeId, PrimitiveType,
+    ResolvedBlock, ResolvedBody, ResolvedCallee, ResolvedConstValue, ResolvedExpr,
+    ResolvedExprKind, ResolvedLiteral, ResolvedLocalId, ResolvedPattern, ResolvedPatternKind,
+    ResolvedPlace, ResolvedStmtKind, ResolvedType, ResolvedTypeId,
 };
 use crate::diagnostic::Diagnostic;
 use crate::error::CompileError;
@@ -278,27 +278,47 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         Ok(&function.qualified_name)
     }
 
+    /// Lower a ResolvedTypeId to an LLVM type, with fallback for
+    /// user-defined record Nominal types that types.rs doesn't handle.
+    fn lower_type(&self, id: &ResolvedTypeId) -> Result<BasicTypeEnum<'ctx>, CompileError> {
+        match llvm_type_for_resolved(
+            self.generator.context,
+            self.program.resolved_types(),
+            id,
+        ) {
+            Ok(ty) => Ok(ty),
+            Err(_) => {
+                // Check if this is a user-defined record Nominal type.
+                if let Some(ResolvedType::Nominal { item, .. }) =
+                    self.program.resolved_types().get(id)
+                {
+                    let sty = self.record_llvm_type(item)?;
+                    Ok(BasicTypeEnum::StructType(sty))
+                } else {
+                    // Re-propagate the original error.
+                    llvm_type_for_resolved(
+                        self.generator.context,
+                        self.program.resolved_types(),
+                        id,
+                    )
+                }
+            }
+        }
+    }
+
     fn declare_callable(
         &mut self,
         callable: &crate::core::ResolvedCallable,
     ) -> Result<(), CompileError> {
         let symbol = self.callable_symbol(&callable.owner)?.to_string();
-        let result = llvm_type_for_resolved(
-            self.generator.context,
-            self.program.resolved_types(),
-            &callable.signature.result,
-        )?;
+        let result = self.lower_type(&callable.signature.result)?;
         let parameters = callable
             .signature
             .parameters
             .iter()
             .map(|parameter| {
-                llvm_type_for_resolved(
-                    self.generator.context,
-                    self.program.resolved_types(),
-                    &parameter.ty,
-                )
-                .map(BasicMetadataTypeEnum::from)
+                self.lower_type(&parameter.ty)
+                    .map(BasicMetadataTypeEnum::from)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let function_type = match result {
@@ -348,11 +368,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         if self.current_block_terminated() {
             return Ok(());
         }
-        let result_type = llvm_type_for_resolved(
-            self.generator.context,
-            self.program.resolved_types(),
-            &callable.signature.result,
-        )?;
+        let result_type = self.lower_type(&callable.signature.result)?;
         let value = match value {
             Some(value) => value,
             None if matches!(
@@ -388,11 +404,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     local_id.0 .0
                 ))
             })?;
-            let llvm_type = llvm_type_for_resolved(
-                self.generator.context,
-                self.program.resolved_types(),
-                &local.ty,
-            )?;
+            let llvm_type = self.lower_type(&local.ty)?;
             let value = function.get_nth_param(index as u32).ok_or_else(|| {
                 CompileError::LlvmError(format!(
                     "resolved parameter {index} is absent from '{}'",
@@ -572,11 +584,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         local.0 .0
                     ))
                 })?;
-                let llvm_type = llvm_type_for_resolved(
-                    self.generator.context,
-                    self.program.resolved_types(),
-                    &metadata.ty,
-                )?;
+                let llvm_type = self.lower_type(&metadata.ty)?;
                 let value = self.coerce_to(value, llvm_type)?;
                 let storage = self
                     .generator
@@ -635,11 +643,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .build_load(entry.llvm_type, entry.storage, "resolved_load")
             }
             ResolvedExprKind::Tuple(elements) => {
-                let llvm_type = llvm_type_for_resolved(
-                    self.generator.context,
-                    self.program.resolved_types(),
-                    &expression.ty,
-                )?;
+                let llvm_type = self.lower_type(&expression.ty)?;
                 let BasicTypeEnum::StructType(struct_type) = llvm_type else {
                     return Err(CompileError::Unsupported(
                         "tuple type did not lower to LLVM struct".into(),
@@ -699,6 +703,42 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     "list_val",
                 )
             }
+            // 0.32.5: Record construction. Build LLVM struct from field
+            // value types, allocate, store each field.
+            ResolvedExprKind::Record { nominal: _, fields } => {
+                // Build the LLVM struct type from field value types.
+                let field_types: Vec<BasicTypeEnum<'ctx>> = fields
+                    .iter()
+                    .map(|f| {
+                        self.lower_type(&f.value.ty)
+                    })
+                    .collect::<Result<_, _>>()?;
+                let struct_ty = self
+                    .generator
+                    .context
+                    .struct_type(&field_types, false);
+                let alloca = self.generator.build_alloca(struct_ty, "record_alloc")?;
+                for (i, field) in fields.iter().enumerate() {
+                    let value = self.emit_expr(&field.value, frame)?;
+                    let field_ptr = self
+                        .generator
+                        .builder
+                        .build_struct_gep(struct_ty, alloca, i as u32, "rec_field")
+                        .map_err(|e| CompileError::LlvmError(format!("record gep: {e}")))?;
+                    let field_ty = struct_ty
+                        .get_field_type_at_index(i as u32)
+                        .ok_or_else(|| {
+                            CompileError::LlvmError(format!("record field {i} type absent"))
+                        })?;
+                    let value = self.numeric_convert(value, field_ty)?;
+                    self.generator.build_store(field_ptr, value)?;
+                }
+                self.generator.build_load(
+                    BasicTypeEnum::StructType(struct_ty),
+                    alloca,
+                    "record_val",
+                )
+            }
             ResolvedExprKind::Project { value, projection } => {
                 let agg = self.emit_expr(value, frame)?;
                 match projection {
@@ -739,6 +779,25 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         self.generator.build_load(
                             BasicTypeEnum::IntType(i64_ty), elem_ptr, "list_val_load",
                         )
+                    }
+                    // 0.32.5: Field value projection for record rvalue access.
+                    crate::core::ir::ResolvedValueProjection::Field(field_id) => {
+                        let BasicValueEnum::StructValue(struct_val) = agg else {
+                            return Err(CompileError::Unsupported(
+                                "field projection on non-struct (record) value".into(),
+                            ));
+                        };
+                        // Look up field name from type definitions.
+                        let field_name = self.lookup_field_name(field_id)?;
+                        let field_index = self.lookup_field_index(field_id, &field_name)?;
+                        let field = struct_val
+                            .get_field_at_index(field_index)
+                            .ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "record field {field_index} absent"
+                                ))
+                            })?;
+                        Ok(field)
                     }
                     other => Err(CompileError::Unsupported(format!(
                         "value projection {other:?} escaped resolved native eligibility"
@@ -884,7 +943,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         literal: &ResolvedLiteral,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let llvm_type =
-            llvm_type_for_resolved(self.generator.context, self.program.resolved_types(), ty)?;
+            self.lower_type(ty)?;
         match (literal, llvm_type) {
             (ResolvedLiteral::Int(value), BasicTypeEnum::IntType(integer)) => {
                 Ok(integer.const_int(*value as u64, true).into())
@@ -926,7 +985,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         value: &ResolvedConstValue,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let llvm_type =
-            llvm_type_for_resolved(self.generator.context, self.program.resolved_types(), ty)?;
+            self.lower_type(ty)?;
         match (value, llvm_type) {
             (ResolvedConstValue::Int(v), BasicTypeEnum::IntType(integer)) => {
                 Ok(integer.const_int(*v as u64, true).into())
@@ -1189,11 +1248,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         arms: &[crate::core::ir::MatchArm],
         frame: &mut ResolvedFrame<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let result_type = llvm_type_for_resolved(
-            self.generator.context,
-            self.program.resolved_types(),
-            &expression.ty,
-        )?;
+        let result_type = self.lower_type(&expression.ty)?;
         let result_alloca = self.generator.build_alloca(result_type, "match_result")?;
         let scrutinee_val = self.emit_expr(scrutinee, frame)?;
 
@@ -1341,11 +1396,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         match conversion.kind {
             CheckedConversionKind::Identity => Ok(value),
             CheckedConversionKind::NumericWiden | CheckedConversionKind::NumericNarrowChecked => {
-                let target = llvm_type_for_resolved(
-                    self.generator.context,
-                    self.program.resolved_types(),
-                    &conversion.to,
-                )?;
+                let target = self.lower_type(&conversion.to)?;
                 self.numeric_convert(value, target)
             }
             other => Err(CompileError::Unsupported(format!(
@@ -1484,6 +1535,143 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         }
     }
 
+    /// Look up the field name from a field NodeId by searching type definitions.
+    fn lookup_field_name(&self, field_id: &NodeId) -> Result<String, CompileError> {
+        for td in self.program.type_defs().values() {
+            for (name, id) in &td.field_ids {
+                if id == field_id {
+                    return Ok(name.clone());
+                }
+            }
+        }
+        Err(CompileError::Unsupported(format!(
+            "field '{}' not found in any type definition",
+            field_id.0
+        )))
+    }
+
+    /// Build the LLVM struct type for a user-defined record NominalTypeId.
+    /// Looks up the type definition, resolves each field's type display
+    /// string to a ResolvedTypeId via the type table, and builds the struct.
+    fn record_llvm_type(
+        &self,
+        item: &crate::core::NominalTypeId,
+    ) -> Result<inkwell::types::StructType<'ctx>, CompileError> {
+        let item_str = item.as_str();
+        let type_name = item_str.strip_prefix("type:").unwrap_or(item_str);
+        // Find the type definition.
+        let td = self
+            .program
+            .type_defs()
+            .values()
+            .find(|td| td.qualified_name == type_name || td.qualified_name == item_str)
+            .ok_or_else(|| {
+                CompileError::Unsupported(format!(
+                    "type definition for '{item_str}' not found"
+                ))
+            })?;
+        // Build LLVM field types from the field type display strings.
+        // Each field's type display is resolved via the ResolvedTypeTable
+        // by finding a matching interned type.
+        let mut field_types = Vec::with_capacity(td.fields.len());
+        for (_name, type_display) in &td.fields {
+            let field_ty = self.resolve_type_display(type_display)?;
+            field_types.push(field_ty);
+        }
+        Ok(self.generator.context.struct_type(&field_types, false))
+    }
+
+    /// Resolve a type display string (e.g. "i64", "string") to an LLVM type
+    /// by scanning the ResolvedTypeTable for a matching primitive.
+    fn resolve_type_display(
+        &self,
+        display: &str,
+    ) -> Result<BasicTypeEnum<'ctx>, CompileError> {
+        // Fast path: primitive types.
+        if let Some(prim) = PrimitiveType::from_language_name(display) {
+            return Ok(match prim {
+                PrimitiveType::I8 | PrimitiveType::U8 => {
+                    BasicTypeEnum::IntType(self.generator.context.i8_type())
+                }
+                PrimitiveType::I16 | PrimitiveType::U16 => {
+                    BasicTypeEnum::IntType(self.generator.context.i16_type())
+                }
+                PrimitiveType::I32 | PrimitiveType::U32 | PrimitiveType::Char => {
+                    BasicTypeEnum::IntType(self.generator.context.i32_type())
+                }
+                PrimitiveType::I64 | PrimitiveType::U64 | PrimitiveType::Isize
+                | PrimitiveType::Usize => {
+                    BasicTypeEnum::IntType(self.generator.context.i64_type())
+                }
+                PrimitiveType::I128 | PrimitiveType::U128 => {
+                    BasicTypeEnum::IntType(self.generator.context.i128_type())
+                }
+                PrimitiveType::F32 => {
+                    BasicTypeEnum::FloatType(self.generator.context.f32_type())
+                }
+                PrimitiveType::F64 => {
+                    BasicTypeEnum::FloatType(self.generator.context.f64_type())
+                }
+                PrimitiveType::Bool => {
+                    BasicTypeEnum::IntType(self.generator.context.bool_type())
+                }
+                PrimitiveType::String => {
+                    let ptr = BasicTypeEnum::PointerType(
+                        self.generator.context.ptr_type(inkwell::AddressSpace::default()),
+                    );
+                    let i64 = BasicTypeEnum::IntType(self.generator.context.i64_type());
+                    BasicTypeEnum::StructType(
+                        self.generator.context.struct_type(&[ptr, i64], false),
+                    )
+                }
+                PrimitiveType::Unit => {
+                    BasicTypeEnum::IntType(self.generator.context.i64_type())
+                }
+            });
+        }
+        // Fallback: scan the type table for a matching type.
+        for (id, ty) in self.program.resolved_types().iter() {
+            if id.as_str() == display || format!("{ty:?}") == display {
+                return self.lower_type(&id);
+            }
+        }
+        Err(CompileError::Unsupported(format!(
+            "cannot resolve type display '{display}' to LLVM type"
+        )))
+    }
+
+    /// Look up the field index within a record type definition.
+    /// Searches all type definitions for one whose `field_ids` contains
+    /// the given field NodeId, then returns the field's position.
+    fn lookup_field_index(
+        &self,
+        field_id: &NodeId,
+        field_name: &str,
+    ) -> Result<u32, CompileError> {
+        for td in self.program.type_defs().values() {
+            if td.field_ids.values().any(|id| id == field_id) {
+                // Found the type definition. Find the field's position.
+                for (i, (name, _)) in td.fields.iter().enumerate() {
+                    if name == field_name {
+                        return Ok(i as u32);
+                    }
+                }
+            }
+        }
+        // Fallback: try matching by name across all type definitions.
+        for td in self.program.type_defs().values() {
+            for (i, (name, _)) in td.fields.iter().enumerate() {
+                if name == field_name {
+                    return Ok(i as u32);
+                }
+            }
+        }
+        Err(CompileError::Unsupported(format!(
+            "field '{field_name}' ({}) not found in any type definition",
+            field_id.0
+        )))
+    }
+
     fn root_place(
         &mut self,
         frame: &mut ResolvedFrame<'ctx>,
@@ -1573,11 +1761,28 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         i64_ty, data_ptr, &[idx_val], "list_idx_gep",
                     )?;
                     // Element type: lower the resolved type identity.
-                    current_type = llvm_type_for_resolved(
-                        self.generator.context,
-                        self.program.resolved_types(),
-                        ty,
-                    )?;
+                    current_type = self.lower_type(ty)?;
+                }
+                // 0.32.5: Field projection for record field access.
+                // Look up the field index from the type definition catalog.
+                crate::core::ir::ResolvedProjection::Field { field, name, ty } => {
+                    let BasicTypeEnum::StructType(struct_type) = current_type else {
+                        return Err(CompileError::Unsupported(
+                            "field projection on non-struct (record) place".into(),
+                        ));
+                    };
+                    let field_index = self.lookup_field_index(field, name)?;
+                    current_ptr = self
+                        .generator
+                        .builder
+                        .build_struct_gep(
+                            struct_type,
+                            current_ptr,
+                            field_index,
+                            "rec_field_gep",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("field gep: {e}")))?;
+                    current_type = self.lower_type(ty)?;
                 }
                 other => {
                     return Err(CompileError::Unsupported(format!(
@@ -1636,11 +1841,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         else_block: &ResolvedBlock,
         frame: &mut ResolvedFrame<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let result_type = llvm_type_for_resolved(
-            self.generator.context,
-            self.program.resolved_types(),
-            &expression.ty,
-        )?;
+        let result_type = self.lower_type(&expression.ty)?;
         let result_alloca = self.generator.build_alloca(result_type, "if_result")?;
 
         let cond_value = self.emit_expr(condition, frame)?;
@@ -1806,11 +2007,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 local.0 .0
             ))
         })?;
-        let llvm_type = llvm_type_for_resolved(
-            self.generator.context,
-            self.program.resolved_types(),
-            &metadata.ty,
-        )?;
+        let llvm_type = self.lower_type(&metadata.ty)?;
         let storage = self
             .generator
             .build_alloca(llvm_type, &metadata.display_name)?;
@@ -1925,11 +2122,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         local.0 .0
                     ))
                 })?;
-                let llvm_type = llvm_type_for_resolved(
-                    self.generator.context,
-                    self.program.resolved_types(),
-                    &metadata.ty,
-                )?;
+                let llvm_type = self.lower_type(&metadata.ty)?;
                 let storage = self
                     .generator
                     .build_alloca(llvm_type, &metadata.display_name)?;
@@ -2385,6 +2578,30 @@ func main() -> i32 {
         generator.module.verify().expect("valid LLVM");
     }
 
+    /// 0.32.5: User-defined record construction and field access through
+    /// the resolved native emitter.
+    #[test]
+    fn record_construct_field_access_emits_from_resolved_ir() {
+        let program = checked(
+            r#"
+type Point { x: i64, y: i64 }
+func make_point(a: i64, b: i64) -> Point { Point { x: a, y: b } }
+func get_x(p: Point) -> i64 { p.x }
+func main() -> i32 {
+    let p = make_point(3, 4)
+    let x = get_x(p)
+    if x == 3 { 0 } else { 1 }
+}
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_record");
+        generator
+            .compile_resolved_native(&program)
+            .expect("Record construct/field access is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+    }
+
     /// Diagnostic: dispatch distribution across representative programs.
     /// Run with `--nocapture` to see the per-function eligibility report.
     /// This test documents the current resolved-native coverage and identifies
@@ -2531,6 +2748,15 @@ func main() -> i32 { guard(5) }
 func double(x: i32) -> i32 { x * 2 }
 func quadruple(x: i32) -> i32 { double(double(x)) }
 func main() -> i32 { quadruple(3) }
+"#,
+            ),
+            (
+                "record_type",
+                r#"
+type Point { x: i64, y: i64 }
+func make_point(a: i64, b: i64) -> Point { Point { x: a, y: b } }
+func get_x(p: Point) -> i64 { p.x }
+func main() -> i32 { println(get_x(make_point(3, 4))); 0 }
 "#,
             ),
         ];
