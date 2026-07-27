@@ -416,7 +416,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ## Roadmap (0.1.1)
 
-0.1.1 is a long-cycle release covering 41 internal sprints (0.31.8–0.31.48). No intermediate tags. Current: **0.31.24** (Soundness block).
+0.1.1 is a long-cycle release covering 51 internal sprints (0.31.8–0.31.58). No intermediate tags. Codegen per-function dispatch is active (eligible slice: scalar/tuple/string/control-flow); full migration deferred to 0.1.2.
 
 | Phase | Sprints | Theme |
 |-------|---------|-------|
@@ -427,6 +427,11 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 | **C** | 0.31.30–0.31.38 | Component boundary: Component IR + ABI generator, Native ABI + fat pointers, stable checkpoint, Wire Schema, Rust SDK conformance, XPU FFI validation, SDK hardening |
 | **D** | 0.31.39–0.31.44 | Tooling & isolation: migration, fmt/LSP/probes, Provenance/TyErr/Z3 translation, experimental isolation |
 | **E** | 0.31.45–0.31.48 | Freeze: DEBUG + L1 hardening + Interpreter slimming, final hostile audit + Trap Tests, RC1, RC2 |
+| **F** | 0.31.49–0.31.54 | Soundness: type system, arithmetic semantics, Runtime, Verifier, Interpreter/Stdlib/Quote |
+| **G** | 0.31.55–0.31.56 | Completeness: Flow/Session/Actor + systematic pattern fixes + test infrastructure |
+| **H** | 0.31.57–0.31.58 | Release: RC1, RC2, 0.1.1 tag |
+
+**Next: 0.1.2 (0.32.1–0.32.30)** — Codegen full migration (`legacy_body_file()` deletion) + post-migration audit.
 
 ### Key References
 
@@ -448,7 +453,7 @@ Nine rounds of external blind review covered: Z3 verification, FFI/ABI, concurre
 
 | Version | Highlight |
 |---------|-----------|
-| **0.1.1-dev** | **Current**. 41-sprint roadmap: Flow core closure, foundation repair, Runtime Efficiency, Soundness, language freeze, Component boundary, tooling, RC. Architecture Amendment (13 clauses). Nine blind reviews. |
+| **0.1.1-dev** | **Current**. 51-sprint roadmap: Flow core closure, foundation repair, Runtime Efficiency, Soundness, language freeze, Component boundary, tooling, RC. Architecture Amendment (13 clauses). Nine blind reviews. Codegen per-function dispatch active. |
 | **0.1.0** | Baseline stability: CheckedProgram semantic hub, Typed Resolved IR, HM unification, CFG/ownership analysis, runtime/resolved split, semver switch, 4063 tests green |
 | **v0.30.0** | Hemostasis: zero new features — 15 architecture debts cleared (sprintf→snprintf, path safety, malloc checks, fmt tokenization) |
 | **v0.29.0–41** | Flow paradigm: compiler internal Flow replacement (7 modules) + language-level Flow semantics + 38 white paper capabilities |
