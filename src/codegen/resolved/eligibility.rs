@@ -278,15 +278,21 @@ fn require_binding_pattern(
     owner: &NodeId,
     pattern: &ResolvedPattern,
 ) -> Result<(), UnsupportedResolvedNode> {
-    match pattern.kind {
+    match &pattern.kind {
         ResolvedPatternKind::Binding {
             by_reference: None, ..
         }
         | ResolvedPatternKind::Wildcard => Ok(()),
+        ResolvedPatternKind::Tuple(sub_patterns) => {
+            for sub in sub_patterns {
+                require_binding_pattern(owner, sub)?;
+            }
+            Ok(())
+        }
         _ => Err(UnsupportedResolvedNode::new(
             owner,
             &pattern.node_id,
-            "only value bindings and wildcards are in the resolved native slice",
+            "only value bindings, wildcards, and tuples are in the resolved native slice",
         )),
     }
 }
