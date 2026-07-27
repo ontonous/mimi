@@ -773,13 +773,21 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             (ResolvedLiteral::Unit, BasicTypeEnum::IntType(integer)) => {
                 Ok(integer.const_zero().into())
             }
-            (ResolvedLiteral::String(text), BasicTypeEnum::PointerType(_)) => {
+            (ResolvedLiteral::String(text), BasicTypeEnum::StructType(st)) => {
+                // String ABI: {ptr, i64} struct (ptr to null-terminated data, byte length).
                 let global = self
                     .generator
                     .builder
                     .build_global_string_ptr(text, "resolved_str")
                     .map_err(|e| CompileError::LlvmError(format!("string literal: {e}")))?;
-                Ok(global.as_pointer_value().into())
+                let ptr_val = global.as_pointer_value();
+                let len_val = self
+                    .generator
+                    .context
+                    .i64_type()
+                    .const_int(text.len() as u64, false);
+                let agg = st.const_named_struct(&[ptr_val.into(), len_val.into()]);
+                Ok(agg.into())
             }
             _ => Err(CompileError::Unsupported(
                 "resolved literal does not match its canonical type".into(),
@@ -807,13 +815,20 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             (ResolvedConstValue::Unit, BasicTypeEnum::IntType(integer)) => {
                 Ok(integer.const_zero().into())
             }
-            (ResolvedConstValue::String(text), BasicTypeEnum::PointerType(_)) => {
+            (ResolvedConstValue::String(text), BasicTypeEnum::StructType(st)) => {
                 let global = self
                     .generator
                     .builder
                     .build_global_string_ptr(text, "resolved_const_str")
                     .map_err(|e| CompileError::LlvmError(format!("const string: {e}")))?;
-                Ok(global.as_pointer_value().into())
+                let ptr_val = global.as_pointer_value();
+                let len_val = self
+                    .generator
+                    .context
+                    .i64_type()
+                    .const_int(text.len() as u64, false);
+                let agg = st.const_named_struct(&[ptr_val.into(), len_val.into()]);
+                Ok(agg.into())
             }
             _ => Err(CompileError::Unsupported(
                 "resolved constant value does not match its canonical type".into(),
@@ -840,7 +855,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 .builder
                 .build_global_string_ptr(&text, "resolved_fstr")
                 .map_err(|e| CompileError::LlvmError(format!("fstring literal: {e}")))?;
-            return Ok(global.as_pointer_value().into());
+            let ptr_ty = self.generator.context.ptr_type(inkwell::AddressSpace::default());
+            let i64_ty = self.generator.context.i64_type();
+            let struct_ty = self.generator.context.struct_type(
+                &[BasicTypeEnum::PointerType(ptr_ty), BasicTypeEnum::IntType(i64_ty)],
+                false,
+            );
+            let len_val = i64_ty.const_int(text.len() as u64, false);
+            let agg = struct_ty
+                .const_named_struct(&[global.as_pointer_value().into(), len_val.into()]);
+            return Ok(agg.into());
         }
 
         // Interpolation path: build format string + snprintf into stack buffer.
@@ -900,8 +924,29 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         self.generator
             .build_call(snprintf, &call_args, "fstr_snprintf")?;
 
-        // Return buffer pointer (null-terminated C string).
-        Ok(buf_ptr.into())
+        // Return {ptr, i64} string struct (ptr to buffer, len=0 placeholder;
+        // runtime uses null terminator for actual string operations).
+        let ptr_ty = self.generator.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.generator.context.i64_type();
+        let struct_ty = self.generator.context.struct_type(
+            &[BasicTypeEnum::PointerType(ptr_ty), BasicTypeEnum::IntType(i64_ty)],
+            false,
+        );
+        let str_alloca = self.generator.build_alloca(struct_ty, "fstr_ret")?;
+        let ptr_field = self
+            .generator
+            .builder
+            .build_struct_gep(struct_ty, str_alloca, 0, "fstr_ptr_field")
+            .map_err(|e| CompileError::LlvmError(format!("fstr gep0: {e}")))?;
+        let len_field = self
+            .generator
+            .builder
+            .build_struct_gep(struct_ty, str_alloca, 1, "fstr_len_field")
+            .map_err(|e| CompileError::LlvmError(format!("fstr gep1: {e}")))?;
+        self.generator.build_store(ptr_field, buf_ptr)?;
+        self.generator.build_store(len_field, i64_ty.const_zero())?;
+        self.generator
+            .build_load(struct_ty, str_alloca, "fstr_val")
     }
 
     /// Map a canonical type to its printf format specifier.
