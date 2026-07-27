@@ -525,18 +525,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         if super::resolved::supports_resolved_native(program) {
             return self.compile_resolved_native(program);
         }
-        // Per-function dispatch (S9): compile eligible functions through the
-        // resolved emitter first, then let the legacy emitter handle the rest.
-        // The legacy compile_func skip guard (count_basic_blocks != 0) prevents
-        // double-emission. Type ABI is unified (String {ptr,i64}, tuple widening)
-        // so declarations from either emitter are interchangeable.
-        if let Some(eligible) = super::resolved::resolved_eligible_functions(program) {
-            // Best-effort: if subset compilation fails entirely, fall through
-            // to pure legacy. Successfully emitted functions are skipped by the
-            // legacy emitter via the count_basic_blocks guard.
-            let _ = self.compile_resolved_subset(program, &eligible);
-        }
-        self.compile_file(program.legacy_body_file())
+        // Per-function dispatch (S12): resolved subset compilation is deferred
+        // to inside compile_file, after the setup phase (forward declarations,
+        // impl methods, vtables) completes. This ensures all symbols are
+        // declared before the resolved emitter compiles eligible bodies.
+        let eligible = super::resolved::resolved_eligible_functions(program);
+        self.compile_file_with_resolved(program.legacy_body_file(), program, eligible.as_ref())
             .map_err(|error| {
                 let mut diagnostic = error.to_diagnostic();
                 if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {
@@ -596,7 +590,34 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    // Used directly by test code; the production dispatch path goes through
+    // compile_file_with_resolved.
+    #[allow(dead_code)]
     pub(crate) fn compile_file(&mut self, file: &File) -> MimiResult<()> {
+        self.compile_file_inner(file, None)
+    }
+
+    /// Compile with per-function resolved dispatch (S12). The resolved subset
+    /// is compiled after the setup phase (forward declarations, impl methods,
+    /// vtables) but before the legacy body compilation pass. This ensures all
+    /// symbols are declared before the resolved emitter compiles eligible bodies.
+    pub(crate) fn compile_file_with_resolved(
+        &mut self,
+        file: &File,
+        program: &crate::core::CheckedProgram,
+        eligible: Option<&std::collections::BTreeSet<crate::core::NodeId>>,
+    ) -> MimiResult<()> {
+        self.compile_file_inner(file, Some((program, eligible)))
+    }
+
+    fn compile_file_inner(
+        &mut self,
+        file: &File,
+        resolved_ctx: Option<(
+            &crate::core::CheckedProgram,
+            Option<&std::collections::BTreeSet<crate::core::NodeId>>,
+        )>,
+    ) -> MimiResult<()> {
         // Register built-in Record types used by builtins
         self.register_builtin_record_types()?;
 
@@ -755,6 +776,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.compile_impl_methods()?;
         // Fourth pass: compile vtables (needed before user function compilation)
         self.compile_vtables()?;
+        // S12: Per-function resolved dispatch — compile eligible function bodies
+        // through the resolved native emitter AFTER all declarations, impl methods,
+        // and vtables are set up. The legacy compile_func skip guard
+        // (count_basic_blocks != 0) prevents double-emission in the fifth pass.
+        if let Some((program, Some(eligible))) = resolved_ctx {
+            let _ = self.compile_resolved_subset(program, eligible);
+        }
         // Fifth pass: compile user functions, actors, and flow transitions.
         // v0.28.21 — `comptime func` items are folded at codegen-start by
         // `fold_comptime_items` and intentionally NOT compiled to LLVM IR
