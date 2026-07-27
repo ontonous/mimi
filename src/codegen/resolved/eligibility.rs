@@ -36,7 +36,6 @@ pub(super) fn require_resolved_native_program(
         || !program.capabilities().is_empty()
         || !program.traits().is_empty()
         || !program.impls().is_empty()
-        || !program.type_defs().is_empty()
         || !program.extern_blocks().is_empty()
     {
         let owner = program
