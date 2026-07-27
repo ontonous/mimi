@@ -457,8 +457,22 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .insert(local.clone(), ResolvedVarEntry { storage, llvm_type });
                 Ok(())
             }
+            ResolvedPatternKind::Tuple(sub_patterns) => {
+                let BasicValueEnum::StructValue(struct_val) = value else {
+                    return Err(CompileError::Unsupported(
+                        "tuple pattern bound to non-struct value".into(),
+                    ));
+                };
+                for (index, sub_pattern) in sub_patterns.iter().enumerate() {
+                    let field = struct_val.get_field_at_index(index as u32).ok_or_else(|| {
+                        CompileError::LlvmError(format!("tuple field {index} absent in pattern"))
+                    })?;
+                    self.bind_pattern(body, sub_pattern, field, frame)?;
+                }
+                Ok(())
+            }
             _ => Err(CompileError::Unsupported(format!(
-                "resolved pattern '{}' escaped scalar eligibility",
+                "resolved pattern '{}' escaped resolved native eligibility",
                 pattern.node_id.0
             ))),
         }
