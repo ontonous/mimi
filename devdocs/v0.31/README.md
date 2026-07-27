@@ -112,7 +112,11 @@ Span/Origin -> HM -> CFG/ownership -> CheckedProgram/Resolved IR
 
 - 31/31 requirement 有自动 probe 和持久 evidence；26 stable 全部 complete。
 - 4 experimental 完整隔离并 fail-closed；1 removed 主路径拒绝且迁移幂等。
-- Interpreter/native/verifier/component 只消费真实 Typed Resolved IR。
+- **Typed Resolved IR 消费状态（0.1.1 修订）**：
+  - 声明层（签名、Flow transition 表、Actor/Session/Protocol/Trait/Impl 目录、ownership、CFG）：所有后端从 CheckedProgram 安装，不回退 raw AST。
+  - 函数体：per-function dispatch 已激活（`compile.rs` S12）。eligible 函数经 resolved native emitter 编译；ineligible 函数经显式 legacy arm（`compile_func`）编译。legacy fallback 在 `MIMI_VERBOSE=1` 下可观测，非 silent。
+  - **legacy arm 清单**（0.1.1 发布时）：所有含 List/Map/Set 构造、nominal record 类型、Option/Result、trait method 调用、`use std::*` 导入的函数体。
+  - **删除计划**：`legacy_body_file()` 及所有 legacy body arm 在 0.1.2 (0.32) 全量迁移中删除。详见 `architecture-amendment-1.0.md` SD-6 追加条款。
 - Flow generation、Actor runs Flow、typed Session、resource exactly-once 闭环。
 - Verified Core known-unsound 误证为 0。
 - Component IR、Native ABI 1、Wire Schema 1 和 Rust SDK conformance 全绿。
