@@ -522,13 +522,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         // propagate directly; there is deliberately no typed-error → AST
         // fallback. Unmigrated body classes remain on the explicit legacy arm
         // until their slice is implemented and its oracle tests are green.
-        //
-        // NOTE: per-function dispatch (compile_resolved_subset) is blocked by
-        // the String ABI inconsistency: resolved uses opaque ptr, legacy uses
-        // {ptr, i64}. Until the ABI is unified, dispatch remains all-or-nothing.
         if super::resolved::supports_resolved_native(program) {
             return self.compile_resolved_native(program);
         }
+        // Per-function dispatch infrastructure is in place (eligible_function_ids,
+        // compile_resolved_subset, compile_func skip guard). Activation requires
+        // wrapping builtin return values: compile_builtin_call returns raw ptr
+        // for strings, but the resolved emitter expects {ptr, i64} structs.
+        // TODO(S8b): add post-call wrapping in the Builtin arm of emit_expr.
         self.compile_file(program.legacy_body_file())
             .map_err(|error| {
                 let mut diagnostic = error.to_diagnostic();
