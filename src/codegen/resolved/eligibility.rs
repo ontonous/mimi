@@ -241,6 +241,9 @@ fn require_block(
                 }
                 require_block(program, owner, body)?;
             }
+            ResolvedStmtKind::Loop(body) => {
+                require_block(program, owner, body)?;
+            }
             other => {
                 return Err(UnsupportedResolvedNode::new(
                     owner,
@@ -365,6 +368,16 @@ fn require_expr(
             require_block(program, owner, else_block)
         }
         ResolvedExprKind::Block(block) => require_block(program, owner, block),
+        ResolvedExprKind::Scope { kind, body } => {
+            if !matches!(kind, crate::core::ir::ResolvedScopeKind::Lexical) {
+                return Err(UnsupportedResolvedNode::new(
+                    owner,
+                    &expression.node_id,
+                    format!("scope kind {kind:?} is not in the resolved native slice"),
+                ));
+            }
+            require_block(program, owner, body)
+        }
         other => Err(UnsupportedResolvedNode::new(
             owner,
             &expression.node_id,
