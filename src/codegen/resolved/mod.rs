@@ -502,9 +502,23 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 ))
                             })
                     }
-                    ResolvedCallee::Builtin(builtin_id) => self
-                        .generator
-                        .compile_builtin_call(builtin_id.as_str(), &arguments),
+                    ResolvedCallee::Builtin(builtin_id) => {
+                        let name = builtin_id.as_str();
+                        // Print-family builtins need arg type hints for formatting dispatch.
+                        if matches!(name, "println" | "print" | "eprintln" | "format") {
+                            self.generator.pending_print_arg_types = call
+                                .arguments
+                                .iter()
+                                .map(|arg| {
+                                    resolved_type_display_name(
+                                        self.program,
+                                        &arg.value.ty,
+                                    )
+                                })
+                                .collect();
+                        }
+                        self.generator.compile_builtin_call(name, &arguments)
+                    }
                     _ => Err(CompileError::Unsupported(format!(
                         "resolved callee {:?} escaped resolved native eligibility at '{}'",
                         call.callee, expression.node_id.0
@@ -547,7 +561,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     }
 
     fn emit_literal(
-        &self,
+        &mut self,
         ty: &ResolvedTypeId,
         literal: &ResolvedLiteral,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
@@ -566,8 +580,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             (ResolvedLiteral::Unit, BasicTypeEnum::IntType(integer)) => {
                 Ok(integer.const_zero().into())
             }
+            (ResolvedLiteral::String(text), BasicTypeEnum::PointerType(_)) => {
+                let global = self
+                    .generator
+                    .builder
+                    .build_global_string_ptr(text, "resolved_str")
+                    .map_err(|e| CompileError::LlvmError(format!("string literal: {e}")))?;
+                Ok(global.as_pointer_value().into())
+            }
             _ => Err(CompileError::Unsupported(
-                "resolved literal does not match its canonical scalar type".into(),
+                "resolved literal does not match its canonical type".into(),
             )),
         }
     }
@@ -1082,6 +1104,27 @@ fn is_signed_integer_type(program: &CheckedProgram, ty: &ResolvedTypeId) -> bool
     )
 }
 
+/// Map a canonical type identity to the display name expected by the
+/// print-family builtin formatting dispatch (`pending_print_arg_types`).
+fn resolved_type_display_name(program: &CheckedProgram, ty: &ResolvedTypeId) -> String {
+    use crate::core::PrimitiveType;
+    match program.resolved_types().get(ty) {
+        Some(ResolvedType::Primitive(p)) => match p {
+            PrimitiveType::I8 | PrimitiveType::I16 | PrimitiveType::I32 => "i32".to_string(),
+            PrimitiveType::I64 | PrimitiveType::Isize => "i64".to_string(),
+            PrimitiveType::U8 | PrimitiveType::U16 | PrimitiveType::U32 => "u32".to_string(),
+            PrimitiveType::U64 | PrimitiveType::Usize => "u64".to_string(),
+            PrimitiveType::F32 | PrimitiveType::F64 => "f64".to_string(),
+            PrimitiveType::Bool => "bool".to_string(),
+            PrimitiveType::String | PrimitiveType::Char => "string".to_string(),
+            PrimitiveType::Unit => "unit".to_string(),
+            _ => "unknown".to_string(),
+        },
+        Some(_) => "unknown".to_string(),
+        None => "unknown".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1369,5 +1412,28 @@ func main() -> i32 {
         generator.module.verify().expect("valid LLVM");
         let ir = generator.module.print_to_string().to_string();
         assert!(ir.contains("fptosi"), "expected fptosi instruction: {ir}");
+    }
+
+    #[test]
+    fn println_with_string_literal_emits_from_resolved_ir() {
+        let program = checked(
+            r#"
+func main() -> i32 {
+    println("hello resolved")
+    0
+}
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_println");
+        generator
+            .compile_resolved_native(&program)
+            .expect("println with string literal is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+        let ir = generator.module.print_to_string().to_string();
+        assert!(
+            ir.contains("hello resolved"),
+            "expected string constant in IR: {ir}"
+        );
     }
 }

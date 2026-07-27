@@ -125,7 +125,8 @@ fn require_scalar_type(
             | PrimitiveType::I64
             | PrimitiveType::F64
             | PrimitiveType::Bool
-            | PrimitiveType::Unit,
+            | PrimitiveType::Unit
+            | PrimitiveType::String,
         )) => Ok(()),
         Some(other) => Err(UnsupportedResolvedNode::new(
             owner,

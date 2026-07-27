@@ -123,11 +123,9 @@ fn lower_primitive<'ctx>(context: &'ctx Context, primitive: PrimitiveType) -> Ba
         PrimitiveType::F64 => BasicTypeEnum::FloatType(context.f64_type()),
         PrimitiveType::Bool => BasicTypeEnum::IntType(context.bool_type()),
         PrimitiveType::String => {
-            let pointer = BasicTypeEnum::PointerType(context.ptr_type(AddressSpace::default()));
-            BasicTypeEnum::StructType(context.struct_type(
-                &[pointer, BasicTypeEnum::IntType(context.i64_type())],
-                false,
-            ))
+            // Native ABI: strings are opaque C-style pointers (null-terminated).
+            // The runtime (puts, printf, mimi_string_*) consumes raw ptr.
+            BasicTypeEnum::PointerType(context.ptr_type(AddressSpace::default()))
         }
         // Unit expressions use the established native sentinel representation
         // `i64 0`. This is an explicit ABI choice, not an unknown-type fallback.
@@ -192,12 +190,10 @@ mod tests {
         let mut types = ResolvedTypeTable::new();
         let string = intern(&mut types, ResolvedType::Primitive(PrimitiveType::String));
         let lowered = llvm_type_for_resolved(&context, &types, &string).expect("string");
-        let BasicTypeEnum::StructType(string) = lowered else {
-            panic!("string must be a struct")
-        };
-        let fields = string.get_field_types();
-        assert!(matches!(fields[0], BasicTypeEnum::PointerType(_)));
-        assert_eq!(int_width(fields[1]), 64);
+        assert!(
+            matches!(lowered, BasicTypeEnum::PointerType(_)),
+            "string must be an opaque pointer, got {lowered:?}"
+        );
     }
 
     #[test]
