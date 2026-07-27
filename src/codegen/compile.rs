@@ -883,9 +883,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             borrow: param.borrow,
         }));
 
-        // H2: recover bodies already keep persistent shadows when
-        // `flow.persistent_fields` is non-empty (inject_system_verbs keep=true).
-        let _ = &flow.persistent_fields;
         let ret_name = t
             .to_states
             .first()
