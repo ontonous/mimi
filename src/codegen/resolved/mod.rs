@@ -3453,6 +3453,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         self.generator.push_heap_scope();
         let body_val = self.emit_block(&callable_body, &lambda.body, &mut lambda_frame)?;
         if !self.current_block_terminated() {
+            // Free heap allocations before returning (lambda return types
+            // are scalar — they don't own heap data).
+            let _ = self.generator.free_heap_allocs();
             if let Some(val) = body_val {
                 let val = self.coerce_to(val, ret_ty)?;
                 self.generator.build_return(Some(&val))?;
@@ -3460,7 +3463,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.generator.build_return(None)?;
             }
         }
-        self.generator.free_heap_allocs()?;
 
         // Restore builder position.
         if let Some(bb) = saved_block {
