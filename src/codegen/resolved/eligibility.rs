@@ -482,6 +482,13 @@ fn require_conversion(
         CheckedConversionKind::Identity
             | CheckedConversionKind::NumericWiden
             | CheckedConversionKind::NumericNarrowChecked
+            // 0.32.11: Alias/Newtype conversions are identity at the LLVM
+            // level (same representation, different type name). Accept them
+            // so programs using type aliases and newtypes are eligible.
+            | CheckedConversionKind::AliasWrap
+            | CheckedConversionKind::AliasUnwrap
+            | CheckedConversionKind::NewtypeWrap
+            | CheckedConversionKind::NewtypeUnwrap
     ) {
         Ok(())
     } else {

@@ -1750,7 +1750,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         conversion: &CheckedConversion,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         match conversion.kind {
-            CheckedConversionKind::Identity => Ok(value),
+            CheckedConversionKind::Identity
+            // Alias/Newtype conversions are identity at the LLVM level.
+            | CheckedConversionKind::AliasWrap
+            | CheckedConversionKind::AliasUnwrap
+            | CheckedConversionKind::NewtypeWrap
+            | CheckedConversionKind::NewtypeUnwrap => Ok(value),
             CheckedConversionKind::NumericWiden | CheckedConversionKind::NumericNarrowChecked => {
                 let target = self.lower_type(&conversion.to)?;
                 self.numeric_convert(value, target)
