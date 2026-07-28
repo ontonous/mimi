@@ -624,17 +624,15 @@ fn join_predecessors(
                     }
                 }
                 (Some(fact), None) | (None, Some(fact)) => {
-                    emit_incompatible_join(
-                        cfg,
-                        block,
-                        &id,
-                        &fact,
-                        &ResourceFact {
-                            availability: Availability::MaybeConsumed,
-                            owner: None,
-                        },
-                        errors,
-                    );
+                    // Resource exists on only one predecessor path.
+                    // This is NOT an error when the resource was introduced
+                    // inside a branch (e.g., a match arm binding). The branch
+                    // arms are mutually exclusive — introduction on one arm
+                    // does not obligate consumption on all arms.
+                    // Resources introduced before the branch are present in
+                    // BOTH predecessors and correctly compared above.
+                    // See flow_order_system.mimi for the false positive this
+                    // prevents (E0304 on match-arm-scoped Flow state variables).
                     ResourceFact {
                         availability: Availability::MaybeConsumed,
                         owner: fact.owner,

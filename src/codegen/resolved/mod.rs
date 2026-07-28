@@ -18,10 +18,10 @@ use crate::codegen::{CallSiteValueExt, CodeGenerator};
 use crate::core::ir::ResolvedFStringPart;
 use crate::core::ir::{ResolvedBinaryOp, ResolvedUnaryOp};
 use crate::core::{
-    CheckedConversion, CheckedConversionKind, CheckedProgram, NodeId, PrimitiveType,
-    ResolvedBlock, ResolvedBody, ResolvedCallee, ResolvedConstValue, ResolvedExpr,
-    ResolvedExprKind, ResolvedLiteral, ResolvedLocalId, ResolvedPattern, ResolvedPatternKind,
-    ResolvedPlace, ResolvedStmtKind, ResolvedType, ResolvedTypeId,
+    CheckedConversion, CheckedConversionKind, CheckedProgram, NodeId, PrimitiveType, ResolvedBlock,
+    ResolvedBody, ResolvedCallee, ResolvedConstValue, ResolvedExpr, ResolvedExprKind,
+    ResolvedLiteral, ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace,
+    ResolvedStmtKind, ResolvedType, ResolvedTypeId,
 };
 use crate::diagnostic::Diagnostic;
 use crate::error::CompileError;
@@ -291,11 +291,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     /// Lower a ResolvedTypeId to an LLVM type, with fallback for
     /// user-defined record Nominal types that types.rs doesn't handle.
     fn lower_type(&self, id: &ResolvedTypeId) -> Result<BasicTypeEnum<'ctx>, CompileError> {
-        match llvm_type_for_resolved(
-            self.generator.context,
-            self.program.resolved_types(),
-            id,
-        ) {
+        match llvm_type_for_resolved(self.generator.context, self.program.resolved_types(), id) {
             Ok(ty) => Ok(ty),
             Err(_) => {
                 // Check if this is a user-defined record Nominal type.
@@ -405,16 +401,21 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             }
         };
         let value = self.coerce_to(value, result_type)?;
-        // If returning a string ({ptr, i64} struct), drain the heap scope
-        // WITHOUT freeing. The caller takes ownership of the string data.
-        // For non-string returns, free all heap allocations normally.
-        let is_string_ret = matches!(result_type, BasicTypeEnum::StructType(st) if {
-            let f = st.get_field_types();
-            f.len() == 2
-                && matches!(f[0], BasicTypeEnum::PointerType(_))
-                && matches!(f[1], BasicTypeEnum::IntType(_))
+        // Determine whether the return type transitively owns heap data.
+        // If so, drain the heap scope (caller takes ownership) instead of
+        // freeing — otherwise the returned pointer(s) dangle.
+        //
+        // Strings:         {ptr, i64}     — ptr is the string data pointer.
+        // Lists:           {i64, ptr}     — ptr is the element data pointer.
+        // Nested records:  any struct with at least one pointer field.
+        //
+        // The resolved emitter's `register_heap_slot` only tracks the data
+        // pointer of list/string allocas.  Any struct field whose LLVM type
+        // is a PointerType *may* reference such a tracked allocation.
+        let return_owns_heap = matches!(result_type, BasicTypeEnum::StructType(st) if {
+            st.get_field_types().iter().any(|f| matches!(f, BasicTypeEnum::PointerType(_)))
         });
-        if is_string_ret {
+        if return_owns_heap {
             self.generator.drain_heap_scope();
         } else {
             self.generator.free_heap_allocs()?;
@@ -616,7 +617,35 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     ))
                 })?;
                 let llvm_type = self.lower_type(&metadata.ty)?;
-                let value = self.coerce_to(value, llvm_type)?;
+                // For i64 (ptrtoint) → struct conversion, inttoptr + load.
+                // This is used when the error tuple in Result<E> stores the
+                // payload as a ptrtoint-encoded heap pointer (e.g., source
+                // state or string in the Err tuple).
+                let value = if matches!(value, BasicValueEnum::IntValue(_))
+                    && matches!(llvm_type, BasicTypeEnum::StructType(_))
+                {
+                    let ptr = self
+                        .generator
+                        .builder
+                        .build_int_to_ptr(
+                            value.into_int_value(),
+                            self.generator
+                                .context
+                                .ptr_type(inkwell::AddressSpace::default()),
+                            "bind_struct_ptr",
+                        )
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("inttoptr for struct bind: {e}"))
+                        })?;
+                    self.generator
+                        .builder
+                        .build_load(llvm_type, ptr, "bind_struct_loaded")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("load for struct bind: {e}"))
+                        })?
+                } else {
+                    self.coerce_to(value, llvm_type)?
+                };
                 let storage = self
                     .generator
                     .build_alloca(llvm_type, &metadata.display_name)?;
@@ -645,19 +674,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         .builder
                         .build_struct_gep(sty, alloca, index as u32, "pat_gep")
                         .map_err(|e| CompileError::LlvmError(format!("pat gep: {e}")))?;
-                    let field_ty = sty
-                        .get_field_type_at_index(index as u32)
-                        .ok_or_else(|| {
-                            CompileError::LlvmError(format!(
-                                "tuple field type {index} absent in pattern"
-                            ))
-                        })?;
+                    let field_ty = sty.get_field_type_at_index(index as u32).ok_or_else(|| {
+                        CompileError::LlvmError(format!(
+                            "tuple field type {index} absent in pattern"
+                        ))
+                    })?;
                     let field = self
                         .generator
                         .build_load(field_ty, field_ptr, "pat_field")
-                        .map_err(|e| {
-                            CompileError::LlvmError(format!("pat load: {e}"))
-                        })?;
+                        .map_err(|e| CompileError::LlvmError(format!("pat load: {e}")))?;
                     self.bind_pattern(body, sub_pattern, field, frame)?;
                 }
                 Ok(())
@@ -740,9 +765,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     let value = self.emit_expr(element, frame)?;
                     let iv = self.coerce_to_i64(value)?;
                     let idx = i64_ty.const_int(i as u64, false);
-                    let elem_ptr = self
-                        .generator
-                        .build_in_bounds_gep(i64_ty, data_ptr, &[idx], "list_elem")?;
+                    let elem_ptr = self.generator.build_in_bounds_gep(
+                        i64_ty,
+                        data_ptr,
+                        &[idx],
+                        "list_elem",
+                    )?;
                     self.generator.build_store(elem_ptr, iv)?;
                 }
                 // build_list_struct returns a pointer to the alloca'd struct.
@@ -764,9 +792,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 let result = self.generator.build_call(map_new, &[], "map_new_call")?;
                 let map_handle = result
                     .try_as_basic_value_opt()
-                    .ok_or_else(|| {
-                        CompileError::LlvmError("mimi_map_new returned void".into())
-                    })?
+                    .ok_or_else(|| CompileError::LlvmError("mimi_map_new returned void".into()))?
                     .into_int_value();
                 if !entries.is_empty() {
                     let map_set = self.generator.get_runtime_fn("mimi_map_set")?;
@@ -809,9 +835,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 let result = self.generator.build_call(set_new, &[], "set_new_call")?;
                 let set_handle = result
                     .try_as_basic_value_opt()
-                    .ok_or_else(|| {
-                        CompileError::LlvmError("mimi_set_new returned void".into())
-                    })?
+                    .ok_or_else(|| CompileError::LlvmError("mimi_set_new returned void".into()))?
                     .into_int_value();
                 if !elements.is_empty() {
                     let set_insert = self.generator.get_runtime_fn("mimi_set_insert")?;
@@ -836,14 +860,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 // Build the LLVM struct type from field value types.
                 let field_types: Vec<BasicTypeEnum<'ctx>> = fields
                     .iter()
-                    .map(|f| {
-                        self.lower_type(&f.value.ty)
-                    })
+                    .map(|f| self.lower_type(&f.value.ty))
                     .collect::<Result<_, _>>()?;
-                let struct_ty = self
-                    .generator
-                    .context
-                    .struct_type(&field_types, false);
+                let struct_ty = self.generator.context.struct_type(&field_types, false);
                 let alloca = self.generator.build_alloca(struct_ty, "record_alloc")?;
                 for (i, field) in fields.iter().enumerate() {
                     let value = self.emit_expr(&field.value, frame)?;
@@ -852,9 +871,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         .builder
                         .build_struct_gep(struct_ty, alloca, i as u32, "rec_field")
                         .map_err(|e| CompileError::LlvmError(format!("record gep: {e}")))?;
-                    let field_ty = struct_ty
-                        .get_field_type_at_index(i as u32)
-                        .ok_or_else(|| {
+                    let field_ty =
+                        struct_ty.get_field_type_at_index(i as u32).ok_or_else(|| {
                             CompileError::LlvmError(format!("record field {i} type absent"))
                         })?;
                     let value = self.numeric_convert(value, field_ty)?;
@@ -875,11 +893,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 "tuple projection on non-struct value".into(),
                             ));
                         };
-                        let field = struct_val
-                            .get_field_at_index(*index as u32)
-                            .ok_or_else(|| {
-                                CompileError::LlvmError(format!("tuple field {index} absent"))
-                            })?;
+                        let field =
+                            struct_val
+                                .get_field_at_index(*index as u32)
+                                .ok_or_else(|| {
+                                    CompileError::LlvmError(format!("tuple field {index} absent"))
+                                })?;
                         Ok(field)
                     }
                     // 0.32.2: Index value projection for List rvalue access.
@@ -898,14 +917,23 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             .into_pointer_value();
                         // Evaluate index.
                         let idx_val = self.emit_expr(index_expr, frame)?.into_int_value();
-                        // GEP + load.
+                        // GEP into the i64 data buffer.
                         let i64_ty = self.generator.context.i64_type();
                         let elem_ptr = self.generator.build_in_bounds_gep(
-                            i64_ty, data_ptr, &[idx_val], "list_val_idx",
+                            i64_ty,
+                            data_ptr,
+                            &[idx_val],
+                            "list_val_idx",
                         )?;
-                        self.generator.build_load(
-                            BasicTypeEnum::IntType(i64_ty), elem_ptr, "list_val_load",
-                        )
+                        let elem_int = self
+                            .generator
+                            .build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "list_val_i64")?
+                            .into_int_value();
+                        // Convert the loaded i64 to the proper element type.
+                        // The element type = expression.ty (e.g. List<string> for
+                        // xs[0] where xs: List<List<string>>).
+                        let result_llvm_ty = self.lower_type(&expression.ty)?;
+                        self.convert_list_elem_i64(elem_int, result_llvm_ty)
                     }
                     // 0.32.5: Field value projection for record rvalue access.
                     crate::core::ir::ResolvedValueProjection::Field(field_id) => {
@@ -917,9 +945,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         // Look up field name from type definitions.
                         let field_name = self.lookup_field_name(field_id)?;
                         let field_index = self.lookup_field_index(field_id, &field_name)?;
-                        let field = struct_val
-                            .get_field_at_index(field_index)
-                            .ok_or_else(|| {
+                        let field =
+                            struct_val.get_field_at_index(field_index).ok_or_else(|| {
                                 CompileError::LlvmError(format!(
                                     "record field {field_index} absent"
                                 ))
@@ -972,6 +999,31 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     }
                     ResolvedCallee::Builtin(builtin_id) => {
                         let name = builtin_id.as_str();
+                        // push/pop need the *original alloca pointer* for
+                        // their first argument — the legacy `compile_push`
+                        // (require_list_pointer) GEPs into the struct fields
+                        // and stores back, which only works with a pointer.
+                        // When the first argument is a simple local variable,
+                        // load its alloca pointer instead of the loaded value.
+                        if matches!(name, "push" | "pop") && !arguments.is_empty() {
+                            if let Some(first_arg) = call.arguments.first() {
+                                use crate::core::ir::ResolvedExprKind;
+                                if let ResolvedExprKind::Load(place) = &first_arg.value.kind {
+                                    if place.projections.is_empty() {
+                                        if let Some(entry) = frame.locals.get(&place.base) {
+                                            if matches!(
+                                                entry.llvm_type,
+                                                BasicTypeEnum::StructType(_)
+                                            ) {
+                                                arguments[0] = BasicMetadataValueEnum::PointerValue(
+                                                    entry.storage,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         // Option/Result constructors are handled by the legacy
                         // compile_constructor path, not compile_builtin_call.
                         if matches!(name, "Some" | "None" | "Ok" | "Err") {
@@ -1069,8 +1121,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         ty: &ResolvedTypeId,
         literal: &ResolvedLiteral,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let llvm_type =
-            self.lower_type(ty)?;
+        let llvm_type = self.lower_type(ty)?;
         match (literal, llvm_type) {
             (ResolvedLiteral::Int(value), BasicTypeEnum::IntType(integer)) => {
                 Ok(integer.const_int(*value as u64, true).into())
@@ -1111,8 +1162,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         ty: &ResolvedTypeId,
         value: &ResolvedConstValue,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let llvm_type =
-            self.lower_type(ty)?;
+        let llvm_type = self.lower_type(ty)?;
         match (value, llvm_type) {
             (ResolvedConstValue::Int(v), BasicTypeEnum::IntType(integer)) => {
                 Ok(integer.const_int(*v as u64, true).into())
@@ -1474,12 +1524,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 // Shouldn't happen for Option/Result, but handle gracefully.
                                 self.generator
                                     .builder
-                                    .build_ptr_to_int(
-                                        pv,
-                                        bool_ty,
-                                        "disc_ptr2int",
-                                    )
-                                    .map_err(|e| CompileError::LlvmError(format!("disc ptr2int: {e}")))?
+                                    .build_ptr_to_int(pv, bool_ty, "disc_ptr2int")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("disc ptr2int: {e}"))
+                                    })?
                             }
                             _ => {
                                 return Err(CompileError::LlvmError(
@@ -1600,12 +1648,49 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     "extract payload field {field_idx}: {e}"
                                 ))
                             })?;
-                        self.bind_pattern(
-                            callable_body,
-                            sub_pattern,
-                            payload_val,
-                            frame,
-                        )?;
+                        // For built-in Err, the payload at index 2 is an i64
+                        // ptrtoint to a heap-allocated {i64, i64} tuple (source
+                        // and error, both ptrtoint-encoded). Decode the tuple
+                        // struct before recursing so that Tuple patterns see a
+                        // StructValue instead of a raw i64.
+                        let decoded_val = if variant_name.as_str() == "Err"
+                            && matches!(payload_val, BasicValueEnum::IntValue(_))
+                        {
+                            let i64_ty = self.generator.context.i64_type();
+                            let tuple_llvm_ty = self.generator.context.struct_type(
+                                &[
+                                    BasicTypeEnum::IntType(i64_ty),
+                                    BasicTypeEnum::IntType(i64_ty),
+                                ],
+                                false,
+                            );
+                            let ptr = self
+                                .generator
+                                .builder
+                                .build_int_to_ptr(
+                                    payload_val.into_int_value(),
+                                    self.generator
+                                        .context
+                                        .ptr_type(inkwell::AddressSpace::default()),
+                                    "err_tuple_ptr",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("inttoptr err: {e}"))
+                                })?;
+                            self.generator
+                                .builder
+                                .build_load(
+                                    BasicTypeEnum::StructType(tuple_llvm_ty),
+                                    ptr,
+                                    "err_tuple_val",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("load err tuple: {e}"))
+                                })?
+                        } else {
+                            payload_val
+                        };
+                        self.bind_pattern(callable_body, sub_pattern, decoded_val, frame)?;
                     }
                 }
                 _ => {}
@@ -1755,7 +1840,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     }
 
     /// Coerce a value to i64 for list element storage. Handles int
-    /// sign/zero-extension, float-to-int, and bool zext.
+    /// sign/zero-extension, float-to-int, bool zext, pointer ptrtoint,
+    /// and struct-value pointer extraction (for string/record/nested list
+    /// values stored as heap pointers in the list data array).
     fn coerce_to_i64(
         &self,
         value: BasicValueEnum<'ctx>,
@@ -1796,8 +1883,158 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .map_err(|e| CompileError::LlvmError(format!("float bitcast: {e}")))?
                     .into_int_value())
             }
+            BasicValueEnum::PointerValue(pv) => {
+                // Pointer: ptrtoint to i64 (for string/record heap pointers).
+                self.generator
+                    .build_ptr_to_int(pv, i64_ty, "list_ptr_to_handle")
+            }
+            BasicValueEnum::StructValue(sv) => {
+                // Struct value: match the legacy emitter's approach.
+                // For string structs {ptr, i64}: extract the raw C-string
+                // pointer and store it directly as i64.
+                // For all other structs (nested lists, tuples, records,
+                // Option, Result): heap-allocate the struct, store the
+                // pointer as i64 — matching legacy data layout exactly.
+                let sv_fields = sv.get_type().get_field_types();
+                if sv_fields.len() == 2
+                    && matches!(&sv_fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(&sv_fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64)
+                {
+                    // String struct {i8*, i64}: extract raw pointer.
+                    let raw_ptr = self
+                        .generator
+                        .build_extract_value(sv.into(), 0, "str_ptr")?
+                        .into_pointer_value();
+                    return self
+                        .generator
+                        .build_ptr_to_int(raw_ptr, i64_ty, "str_to_i64");
+                }
+                // Non-string struct: heap-allocate, store, return pointer.
+                let struct_ty = sv.get_type();
+                let size = self
+                    .generator
+                    .llvm_type_size_bytes(BasicTypeEnum::StructType(struct_ty));
+                let size_val = i64_ty.const_int(size, false);
+                let ptr = self.generator.malloc_or_abort(size_val, "struct_to_i64")?;
+                let i8_ptr_ty = self
+                    .generator
+                    .context
+                    .ptr_type(inkwell::AddressSpace::default());
+                let typed_ptr = self
+                    .generator
+                    .build_pointer_cast(ptr, i8_ptr_ty, "struct_ptr")?;
+                self.generator.build_store(typed_ptr, sv)?;
+                self.generator
+                    .build_ptr_to_int(ptr, i64_ty, "struct_handle")
+            }
             other => Err(CompileError::Unsupported(format!(
                 "cannot coerce {other:?} to i64 for list storage"
+            ))),
+        }
+    }
+
+    /// Convert a list element loaded as i64 back to its proper type.
+    /// Mirror of the legacy emitter's `try_convert_list_element` / `convert_list_elem_by_type`:
+    /// - String ({i8*, i64}): load i64 → inttoptr → strlen → build struct
+    /// - Nested list/tuple/record/Option/Result: inttoptr → load struct from heap pointer
+    /// - Pointer: inttoptr
+    /// - Int/Float: use as-is
+    fn convert_list_elem_i64(
+        &self,
+        elem_int: inkwell::values::IntValue<'ctx>,
+        elem_llvm_ty: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        match elem_llvm_ty {
+            BasicTypeEnum::StructType(sty) => {
+                let fields = sty.get_field_types();
+                let is_string = fields.len() == 2
+                    && matches!(&fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(&fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                if is_string {
+                    // String struct {i8*, i64}: the i64 IS the raw char* pointer.
+                    // Build a proper {i8*, i64} struct from it.
+                    let raw_ptr =
+                        self.generator
+                            .build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
+                    // Call strlen to get the length.
+                    let strlen_fn = self
+                        .generator
+                        .module
+                        .get_function("strlen")
+                        .ok_or_else(|| "strlen not declared in module".to_string())?;
+                    let str_len = self
+                        .generator
+                        .builder
+                        .build_call(
+                            strlen_fn,
+                            &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
+                            "strlen",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("strlen call: {e}")))?
+                        .try_as_basic_value_opt()
+                        .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?;
+                    // Build {i8*, i64} struct in an alloca then load.
+                    let str_alloca = self.generator.build_alloca(sty, "str_struct")?;
+                    // Store ptr (field 0)
+                    let ptr_gep = self
+                        .generator
+                        .builder
+                        .build_struct_gep(sty, str_alloca, 0, "str_ptr_gep")
+                        .map_err(|e| CompileError::LlvmError(format!("str ptr gep: {e}")))?;
+                    self.generator.build_store(ptr_gep, raw_ptr)?;
+                    // Store len (field 1)
+                    let len_gep = self
+                        .generator
+                        .builder
+                        .build_struct_gep(sty, str_alloca, 1, "str_len_gep")
+                        .map_err(|e| CompileError::LlvmError(format!("str len gep: {e}")))?;
+                    self.generator.build_store(len_gep, str_len)?;
+                    // Load the full struct
+                    self.generator
+                        .build_load(BasicTypeEnum::StructType(sty), str_alloca, "str_val")
+                } else {
+                    // Non-string struct: stored as heap pointer.
+                    let struct_ptr = self
+                        .generator
+                        .build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")?;
+                    self.generator.build_load(
+                        BasicTypeEnum::StructType(sty),
+                        struct_ptr,
+                        "elem_struct",
+                    )
+                }
+            }
+            BasicTypeEnum::PointerType(_) => {
+                // Raw pointer (string char*).
+                let ptr = self
+                    .generator
+                    .build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")?;
+                Ok(BasicValueEnum::PointerValue(ptr))
+            }
+            BasicTypeEnum::IntType(_) => {
+                // Native int — use as-is.
+                Ok(BasicValueEnum::IntValue(elem_int))
+            }
+            BasicTypeEnum::FloatType(_) => {
+                // Float — bitcast i64 to float.
+                let fv = self
+                    .generator
+                    .builder
+                    .build_bit_cast(
+                        BasicValueEnum::IntValue(elem_int),
+                        elem_llvm_ty,
+                        "i64_to_float",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("i64 to float: {e}")))?
+                    .into_float_value();
+                Ok(BasicValueEnum::FloatValue(fv))
+            }
+            _ => Err(CompileError::Unsupported(format!(
+                "cannot convert list element from i64 to {elem_llvm_ty:?}"
             ))),
         }
     }
@@ -1855,9 +2092,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .values()
             .find(|td| td.qualified_name == type_name || td.qualified_name == item_str)
             .ok_or_else(|| {
-                CompileError::Unsupported(format!(
-                    "type definition for '{item_str}' not found"
-                ))
+                CompileError::Unsupported(format!("type definition for '{item_str}' not found"))
             })?;
         // Build LLVM field types from the field type display strings.
         // Each field's type display is resolved via the ResolvedTypeTable
@@ -1872,10 +2107,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
 
     /// Resolve a type display string (e.g. "i64", "string") to an LLVM type
     /// by scanning the ResolvedTypeTable for a matching primitive.
-    fn resolve_type_display(
-        &self,
-        display: &str,
-    ) -> Result<BasicTypeEnum<'ctx>, CompileError> {
+    fn resolve_type_display(&self, display: &str) -> Result<BasicTypeEnum<'ctx>, CompileError> {
         // Fast path: primitive types.
         if let Some(prim) = PrimitiveType::from_language_name(display) {
             return Ok(match prim {
@@ -1888,40 +2120,34 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 PrimitiveType::I32 | PrimitiveType::U32 | PrimitiveType::Char => {
                     BasicTypeEnum::IntType(self.generator.context.i32_type())
                 }
-                PrimitiveType::I64 | PrimitiveType::U64 | PrimitiveType::Isize
-                | PrimitiveType::Usize => {
-                    BasicTypeEnum::IntType(self.generator.context.i64_type())
-                }
+                PrimitiveType::I64
+                | PrimitiveType::U64
+                | PrimitiveType::Isize
+                | PrimitiveType::Usize => BasicTypeEnum::IntType(self.generator.context.i64_type()),
                 PrimitiveType::I128 | PrimitiveType::U128 => {
                     BasicTypeEnum::IntType(self.generator.context.i128_type())
                 }
-                PrimitiveType::F32 => {
-                    BasicTypeEnum::FloatType(self.generator.context.f32_type())
-                }
-                PrimitiveType::F64 => {
-                    BasicTypeEnum::FloatType(self.generator.context.f64_type())
-                }
-                PrimitiveType::Bool => {
-                    BasicTypeEnum::IntType(self.generator.context.bool_type())
-                }
+                PrimitiveType::F32 => BasicTypeEnum::FloatType(self.generator.context.f32_type()),
+                PrimitiveType::F64 => BasicTypeEnum::FloatType(self.generator.context.f64_type()),
+                PrimitiveType::Bool => BasicTypeEnum::IntType(self.generator.context.bool_type()),
                 PrimitiveType::String => {
                     let ptr = BasicTypeEnum::PointerType(
-                        self.generator.context.ptr_type(inkwell::AddressSpace::default()),
+                        self.generator
+                            .context
+                            .ptr_type(inkwell::AddressSpace::default()),
                     );
                     let i64 = BasicTypeEnum::IntType(self.generator.context.i64_type());
                     BasicTypeEnum::StructType(
                         self.generator.context.struct_type(&[ptr, i64], false),
                     )
                 }
-                PrimitiveType::Unit => {
-                    BasicTypeEnum::IntType(self.generator.context.i64_type())
-                }
+                PrimitiveType::Unit => BasicTypeEnum::IntType(self.generator.context.i64_type()),
             });
         }
         // Fallback: scan the type table for a matching type.
         for (id, ty) in self.program.resolved_types().iter() {
             if id.as_str() == display || format!("{ty:?}") == display {
-                return self.lower_type(&id);
+                return self.lower_type(id);
             }
         }
         Err(CompileError::Unsupported(format!(
@@ -1932,11 +2158,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     /// Look up the field index within a record type definition.
     /// Searches all type definitions for one whose `field_ids` contains
     /// the given field NodeId, then returns the field's position.
-    fn lookup_field_index(
-        &self,
-        field_id: &NodeId,
-        field_name: &str,
-    ) -> Result<u32, CompileError> {
+    fn lookup_field_index(&self, field_id: &NodeId, field_name: &str) -> Result<u32, CompileError> {
         for td in self.program.type_defs().values() {
             if td.field_ids.values().any(|id| id == field_id) {
                 // Found the type definition. Find the field's position.
@@ -1989,12 +2211,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     current_ptr = self
                         .generator
                         .builder
-                        .build_struct_gep(
-                            struct_type,
-                            current_ptr,
-                            *index as u32,
-                            "place_gep",
-                        )
+                        .build_struct_gep(struct_type, current_ptr, *index as u32, "place_gep")
                         .map_err(|e| CompileError::LlvmError(format!("place gep: {e}")))?;
                     current_type = struct_type
                         .get_field_type_at_index(*index as u32)
@@ -2024,33 +2241,171 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         .ptr_type(inkwell::AddressSpace::default());
                     let data_ptr = self
                         .generator
-                        .build_load(BasicTypeEnum::PointerType(ptr_ty), data_gep, "list_data_ptr")?
+                        .build_load(
+                            BasicTypeEnum::PointerType(ptr_ty),
+                            data_gep,
+                            "list_data_ptr",
+                        )?
                         .into_pointer_value();
                     // Evaluate the index expression.
                     let idx_val = match index {
-                        crate::core::ir::ResolvedIndex::Constant(c) => {
-                            self.generator.context.i64_type().const_int(*c as u64, false)
-                        }
+                        crate::core::ir::ResolvedIndex::Constant(c) => self
+                            .generator
+                            .context
+                            .i64_type()
+                            .const_int(*c as u64, false),
                         crate::core::ir::ResolvedIndex::Dynamic(expr_id) => {
                             // Look up the index expression from place_inputs
                             // and emit it. Clone to release the immutable
                             // borrow on self before calling emit_expr.
-                            let idx_expr = self.place_inputs.get(expr_id).cloned().ok_or_else(|| {
-                                CompileError::Unsupported(format!(
-                                    "dynamic index expression '{}' not in place_inputs",
-                                    expr_id.0
-                                ))
-                            })?;
+                            let idx_expr =
+                                self.place_inputs.get(expr_id).cloned().ok_or_else(|| {
+                                    CompileError::Unsupported(format!(
+                                        "dynamic index expression '{}' not in place_inputs",
+                                        expr_id.0
+                                    ))
+                                })?;
                             self.emit_expr(&idx_expr, frame)?.into_int_value()
                         }
                     };
                     // GEP into the data buffer.
                     let i64_ty = self.generator.context.i64_type();
                     current_ptr = self.generator.build_in_bounds_gep(
-                        i64_ty, data_ptr, &[idx_val], "list_idx_gep",
+                        i64_ty,
+                        data_ptr,
+                        &[idx_val],
+                        "list_idx_gep",
                     )?;
                     // Element type: lower the resolved type identity.
-                    current_type = self.lower_type(ty)?;
+                    let elem_llvm_ty = self.lower_type(ty)?;
+                    // When the element is a struct (nested list, tuple, record,
+                    // Option, Result) or a pointer (string), the i64 slot stores
+                    // a pointer-to-value, not the value itself. Load the i64,
+                    // inttoptr, then load the struct from the heap pointer —
+                    // matching the legacy data layout.
+                    // Only the string struct {ptr, i64} stores the raw pointer
+                    // (field 0) directly; all other structs are heap-allocated.
+                    match elem_llvm_ty {
+                        BasicTypeEnum::StructType(sty) => {
+                            let fields = sty.get_field_types();
+                            let is_string = fields.len() == 2
+                                && matches!(&fields[0], BasicTypeEnum::PointerType(_))
+                                && matches!(&fields[1], BasicTypeEnum::IntType(bit) if bit.get_bit_width() == 64);
+                            if is_string {
+                                // String: the i64 IS the raw char* pointer.
+                                // Construct a full {i8*, i64} string struct.
+                                let loaded = self
+                                    .generator
+                                    .build_load(
+                                        BasicTypeEnum::IntType(i64_ty),
+                                        current_ptr,
+                                        "list_elem_i64",
+                                    )?
+                                    .into_int_value();
+                                let ptr_ty = self
+                                    .generator
+                                    .context
+                                    .ptr_type(inkwell::AddressSpace::default());
+                                let raw_ptr = self.generator.build_int_to_ptr(
+                                    loaded,
+                                    ptr_ty,
+                                    "elem_str_ptr",
+                                )?;
+                                // Call strlen to get the length.
+                                let strlen_fn = self
+                                    .generator
+                                    .module
+                                    .get_function("strlen")
+                                    .ok_or_else(|| "strlen not declared".to_string())?;
+                                let str_len = self
+                                    .generator
+                                    .builder
+                                    .build_call(
+                                        strlen_fn,
+                                        &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
+                                        "strlen",
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("strlen call: {e}"))
+                                    })?
+                                    .try_as_basic_value_opt()
+                                    .ok_or_else(|| {
+                                        CompileError::LlvmError("strlen returned void".into())
+                                    })?;
+                                // Build {i8*, i64} struct in alloca.
+                                let str_alloca = self.generator.build_alloca(sty, "str_struct")?;
+                                let ptr_gep = self
+                                    .generator
+                                    .builder
+                                    .build_struct_gep(sty, str_alloca, 0, "str_ptr_gep")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("str gep: {e}"))
+                                    })?;
+                                self.generator.build_store(ptr_gep, raw_ptr)?;
+                                let len_gep = self
+                                    .generator
+                                    .builder
+                                    .build_struct_gep(sty, str_alloca, 1, "str_len_gep")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("len gep: {e}"))
+                                    })?;
+                                self.generator.build_store(len_gep, str_len)?;
+                                current_ptr = str_alloca;
+                                current_type = elem_llvm_ty;
+                            } else {
+                                // Non-string struct (nested list, tuple, record, etc.):
+                                // load i64 pointer, inttoptr, load struct, store in alloca.
+                                let loaded = self
+                                    .generator
+                                    .build_load(
+                                        BasicTypeEnum::IntType(i64_ty),
+                                        current_ptr,
+                                        "list_elem_i64",
+                                    )?
+                                    .into_int_value();
+                                let ptr_ty = self
+                                    .generator
+                                    .context
+                                    .ptr_type(inkwell::AddressSpace::default());
+                                let struct_ptr = self
+                                    .generator
+                                    .build_int_to_ptr(loaded, ptr_ty, "elem_ptr")?;
+                                let struct_val = self.generator.build_load(
+                                    BasicTypeEnum::StructType(sty),
+                                    struct_ptr,
+                                    "elem_struct",
+                                )?;
+                                let alloca = self.generator.build_alloca(sty, "elem_alloca")?;
+                                self.generator.build_store(alloca, struct_val)?;
+                                current_ptr = alloca;
+                                current_type = elem_llvm_ty;
+                            }
+                        }
+                        BasicTypeEnum::PointerType(_) => {
+                            // String/raw pointer: load i64, inttoptr.
+                            let loaded = self
+                                .generator
+                                .build_load(
+                                    BasicTypeEnum::IntType(i64_ty),
+                                    current_ptr,
+                                    "list_elem_i64",
+                                )?
+                                .into_int_value();
+                            let ptr_ty = self
+                                .generator
+                                .context
+                                .ptr_type(inkwell::AddressSpace::default());
+                            let raw_ptr = self
+                                .generator
+                                .build_int_to_ptr(loaded, ptr_ty, "elem_ptr")?;
+                            current_ptr = raw_ptr;
+                            current_type = elem_llvm_ty;
+                        }
+                        _ => {
+                            // Scalar element: keep the GEP'd i64 pointer.
+                            current_type = elem_llvm_ty;
+                        }
+                    }
                 }
                 // 0.32.5: Field projection for record field access.
                 // Look up the field index from the type definition catalog.
@@ -2064,12 +2419,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     current_ptr = self
                         .generator
                         .builder
-                        .build_struct_gep(
-                            struct_type,
-                            current_ptr,
-                            field_index,
-                            "rec_field_gep",
-                        )
+                        .build_struct_gep(struct_type, current_ptr, field_index, "rec_field_gep")
                         .map_err(|e| CompileError::LlvmError(format!("field gep: {e}")))?;
                     current_type = self.lower_type(ty)?;
                 }
@@ -2426,7 +2776,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             ))),
         }
     }
-
 }
 
 fn binary_op(op: ResolvedBinaryOp) -> BinOp {
@@ -2470,10 +2819,23 @@ fn is_signed_integer_type(program: &CheckedProgram, ty: &ResolvedTypeId) -> bool
 
 /// Map a canonical type identity to the display name expected by the
 /// print-family builtin formatting dispatch (`pending_print_arg_types`).
+///
+/// The print-formatter chain in `src/codegen/builtins/io.rs` dispatches on
+/// strings like `"List<string>"`, `"Option<i32>"`, `"Result<i32, string>"`,
+/// `"(i32, string)"`, `"Map<string, i32>"`, `"Set<string>"`, etc.  This
+/// function recovers those names from the resolved type graph so that the
+/// resolved emitter's per-function dispatch path selects the correct
+/// runtime formatter — instead of falling through to the `emit_list_i32`
+/// default (which prints pointer addresses as decimal integers).
 fn resolved_type_display_name(program: &CheckedProgram, ty: &ResolvedTypeId) -> String {
     use crate::core::PrimitiveType;
-    match program.resolved_types().get(ty) {
-        Some(ResolvedType::Primitive(p)) => match p {
+    use crate::core::ResolvedType::*;
+    let rty = match program.resolved_types().get(ty) {
+        Some(t) => t,
+        None => return "unknown".to_string(),
+    };
+    match rty {
+        Primitive(p) => match p {
             PrimitiveType::I8 | PrimitiveType::I16 | PrimitiveType::I32 => "i32".to_string(),
             PrimitiveType::I64 | PrimitiveType::Isize => "i64".to_string(),
             PrimitiveType::U8 | PrimitiveType::U16 | PrimitiveType::U32 => "u32".to_string(),
@@ -2484,8 +2846,69 @@ fn resolved_type_display_name(program: &CheckedProgram, ty: &ResolvedTypeId) -> 
             PrimitiveType::Unit => "unit".to_string(),
             _ => "unknown".to_string(),
         },
-        Some(_) => "unknown".to_string(),
-        None => "unknown".to_string(),
+        Nominal {
+            item, arguments, ..
+        } => {
+            let name = if let Some(stripped) = item.as_str().strip_prefix("builtin:type:") {
+                stripped.to_string()
+            } else {
+                item.as_str().to_string()
+            };
+            if arguments.is_empty() {
+                name
+            } else {
+                let args: Vec<String> = arguments
+                    .iter()
+                    .map(|a| resolved_type_display_name(program, a))
+                    .collect();
+                format!("{}<{}>", name, args.join(", "))
+            }
+        }
+        Option(inner) => {
+            format!("Option<{}>", resolved_type_display_name(program, inner))
+        }
+        Result { ok, error } => {
+            format!(
+                "Result<{}, {}>",
+                resolved_type_display_name(program, ok),
+                resolved_type_display_name(program, error)
+            )
+        }
+        Tuple(elems) => {
+            let inner: Vec<String> = elems
+                .iter()
+                .map(|e| resolved_type_display_name(program, e))
+                .collect();
+            format!("({})", inner.join(", "))
+        }
+        Reference {
+            target, mutable, ..
+        } => {
+            let prefix = if *mutable { "&mut " } else { "&" };
+            format!("{}{}", prefix, resolved_type_display_name(program, target))
+        }
+        Function {
+            parameters, result, ..
+        } => {
+            let params: Vec<String> = parameters
+                .iter()
+                .map(|p| resolved_type_display_name(program, p))
+                .collect();
+            format!(
+                "fn({}) -> {}",
+                params.join(", "),
+                resolved_type_display_name(program, result)
+            )
+        }
+        Slice(inner) => {
+            format!("[]{}", resolved_type_display_name(program, inner))
+        }
+        Newtype { inner, .. } => resolved_type_display_name(program, inner),
+        Array { element, .. } => {
+            format!("[{}]", resolved_type_display_name(program, element))
+        }
+        FlowStateSet { .. } => "unknown".to_string(),
+        _ => "unknown".to_string(),
     }
 }
 
@@ -2573,7 +2996,6 @@ func main() -> i32 {
         generator.module.verify().expect("valid LLVM");
     }
 
-    #[test]
     /// 0.32.2: List literals and indexing are now in the resolved native
     /// slice. This test was previously a rejection test; now it verifies
     /// successful compilation.
@@ -3097,10 +3519,7 @@ func main() -> i32 { println(get_x(make_point(3, 4))); 0 }
             let eligible_set = match &eligible {
                 Ok(set) => set.clone(),
                 Err(e) => {
-                    eprintln!(
-                        "  [{name}] PROGRAM-LEVEL REJECT: {}",
-                        e.reason
-                    );
+                    eprintln!("  [{name}] PROGRAM-LEVEL REJECT: {}", e.reason);
                     *rejection_reasons
                         .entry(format!("program-level: {}", e.reason))
                         .or_insert(0) += 1;
@@ -3120,12 +3539,8 @@ func main() -> i32 { println(get_x(make_point(3, 4))); 0 }
                     ineligible_names.push(f.qualified_name.as_str());
                     // Determine rejection reason by re-checking individually
                     if let Some(callable) = program.callable(&f.node_id) {
-                        if let Err(e) =
-                            require_resolved_native_callable(&program, callable)
-                        {
-                            *rejection_reasons
-                                .entry(e.reason.clone())
-                                .or_insert(0) += 1;
+                        if let Err(e) = require_resolved_native_callable(&program, callable) {
+                            *rejection_reasons.entry(e.reason.clone()).or_insert(0) += 1;
                         } else {
                             *rejection_reasons
                                 .entry("origin/generics/qualified filter".into())
