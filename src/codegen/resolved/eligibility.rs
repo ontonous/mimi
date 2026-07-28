@@ -1,7 +1,7 @@
 use crate::core::{
-    CheckedConversionKind, CheckedProgram, NodeId, PrimitiveType, ResolvedBlock, ResolvedCallable,
-    ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedPattern, ResolvedPatternKind,
-    ResolvedPlace, ResolvedStmtKind, ResolvedType, ResolvedTypeId,
+    CheckedConversionKind, CheckedProgram, NodeId, Origin, PrimitiveType, ResolvedBlock,
+    ResolvedCallable, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedPattern,
+    ResolvedPatternKind, ResolvedPlace, ResolvedStmtKind, ResolvedType, ResolvedTypeId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,7 +151,6 @@ pub(super) fn eligible_function_ids(
         || !program.sessions().is_empty()
         || !program.protocols().is_empty()
         || !program.capabilities().is_empty()
-        || !program.impls().is_empty()
         || !program.extern_blocks().is_empty()
     {
         let owner = program
@@ -163,7 +162,7 @@ pub(super) fn eligible_function_ids(
         return Err(UnsupportedResolvedNode::new(
             &owner,
             &owner,
-            "program contains flows/actors/sessions/protocols/capabilities/impls/externs",
+            "program contains flows/actors/sessions/protocols/capabilities/externs",
         ));
     }
     // ⛔ 2026-07-28: traits unblocked. Prelude always loads From/Into traits,
@@ -172,6 +171,16 @@ pub(super) fn eligible_function_ids(
     // lowering now matches legacy ABI for Result/Option. Tuple destructure in
     // the resolved emitter uses alloca+GEP+load instead of extract_value to
     // avoid struct field misordering on cross-function call results.
+    // ✅ 0.32.13: impls unblocked. The checker auto-generates From/Into impls
+    // for primitive types, making program.impls() non-empty for EVERY program
+    // (even without `use std::xxx`). This was silently disabling per-function
+    // dispatch for all real programs. The per-function guards (Origin::User,
+    // qualified_name "::", non-User-origin callee rejection) are sufficient
+    // to prevent stdlib functions from being compiled through resolved.
+    // The 0.32.8 SIGSEGV was caused by stdlib module functions being
+    // User-origin — the callee origin check (added in 0.32.8) now prevents
+    // calls TO those functions from being eligible, which means the calling
+    // function is rejected at the per-function level (not program level).
     // Constants must be materializable.
     for constant in program.constants().values() {
         if matches!(constant.value, crate::core::ResolvedConstValue::Complex) {
@@ -183,6 +192,10 @@ pub(super) fn eligible_function_ids(
         }
     }
     // Per-function eligibility check.
+    // 0.32.13: Determine the entry file's source_id so we can exclude
+    // functions imported from module files (which are User-origin but
+    // defined in a different source file).
+    let entry_source = program.entry_span().map(|s| s.source_id);
     let mut eligible = std::collections::BTreeSet::new();
     for function in program.functions().values() {
         if function.is_comptime || function.is_async || function.extern_abi.is_some() {
@@ -197,10 +210,20 @@ pub(super) fn eligible_function_ids(
         if !matches!(function.origin, crate::core::Origin::User(_)) {
             continue;
         }
+        // 0.32.13: exclude functions from module files. Module functions
+        // are User-origin (parsed from .mimi) but defined in a different
+        // source file than the entry point. Their bodies reference runtime
+        // symbols and cross-emitter patterns that cause SIGSEGV when
+        // compiled through the resolved emitter.
+        if let (Some(entry_src), Origin::User(span)) = (entry_source, &function.origin) {
+            if span.source_id != entry_src {
+                continue;
+            }
+        }
         let Some(callable) = program.callable(&function.node_id) else {
             continue;
         };
-        if require_resolved_native_callable(program, callable).is_ok() {
+        if require_resolved_native_callable_with_source(program, callable, entry_source).is_ok() {
             eligible.insert(function.node_id.clone());
         }
     }
@@ -210,6 +233,14 @@ pub(super) fn eligible_function_ids(
 pub(super) fn require_resolved_native_callable(
     program: &CheckedProgram,
     callable: &ResolvedCallable,
+) -> Result<(), UnsupportedResolvedNode> {
+    require_resolved_native_callable_with_source(program, callable, None)
+}
+
+fn require_resolved_native_callable_with_source(
+    program: &CheckedProgram,
+    callable: &ResolvedCallable,
+    entry_source: Option<crate::span::SourceId>,
 ) -> Result<(), UnsupportedResolvedNode> {
     if !callable.contracts.is_empty() {
         return Err(UnsupportedResolvedNode::new(
@@ -222,7 +253,7 @@ pub(super) fn require_resolved_native_callable(
     for parameter in &callable.signature.parameters {
         require_scalar_type(program, &callable.owner, &parameter.ty)?;
     }
-    require_block(program, &callable.owner, &callable.body.root)
+    require_block(program, &callable.owner, &callable.body.root, entry_source)
 }
 
 fn require_scalar_type(
@@ -315,6 +346,7 @@ fn require_block(
     program: &CheckedProgram,
     owner: &NodeId,
     block: &ResolvedBlock,
+    entry_source: Option<crate::span::SourceId>,
 ) -> Result<(), UnsupportedResolvedNode> {
     for statement in &block.statements {
         if !statement.backend_requirements.is_empty() {
@@ -330,7 +362,7 @@ fn require_block(
                 initializer: Some(initializer),
             } => {
                 require_binding_pattern(owner, pattern)?;
-                require_expr(program, owner, initializer)?;
+                require_expr(program, owner, initializer, entry_source)?;
             }
             ResolvedStmtKind::Assign {
                 target,
@@ -339,17 +371,19 @@ fn require_block(
             } => {
                 require_root_place(owner, &statement.node_id, target)?;
                 require_conversion(owner, &statement.node_id, conversion.kind)?;
-                require_expr(program, owner, value)?;
+                require_expr(program, owner, value, entry_source)?;
             }
             ResolvedStmtKind::Return { value, conversion } => {
                 if let Some(value) = value {
-                    require_expr(program, owner, value)?;
+                    require_expr(program, owner, value, entry_source)?;
                 }
                 if let Some(conversion) = conversion {
                     require_conversion(owner, &statement.node_id, conversion.kind)?;
                 }
             }
-            ResolvedStmtKind::Expr(expression) => require_expr(program, owner, expression)?,
+            ResolvedStmtKind::Expr(expression) => {
+                require_expr(program, owner, expression, entry_source)?
+            }
             ResolvedStmtKind::Bind {
                 pattern,
                 initializer: None,
@@ -357,8 +391,8 @@ fn require_block(
                 require_binding_pattern(owner, pattern)?;
             }
             ResolvedStmtKind::While { condition, body } => {
-                require_condition(program, owner, condition)?;
-                require_block(program, owner, body)?;
+                require_condition(program, owner, condition, entry_source)?;
+                require_block(program, owner, body, entry_source)?;
             }
             ResolvedStmtKind::For {
                 pattern,
@@ -368,19 +402,19 @@ fn require_block(
                 require_binding_pattern(owner, pattern)?;
                 match &iterable.kind {
                     ResolvedExprKind::Range { start, end } => {
-                        require_integer_expr(program, owner, start)?;
-                        require_integer_expr(program, owner, end)?;
+                        require_integer_expr(program, owner, start, entry_source)?;
+                        require_integer_expr(program, owner, end, entry_source)?;
                     }
                     // 0.32.8–0.32.9: List iteration — `for x in expr` where
                     // expr: List<T>. Accept any expression (Load, Call,
                     // Project, etc.) whose canonical type is List<T> with
                     // scalar element type.
                     _ => {
-                        require_expr(program, owner, iterable)?;
+                        require_expr(program, owner, iterable, entry_source)?;
                         require_list_iterable_type(program, owner, &iterable.ty)?;
                     }
                 }
-                require_block(program, owner, body)?;
+                require_block(program, owner, body, entry_source)?;
             }
             ResolvedStmtKind::Break(value) => {
                 if value.is_some() {
@@ -401,19 +435,19 @@ fn require_block(
                         format!("scope kind {kind:?} is not in the resolved native slice"),
                     ));
                 }
-                require_block(program, owner, body)?;
+                require_block(program, owner, body, entry_source)?;
             }
             ResolvedStmtKind::Loop(body) => {
-                require_block(program, owner, body)?;
+                require_block(program, owner, body, entry_source)?;
             }
             // Specification-level statements: no codegen output, accept unconditionally.
             ResolvedStmtKind::Drop(_) => {}
             ResolvedStmtKind::Contract { condition, .. } => {
-                require_expr(program, owner, condition)?;
+                require_expr(program, owner, condition, entry_source)?;
             }
             ResolvedStmtKind::Math(conditions) => {
                 for condition in conditions {
-                    require_expr(program, owner, condition)?;
+                    require_expr(program, owner, condition, entry_source)?;
                 }
             }
             other => {
@@ -426,7 +460,7 @@ fn require_block(
         }
     }
     if let Some(result) = &block.result {
-        require_expr(program, owner, result)?;
+        require_expr(program, owner, result, entry_source)?;
     }
     Ok(())
 }
@@ -510,6 +544,7 @@ fn require_expr(
     program: &CheckedProgram,
     owner: &NodeId,
     expression: &ResolvedExpr,
+    entry_source: Option<crate::span::SourceId>,
 ) -> Result<(), UnsupportedResolvedNode> {
     if !expression.backend_requirements.is_empty() {
         return Err(UnsupportedResolvedNode::new(
@@ -525,35 +560,35 @@ fn require_expr(
         ResolvedExprKind::Load(place) => require_root_place(owner, &expression.node_id, place),
         ResolvedExprKind::Tuple(elements) => {
             for element in elements {
-                require_expr(program, owner, element)?;
+                require_expr(program, owner, element, entry_source)?;
             }
             Ok(())
         }
         // 0.32.2: List literals.
         ResolvedExprKind::List(elements) => {
             for element in elements {
-                require_expr(program, owner, element)?;
+                require_expr(program, owner, element, entry_source)?;
             }
             Ok(())
         }
         // 0.32.3: Map/Set literals.
         ResolvedExprKind::Map(entries) => {
             for (key, value) in entries {
-                require_expr(program, owner, key)?;
-                require_expr(program, owner, value)?;
+                require_expr(program, owner, key, entry_source)?;
+                require_expr(program, owner, value, entry_source)?;
             }
             Ok(())
         }
         ResolvedExprKind::Set(elements) => {
             for element in elements {
-                require_expr(program, owner, element)?;
+                require_expr(program, owner, element, entry_source)?;
             }
             Ok(())
         }
         // 0.32.5: Record construction.
         ResolvedExprKind::Record { fields, .. } => {
             for field in fields {
-                require_expr(program, owner, &field.value)?;
+                require_expr(program, owner, &field.value, entry_source)?;
             }
             Ok(())
         }
@@ -563,7 +598,7 @@ fn require_expr(
                 // 0.32.2: Index value projections for List element access
                 // on rvalues (e.g. get_list()[0]).
                 crate::core::ir::ResolvedValueProjection::Index(index_expr) => {
-                    require_expr(program, owner, index_expr)?;
+                    require_expr(program, owner, index_expr, entry_source)?;
                 }
                 // 0.32.5: Field value projections for record rvalue access.
                 crate::core::ir::ResolvedValueProjection::Field(_) => {}
@@ -575,11 +610,11 @@ fn require_expr(
                     ))
                 }
             }
-            require_expr(program, owner, value)
+            require_expr(program, owner, value, entry_source)
         }
         ResolvedExprKind::Binary { left, right, .. } => {
-            require_expr(program, owner, left)?;
-            require_expr(program, owner, right)
+            require_expr(program, owner, left, entry_source)?;
+            require_expr(program, owner, right, entry_source)
         }
         ResolvedExprKind::Unary { op, operand }
             if matches!(
@@ -587,11 +622,11 @@ fn require_expr(
                 crate::core::ir::ResolvedUnaryOp::Negate | crate::core::ir::ResolvedUnaryOp::Not
             ) =>
         {
-            require_expr(program, owner, operand)
+            require_expr(program, owner, operand, entry_source)
         }
         ResolvedExprKind::Cast { value, conversion } => {
             require_conversion(owner, &expression.node_id, conversion.kind)?;
-            require_expr(program, owner, value)
+            require_expr(program, owner, value, entry_source)
         }
         ResolvedExprKind::Call(call)
             if matches!(
@@ -626,11 +661,29 @@ fn require_expr(
                             ),
                         ));
                     }
+                    // 0.32.13: reject calls to functions from module files.
+                    // Module functions are User-origin but defined in a
+                    // different source file. Calling them from a resolved-
+                    // compiled function causes ABI mismatches at runtime.
+                    if let (Some(entry_src), Origin::User(callee_span)) =
+                        (entry_source, &callee_fn.origin)
+                    {
+                        if callee_span.source_id != entry_src {
+                            return Err(UnsupportedResolvedNode::new(
+                                owner,
+                                &expression.node_id,
+                                format!(
+                                    "call to module function '{}' (different source file) is not in the resolved native slice",
+                                    callee_fn.qualified_name
+                                ),
+                            ));
+                        }
+                    }
                 }
             }
             for argument in &call.arguments {
                 require_conversion(owner, &argument.value.node_id, argument.conversion.kind)?;
-                require_expr(program, owner, &argument.value)?;
+                require_expr(program, owner, &argument.value, entry_source)?;
             }
             Ok(())
         }
@@ -639,27 +692,27 @@ fn require_expr(
             then_block,
             else_block,
         } => {
-            require_condition(program, owner, condition)?;
-            require_block(program, owner, then_block)?;
-            require_block(program, owner, else_block)
+            require_condition(program, owner, condition, entry_source)?;
+            require_block(program, owner, then_block, entry_source)?;
+            require_block(program, owner, else_block, entry_source)
         }
-        ResolvedExprKind::Block(block) => require_block(program, owner, block),
+        ResolvedExprKind::Block(block) => require_block(program, owner, block, entry_source),
         ResolvedExprKind::FString(parts) => {
             for part in parts {
                 if let crate::core::ir::ResolvedFStringPart::Interpolation(expr) = part {
-                    require_expr(program, owner, expr)?;
+                    require_expr(program, owner, expr, entry_source)?;
                 }
             }
             Ok(())
         }
         ResolvedExprKind::Match { scrutinee, arms } => {
-            require_expr(program, owner, scrutinee)?;
+            require_expr(program, owner, scrutinee, entry_source)?;
             for arm in arms {
                 require_match_pattern(owner, &arm.pattern)?;
                 if let Some(guard) = &arm.guard {
-                    require_condition(program, owner, guard)?;
+                    require_condition(program, owner, guard, entry_source)?;
                 }
-                require_expr(program, owner, &arm.body)?;
+                require_expr(program, owner, &arm.body, entry_source)?;
             }
             Ok(())
         }
@@ -671,14 +724,14 @@ fn require_expr(
                     format!("scope kind {kind:?} is not in the resolved native slice"),
                 ));
             }
-            require_block(program, owner, body)
+            require_block(program, owner, body, entry_source)
         }
         // 0.32.10: Try expression (`?` operator). The inner value must be
         // Result<T, E> or Option<T>. The Try expression itself has type T
         // (the Ok/Some payload), already checked by require_scalar_type at
         // the top of require_expr.
         ResolvedExprKind::Try { value, .. } => {
-            require_expr(program, owner, value)?;
+            require_expr(program, owner, value, entry_source)?;
             // The inner expression's type must be Result or Option.
             match program.resolved_types().get(&value.ty) {
                 Some(ResolvedType::Result { .. } | ResolvedType::Option(_)) => Ok(()),
@@ -734,8 +787,9 @@ fn require_condition(
     program: &CheckedProgram,
     owner: &NodeId,
     condition: &ResolvedExpr,
+    entry_source: Option<crate::span::SourceId>,
 ) -> Result<(), UnsupportedResolvedNode> {
-    require_expr(program, owner, condition)?;
+    require_expr(program, owner, condition, entry_source)?;
     match program.resolved_types().get(&condition.ty) {
         Some(ResolvedType::Primitive(PrimitiveType::Bool)) => Ok(()),
         Some(other) => Err(UnsupportedResolvedNode::new(
@@ -756,8 +810,9 @@ fn require_integer_expr(
     program: &CheckedProgram,
     owner: &NodeId,
     expression: &ResolvedExpr,
+    entry_source: Option<crate::span::SourceId>,
 ) -> Result<(), UnsupportedResolvedNode> {
-    require_expr(program, owner, expression)?;
+    require_expr(program, owner, expression, entry_source)?;
     match program.resolved_types().get(&expression.ty) {
         Some(ResolvedType::Primitive(
             PrimitiveType::I8
