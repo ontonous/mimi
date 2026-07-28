@@ -1106,11 +1106,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .append_basic_block(function, &format!("arm_body{}", arm_idx));
                 self.build_cond_br(guard_bool, arm_body_bb, env.else_bb)?;
                 self.builder.position_at_end(arm_body_bb);
+                let prior_count = self
+                    .heap_allocs
+                    .borrow()
+                    .last()
+                    .map(|s| s.len())
+                    .unwrap_or(0);
                 let arm_val = self.compile_expr(&arm.body, &local_vars)?;
                 // MATCH-STRFIX: if the arm body produces a heap-allocated
-                // string (fstring, concat, etc.), detach the heap slot so
+                // string (fstring, concat, etc.), detach the heap entries so
                 // free_heap_allocs doesn't free data the caller still needs.
-                self.claim_match_arm_string(&arm.body, &arm_val);
+                self.claim_match_arm_string(&arm.body, &arm_val, prior_count);
                 let guarded_body_bb = self.builder.get_insert_block().ok_or_else(|| {
                     CompileError::LlvmError("no insert block after guard arm body".to_string())
                 })?;
@@ -1118,9 +1124,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok((arm_val, guarded_body_bb))
             }
             None => {
+                let prior_count = self
+                    .heap_allocs
+                    .borrow()
+                    .last()
+                    .map(|s| s.len())
+                    .unwrap_or(0);
                 let arm_val = self.compile_expr(&arm.body, &local_vars)?;
                 // MATCH-STRFIX: same as above for unguarded arms.
-                self.claim_match_arm_string(&arm.body, &arm_val);
+                self.claim_match_arm_string(&arm.body, &arm_val, prior_count);
                 let body_bb = self.builder.get_insert_block().ok_or_else(|| {
                     CompileError::LlvmError("no insert block after arm body".to_string())
                 })?;
@@ -1300,26 +1312,42 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(phi.as_basic_value())
     }
 
-    /// MATCH-STRFIX: if a match arm body produces a heap-allocated string
-    /// (fstring, string concat, etc.), pop the heap slot so that
-    /// `free_heap_allocs` at function exit does not free data the caller
-    /// will receive through the match result / phi node.
-    fn claim_match_arm_string(&self, body: &Expr, _val: &BasicValueEnum<'ctx>) {
+    /// If a match arm body produces a heap-allocated string (fstring, string
+    /// concat, etc.), pop the heap entries so that `free_heap_allocs` at scope
+    /// exit does not free data the caller will receive through the match
+    /// result / phi node.
+    ///
+    /// Uses a prior-count approach: `prior_count` is the number of heap entries
+    /// in the current scope before the arm body was compiled. We truncate back
+    /// to that count, removing only the entries added by this arm body. This is
+    /// exact regardless of how many entries the arm body's expression produced
+    /// (varies: N+1 Ptr entries for fstring with N interpolations, 1 for string
+    /// concat, etc.) and independent of entry type (Ptr vs Slot).
+    fn claim_match_arm_string(
+        &self,
+        body: &Expr,
+        _val: &BasicValueEnum<'ctx>,
+        prior_count: usize,
+    ) {
         if self.is_string_producing_expr(body) {
-            // The fstring emitter registers TWO heap entries: a Slot for
-            // the snprintf temp buffer and a Ptr for the final string buffer.
-            // pop_last_heap_ptr pops entries until it finds a Ptr, so one
-            // call removes the Ptr but leaves the Slot. The Slot's snprintf
-            // temp is only allocated in ONE match arm; when a different arm
-            // is taken, free_heap_allocs would free an undefined pointer.
-            // Call twice to drain both entries.
-            let _ = self.pop_last_heap_ptr();
-            let _ = self.pop_last_heap_ptr();
+            let mut guard = self.heap_allocs.borrow_mut();
+            if let Some(scope) = guard.last_mut() {
+                let added = scope.len().saturating_sub(prior_count);
+                if added > 0 {
+                    scope.truncate(prior_count);
+                }
+            }
         }
     }
 
     /// Check if an expression produces a heap-allocated string, looking
-    /// through Block wrappers.
+    /// through Block and If wrappers.
+    ///
+    /// `Expr::If` branches use `compile_block_last_val` (not `compile_block`),
+    /// so fstring/interpolation heap entries go into the enclosing scope —
+    /// not a nested scope. If we miss this, `free_heap_allocs` frees the
+    /// string buffer while the if-expr phi still references it, causing
+    /// dangling-pointer access at runtime.
     fn is_string_producing_expr(&self, expr: &Expr) -> bool {
         match expr.unlocated() {
             Expr::Literal(Lit::FString(_)) => true,
@@ -1337,17 +1365,29 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             // Look through block wrappers: { f"..." } or { let x = ...; f"..." }
             Expr::Block(stmts) => {
-                // Check the last statement's expression (the block result).
-                if let Some(last) = stmts.last() {
-                    match last.unlocated() {
-                        Stmt::Expr(e) => self.is_string_producing_expr(e),
-                        _ => false,
-                    }
-                } else {
-                    false
-                }
+                self.block_last_is_string_producer(stmts)
+            }
+            // Recurse into if-expr: both branches are Blocks compiled via
+            // compile_block_last_val (no heap scope push), so string-producing
+            // tail expressions in either branch leak heap entries into the
+            // enclosing scope and must be claimed.
+            Expr::If { cond: _, then_, else_ } => {
+                self.block_last_is_string_producer(then_)
+                    || else_.as_ref().is_some_and(|blk| self.block_last_is_string_producer(blk))
             }
             _ => false,
+        }
+    }
+
+    /// Check if the last statement of a Block is a string-producing expression.
+    fn block_last_is_string_producer(&self, block: &Block) -> bool {
+        if let Some(last) = block.last() {
+            match last.unlocated() {
+                Stmt::Expr(e) => self.is_string_producing_expr(e),
+                _ => false,
+            }
+        } else {
+            false
         }
     }
 }

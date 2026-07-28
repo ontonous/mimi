@@ -778,6 +778,34 @@ fn real_world_match_literal_fstring_return() {
     );
 }
 
+/// Match with if-expr returning fstring in branches. `is_string_producing_expr`
+/// must recurse into `Expr::If` branches because `compile_if_expr` uses
+/// `compile_block_last_val` (no heap scope) — without the recursion,
+/// `free_heap_allocs` would free the string buffer while the if-expr phi
+/// still references it.
+#[test]
+fn real_world_match_if_fstring_return() {
+    run_both(
+        r#"
+        func sign(n: i64) -> string {
+            match n {
+                _ if n > 0 => if true { f"positive ({n})" } else { f"positive ({n})" },
+                _ if n < 0 => if true { f"negative ({n})" } else { f"negative ({n})" },
+                _ => "zero",
+            }
+        }
+
+        func main() -> i32 {
+            println(sign(5))
+            println(sign(-3))
+            println(sign(0))
+            0
+        }
+    "#,
+        "positive (5)\nnegative (-3)\nzero",
+    );
+}
+
 /// Dual-backend regression for every `tests/real_world/flow_*.mimi`.
 ///
 /// Requires `cc` for the codegen path. Compares normalized stdout so L1
