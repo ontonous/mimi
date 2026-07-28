@@ -888,18 +888,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 _ => false,
             };
-            if is_variant_with_string_payload {
-                // Check if the expression is a constructor wrapping a string temp,
-                // e.g. `Ok(s + "-wrapped")`.  The inner string temp's heap pointer
-                // must be popped so free_heap_allocs doesn't free it before return.
+            // Also handle Result<T, string> (string in Err payload, widened
+            // to i64 in the Result struct).  The LLVM type of field 2 is i64
+            // (not a string struct), so we detect this by checking whether the
+            // return expression is `Err(str_expr)` where str_expr produces a
+            // heap-tracked string.
+            let is_err_with_string_arg = match expr {
+                Some(crate::ast::Expr::Call(callee, args)) => {
+                    matches!(callee.unlocated(), crate::ast::Expr::Ident(n) if n == "Err")
+                        && args.len() == 1
+                }
+                _ => false,
+            };
+            if is_variant_with_string_payload || is_err_with_string_arg {
+                // Pop the inner string's heap allocation so free_heap_allocs
+                // does not free the returned string before the caller can use it.
                 if let Some(expr) = expr {
-                    if let Expr::Call(callee, args) = expr.unlocated() {
-                        if args.len() == 1 && Self::is_string_temp_expr(&args[0], &val) {
-                            if let Expr::Ident(name) = callee.unlocated() {
-                                if matches!(name.as_str(), "Ok" | "Err" | "Some" | "None") {
-                                    let _ = self.pop_last_heap_ptr();
-                                }
-                            }
+                    if let Expr::Call(_, args) = expr.unlocated() {
+                        if Self::is_string_temp_expr(&args[0], &val) {
+                            let _ = self.pop_last_heap_ptr();
                         }
                     }
                 }
@@ -1767,9 +1774,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 t.name == *method_name && t.from_state == from_type
                                             });
                                             if let Some(t) = t {
-                                                if let Some(to) = t.to_states.first() {
+                                                let from_state = t.from_state.clone();
+                                                let to_states = t.to_states.clone();
+                                                let fails = t.fails.clone();
+                                                if let Some(to) = to_states.first() {
                                                     self.var_type_names
                                                         .insert(name.clone(), to.clone());
+                                                    self.track_flow_result_type(
+                                                        name,
+                                                        &from_state,
+                                                        to,
+                                                        fails,
+                                                    );
                                                 }
                                             }
                                         }
@@ -1796,9 +1812,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 t.name == *method_name && t.from_state == from_type
                                             });
                                             if let Some(t) = t {
-                                                if let Some(to) = t.to_states.first() {
+                                                let from_state = t.from_state.clone();
+                                                let to_states = t.to_states.clone();
+                                                let fails = t.fails.clone();
+                                                if let Some(to) = to_states.first() {
                                                     self.var_type_names
                                                         .insert(name.clone(), to.clone());
+                                                    self.track_flow_result_type(
+                                                        name,
+                                                        &from_state,
+                                                        to,
+                                                        fails,
+                                                    );
                                                 }
                                             }
                                         }

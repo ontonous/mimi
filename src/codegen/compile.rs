@@ -529,14 +529,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         // to inside compile_file, after the setup phase (forward declarations,
         // impl methods, vtables) completes. This ensures all symbols are
         // declared before the resolved emitter compiles eligible bodies.
-        // ⛔ 2026-07-28: Disabled due to ABI incompatibility between resolved
-        // and legacy emitters for List type operations (string → i64 coercion
-        // for list storage in array_set and main, resulting in empty list
-        // results or SIGSEGV in real_world tests).
-        // Enable with MIMI_USE_PER_FUNCTION_DISPATCH=1 once the resolved
-        // emitter handles list literal types and string-to-integer coercions.
+        // ✅ 2026-07-28: Per-function dispatch (S12) enabled by default.
+        // Three ABI fixes resolved the remaining blockers:
+        //   1. `coerce_to_i64` — handle PointerValue/StructValue for list
+        //      element storage (string ptr → i64).
+        //   2. `resolved_type_display_name` — emit composite type names
+        //      (List<string>, Option<i32>, etc.) instead of "unknown", so
+        //      the print formatter dispatches to mimi_list_to_string etc.
+        //   3. `return_owns_heap` — drain (not free) heap scope when the
+        //      return type holds pointer fields (list/string structs).
+        //   4. `push`/`pop` alloca-swap — pass the original alloca pointer
+        //      to mutating builtins instead of a loaded copy.
+        // Set MIMI_USE_PER_FUNCTION_DISPATCH=0 or unset to disable.
         let eligible: Option<std::collections::BTreeSet<crate::core::NodeId>> =
-            if std::env::var("MIMI_USE_PER_FUNCTION_DISPATCH").is_ok() {
+            if std::env::var("MIMI_USE_PER_FUNCTION_DISPATCH").map_or(true, |v| v != "0") {
                 super::resolved::resolved_eligible_functions(program)
             } else {
                 None

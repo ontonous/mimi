@@ -1939,6 +1939,30 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Register the full Result<T, (Source, E)> return type of a flow
+    /// transition call in `var_types`, enabling pattern matching code
+    /// (e.g., `Err((src, e))`) to recover the correct struct types for
+    /// the source state and error payload.
+    pub(super) fn track_flow_result_type(
+        &mut self,
+        var_name: &str,
+        from_state: &str,
+        to_state: &str,
+        fails: Option<crate::ast::Type>,
+    ) {
+        use crate::ast::Type;
+        let to_ty = Type::Name(to_state.to_string(), vec![]);
+        let from_ty = Type::Name(from_state.to_string(), vec![]);
+        let err_ty = match fails {
+            Some(f) => Type::Tuple(vec![from_ty, f]),
+            None => Type::Tuple(vec![from_ty, Type::Name("string".to_string(), vec![])]),
+        };
+        self.var_types.insert(
+            var_name.to_string(),
+            Type::Result(Box::new(to_ty), Box::new(err_ty)),
+        );
+    }
+
     /// Resolve generic type parameters (e.g., `T` → `User`) using the active
     /// `type_map` from the calling context (populated by monomorphization).
     pub(super) fn substitute_type_params(&self, ty: &crate::ast::Type) -> crate::ast::Type {
@@ -1999,6 +2023,45 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Returns `None` if `name` is not a variant in any registered enum type.
     pub(super) fn find_variant_owner(&self, name: &str) -> Option<(String, u64)> {
         self.find_variant_info(name)
+    }
+
+    /// Convert a Mimi AST Type to the type-name string used in
+    /// `var_type_names` and `infer_object_type` lookups.
+    fn mimi_type_to_type_name(ty: &crate::ast::Type) -> Option<String> {
+        match ty.unlocated() {
+            crate::ast::Type::Name(n, _) => Some(n.clone()),
+            crate::ast::Type::Infer => Some("i64".to_string()),
+            _ => None,
+        }
+    }
+
+    /// Reverse-lookup: given an LLVM type, find the best matching registered
+    /// Mimi type name. This is used to recover the Mimi type of a payload
+    /// extracted from a built-in Result/Option constructor pattern (where the
+    /// AST type info is not available in type_defs).
+    ///
+    /// Prefers unqualified names (shorter, no `::`) over qualified ones
+    /// (e.g. `Paid` over `flow::Order::Paid`) so that field access and
+    /// transition dispatch resolve correctly.
+    pub(super) fn find_type_name_by_llvm_type(
+        &self,
+        llvm_ty: BasicTypeEnum<'ctx>,
+    ) -> Option<String> {
+        let mut best: Option<&str> = None;
+        for (name, registered_ty) in &self.type_llvm {
+            if llvm_ty == *registered_ty {
+                match best {
+                    None => best = Some(name),
+                    Some(current) => {
+                        // Prefer shorter (unqualified) names.
+                        if name.len() < current.len() {
+                            best = Some(name);
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|s| s.to_string())
     }
 
     /// Compute the size in bytes of an LLVM type using a portable layout.

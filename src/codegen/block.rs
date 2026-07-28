@@ -420,9 +420,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 t.name == *method_name && t.from_state == from_type
                                             });
                                             if let Some(t) = t {
-                                                if let Some(to) = t.to_states.first() {
+                                                let from_state = t.from_state.clone();
+                                                let to_states = t.to_states.clone();
+                                                let fails = t.fails.clone();
+                                                if let Some(to) = to_states.first() {
                                                     self.var_type_names
                                                         .insert(name.clone(), to.clone());
+                                                    self.track_flow_result_type(
+                                                        name,
+                                                        &from_state,
+                                                        to,
+                                                        fails,
+                                                    );
                                                 }
                                             }
                                         }
@@ -449,9 +458,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 t.name == *method_name && t.from_state == from_type
                                             });
                                             if let Some(t) = t {
-                                                if let Some(to) = t.to_states.first() {
+                                                let from_state = t.from_state.clone();
+                                                let to_states = t.to_states.clone();
+                                                let fails = t.fails.clone();
+                                                if let Some(to) = to_states.first() {
                                                     self.var_type_names
                                                         .insert(name.clone(), to.clone());
+                                                    self.track_flow_result_type(
+                                                        name,
+                                                        &from_state,
+                                                        to,
+                                                        fails,
+                                                    );
                                                 }
                                             }
                                         }
@@ -1675,6 +1693,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         self.var_type_names.insert(name.clone(), "Set".to_string());
                                     }
                                     _ => {}
+                                }
+                            } else if let Expr::Field(obj, method_name) = callee.unlocated() {
+                                // Method call return type: flow transition dispatch
+                                // (FlowName::transition(from, ...). Similar to the
+                                // tracking in compile_stmts lines 432-458.
+                                if let Expr::Ident(flow_name) = obj.unlocated() {
+                                    if let Some(flow) = self.flow_defs.get(flow_name) {
+                                        let from_type = args
+                                            .first()
+                                            .map(|a| self.infer_object_type(a, vars))
+                                            .unwrap_or_default();
+                                        let t = flow.transitions.iter().find(|t| {
+                                            t.name == *method_name && t.from_state == from_type
+                                        });
+                                        if let Some(t) = t {
+                                            let from_state = t.from_state.clone();
+                                            let to_states = t.to_states.clone();
+                                            let fails = t.fails.clone();
+                                            if let Some(to) = to_states.first() {
+                                                self.var_type_names
+                                                    .insert(name.clone(), to.clone());
+                                                self.track_flow_result_type(
+                                                    name,
+                                                    &from_state,
+                                                    to,
+                                                    fails,
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

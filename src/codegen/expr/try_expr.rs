@@ -3,7 +3,7 @@ use crate::codegen::{CodeGenerator, VarEntry};
 use crate::error::CompileError;
 
 use inkwell::types::BasicTypeEnum;
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, IntValue};
 use std::collections::HashMap;
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -365,43 +365,92 @@ impl<'ctx> CodeGenerator<'ctx> {
         })?;
         let source_val = self.build_load(self_ty, self_ptr, "try_rej_source")?;
 
-        // Build the error tuple (source, error) as a 2-element struct.
-        let source_as_i64 = match source_val {
-            BasicValueEnum::IntValue(iv) => iv,
-            BasicValueEnum::PointerValue(pv) => self
-                .builder
-                .build_ptr_to_int(pv, i64_ty, "try_rej_src_i64")
-                .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?,
-            other => {
-                // For struct values (records), store to alloca and ptrtoint.
-                let alloca = self.build_alloca(other.get_type(), "try_rej_src_tmp")?;
-                self.build_store(alloca, other)?;
-                self.builder
-                    .build_ptr_to_int(alloca, i64_ty, "try_rej_src_i64")
-                    .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?
+        // For struct values, heap-allocate a copy so the pointer survives
+        // function return. For int/pointer values, use directly.
+        // All arms return `(IntValue, BasicTypeEnum)` for consistency.
+        let source_ptr_i64: IntValue<'ctx> = match source_val {
+            BasicValueEnum::StructValue(sv) => {
+                let llvm_ty = sv.get_type();
+                let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(llvm_ty));
+                let heap =
+                    self.malloc_or_abort(i64_ty.const_int(size, false), "try_rej_src_heap")?;
+                let typed = self
+                    .builder
+                    .build_pointer_cast(
+                        heap,
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "try_rej_src_typed",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("bitcast src: {e}")))?;
+                self.build_store(typed, sv)?;
+                self.build_ptr_to_int(heap, i64_ty, "try_rej_src_i64")?
             }
-        };
-        let err_as_i64 = match err_val {
-            BasicValueEnum::IntValue(iv) => iv,
-            BasicValueEnum::PointerValue(pv) => self
-                .builder
-                .build_ptr_to_int(pv, i64_ty, "try_rej_err_i64")
-                .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?,
-            other => {
-                let alloca = self.build_alloca(other.get_type(), "try_rej_err_tmp")?;
-                self.build_store(alloca, other)?;
-                self.builder
-                    .build_ptr_to_int(alloca, i64_ty, "try_rej_err_i64")
-                    .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?
+            BasicValueEnum::PointerValue(pv) => {
+                self.build_ptr_to_int(pv, i64_ty, "try_rej_src_i64")?
+            }
+            BasicValueEnum::IntValue(iv) => {
+                let bw = iv.get_type().get_bit_width();
+                if bw < 64 {
+                    self.builder
+                        .build_int_z_extend(iv, i64_ty, "try_rej_src_zext")
+                        .map_err(|e| CompileError::LlvmError(format!("src zext: {e}")))?
+                } else if bw > 64 {
+                    self.builder
+                        .build_int_truncate(iv, i64_ty, "try_rej_src_trunc")
+                        .map_err(|e| CompileError::LlvmError(format!("src trunc: {e}")))?
+                } else {
+                    iv
+                }
+            }
+            _ => {
+                return Err("try_rej: unsupported source value type".into());
             }
         };
 
-        // P1-1 fix: allocate tuple struct {i64 source, i64 error} on HEAP.
-        // Stack alloca would dangle after return — the Result struct's err
-        // field stores ptrtoint(tuple), and the caller dereferences it.
-        // Heap allocation survives the function return. Not registered with
-        // heap_allocs: the caller owns the error payload (acceptable leak
-        // on error paths; tuple is 16 bytes).
+        // For error value: struct values get heap-allocated; int values get
+        // sign/zero-extended to i64; pointer values use ptrtoint.
+        let err_ptr_i64: IntValue<'ctx> = match err_val {
+            BasicValueEnum::StructValue(sv) => {
+                let llvm_ty = sv.get_type();
+                let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(llvm_ty));
+                let heap =
+                    self.malloc_or_abort(i64_ty.const_int(size, false), "try_rej_err_heap")?;
+                let typed = self
+                    .builder
+                    .build_pointer_cast(
+                        heap,
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "try_rej_err_typed",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("bitcast err: {e}")))?;
+                self.build_store(typed, sv)?;
+                self.build_ptr_to_int(heap, i64_ty, "try_rej_err_i64")?
+            }
+            BasicValueEnum::PointerValue(pv) => {
+                self.build_ptr_to_int(pv, i64_ty, "try_rej_err_i64")?
+            }
+            BasicValueEnum::IntValue(iv) => {
+                let bw = iv.get_type().get_bit_width();
+                if bw < 64 {
+                    self.builder
+                        .build_int_s_extend(iv, i64_ty, "try_rej_err_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("err sext: {e}")))?
+                } else if bw > 64 {
+                    self.builder
+                        .build_int_truncate(iv, i64_ty, "try_rej_err_trunc")
+                        .map_err(|e| CompileError::LlvmError(format!("err trunc: {e}")))?
+                } else {
+                    iv
+                }
+            }
+            _ => {
+                return Err("try_rej: unsupported error value type".into());
+            }
+        };
+
+        // Allocate a {ptr, ptr} tuple on the heap. Each field is a ptrtoint
+        // to the heap-allocated struct (or the direct value for ints/ptrs).
+        // The caller decodes by inttopping each field and loading the struct.
         let tuple_ty = self.context.struct_type(
             &[
                 BasicTypeEnum::IntType(i64_ty),
@@ -409,52 +458,72 @@ impl<'ctx> CodeGenerator<'ctx> {
             ],
             false,
         );
-        // Tuple is {i64, i64} = 16 bytes on all supported targets.
         let tuple_size_val = i64_ty.const_int(16, false);
         let tuple_heap_ptr = self.malloc_or_abort(tuple_size_val, "try_rej_tuple")?;
-        let tuple_alloca = self
+        let tuple_typed = self
             .builder
             .build_pointer_cast(
                 tuple_heap_ptr,
                 self.context.ptr_type(inkwell::AddressSpace::default()),
                 "try_rej_tuple_cast",
             )
-            .map_err(|e| CompileError::LlvmError(format!("bitcast: {}", e)))?;
+            .map_err(|e| CompileError::LlvmError(format!("bitcast: {e}")))?;
         let src_gep = self
             .gep()
-            .build_struct_gep(tuple_ty, tuple_alloca, 0, "try_rej_tuple_src")
-            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
-        self.build_store(src_gep, source_as_i64)?;
+            .build_struct_gep(tuple_ty, tuple_typed, 0, "try_rej_slot_src")
+            .map_err(|e| CompileError::LlvmError(format!("gep src: {e}")))?;
+        self.build_store(src_gep, source_ptr_i64)?;
         let err_gep = self
             .gep()
-            .build_struct_gep(tuple_ty, tuple_alloca, 1, "try_rej_tuple_err")
-            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
-        self.build_store(err_gep, err_as_i64)?;
+            .build_struct_gep(tuple_ty, tuple_typed, 1, "try_rej_slot_err")
+            .map_err(|e| CompileError::LlvmError(format!("gep err: {e}")))?;
+        self.build_store(err_gep, err_ptr_i64)?;
 
-        // Build outer Result struct: {i1 disc=0, i64 ok_pad=0, i64 err=ptr_to_tuple}
+        // Build outer Result struct with the FUNCTION'S actual return type
+        // instead of a hardcoded {i1, i64, i64}. Flow transitions return
+        // {i1, ToState, i64} where ToState is the target state struct (e.g.,
+        // Paid {string, i32, string} = 40 bytes). Using the wrong struct type
+        // causes the Err path to write only 24 bytes into a 56-byte return
+        // slot — the err payload (i64 at offset 48) contains garbage → SIGSEGV.
         let tuple_ptr_i64 = self
             .builder
-            .build_ptr_to_int(tuple_alloca, i64_ty, "try_rej_tuple_i64")
-            .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {}", e)))?;
-        let result_struct_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::IntType(bool_ty),
-                BasicTypeEnum::IntType(i64_ty),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
+            .build_ptr_to_int(tuple_typed, i64_ty, "try_rej_tuple_i64")
+            .map_err(|e| CompileError::LlvmError(format!("ptrtoint: {e}")))?;
+        let result_struct_bte = function.get_type().get_return_type().ok_or_else(|| {
+            CompileError::LlvmError("fails transition function has no return type".into())
+        })?;
+        if !matches!(result_struct_bte, BasicTypeEnum::StructType(_)) {
+            return Err("fails transition return type is not a struct".into());
+        }
+        let result_llvm_st = match result_struct_bte {
+            BasicTypeEnum::StructType(st) => st,
+            _ => return Err("fails transition return type is not a struct".into()),
+        };
+        let result_struct_ty = BasicTypeEnum::StructType(result_llvm_st);
         let result_alloca = self.build_alloca(result_struct_ty, "try_rej_result")?;
         let disc_gep = self
             .gep()
             .build_struct_gep(result_struct_ty, result_alloca, 0, "try_rej_res_disc")
             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
         self.build_store(disc_gep, bool_ty.const_int(0, false))?; // Err
+                                                                  // Zero-initialize field 1 (ok payload) using its actual LLVM type.
+                                                                  // For a struct ok-payload, store const_zero; for int, store 0.
+        let ok_field_ty = result_llvm_st
+            .get_field_type_at_index(1)
+            .ok_or_else(|| CompileError::LlvmError("result struct has no field index 1".into()))?;
         let ok_pad_gep = self
             .gep()
             .build_struct_gep(result_struct_ty, result_alloca, 1, "try_rej_res_ok")
             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
-        self.build_store(ok_pad_gep, i64_ty.const_int(0, false))?;
+        let ok_zero_val: BasicValueEnum<'ctx> = match ok_field_ty {
+            BasicTypeEnum::IntType(it) => it.const_zero().into(),
+            BasicTypeEnum::StructType(st) => st.const_zero().into(),
+            BasicTypeEnum::PointerType(pt) => pt.const_zero().into(),
+            BasicTypeEnum::ArrayType(at) => at.const_zero().into(),
+            BasicTypeEnum::FloatType(ft) => ft.const_zero().into(),
+            _ => i64_ty.const_zero().into(),
+        };
+        self.build_store(ok_pad_gep, ok_zero_val)?;
         let err_store_gep = self
             .gep()
             .build_struct_gep(result_struct_ty, result_alloca, 2, "try_rej_res_err")

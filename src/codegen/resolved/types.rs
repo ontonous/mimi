@@ -124,7 +124,9 @@ fn lower_resolved_type<'ctx>(
         // 0.32.2: Builtin collection types. List is {i64 len, ptr data}
         // matching the legacy emitter's list_struct_type(). Map and Set
         // share the same runtime representation (handle-based).
-        ResolvedType::Nominal { item, arguments, .. } => {
+        ResolvedType::Nominal {
+            item, arguments, ..
+        } => {
             // Validate element types are lowerable (fail-closed).
             for arg in arguments {
                 let _ = lower_resolved_type(context, types, arg, active)?;

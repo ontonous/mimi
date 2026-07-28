@@ -14,6 +14,11 @@ struct MatchArmEnv<'ctx> {
     scrutinee_iv: Option<IntValue<'ctx>>,
     merge_bb: BasicBlock<'ctx>,
     else_bb: BasicBlock<'ctx>,
+    /// The Mimi AST type of the scrutinee expression (if inferable),
+    /// used to recover struct-typed variables from ptrtoint-encoded i64
+    /// payloads in pattern matching (e.g., `Err((src, e))` where src is
+    /// a flow state stored as a heap pointer).
+    scrutinee_type: Option<crate::ast::Type>,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -23,6 +28,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         scrutinee_val: BasicValueEnum<'ctx>,
         scrutinee_iv: Option<inkwell::values::IntValue<'ctx>>,
         vars: &HashMap<String, VarEntry<'ctx>>,
+        scrutinee_type: Option<&crate::ast::Type>,
     ) -> Result<HashMap<String, VarEntry<'ctx>>, CompileError> {
         let mut local_vars = vars.clone();
         // Bind variables from pattern
@@ -252,14 +258,190 @@ impl<'ctx> CodeGenerator<'ctx> {
                         })
                     });
                     for (_, inner_pat) in inner_patterns {
-                        if let PatternKind::Variable(bind_name) = &inner_pat.kind {
-                            self.bind_pattern_var(&mut local_vars, bind_name, payload, payload_ty)?;
-                            if let Some(ref ast_ty) = payload_ast {
-                                self.var_types.insert(bind_name.clone(), ast_ty.clone());
-                                if let Some(full) = self.get_full_type_name(ast_ty) {
-                                    self.var_type_names.insert(bind_name.clone(), full);
+                        match &inner_pat.kind {
+                            PatternKind::Variable(bind_name) => {
+                                self.bind_pattern_var(
+                                    &mut local_vars,
+                                    bind_name,
+                                    payload,
+                                    payload_ty,
+                                )?;
+                                if let Some(ref ast_ty) = payload_ast {
+                                    self.var_types.insert(bind_name.clone(), ast_ty.clone());
+                                    if let Some(full) = self.get_full_type_name(ast_ty) {
+                                        self.var_type_names.insert(bind_name.clone(), full);
+                                    }
+                                    self.register_list_elem_type(bind_name, ast_ty);
+                                } else {
+                                    // Built-in constructor (Ok/Err/Some/None) from
+                                    // Result/Option. The AST type is not in type_defs,
+                                    // so payload_ast is None. Look up the type by
+                                    // matching the payload's LLVM type against
+                                    // registered type_llvm entries.
+                                    let payload_type_name =
+                                        self.find_type_name_by_llvm_type(payload_ty);
+                                    if let Some(ref ty_name) = payload_type_name {
+                                        self.var_type_names
+                                            .insert(bind_name.clone(), ty_name.clone());
+                                    }
                                 }
-                                self.register_list_elem_type(bind_name, ast_ty);
+                            }
+                            _ => {
+                                // Non-variable pattern (e.g. Tuple, Constructor).
+                                // Recursively bind inner variables from the payload.
+                                //
+                                // For built-in Err with i64 (ptrtoint) payload,
+                                // the heap-allocated struct is always {i64, i64}
+                                // (source and error, both ptrtoint-encoded by
+                                // compile_try_rejected). Decode before recursing
+                                // so tuple/constructor inner patterns see a
+                                // StructValue instead of a raw i64.
+                                let recurse_payload = if name == "Err"
+                                    && variant_owner.is_none()
+                                    && matches!(payload, BasicValueEnum::IntValue(_))
+                                {
+                                    let i64_ty = self.context.i64_type();
+                                    let tuple_llvm_ty = self.context.struct_type(
+                                        &[
+                                            BasicTypeEnum::IntType(i64_ty),
+                                            BasicTypeEnum::IntType(i64_ty),
+                                        ],
+                                        false,
+                                    );
+                                    let ptr = self
+                                        .builder
+                                        .build_int_to_ptr(
+                                            payload.into_int_value(),
+                                            self.context.ptr_type(inkwell::AddressSpace::default()),
+                                            "err_tuple_ptr",
+                                        )
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!(
+                                                "inttoptr err tuple: {e}"
+                                            ))
+                                        })?;
+                                    self.builder
+                                        .build_load(
+                                            BasicTypeEnum::StructType(tuple_llvm_ty),
+                                            ptr,
+                                            "err_tuple_loaded",
+                                        )
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!("load err tuple: {e}"))
+                                        })?
+                                } else {
+                                    payload
+                                };
+                                // For Tuple patterns inside built-in constructors
+                                // with ptrtoint-encoded i64 payloads, extract each
+                                // field individually and convert i64→struct via
+                                // inttoptr+load, so Variable bindings get the
+                                // correct LLVM struct type instead of a raw i64.
+                                if let PatternKind::Tuple(sub_pats) = &inner_pat.kind {
+                                    let decoded_struct = recurse_payload.into_struct_value();
+                                    // Determine the expected Mimi types for each
+                                    // tuple field from the scrutinee's error type.
+                                    // Result<T, (Source, E)> → error tuple field types.
+                                    let err_field_mimi_types: Vec<crate::ast::Type> =
+                                        scrutinee_type
+                                            .and_then(|st| match st {
+                                                crate::ast::Type::Result(_, err_tuple) => {
+                                                    match err_tuple.as_ref() {
+                                                        crate::ast::Type::Tuple(elems) => {
+                                                            Some(elems.clone())
+                                                        }
+                                                        _ => None,
+                                                    }
+                                                }
+                                                _ => None,
+                                            })
+                                            .unwrap_or_default();
+                                    for (i, sub_pat) in sub_pats.iter().enumerate() {
+                                        // Extract i-th field (i64 ptrtoint)
+                                        let field_i64 = self
+                                            .builder
+                                            .build_extract_value(
+                                                decoded_struct,
+                                                i as u32,
+                                                &format!("err_tuple_field_{i}"),
+                                            )
+                                            .map_err(|e| {
+                                                CompileError::LlvmError(format!(
+                                                    "extract err tuple field {i}: {e}"
+                                                ))
+                                            })?
+                                            .into_int_value();
+                                        // If we know the expected Mimi type, inttoptr
+                                        // and load as the correct LLVM struct type.
+                                        let field_val: BasicValueEnum<'ctx> = if let Some(
+                                            field_mimi_ty,
+                                        ) =
+                                            err_field_mimi_types.get(i)
+                                        {
+                                            match self.llvm_type_for(field_mimi_ty) {
+                                                Some(target_llvm) => {
+                                                    let ptr = self
+                                                        .builder
+                                                        .build_int_to_ptr(
+                                                            field_i64,
+                                                            self.context.ptr_type(
+                                                                inkwell::AddressSpace::default(),
+                                                            ),
+                                                            &format!("field_{i}_ptr"),
+                                                        )
+                                                        .map_err(|e| {
+                                                            CompileError::LlvmError(format!(
+                                                                "inttoptr field {i}: {e}"
+                                                            ))
+                                                        })?;
+                                                    self.builder
+                                                        .build_load(
+                                                            target_llvm,
+                                                            ptr,
+                                                            &format!("field_{i}_loaded"),
+                                                        )
+                                                        .map_err(|e| {
+                                                            CompileError::LlvmError(format!(
+                                                                "load field {i}: {e}"
+                                                            ))
+                                                        })?
+                                                }
+                                                None => {
+                                                    // Fallback: keep as i64
+                                                    field_i64.into()
+                                                }
+                                            }
+                                        } else {
+                                            field_i64.into()
+                                        };
+                                        self.compile_pattern_bind(
+                                            sub_pat,
+                                            field_val,
+                                            &mut local_vars,
+                                        )?;
+                                        // Register var_type_names for inner
+                                        // variables so infer_object_type can
+                                        // resolve the type name for field access.
+                                        if let PatternKind::Variable(vname) = &sub_pat.kind {
+                                            if let Some(field_mimi_ty) = err_field_mimi_types.get(i)
+                                            {
+                                                let ty_name =
+                                                    Self::mimi_type_to_type_name(field_mimi_ty);
+                                                if let Some(tn) = ty_name {
+                                                    self.var_type_names.insert(vname.clone(), tn);
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Non-Tuple inner pattern: fall through to
+                                    // compile_pattern_bind with the decoded payload.
+                                    self.compile_pattern_bind(
+                                        inner_pat,
+                                        recurse_payload,
+                                        &mut local_vars,
+                                    )?;
+                                }
                             }
                         }
                     }
@@ -804,11 +986,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Guard failure must continue to the next arm's dispatch block, so
             // update else_bb before compiling the arm body.
             else_bb = next_else_bb;
+            let scrutinee_type = self.expr_type_of(scrutinee, vars);
             let env = MatchArmEnv {
                 scrutinee_val,
                 scrutinee_iv,
                 merge_bb,
                 else_bb,
+                scrutinee_type,
             };
             let (arm_val, body_bb) = self.compile_match_arm_body(i, arm, arm_bb, vars, &env)?;
             incoming_vals.push(arm_val);
@@ -1071,8 +1255,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         })?;
         self.builder.position_at_end(arm_bb);
 
-        let local_vars =
-            self.bind_pattern_variables(arm, env.scrutinee_val, env.scrutinee_iv, vars)?;
+        let local_vars = self.bind_pattern_variables(
+            arm,
+            env.scrutinee_val,
+            env.scrutinee_iv,
+            vars,
+            env.scrutinee_type.as_ref(),
+        )?;
         match &arm.guard {
             Some(guard) => {
                 let guard_val = self.compile_expr(guard, &local_vars)?;
@@ -1323,12 +1512,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// exact regardless of how many entries the arm body's expression produced
     /// (varies: N+1 Ptr entries for fstring with N interpolations, 1 for string
     /// concat, etc.) and independent of entry type (Ptr vs Slot).
-    fn claim_match_arm_string(
-        &self,
-        body: &Expr,
-        _val: &BasicValueEnum<'ctx>,
-        prior_count: usize,
-    ) {
+    fn claim_match_arm_string(&self, body: &Expr, _val: &BasicValueEnum<'ctx>, prior_count: usize) {
         if self.is_string_producing_expr(body) {
             let mut guard = self.heap_allocs.borrow_mut();
             if let Some(scope) = guard.last_mut() {
@@ -1364,16 +1548,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
             }
             // Look through block wrappers: { f"..." } or { let x = ...; f"..." }
-            Expr::Block(stmts) => {
-                self.block_last_is_string_producer(stmts)
-            }
+            Expr::Block(stmts) => self.block_last_is_string_producer(stmts),
             // Recurse into if-expr: both branches are Blocks compiled via
             // compile_block_last_val (no heap scope push), so string-producing
             // tail expressions in either branch leak heap entries into the
             // enclosing scope and must be claimed.
-            Expr::If { cond: _, then_, else_ } => {
+            Expr::If {
+                cond: _,
+                then_,
+                else_,
+            } => {
                 self.block_last_is_string_producer(then_)
-                    || else_.as_ref().is_some_and(|blk| self.block_last_is_string_producer(blk))
+                    || else_
+                        .as_ref()
+                        .is_some_and(|blk| self.block_last_is_string_producer(blk))
             }
             _ => false,
         }

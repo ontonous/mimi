@@ -241,9 +241,7 @@ fn require_scalar_type(
         // ({i1, T} and {i1, T, E} structs). Accept them in the eligibility
         // gate so the resolved emitter can handle Option/Result-typed
         // parameters, return values, and local bindings.
-        Some(ResolvedType::Option(payload)) => {
-            require_scalar_type(program, owner, payload)
-        }
+        Some(ResolvedType::Option(payload)) => require_scalar_type(program, owner, payload),
         Some(ResolvedType::Result { ok, error }) => {
             require_scalar_type(program, owner, ok)?;
             require_scalar_type(program, owner, error)
@@ -252,7 +250,9 @@ fn require_scalar_type(
         // in types.rs. Accept them so the resolved emitter can handle
         // collection-typed parameters, return values, and local bindings.
         // 0.32.5: User-defined record types are also accepted.
-        Some(ResolvedType::Nominal { item, arguments, .. }) => {
+        Some(ResolvedType::Nominal {
+            item, arguments, ..
+        }) => {
             match item.as_str() {
                 "builtin:type:List" | "builtin:type:Map" | "builtin:type:Set" => {
                     for arg in arguments {
@@ -272,10 +272,7 @@ fn require_scalar_type(
                             .is_some_and(|n| td.qualified_name == n)
                             || td.qualified_name == item_str;
                         matches_name
-                            && matches!(
-                                td.kind,
-                                crate::core::resolved::ResolvedTypeKind::Record
-                            )
+                            && matches!(td.kind, crate::core::resolved::ResolvedTypeKind::Record)
                     });
                     if is_record {
                         for arg in arguments {
