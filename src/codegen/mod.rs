@@ -395,6 +395,13 @@ pub struct CodeGenerator<'ctx> {
     /// (Rejected codegen not yet implemented) instead of silently calling
     /// `mimi_try_exit` which would produce wrong dual-backend behavior.
     in_fails_transition: bool,
+    /// Set of function qualified_names that the resolved emitter attempted to
+    /// compile but failed (e.g., due to a coercion error in the body emission).
+    /// These functions may have partial basic blocks (entry block without
+    /// terminator) that would cause the legacy emitter's `compile_func` to
+    /// incorrectly skip them. Track them here so the legacy emitter knows to
+    /// recompile even when `count_basic_blocks() != 0`.
+    resolved_failed_functions: std::collections::HashSet<String>,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -563,6 +570,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             component_ir: None,
             max_children: None,
             in_fails_transition: false,
+            resolved_failed_functions: std::collections::HashSet::new(),
         }
     }
 

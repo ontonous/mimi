@@ -1591,7 +1591,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Convert any basic value to an i64 ValueHandle for map/set storage.
     /// Integers are stored directly (no tagging). Pointers are stored as ptrtoint.
     /// The runtime's `mimi_any_to_string` handles both tagged and untagged values.
-    fn any_value_to_handle(
+    pub(super) fn any_value_to_handle(
         &self,
         val: BasicValueEnum<'ctx>,
     ) -> Result<IntValue<'ctx>, CompileError> {
