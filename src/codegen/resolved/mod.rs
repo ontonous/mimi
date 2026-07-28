@@ -40,9 +40,24 @@ pub(super) fn supports_resolved_native(program: &CheckedProgram) -> bool {
 pub(super) fn resolved_eligible_functions(
     program: &CheckedProgram,
 ) -> Option<std::collections::BTreeSet<NodeId>> {
-    eligible_function_ids(program)
-        .ok()
-        .filter(|set| !set.is_empty())
+    match eligible_function_ids(program) {
+        Ok(set) if !set.is_empty() => Some(set),
+        Ok(_) => {
+            if std::env::var("MIMI_VERBOSE").is_ok() {
+                eprintln!("info: resolved dispatch: 0 eligible functions (all filtered per-function)");
+            }
+            None
+        }
+        Err(blocker) => {
+            if std::env::var("MIMI_VERBOSE").is_ok() {
+                eprintln!(
+                    "info: resolved dispatch blocked: {}",
+                    blocker.reason
+                );
+            }
+            None
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1203,6 +1218,37 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 .iter()
                                 .map(|arg| resolved_type_display_name(self.program, &arg.value.ty))
                                 .collect();
+                        }
+                        // 0.32.18: Builtin/module-function name shadowing.
+                        // The checker may resolve a call to a module function
+                        // (e.g. `contains` from std::strings) as
+                        // ResolvedCallee::Builtin when a builtin with the same
+                        // name exists. If a user-defined function with this
+                        // name has been forward-declared in the LLVM module,
+                        // call it directly instead of delegating to
+                        // compile_builtin_call (which would dispatch to the
+                        // wrong builtin implementation, e.g. list-contains
+                        // instead of string-contains → SIGSEGV).
+                        if let Some(shadow_fn) = self.generator.module.get_function(name) {
+                            // Only shadow if the function is user-defined
+                            // (has a body or is forward-declared from a
+                            // module file). Runtime builtins like printf
+                            // are also in the module but should NOT be
+                            // shadowed — they don't conflict with module
+                            // functions.
+                            let is_user_decl = self.generator.func_defs.contains_key(name);
+                            if is_user_decl {
+                                let result = self
+                                    .generator
+                                    .build_call(shadow_fn, &arguments, "resolved_shadow_call")?
+                                    .try_as_basic_value_opt()
+                                    .ok_or_else(|| {
+                                        CompileError::LlvmError(format!(
+                                            "resolved shadow call '{name}' returned void"
+                                        ))
+                                    })?;
+                                return self.wrap_builtin_string_result(result, &call.result);
+                            }
                         }
                         let result = self.generator.compile_builtin_call(name, &arguments)?;
                         // ABI bridge: builtins return raw ptr for strings, but the
