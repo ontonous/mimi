@@ -2644,10 +2644,81 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 }
             }
         }
+        // 0.32.21: Flow state field fallback. Extract the state path and
+        // source span from the field_id, then match against the legacy
+        // type_defs registered by compile_flow().
+        if let Some((flow_type_name, span_str)) = Self::parse_flow_field_id(field_id) {
+            if let Some(td) = self.generator.type_defs.get(&flow_type_name) {
+                if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
+                    if let Some(field) = Self::match_field_by_span(fields, &span_str) {
+                        return Ok(field.name.clone());
+                    }
+                }
+            }
+        }
         Err(CompileError::Unsupported(format!(
             "field '{}' not found in any type definition",
             field_id.0
         )))
+    }
+
+    /// Parse a Flow state field_id into (flow_type_name, span_string).
+    /// Format: "state:Flow::State/node:decl.field@external:HASH:LINE:COL-LINE:COL"
+    /// Returns ("flow::Flow::State", "LINE:COL-LINE:COL").
+    fn parse_flow_field_id(field_id: &NodeId) -> Option<(String, String)> {
+        let id_str = &field_id.0;
+        let state_path = id_str.strip_prefix("state:")?;
+        let slash_pos = state_path.find('/')?;
+        let state_name = &state_path[..slash_pos];
+        // Extract span: last segment after the last ':'-separated hash.
+        // Format after slash: "node:decl.field@external:HASH:L:C-L:C"
+        let after_slash = &state_path[slash_pos + 1..];
+        // Find the span part: "L:C-L:C" at the end.
+        let span_str = after_slash.rsplit_once(':').map(|(_, s)| s)?;
+        // span_str is now "L:C-L:C" — but we need to handle the case where
+        // the hash contains colons. Use a more robust extraction: find the
+        // pattern "digits:digits-digits:digits" at the end.
+        let span_str = span_str
+            .rsplit_once('-')
+            .and_then(|(start, end)| {
+                // start might be "L:C" or "HASH:L:C"
+                let start = start.rsplit_once(':').map(|(_, c)| {
+                    // Reconstruct "L:C" from the last two segments
+                    let line = start.rsplit_once(':').map(|(l, _)| l.rsplit_once(':').map_or(l, |(_, l2)| l2)).unwrap_or(start);
+                    format!("{}:{}", line, c)
+                }).unwrap_or(start.to_string());
+                Some(format!("{}-{}", start, end))
+            })
+            .unwrap_or(span_str.to_string());
+        Some((format!("flow::{state_name}"), span_str))
+    }
+
+    /// Match a field by comparing source spans. The span_str format is
+    /// "LINE:COL-LINE:COL" (possibly with extra hash prefix).
+    fn match_field_by_span<'a>(
+        fields: &'a [crate::ast::Field],
+        span_str: &str,
+    ) -> Option<&'a crate::ast::Field> {
+        // Parse "L:C-L:C" from span_str (take the last valid pattern).
+        let parts: Vec<&str> = span_str.split('-').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        let end_part = parts.last()?;
+        let start_part = parts[parts.len() - 2];
+        let (end_line, end_col) = end_part.split_once(':')?;
+        let (start_line, start_col) = start_part.split_once(':')?;
+        let end_line: usize = end_line.parse().ok()?;
+        let end_col: usize = end_col.parse().ok()?;
+        let start_line: usize = start_line.parse().ok()?;
+        let start_col: usize = start_col.parse().ok()?;
+        fields.iter().find(|f| {
+            let s = &f.meta.span;
+            s.start_line == start_line
+                && s.start_col == start_col
+                && s.end_line == end_line
+                && s.end_col == end_col
+        })
     }
 
     /// Build the LLVM struct type for a user-defined record NominalTypeId.
@@ -2748,6 +2819,27 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             for (i, (name, _)) in td.fields.iter().enumerate() {
                 if name == field_name {
                     return Ok(i as u32);
+                }
+            }
+        }
+        // 0.32.21: Flow state field fallback.
+        if let Some((flow_type_name, span_str)) = Self::parse_flow_field_id(field_id) {
+            if let Some(td) = self.generator.type_defs.get(&flow_type_name) {
+                if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
+                    // Match by name first.
+                    for (i, f) in fields.iter().enumerate() {
+                        if f.name == field_name {
+                            return Ok(i as u32);
+                        }
+                    }
+                    // Match by span.
+                    if let Some(field) = Self::match_field_by_span(fields, &span_str) {
+                        for (i, f) in fields.iter().enumerate() {
+                            if std::ptr::eq(f, field) {
+                                return Ok(i as u32);
+                            }
+                        }
+                    }
                 }
             }
         }
