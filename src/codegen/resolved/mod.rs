@@ -1036,6 +1036,29 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     "resolved callee '{symbol}' is undeclared"
                                 ))
                             })?;
+                        // 0.32.19: Coerce arguments to match the callee's
+                        // declared parameter types. The resolved IR may type
+                        // an argument as i64 (e.g. literal 7) while the
+                        // callee's forward declaration (from legacy emitter's
+                        // generic instantiation) expects i32. Without this
+                        // coercion, LLVM verification fails on type mismatch.
+                        let params = callee.get_params();
+                        for (i, arg) in arguments.iter_mut().enumerate() {
+                            if let Some(param) = params.get(i) {
+                                let param_ty = param.get_type();
+                                let arg_basic: BasicValueEnum = match *arg {
+                                    BasicMetadataValueEnum::IntValue(iv) => iv.into(),
+                                    BasicMetadataValueEnum::FloatValue(fv) => fv.into(),
+                                    BasicMetadataValueEnum::PointerValue(pv) => pv.into(),
+                                    BasicMetadataValueEnum::StructValue(sv) => sv.into(),
+                                    _ => continue,
+                                };
+                                if arg_basic.get_type() != param_ty {
+                                    let coerced = self.coerce_to(arg_basic, param_ty)?;
+                                    *arg = BasicMetadataValueEnum::from(coerced);
+                                }
+                            }
+                        }
                         self.generator
                             .build_call(callee, &arguments, "resolved_call")?
                             .try_as_basic_value_opt()
@@ -1238,6 +1261,26 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             // functions.
                             let is_user_decl = self.generator.func_defs.contains_key(name);
                             if is_user_decl {
+                                // Coerce arguments to match the shadow
+                                // function's declared parameter types (same
+                                // as ResolvedCallee::Function path).
+                                let params = shadow_fn.get_params();
+                                for (i, arg) in arguments.iter_mut().enumerate() {
+                                    if let Some(param) = params.get(i) {
+                                        let param_ty = param.get_type();
+                                        let arg_basic: BasicValueEnum = match *arg {
+                                            BasicMetadataValueEnum::IntValue(iv) => iv.into(),
+                                            BasicMetadataValueEnum::FloatValue(fv) => fv.into(),
+                                            BasicMetadataValueEnum::PointerValue(pv) => pv.into(),
+                                            BasicMetadataValueEnum::StructValue(sv) => sv.into(),
+                                            _ => continue,
+                                        };
+                                        if arg_basic.get_type() != param_ty {
+                                            let coerced = self.coerce_to(arg_basic, param_ty)?;
+                                            *arg = BasicMetadataValueEnum::from(coerced);
+                                        }
+                                    }
+                                }
                                 let result = self
                                     .generator
                                     .build_call(shadow_fn, &arguments, "resolved_shadow_call")?
