@@ -236,8 +236,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 );
                             }
                             // Track failed functions so the legacy emitter
-                            // knows to recompile them even if the function
-                            // has partial basic blocks from the failed attempt.
+                            // can re-compile them (clearing the partial body
+                            // before re-emitting).
                             self.generator
                                 .resolved_failed_functions
                                 .insert(symbol.clone());
@@ -249,9 +249,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 }
                 Err(e) => {
                     // Function failed to emit through resolved path.
-                    // The function may have partial basic blocks (entry block
-                    // without terminator) from the failed emit_callable.
-                    // Track it so compile_func knows to recompile.
+                    // Record in failed set — the legacy emitter's skip check
+                    // will handle it by deleting the partial body and
+                    // re-compiling from scratch.
                     let symbol = function.qualified_name.clone();
                     self.generator.resolved_failed_functions.insert(symbol);
                     if std::env::var("MIMI_VERBOSE").is_ok() {
@@ -632,10 +632,32 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         "tuple pattern bound to non-struct value".into(),
                     ));
                 };
+                // Store to alloca + GEP + load instead of extract_value.
+                // extract_value misorders fields on struct-returning function
+                // call results under LLVM target lowering (cross-emitter ABI).
+                // GEP+load is consistent across all code paths.
+                let sty = struct_val.get_type();
+                let alloca = self.generator.build_alloca(sty, "tuple_pat")?;
+                self.generator.build_store(alloca, struct_val)?;
                 for (index, sub_pattern) in sub_patterns.iter().enumerate() {
-                    let field = struct_val.get_field_at_index(index as u32).ok_or_else(|| {
-                        CompileError::LlvmError(format!("tuple field {index} absent in pattern"))
-                    })?;
+                    let field_ptr = self
+                        .generator
+                        .builder
+                        .build_struct_gep(sty, alloca, index as u32, "pat_gep")
+                        .map_err(|e| CompileError::LlvmError(format!("pat gep: {e}")))?;
+                    let field_ty = sty
+                        .get_field_type_at_index(index as u32)
+                        .ok_or_else(|| {
+                            CompileError::LlvmError(format!(
+                                "tuple field type {index} absent in pattern"
+                            ))
+                        })?;
+                    let field = self
+                        .generator
+                        .build_load(field_ty, field_ptr, "pat_field")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("pat load: {e}"))
+                        })?;
                     self.bind_pattern(body, sub_pattern, field, frame)?;
                 }
                 Ok(())
@@ -2404,6 +2426,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             ))),
         }
     }
+
 }
 
 fn binary_op(op: ResolvedBinaryOp) -> BinOp {

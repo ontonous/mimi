@@ -529,7 +529,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         // to inside compile_file, after the setup phase (forward declarations,
         // impl methods, vtables) completes. This ensures all symbols are
         // declared before the resolved emitter compiles eligible bodies.
-        let eligible = super::resolved::resolved_eligible_functions(program);
+        // ⛔ 2026-07-28: Disabled due to ABI incompatibility between resolved
+        // and legacy emitters for List type operations (string → i64 coercion
+        // for list storage in array_set and main, resulting in empty list
+        // results or SIGSEGV in real_world tests).
+        // Enable with MIMI_USE_PER_FUNCTION_DISPATCH=1 once the resolved
+        // emitter handles list literal types and string-to-integer coercions.
+        let eligible: Option<std::collections::BTreeSet<crate::core::NodeId>> =
+            if std::env::var("MIMI_USE_PER_FUNCTION_DISPATCH").is_ok() {
+                super::resolved::resolved_eligible_functions(program)
+            } else {
+                None
+            };
         self.compile_file_with_resolved(program.legacy_body_file(), program, eligible.as_ref())
             .map_err(|error| {
                 let mut diagnostic = error.to_diagnostic();
