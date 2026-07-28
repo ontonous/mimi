@@ -1354,24 +1354,31 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                  (not safe for resolved delegation)"
                             )));
                         }
-                        // 0.32.22: Promote i32 integer arguments to i64 before
-                        // delegating to compile_builtin_call. Runtime functions
-                        // (mimi_mutex_new, mimi_mutex_set, etc.) are declared
-                        // with i64 parameters, but the resolved IR types integer
-                        // literals as i32. Without promotion, LLVM verification
-                        // fails on the type mismatch.
-                        let i64_ty = self.generator.context.i64_type();
-                        for arg in arguments.iter_mut() {
-                            if let BasicMetadataValueEnum::IntValue(iv) = *arg {
-                                if iv.get_type().get_bit_width() < 64 {
-                                    let extended = self
-                                        .generator
-                                        .builder
-                                        .build_int_s_extend(iv, i64_ty, "builtin_arg_sext")
-                                        .map_err(|e| {
-                                            CompileError::LlvmError(format!("builtin arg sext: {e}"))
-                                        })?;
-                                    *arg = BasicMetadataValueEnum::IntValue(extended);
+                        // 0.32.22: Coerce integer arguments to match the runtime
+                        // function's declared parameter types. Builtins like
+                        // mutex_new call runtime functions (mimi_mutex_new)
+                        // declared with i64 params, but the resolved IR types
+                        // integer literals as i32. Look up the runtime function
+                        // and coerce to match its signature.
+                        // Runtime function name: "mimi_{builtin_name}" for
+                        // most builtins.
+                        let runtime_fn_name = format!("mimi_{name}");
+                        if let Some(runtime_fn) = self.generator.module.get_function(&runtime_fn_name) {
+                            let params = runtime_fn.get_params();
+                            for (i, arg) in arguments.iter_mut().enumerate() {
+                                if let Some(param) = params.get(i) {
+                                    let param_ty = param.get_type();
+                                    let arg_basic: BasicValueEnum = match *arg {
+                                        BasicMetadataValueEnum::IntValue(iv) => iv.into(),
+                                        BasicMetadataValueEnum::FloatValue(fv) => fv.into(),
+                                        BasicMetadataValueEnum::PointerValue(pv) => pv.into(),
+                                        BasicMetadataValueEnum::StructValue(sv) => sv.into(),
+                                        _ => continue,
+                                    };
+                                    if arg_basic.get_type() != param_ty {
+                                        let coerced = self.coerce_to(arg_basic, param_ty)?;
+                                        *arg = BasicMetadataValueEnum::from(coerced);
+                                    }
                                 }
                             }
                         }
@@ -1494,6 +1501,63 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 ))
                             })
                     }
+                    // 0.32.22: ProtocolMethod — static trait method dispatch.
+                    // Extract the concrete type and method name from the
+                    // MethodId, construct the impl function name
+                    // ("{Type}_{method}"), and call it directly.
+                    ResolvedCallee::ProtocolMethod { ref method, .. } => {
+                        // MethodId format: "function:{Trait}:for:{Type}::{method}:{hash}"
+                        let method_str = method.as_str();
+                        let symbol = method_str
+                            .strip_prefix("function:")
+                            .and_then(|s: &str| s.split_once(":for:"))
+                            .and_then(|(_, rest): (&str, &str)| {
+                                rest.split_once("::").map(|(ty, method_hash): (&str, &str)| {
+                                    let method_name = method_hash
+                                        .rsplit_once(':')
+                                        .map(|(m, _)| m)
+                                        .unwrap_or(method_hash);
+                                    format!("{}_{}", ty, method_name)
+                                })
+                            })
+                            .ok_or_else(|| {
+                                CompileError::Unsupported(format!(
+                                    "cannot parse ProtocolMethod MethodId '{method_str}'"
+                                ))
+                            })?;
+                        let callee =
+                            self.generator.module.get_function(&symbol).ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "resolved ProtocolMethod callee '{symbol}' is undeclared"
+                                ))
+                            })?;
+                        // Coerce arguments to match the callee's parameter types.
+                        let params = callee.get_params();
+                        for (i, arg) in arguments.iter_mut().enumerate() {
+                            if let Some(param) = params.get(i) {
+                                let param_ty = param.get_type();
+                                let arg_basic: BasicValueEnum = match *arg {
+                                    BasicMetadataValueEnum::IntValue(iv) => iv.into(),
+                                    BasicMetadataValueEnum::FloatValue(fv) => fv.into(),
+                                    BasicMetadataValueEnum::PointerValue(pv) => pv.into(),
+                                    BasicMetadataValueEnum::StructValue(sv) => sv.into(),
+                                    _ => continue,
+                                };
+                                if arg_basic.get_type() != param_ty {
+                                    let coerced = self.coerce_to(arg_basic, param_ty)?;
+                                    *arg = BasicMetadataValueEnum::from(coerced);
+                                }
+                            }
+                        }
+                        self.generator
+                            .build_call(callee, &arguments, "resolved_trait_call")?
+                            .try_as_basic_value_opt()
+                            .ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "resolved ProtocolMethod '{symbol}' returned void"
+                                ))
+                            })
+}
                     _ => Err(CompileError::Unsupported(format!(
                         "resolved callee {:?} escaped resolved native eligibility at '{}'",
                         call.callee, expression.node_id.0
