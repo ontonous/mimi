@@ -136,6 +136,10 @@ pub(super) fn eligible_function_ids(
     // bodies reference runtime symbols the resolved emitter doesn't track.
     // Keep the blocker until the resolved emitter gains full runtime symbol
     // awareness or the checker provides a reliable "imported" flag.
+    // ⚠ 2026-07-28: Attempted removal exposed 9 regressions (wrong results
+    // and SIGSEGV) in real_world tests. Reverted. The per-function eligibility
+    // guards (Origin::User, qualified_name, require_resolved_native_callable)
+    // are necessary but NOT sufficient for cross-emitter ABI compatibility.
     let user_flow_count = program
         .flows()
         .values()
@@ -162,6 +166,25 @@ pub(super) fn eligible_function_ids(
             "program contains flows/actors/sessions/protocols/capabilities/traits/impls/externs",
         ));
     }
+    // ⛔ 2026-07-28: Blocked earlier removal because:
+    //   1) Origin::User cannot distinguish user from stdlib functions
+    //      (parser assigns AstOrigin::User to ALL parsed text, and
+    //      there is no Origin::Stdlib variant. Stdlib functions thus
+    //      pass the Origin::User eligibility gate, and those using
+    //      Result<T, string> constructor fail at coerce_to because
+    //      compile_ok_constructor hardcodes {i1, T, i64} layout for
+    //      the error slot, while the function expects {i1, T, {ptr, i64}}.
+    //   2) Failed emit_callable functions leave a partial entry block
+    //      (no terminator), and count_basic_blocks() prevents the
+    //      legacy emitter from retrying. A resolved_failed_functions
+    //      tracking mechanism was added but the legacy emitter cannot
+    //      recompile because appending a second "entry" block to an
+    //      existing function is unsupported.
+    //   Fix plan: (a) extend eligibility to reject functions with
+    //   Result<T, string>/Option<T, string> constructor mismatches,
+    //   or (b) fix compile_ok_constructor to accept the expected err
+    //   type from context. Either way, also fix the partial-block leak.
+    //   See resolved_failed_functions / no-terminator-entry design for v0.32.9+.
     // Constants must be materializable.
     for constant in program.constants().values() {
         if matches!(constant.value, crate::core::ResolvedConstValue::Complex) {
@@ -510,6 +533,20 @@ fn require_expr(
         }
         // 0.32.2: List literals.
         ResolvedExprKind::List(elements) => {
+            for element in elements {
+                require_expr(program, owner, element)?;
+            }
+            Ok(())
+        }
+        // 0.32.3: Map/Set literals.
+        ResolvedExprKind::Map(entries) => {
+            for (key, value) in entries {
+                require_expr(program, owner, key)?;
+                require_expr(program, owner, value)?;
+            }
+            Ok(())
+        }
+        ResolvedExprKind::Set(elements) => {
             for element in elements {
                 require_expr(program, owner, element)?;
             }

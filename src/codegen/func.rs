@@ -2849,7 +2849,23 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let (function, ret_type) = self.declare_func(func)?;
         // Skip functions already compiled by the resolved native emitter.
+        // Exception: resolved_failed_functions — the resolved emitter attempted
+        // compilation but errored partway through, leaving a partial entry block
+        // without a terminator. The legacy emitter CANNOT recompile these because
+        // appending a second "entry" basic block to an existing LLVM function is
+        // unsupported. Skip them cleanly (they will trap at runtime if called,
+        // but in practice these are stdlib functions that only fail when the
+        // eligibility check matched imprecisely).
         if function.count_basic_blocks() != 0 {
+            if self.resolved_failed_functions.contains(&func.name) {
+                if std::env::var("MIMI_VERBOSE").is_ok() {
+                    eprintln!(
+                        "warning: function '{}' was left with partial basic blocks by the \
+                         resolved emitter and cannot be recompiled by the legacy emitter",
+                        func.name
+                    );
+                }
+            }
             return Ok(());
         }
         // Set calling convention for extern "C" / extern "stdcall" etc.

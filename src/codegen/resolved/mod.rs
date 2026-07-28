@@ -235,6 +235,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     symbol
                                 );
                             }
+                            // Track failed functions so the legacy emitter
+                            // knows to recompile them even if the function
+                            // has partial basic blocks from the failed attempt.
+                            self.generator
+                                .resolved_failed_functions
+                                .insert(symbol.clone());
                             failed += 1;
                             continue;
                         }
@@ -243,7 +249,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 }
                 Err(e) => {
                     // Function failed to emit through resolved path.
-                    // Legacy emitter will compile it (0 basic blocks → not skipped).
+                    // The function may have partial basic blocks (entry block
+                    // without terminator) from the failed emit_callable.
+                    // Track it so compile_func knows to recompile.
+                    let symbol = function.qualified_name.clone();
+                    self.generator.resolved_failed_functions.insert(symbol);
                     if std::env::var("MIMI_VERBOSE").is_ok() {
                         eprintln!(
                             "warning: resolved emitter fallback for '{}': {}",
@@ -723,6 +733,80 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     list_ptr.into_pointer_value(),
                     "list_val",
                 )
+            }
+            // 0.32.3: Map literal. Call mimi_map_new() then mimi_map_set()
+            // for each entry, same as legacy compile_map_literal.
+            // Returns an i64 opaque handle — the same type used in types.rs.
+            ResolvedExprKind::Map(entries) => {
+                let map_new = self.generator.get_runtime_fn("mimi_map_new")?;
+                let result = self.generator.build_call(map_new, &[], "map_new_call")?;
+                let map_handle = result
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| {
+                        CompileError::LlvmError("mimi_map_new returned void".into())
+                    })?
+                    .into_int_value();
+                if !entries.is_empty() {
+                    let map_set = self.generator.get_runtime_fn("mimi_map_set")?;
+                    for (key_expr, val_expr) in entries {
+                        let key_val = self.emit_expr(key_expr, frame)?;
+                        let val_val = self.emit_expr(val_expr, frame)?;
+                        // Key must be a string — extract the data pointer.
+                        let key_ptr = match key_val {
+                            BasicValueEnum::PointerValue(pv) => pv,
+                            BasicValueEnum::StructValue(sv) => self
+                                .generator
+                                .build_extract_value(sv.into(), 0, "map_key_ptr")?
+                                .into_pointer_value(),
+                            _ => {
+                                return Err(CompileError::Unsupported(
+                                    "map literal key must be a string".into(),
+                                ))
+                            }
+                        };
+                        // Value is cast to i64 (ValueHandle) for storage.
+                        let val_i64 = self.generator.any_value_to_handle(val_val)?;
+                        self.generator.build_call(
+                            map_set,
+                            &[
+                                BasicMetadataValueEnum::IntValue(map_handle),
+                                BasicMetadataValueEnum::PointerValue(key_ptr),
+                                BasicMetadataValueEnum::IntValue(val_i64),
+                            ],
+                            "map_set_call",
+                        )?;
+                    }
+                }
+                Ok(BasicValueEnum::IntValue(map_handle))
+            }
+            // 0.32.3: Set literal. Call mimi_set_new() then mimi_set_insert()
+            // for each element, same as legacy compile_set_literal.
+            // Returns an i64 opaque handle.
+            ResolvedExprKind::Set(elements) => {
+                let set_new = self.generator.get_runtime_fn("mimi_set_new")?;
+                let result = self.generator.build_call(set_new, &[], "set_new_call")?;
+                let set_handle = result
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| {
+                        CompileError::LlvmError("mimi_set_new returned void".into())
+                    })?
+                    .into_int_value();
+                if !elements.is_empty() {
+                    let set_insert = self.generator.get_runtime_fn("mimi_set_insert")?;
+                    for elem in elements {
+                        let val = self.emit_expr(elem, frame)?;
+                        let val_i64 = self.generator.any_value_to_handle(val)?;
+                        self.generator.build_call(
+                            set_insert,
+                            &[
+                                BasicMetadataValueEnum::IntValue(set_handle),
+                                BasicMetadataValueEnum::IntValue(val_i64),
+                            ],
+                            "set_insert_call",
+                        )?;
+                    }
+                }
+                Ok(BasicValueEnum::IntValue(set_handle))
             }
             // 0.32.5: Record construction. Build LLVM struct from field
             // value types, allocate, store each field.
