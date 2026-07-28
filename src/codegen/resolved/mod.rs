@@ -2625,13 +2625,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             ResolvedExprKind::Range { start, end } => {
                 self.emit_for_range(body, pattern, start, end, loop_body, frame)
             }
-            // 0.32.8: for-in-list iteration.
-            ResolvedExprKind::Load(place) => {
-                self.emit_for_list(body, pattern, place, &iterable.ty, loop_body, frame)
-            }
-            _ => Err(CompileError::Unsupported(
-                "non-range/non-list iterable escaped resolved native eligibility".into(),
-            )),
+            // 0.32.8–0.32.9: for-in-list iteration. Any expression whose
+            // type is List<T> is accepted (Load, Call, Project, etc.).
+            _ => self.emit_for_list(body, pattern, iterable, loop_body, frame),
         }
     }
 
@@ -2761,24 +2757,20 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         Ok(())
     }
 
-    /// For-in-list: `for x in xs { ... }` where xs: List<T>.
+    /// For-in-list: `for x in expr { ... }` where expr: List<T>.
     /// Lowered to: idx=0; while idx < len(xs) { x = xs[idx]; body; idx++ }
     fn emit_for_list(
         &mut self,
         body: &ResolvedBody,
         pattern: &ResolvedPattern,
-        place: &crate::core::ir::ResolvedPlace,
-        _iterable_ty: &crate::core::ResolvedTypeId,
+        iterable: &ResolvedExpr,
         loop_body: &ResolvedBlock,
         frame: &mut ResolvedFrame<'ctx>,
     ) -> Result<(), CompileError> {
         let i64_ty = self.generator.context.i64_type();
 
-        // Load the list struct {i64 len, ptr data} from the place.
-        let entry = self.root_place(frame, place)?;
-        let list_val =
-            self.generator
-                .build_load(entry.llvm_type, entry.storage, "for_list_load")?;
+        // Evaluate the iterable expression to get the list struct {i64, ptr}.
+        let list_val = self.emit_expr(iterable, frame)?;
         let list_struct = match list_val {
             BasicValueEnum::StructValue(sv) => sv,
             _ => {

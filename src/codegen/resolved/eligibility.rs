@@ -365,19 +365,13 @@ fn require_block(
                         require_integer_expr(program, owner, start)?;
                         require_integer_expr(program, owner, end)?;
                     }
-                    // 0.32.8: List iteration — `for x in xs` where xs: List<T>.
-                    // The iterable must be a Load of a place whose type is
-                    // List<T> with scalar element type.
-                    ResolvedExprKind::Load(place) => {
-                        require_root_place(owner, &statement.node_id, place)?;
-                        require_list_iterable_type(program, owner, &iterable.ty)?;
-                    }
+                    // 0.32.8–0.32.9: List iteration — `for x in expr` where
+                    // expr: List<T>. Accept any expression (Load, Call,
+                    // Project, etc.) whose canonical type is List<T> with
+                    // scalar element type.
                     _ => {
-                        return Err(UnsupportedResolvedNode::new(
-                            owner,
-                            &statement.node_id,
-                            "only range and list-load iterables are in the resolved native slice",
-                        ))
+                        require_expr(program, owner, iterable)?;
+                        require_list_iterable_type(program, owner, &iterable.ty)?;
                     }
                 }
                 require_block(program, owner, body)?;
