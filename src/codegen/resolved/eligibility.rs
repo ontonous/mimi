@@ -126,44 +126,29 @@ pub(super) fn require_resolved_native_program(
 pub(super) fn eligible_function_ids(
     program: &CheckedProgram,
 ) -> Result<std::collections::BTreeSet<NodeId>, UnsupportedResolvedNode> {
-    // Program-level blockers that prevent ANY resolved compilation.
-    // Flows/actors/sessions/protocols/capabilities require special compilation
-    // infrastructure that the resolved emitter does not provide.
-    // Impls/externs: programs with `use std::xxx` bring in User-origin
-    // functions from module files whose bodies reference runtime symbols
-    // and cross-emitter ABI patterns the resolved emitter doesn't fully
-    // handle. The per-function guards (Origin::User, qualified_name) are
-    // NOT sufficient because module functions ARE User-origin and don't
-    // contain "::" after import resolution.
-    // ⚠ 0.32.8 experiment: removal caused 2 SIGSEGV (std_strings,
-    // multiple_std_modules) — resolved emitter compiled 75/89 stdlib
-    // functions but cross-emitter body clearing + recompilation produces
-    // inconsistent LLVM module state. Requires: (1) per-function body
-    // isolation (no partial emit visible to legacy), (2) forward
-    // declaration of ALL module functions before resolved compilation.
-    // 0.32.20: Flows unblocked at program level. Flow programs contain
-    // regular helper functions (e.g. main) that don't involve Flow state
-    // machine compilation. The per-function eligibility checks filter out
-    // Flow transition functions (non-User origin, qualified names). The
-    // legacy emitter still compiles Flow transitions via compile_flow().
-    if !program.actors().is_empty()
-        || !program.sessions().is_empty()
-        || !program.protocols().is_empty()
-        || !program.capabilities().is_empty()
-        || !program.extern_blocks().is_empty()
-    {
-        let owner = program
-            .functions()
-            .values()
-            .next()
-            .map(|function| function.node_id.clone())
-            .unwrap_or_else(|| NodeId("resolved-native:program".into()));
-        return Err(UnsupportedResolvedNode::new(
-            &owner,
-            &owner,
-            "program contains actors/sessions/protocols/capabilities/externs",
-        ));
-    }
+    // 0.32.24: Actors/sessions/protocols/capabilities/externs unblocked at
+    // program level. These programs contain regular helper functions (main,
+    // utility functions) that don't involve actor/session/protocol compilation.
+    // The per-function eligibility checks filter out:
+    // - Actor methods (non-User origin, qualified names with "::")
+    // - Session/protocol functions (non-User origin)
+    // - Functions with actor/session/protocol types in signatures
+    //   (require_scalar_type rejects non-scalar Nominal types)
+    // The legacy emitter still compiles actor/session/protocol infrastructure
+    // (forward declarations, type definitions, method bodies) via compile_actor(),
+    // compile_session(), etc. The resolved emitter only compiles the regular
+    // functions that pass per-function eligibility.
+    //
+    // History:
+    // - 0.32.8: impls/externs removal caused 2 SIGSEGV (std_strings,
+    //   multiple_std_modules) — resolved emitter compiled stdlib function
+    //   BODIES. Fixed by per-function source_id filtering (0.32.13).
+    // - 0.32.13: impls unblocked (checker auto-generates From/Into impls
+    //   for every program). Per-function guards sufficient.
+    // - 0.32.20: Flows unblocked. Per-function checks filter transition
+    //   functions. Legacy emitter compiles Flow infrastructure.
+    // - 0.32.24: Actors/sessions/protocols/caps/externs unblocked.
+    //   Same pattern: per-function checks + legacy infrastructure.
     // ⛔ 2026-07-28: traits unblocked. Prelude always loads From/Into traits,
     // so this per-program check was catching EVERY program. The per-function
     // eligibility checks handle function-level filtering. The resolved type
