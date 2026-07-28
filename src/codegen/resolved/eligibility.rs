@@ -278,6 +278,8 @@ fn require_scalar_type(
             require_scalar_type(program, owner, ok)?;
             require_scalar_type(program, owner, error)
         }
+        // 0.32.14: Newtype is a transparent wrapper — same LLVM repr as inner.
+        Some(ResolvedType::Newtype { inner, .. }) => require_scalar_type(program, owner, inner),
         // 0.32.2: Builtin collection types (List/Map/Set) are lowerable
         // in types.rs. Accept them so the resolved emitter can handle
         // collection-typed parameters, return values, and local bindings.
@@ -404,6 +406,25 @@ fn require_block(
                     ResolvedExprKind::Range { start, end } => {
                         require_integer_expr(program, owner, start, entry_source)?;
                         require_integer_expr(program, owner, end, entry_source)?;
+                    }
+                    // 0.32.14: `range(start, end)` builtin call — same
+                    // semantics as Range { start, end }.
+                    ResolvedExprKind::Call(call)
+                        if matches!(call.callee, ResolvedCallee::Builtin(ref id) if id.as_str() == "range")
+                            && call.arguments.len() == 2 =>
+                    {
+                        require_integer_expr(
+                            program,
+                            owner,
+                            &call.arguments[0].value,
+                            entry_source,
+                        )?;
+                        require_integer_expr(
+                            program,
+                            owner,
+                            &call.arguments[1].value,
+                            entry_source,
+                        )?;
                     }
                     // 0.32.8–0.32.9: List iteration — `for x in expr` where
                     // expr: List<T>. Accept any expression (Load, Call,

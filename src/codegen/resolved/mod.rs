@@ -264,7 +264,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 }
             }
         }
-        if std::env::var("MIMI_VERBOSE").is_ok() && failed > 0 {
+        if std::env::var("MIMI_VERBOSE").is_ok() && (count + failed) > 0 {
             eprintln!(
                 "info: resolved emitter compiled {}/{} function(s), {} fell back to legacy",
                 count,
@@ -294,6 +294,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         match llvm_type_for_resolved(self.generator.context, self.program.resolved_types(), id) {
             Ok(ty) => Ok(ty),
             Err(_) => {
+                // 0.32.14: Newtype is transparent — lower to the inner type.
+                if let Some(ResolvedType::Newtype { inner, .. }) =
+                    self.program.resolved_types().get(id)
+                {
+                    return self.lower_type(inner);
+                }
                 // Check if this is a user-defined Nominal type (record or enum).
                 if let Some(ResolvedType::Nominal { item, .. }) =
                     self.program.resolved_types().get(id)
@@ -2775,6 +2781,21 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         match &iterable.kind {
             ResolvedExprKind::Range { start, end } => {
                 self.emit_for_range(body, pattern, start, end, loop_body, frame)
+            }
+            // 0.32.14: `range(start, end)` as a builtin call — dispatch
+            // to emit_for_range by extracting the call arguments.
+            ResolvedExprKind::Call(call)
+                if matches!(call.callee, ResolvedCallee::Builtin(ref id) if id.as_str() == "range")
+                    && call.arguments.len() == 2 =>
+            {
+                self.emit_for_range(
+                    body,
+                    pattern,
+                    &call.arguments[0].value,
+                    &call.arguments[1].value,
+                    loop_body,
+                    frame,
+                )
             }
             // 0.32.8–0.32.9: for-in-list iteration. Any expression whose
             // type is List<T> is accepted (Load, Call, Project, etc.).
