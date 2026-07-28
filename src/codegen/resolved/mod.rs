@@ -1060,6 +1060,28 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         // Option/Result constructors are handled by the legacy
                         // compile_constructor path, not compile_builtin_call.
                         if matches!(name, "Some" | "None" | "Ok" | "Err") {
+                            // 0.32.17: If the expression's type is a custom
+                            // enum (not built-in Result/Option), compile as
+                            // custom enum construction ({i32 tag, i64 payload}).
+                            let is_custom_enum = matches!(
+                                self.program.resolved_types().get(&expression.ty),
+                                Some(ResolvedType::Nominal { item, .. })
+                                    if self.program.type_defs().values().any(|td| {
+                                        let item_str = item.as_str();
+                                        let tn = item_str
+                                            .strip_prefix("type:")
+                                            .unwrap_or(item_str);
+                                        (td.qualified_name == tn
+                                            || td.qualified_name == item_str)
+                                            && matches!(
+                                                td.kind,
+                                                crate::core::resolved::ResolvedTypeKind::Enum
+                                            )
+                                    })
+                            );
+                            if is_custom_enum {
+                                return self.emit_custom_enum_ctor(name, call, expression, frame);
+                            }
                             let ctor_args: Vec<BasicValueEnum<'ctx>> = call
                                 .arguments
                                 .iter()
@@ -3540,6 +3562,89 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     variant.name
                 ))
             })
+    }
+
+    /// Construct a custom enum variant with payload: {i32 tag, i64 payload}.
+    /// Used when Ok/Err/Some/None names refer to custom enum variants
+    /// (not built-in Result/Option).
+    fn emit_custom_enum_ctor(
+        &mut self,
+        variant_name: &str,
+        call: &crate::core::ir::ResolvedCall,
+        expression: &ResolvedExpr,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i32_ty = self.generator.context.i32_type();
+        let i64_ty = self.generator.context.i64_type();
+
+        // Find the ordinal of this variant in the custom enum.
+        let ResolvedType::Nominal { item, .. } = self
+            .program
+            .resolved_types()
+            .get(&expression.ty)
+            .ok_or_else(|| CompileError::Unsupported("custom enum ctor: missing type".into()))?
+        else {
+            return Err(CompileError::Unsupported(
+                "custom enum ctor: expression type is not Nominal".into(),
+            ));
+        };
+        let item_str = item.as_str();
+        let type_name = item_str.strip_prefix("type:").unwrap_or(item_str);
+        let td = self
+            .program
+            .type_defs()
+            .values()
+            .find(|td| {
+                (td.qualified_name == type_name || td.qualified_name == item_str)
+                    && matches!(td.kind, crate::core::resolved::ResolvedTypeKind::Enum)
+            })
+            .ok_or_else(|| {
+                CompileError::Unsupported(format!("custom enum type '{type_name}' not found"))
+            })?;
+        let mut variant_names: Vec<&str> = td.variants.iter().map(|(n, _)| n.as_str()).collect();
+        variant_names.sort();
+        let ordinal = variant_names
+            .iter()
+            .position(|n| *n == variant_name)
+            .ok_or_else(|| {
+                CompileError::Unsupported(format!(
+                    "variant '{variant_name}' not found in enum '{type_name}'"
+                ))
+            })? as u64;
+
+        // Encode the payload as i64.
+        let payload_i64 = if call.arguments.is_empty() {
+            // Unit variant (no payload).
+            i64_ty.const_zero()
+        } else {
+            // Single-payload variant: emit the argument and coerce to i64.
+            let arg_val = self.emit_expr(&call.arguments[0].value, frame)?;
+            let arg_val = self.apply_conversion(arg_val, &call.arguments[0].conversion)?;
+            self.coerce_to_i64(arg_val)?
+        };
+
+        // Build {i32 tag, i64 payload} struct.
+        let struct_ty = self.generator.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(i32_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let mut result = struct_ty.get_undef();
+        result = self
+            .generator
+            .builder
+            .build_insert_value(result, i32_ty.const_int(ordinal, false), 0, "enum_tag")
+            .map_err(|e| CompileError::LlvmError(format!("enum tag insert: {e}")))?
+            .into_struct_value();
+        result = self
+            .generator
+            .builder
+            .build_insert_value(result, payload_i64, 1, "enum_payload")
+            .map_err(|e| CompileError::LlvmError(format!("enum payload insert: {e}")))?
+            .into_struct_value();
+        Ok(BasicValueEnum::StructValue(result))
     }
 
     /// Construct an enum unit variant value: {i32 tag, i64 0}.
