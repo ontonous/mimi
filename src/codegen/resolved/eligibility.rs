@@ -277,10 +277,15 @@ fn require_resolved_native_callable_with_source(
         // 0.32.20: Reject view/mutate borrow parameters. These are passed
         // as pointers in the LLVM ABI, but the resolved emitter treats
         // parameters as values, causing ABI mismatches (SIGSEGV).
-        if matches!(
-            parameter.permission,
-            Some(crate::core::ir::Permission::View) | Some(crate::core::ir::Permission::Mutate)
-        ) {
+        // Exception: method receivers named "self" use value ABI even
+        // with Mutate permission — the legacy forward declaration matches
+        // the resolved emitter's lower_type output.
+        if parameter.name != "self"
+            && matches!(
+                parameter.permission,
+                Some(crate::core::ir::Permission::View) | Some(crate::core::ir::Permission::Mutate)
+            )
+        {
             return Err(UnsupportedResolvedNode::new(
                 &callable.owner,
                 &callable.owner,
