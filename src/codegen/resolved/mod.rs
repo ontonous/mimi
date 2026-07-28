@@ -319,8 +319,45 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 if let Some(ResolvedType::Nominal { item, .. }) =
                     self.program.resolved_types().get(id)
                 {
-                    // 0.32.12: Enum types lower to {i32 tag, i64 payload}.
                     let item_str = item.as_str();
+                    // 0.32.20: Flow state types (state:FlowName::StateName).
+                    // The legacy emitter registers them as TypeDefs with
+                    // qualified name "flow::FlowName::StateName". Look up
+                    // the legacy type_defs to build the LLVM struct type.
+                    if let Some(state_path) = item_str.strip_prefix("state:") {
+                        let flow_type_name = format!("flow::{state_path}");
+                        let td = self.generator.type_defs.get(&flow_type_name)
+                            .or_else(|| {
+                                // Fallback: try unqualified state name.
+                                state_path.rsplit("::").next()
+                                    .and_then(|short| self.generator.type_defs.get(short))
+                            })
+                            .ok_or_else(|| {
+                                CompileError::Unsupported(format!(
+                                    "flow state type '{item_str}' not found in legacy type_defs"
+                                ))
+                            })?;
+                        if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
+                            let mut field_types = Vec::with_capacity(fields.len());
+                            for field in fields {
+                                let ft = self.generator.llvm_type_for(&field.ty)
+                                    .ok_or_else(|| {
+                                        CompileError::Unsupported(format!(
+                                            "flow state field '{}' type not lowerable",
+                                            field.name
+                                        ))
+                                    })?;
+                                field_types.push(ft);
+                            }
+                            return Ok(BasicTypeEnum::StructType(
+                                self.generator.context.struct_type(&field_types, false),
+                            ));
+                        }
+                        return Err(CompileError::Unsupported(format!(
+                            "flow state type '{item_str}' is not a record"
+                        )));
+                    }
+                    // 0.32.12: Enum types lower to {i32 tag, i64 payload}.
                     let type_name = item_str.strip_prefix("type:").unwrap_or(item_str);
                     let is_enum = self.program.type_defs().values().any(|td| {
                         (td.qualified_name == type_name || td.qualified_name == item_str)
@@ -1369,6 +1406,48 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         call.try_as_basic_value_opt().ok_or_else(|| {
                             CompileError::LlvmError("closure call returned void".into())
                         })
+                    }
+                    // 0.32.20: Flow transition calls. The legacy emitter
+                    // converts transitions to synthetic functions with names
+                    // like "Counter__inc__from_Zero". These are forward-
+                    // declared before the resolved subset is compiled.
+                    ResolvedCallee::Transition(ref tid) => {
+                        let symbol = format!(
+                            "{}__{}__from_{}",
+                            tid.flow.0, tid.event, tid.source.name
+                        );
+                        let callee =
+                            self.generator.module.get_function(&symbol).ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "resolved transition callee '{symbol}' is undeclared"
+                                ))
+                            })?;
+                        // Coerce arguments to match the callee's parameter types.
+                        let params = callee.get_params();
+                        for (i, arg) in arguments.iter_mut().enumerate() {
+                            if let Some(param) = params.get(i) {
+                                let param_ty = param.get_type();
+                                let arg_basic: BasicValueEnum = match *arg {
+                                    BasicMetadataValueEnum::IntValue(iv) => iv.into(),
+                                    BasicMetadataValueEnum::FloatValue(fv) => fv.into(),
+                                    BasicMetadataValueEnum::PointerValue(pv) => pv.into(),
+                                    BasicMetadataValueEnum::StructValue(sv) => sv.into(),
+                                    _ => continue,
+                                };
+                                if arg_basic.get_type() != param_ty {
+                                    let coerced = self.coerce_to(arg_basic, param_ty)?;
+                                    *arg = BasicMetadataValueEnum::from(coerced);
+                                }
+                            }
+                        }
+                        self.generator
+                            .build_call(callee, &arguments, "resolved_transition")?
+                            .try_as_basic_value_opt()
+                            .ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "resolved transition '{symbol}' returned void"
+                                ))
+                            })
                     }
                     _ => Err(CompileError::Unsupported(format!(
                         "resolved callee {:?} escaped resolved native eligibility at '{}'",

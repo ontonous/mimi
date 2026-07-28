@@ -141,13 +141,12 @@ pub(super) fn eligible_function_ids(
     // inconsistent LLVM module state. Requires: (1) per-function body
     // isolation (no partial emit visible to legacy), (2) forward
     // declaration of ALL module functions before resolved compilation.
-    let user_flow_count = program
-        .flows()
-        .values()
-        .filter(|flow| matches!(flow.origin, crate::core::Origin::User(_)))
-        .count();
-    if user_flow_count != 0
-        || !program.actors().is_empty()
+    // 0.32.20: Flows unblocked at program level. Flow programs contain
+    // regular helper functions (e.g. main) that don't involve Flow state
+    // machine compilation. The per-function eligibility checks filter out
+    // Flow transition functions (non-User origin, qualified names). The
+    // legacy emitter still compiles Flow transitions via compile_flow().
+    if !program.actors().is_empty()
         || !program.sessions().is_empty()
         || !program.protocols().is_empty()
         || !program.capabilities().is_empty()
@@ -162,7 +161,7 @@ pub(super) fn eligible_function_ids(
         return Err(UnsupportedResolvedNode::new(
             &owner,
             &owner,
-            "program contains flows/actors/sessions/protocols/capabilities/externs",
+            "program contains actors/sessions/protocols/capabilities/externs",
         ));
     }
     // ⛔ 2026-07-28: traits unblocked. Prelude always loads From/Into traits,
@@ -275,6 +274,22 @@ fn require_resolved_native_callable_with_source(
     }
     require_scalar_type(program, &callable.owner, &callable.signature.result)?;
     for parameter in &callable.signature.parameters {
+        // 0.32.20: Reject view/mutate borrow parameters. These are passed
+        // as pointers in the LLVM ABI, but the resolved emitter treats
+        // parameters as values, causing ABI mismatches (SIGSEGV).
+        if matches!(
+            parameter.permission,
+            Some(crate::core::ir::Permission::View) | Some(crate::core::ir::Permission::Mutate)
+        ) {
+            return Err(UnsupportedResolvedNode::new(
+                &callable.owner,
+                &callable.owner,
+                format!(
+                    "parameter '{}' has view/mutate borrow (not in resolved native slice)",
+                    parameter.name
+                ),
+            ));
+        }
         require_scalar_type(program, &callable.owner, &parameter.ty)?;
     }
     require_block(program, &callable.owner, &callable.body.root, entry_source)
@@ -332,6 +347,16 @@ fn require_scalar_type(
                     // Look up the type definition by matching the
                     // NominalTypeId string against type_defs entries.
                     let item_str = item.as_str();
+                    // 0.32.20: Flow state types (state:FlowName::StateName)
+                    // are record-like types registered by the legacy emitter
+                    // as flow::FlowName::StateName. Accept them — lower_type
+                    // handles the actual LLVM type lookup.
+                    if item_str.starts_with("state:") {
+                        for arg in arguments {
+                            require_scalar_type(program, owner, arg)?;
+                        }
+                        return Ok(());
+                    }
                     let is_record_or_enum = program.type_defs().values().any(|td| {
                         // NominalTypeId is "type:Name"; qualified_name is "Name".
                         let matches_name = item_str
@@ -693,7 +718,7 @@ fn require_expr(
         ResolvedExprKind::Call(call)
             if matches!(
                 call.callee,
-                ResolvedCallee::Function(_) | ResolvedCallee::Builtin(_)
+                ResolvedCallee::Function(_) | ResolvedCallee::Builtin(_) | ResolvedCallee::Transition(_)
             ) =>
         {
             // Reject calls to non-User-origin functions (imported from
