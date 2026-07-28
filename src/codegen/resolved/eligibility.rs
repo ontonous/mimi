@@ -280,6 +280,15 @@ fn require_scalar_type(
         }
         // 0.32.14: Newtype is a transparent wrapper — same LLVM repr as inner.
         Some(ResolvedType::Newtype { inner, .. }) => require_scalar_type(program, owner, inner),
+        // 0.32.16: Function types (closures) — LLVM repr is {ptr, ptr}.
+        Some(ResolvedType::Function {
+            parameters, result, ..
+        }) => {
+            for param in parameters {
+                require_scalar_type(program, owner, param)?;
+            }
+            require_scalar_type(program, owner, result)
+        }
         // 0.32.2: Builtin collection types (List/Map/Set) are lowerable
         // in types.rs. Accept them so the resolved emitter can handle
         // collection-typed parameters, return values, and local bindings.
@@ -649,6 +658,14 @@ fn require_expr(
             require_conversion(owner, &expression.node_id, conversion.kind)?;
             require_expr(program, owner, value, entry_source)
         }
+        // 0.32.16: LocalClosure calls — indirect call through closure struct.
+        ResolvedExprKind::Call(call) if matches!(call.callee, ResolvedCallee::LocalClosure(_)) => {
+            for argument in &call.arguments {
+                require_conversion(owner, &argument.value.node_id, argument.conversion.kind)?;
+                require_expr(program, owner, &argument.value, entry_source)?;
+            }
+            Ok(())
+        }
         ResolvedExprKind::Call(call)
             if matches!(
                 call.callee,
@@ -767,6 +784,17 @@ fn require_expr(
                     "try inner expression has a missing canonical type",
                 )),
             }
+        }
+        // 0.32.16: Lambda expressions — only non-capturing closures.
+        ResolvedExprKind::Lambda(lambda) => {
+            if !lambda.captures.is_empty() {
+                return Err(UnsupportedResolvedNode::new(
+                    owner,
+                    &expression.node_id,
+                    "capturing lambda is not in the resolved native slice",
+                ));
+            }
+            require_block(program, owner, &lambda.body, entry_source)
         }
         other => Err(UnsupportedResolvedNode::new(
             owner,

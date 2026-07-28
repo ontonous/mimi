@@ -1083,6 +1083,78 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         // resolved emitter expects {ptr, i64} structs. Wrap if needed.
                         self.wrap_builtin_string_result(result, &call.result)
                     }
+                    // 0.32.16: LocalClosure — indirect call through closure struct.
+                    ResolvedCallee::LocalClosure(local_id) => {
+                        let entry = frame.locals.get(local_id).ok_or_else(|| {
+                            CompileError::Unsupported(format!(
+                                "closure local '{}' not found in frame",
+                                local_id.0 .0
+                            ))
+                        })?;
+                        let closure_val = self.generator.build_load(
+                            entry.llvm_type,
+                            entry.storage,
+                            "closure_load",
+                        )?;
+                        let sv = closure_val.into_struct_value();
+                        let ptr_ty = self
+                            .generator
+                            .context
+                            .ptr_type(inkwell::AddressSpace::default());
+                        let fn_ptr = self
+                            .generator
+                            .builder
+                            .build_extract_value(sv, 0, "closure_fn_ptr")
+                            .map_err(|e| CompileError::LlvmError(format!("extract fn_ptr: {e}")))?
+                            .into_pointer_value();
+                        let env_ptr = self
+                            .generator
+                            .builder
+                            .build_extract_value(sv, 1, "closure_env_ptr")
+                            .map_err(|e| CompileError::LlvmError(format!("extract env_ptr: {e}")))?
+                            .into_pointer_value();
+                        // Build indirect call: ret(env_ptr, args...).
+                        let ret_llvm_ty = self.lower_type(&expression.ty)?;
+                        let mut all_meta: Vec<BasicMetadataTypeEnum> =
+                            vec![BasicMetadataTypeEnum::PointerType(ptr_ty)];
+                        for arg in &arguments {
+                            all_meta.push(match arg {
+                                BasicMetadataValueEnum::IntValue(iv) => {
+                                    BasicMetadataTypeEnum::IntType(iv.get_type())
+                                }
+                                BasicMetadataValueEnum::FloatValue(fv) => {
+                                    BasicMetadataTypeEnum::FloatType(fv.get_type())
+                                }
+                                BasicMetadataValueEnum::PointerValue(pv) => {
+                                    BasicMetadataTypeEnum::PointerType(pv.get_type())
+                                }
+                                BasicMetadataValueEnum::StructValue(sv) => {
+                                    BasicMetadataTypeEnum::StructType(sv.get_type())
+                                }
+                                _ => BasicMetadataTypeEnum::IntType(
+                                    self.generator.context.i64_type(),
+                                ),
+                            });
+                        }
+                        let indirect_fn_ty = match ret_llvm_ty {
+                            BasicTypeEnum::IntType(t) => t.fn_type(&all_meta, false),
+                            BasicTypeEnum::FloatType(t) => t.fn_type(&all_meta, false),
+                            BasicTypeEnum::PointerType(t) => t.fn_type(&all_meta, false),
+                            BasicTypeEnum::StructType(t) => t.fn_type(&all_meta, false),
+                            _ => self.generator.context.i64_type().fn_type(&all_meta, false),
+                        };
+                        let mut call_args: Vec<BasicMetadataValueEnum> =
+                            vec![BasicMetadataValueEnum::PointerValue(env_ptr)];
+                        call_args.extend_from_slice(&arguments);
+                        let call = self
+                            .generator
+                            .builder
+                            .build_indirect_call(indirect_fn_ty, fn_ptr, &call_args, "closure_call")
+                            .map_err(|e| CompileError::LlvmError(format!("indirect call: {e}")))?;
+                        call.try_as_basic_value_opt().ok_or_else(|| {
+                            CompileError::LlvmError("closure call returned void".into())
+                        })
+                    }
                     _ => Err(CompileError::Unsupported(format!(
                         "resolved callee {:?} escaped resolved native eligibility at '{}'",
                         call.callee, expression.node_id.0
@@ -1146,6 +1218,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             // On Ok/Some: extract payload, continue.
             // On Err/None: call mimi_try_exit(err_val) → unreachable.
             ResolvedExprKind::Try { value, .. } => self.emit_try(value, &expression.ty, frame),
+            // 0.32.16: Lambda expression (non-capturing closure).
+            ResolvedExprKind::Lambda(lambda) => self.emit_lambda(lambda, &expression.ty, frame),
             other => Err(CompileError::Unsupported(format!(
                 "resolved expression {other:?} escaped resolved native eligibility at '{}'",
                 expression.node_id.0
@@ -3261,6 +3335,176 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         self.generator.builder.position_at_end(ok_bb);
         let target_llvm_ty = self.lower_type(result_ty)?;
         self.coerce_to(payload, target_llvm_ty)
+    }
+
+    /// Emit a non-capturing lambda: generate a function + build closure struct.
+    ///
+    /// Closure struct layout: {ptr fn_ptr, ptr env_ptr} (matching legacy).
+    /// Lambda function signature: (env_ptr: ptr, params...) -> ret.
+    fn emit_lambda(
+        &mut self,
+        lambda: &crate::core::ir::ResolvedLambda,
+        expr_ty: &ResolvedTypeId,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // Determine parameter and return LLVM types from the expression type.
+        let (param_tys, ret_ty) = match self.program.resolved_types().get(expr_ty) {
+            Some(ResolvedType::Function {
+                parameters, result, ..
+            }) => {
+                let mut ptys = Vec::with_capacity(parameters.len());
+                for p in parameters {
+                    ptys.push(self.lower_type(p)?);
+                }
+                let rt = self.lower_type(result)?;
+                (ptys, rt)
+            }
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "lambda expression type is not a Function type".into(),
+                ))
+            }
+        };
+
+        // Build the LLVM function type: (ptr env, params...) -> ret.
+        let ptr_ty = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let mut fn_param_tys: Vec<BasicMetadataTypeEnum> =
+            vec![BasicMetadataTypeEnum::PointerType(ptr_ty)];
+        for pty in &param_tys {
+            fn_param_tys.push(match *pty {
+                BasicTypeEnum::IntType(t) => BasicMetadataTypeEnum::IntType(t),
+                BasicTypeEnum::FloatType(t) => BasicMetadataTypeEnum::FloatType(t),
+                BasicTypeEnum::PointerType(t) => BasicMetadataTypeEnum::PointerType(t),
+                BasicTypeEnum::StructType(t) => BasicMetadataTypeEnum::StructType(t),
+                BasicTypeEnum::ArrayType(t) => BasicMetadataTypeEnum::ArrayType(t),
+                other => {
+                    return Err(CompileError::Unsupported(format!(
+                        "lambda param type {other:?} unsupported"
+                    )))
+                }
+            });
+        }
+        let fn_type = match ret_ty {
+            BasicTypeEnum::IntType(t) => t.fn_type(&fn_param_tys, false),
+            BasicTypeEnum::FloatType(t) => t.fn_type(&fn_param_tys, false),
+            BasicTypeEnum::PointerType(t) => t.fn_type(&fn_param_tys, false),
+            BasicTypeEnum::StructType(t) => t.fn_type(&fn_param_tys, false),
+            other => {
+                return Err(CompileError::Unsupported(format!(
+                    "lambda return type {other:?} unsupported"
+                )))
+            }
+        };
+
+        // Generate a unique function name.
+        let lambda_name = format!("__resolved_lambda_{}", self.generator.spawn_counter);
+        self.generator.spawn_counter += 1;
+        let lambda_fn = self
+            .generator
+            .module
+            .add_function(&lambda_name, fn_type, None);
+        let entry = self
+            .generator
+            .context
+            .append_basic_block(lambda_fn, "entry");
+
+        // Save current builder position.
+        let saved_block = self.generator.builder.get_insert_block();
+        self.generator.builder.position_at_end(entry);
+
+        // Bind lambda parameters (skip param 0 = env_ptr).
+        let callable_body = self
+            .program
+            .callable(&frame.owner)
+            .ok_or_else(|| CompileError::Unsupported("callable absent for lambda".into()))?
+            .body
+            .clone();
+        let mut lambda_frame = ResolvedFrame {
+            owner: frame.owner.clone(),
+            locals: BTreeMap::new(),
+        };
+        for (i, local_id) in lambda.parameters.iter().enumerate() {
+            let metadata = callable_body.locals.get(local_id).ok_or_else(|| {
+                CompileError::Unsupported(format!("lambda param local '{}' absent", local_id.0 .0))
+            })?;
+            let llvm_ty = self.lower_type(&metadata.ty)?;
+            let storage = self
+                .generator
+                .build_alloca(llvm_ty, &metadata.display_name)?;
+            // Param index i+1 (0 is env_ptr).
+            let param_val = lambda_fn
+                .get_nth_param((i + 1) as u32)
+                .ok_or_else(|| CompileError::Unsupported(format!("lambda param {i} missing")))?;
+            let param_val = self.coerce_to(param_val, llvm_ty)?;
+            self.generator.build_store(storage, param_val)?;
+            lambda_frame.locals.insert(
+                local_id.clone(),
+                ResolvedVarEntry {
+                    storage,
+                    llvm_type: llvm_ty,
+                },
+            );
+        }
+
+        // Emit the lambda body.
+        self.generator.push_heap_scope();
+        let body_val = self.emit_block(&callable_body, &lambda.body, &mut lambda_frame)?;
+        if !self.current_block_terminated() {
+            if let Some(val) = body_val {
+                let val = self.coerce_to(val, ret_ty)?;
+                self.generator.build_return(Some(&val))?;
+            } else {
+                self.generator.build_return(None)?;
+            }
+        }
+        self.generator.free_heap_allocs()?;
+
+        // Restore builder position.
+        if let Some(bb) = saved_block {
+            self.generator.builder.position_at_end(bb);
+        }
+
+        // Build closure struct {fn_ptr, null_env_ptr}.
+        let closure_ty = self.generator.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(ptr_ty),
+                BasicTypeEnum::PointerType(ptr_ty),
+            ],
+            false,
+        );
+        let closure_alloca = self
+            .generator
+            .build_alloca(BasicTypeEnum::StructType(closure_ty), "closure")?;
+        let fn_gep = self
+            .generator
+            .builder
+            .build_struct_gep(closure_ty, closure_alloca, 0, "fn_gep")
+            .map_err(|e| CompileError::LlvmError(format!("closure fn gep: {e}")))?;
+        let fn_ptr_val = self
+            .generator
+            .builder
+            .build_bit_cast(
+                lambda_fn.as_global_value().as_pointer_value(),
+                BasicTypeEnum::PointerType(ptr_ty),
+                "fn_ptr_cast",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("fn ptr cast: {e}")))?;
+        self.generator.build_store(fn_gep, fn_ptr_val)?;
+        let env_gep = self
+            .generator
+            .builder
+            .build_struct_gep(closure_ty, closure_alloca, 1, "env_gep")
+            .map_err(|e| CompileError::LlvmError(format!("closure env gep: {e}")))?;
+        let null_ptr = ptr_ty.const_null();
+        self.generator.build_store(env_gep, null_ptr)?;
+        self.generator.build_load(
+            BasicTypeEnum::StructType(closure_ty),
+            closure_alloca,
+            "closure_val",
+        )
     }
 
     /// Look up the alphabetical ordinal of an enum variant by its NodeId.
