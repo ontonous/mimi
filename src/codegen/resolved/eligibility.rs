@@ -660,6 +660,27 @@ fn require_expr(
             }
             require_block(program, owner, body)
         }
+        // 0.32.10: Try expression (`?` operator). The inner value must be
+        // Result<T, E> or Option<T>. The Try expression itself has type T
+        // (the Ok/Some payload), already checked by require_scalar_type at
+        // the top of require_expr.
+        ResolvedExprKind::Try { value, .. } => {
+            require_expr(program, owner, value)?;
+            // The inner expression's type must be Result or Option.
+            match program.resolved_types().get(&value.ty) {
+                Some(ResolvedType::Result { .. } | ResolvedType::Option(_)) => Ok(()),
+                Some(other) => Err(UnsupportedResolvedNode::new(
+                    owner,
+                    &expression.node_id,
+                    format!("try inner type {other:?} is not Result or Option"),
+                )),
+                None => Err(UnsupportedResolvedNode::new(
+                    owner,
+                    &expression.node_id,
+                    "try inner expression has a missing canonical type",
+                )),
+            }
+        }
         other => Err(UnsupportedResolvedNode::new(
             owner,
             &expression.node_id,

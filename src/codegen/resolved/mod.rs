@@ -1109,6 +1109,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             ResolvedExprKind::Match { scrutinee, arms } => {
                 self.emit_match(expression, scrutinee, arms, frame)
             }
+            // 0.32.10: Try expression (`?` operator).
+            // On Ok/Some: extract payload, continue.
+            // On Err/None: call mimi_try_exit(err_val) → unreachable.
+            ResolvedExprKind::Try { value, .. } => self.emit_try(value, &expression.ty, frame),
             other => Err(CompileError::Unsupported(format!(
                 "resolved expression {other:?} escaped resolved native eligibility at '{}'",
                 expression.node_id.0
@@ -2920,6 +2924,128 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         Ok(())
     }
 
+    /// Try expression (`?` operator): unwrap Result/Option or exit.
+    ///
+    /// Layout:
+    ///   Result<T, E> → {i1 disc, T ok_val, i64 err_val}
+    ///   Option<T>    → {i1 disc, T payload}
+    ///
+    /// On Ok/Some (disc != 0): extract field 1 → expression value.
+    /// On Err/None (disc == 0): call mimi_try_exit(err_val) → unreachable.
+    fn emit_try(
+        &mut self,
+        value: &ResolvedExpr,
+        result_ty: &ResolvedTypeId,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+
+        // Determine if the inner type is Result (3 fields) or Option (2 fields).
+        let is_result = matches!(
+            self.program.resolved_types().get(&value.ty),
+            Some(ResolvedType::Result { .. })
+        );
+
+        // Emit the inner expression → struct value.
+        let inner_val = self.emit_expr(value, frame)?;
+        let sv = match inner_val {
+            BasicValueEnum::StructValue(sv) => sv,
+            BasicValueEnum::PointerValue(pv) => {
+                // Load through pointer if needed.
+                let llvm_ty = self.lower_type(&value.ty)?;
+                self.generator
+                    .build_load(llvm_ty, pv, "try_ptr_load")?
+                    .into_struct_value()
+            }
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "try inner value is not a struct (Result/Option)".into(),
+                ))
+            }
+        };
+
+        // Extract discriminant (field 0).
+        let disc = self
+            .generator
+            .builder
+            .build_extract_value(sv, 0, "try_disc")
+            .map_err(|e| CompileError::LlvmError(format!("try disc extract: {e}")))?
+            .into_int_value();
+
+        // Extract payload (field 1) — the Ok/Some value.
+        let payload = self
+            .generator
+            .builder
+            .build_extract_value(sv, 1, "try_payload")
+            .map_err(|e| CompileError::LlvmError(format!("try payload extract: {e}")))?;
+
+        // For Result: extract error value (field 2).
+        let err_val = if is_result {
+            self.generator
+                .builder
+                .build_extract_value(sv, 2, "try_err_val")
+                .map_err(|e| CompileError::LlvmError(format!("try err extract: {e}")))?
+        } else {
+            // Option None: use 0 as the error code.
+            BasicValueEnum::IntValue(i64_ty.const_zero())
+        };
+
+        // Branch: disc == 0 → err_bb, else → ok_bb.
+        let function = self.current_function()?;
+        let ok_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "try_ok");
+        let err_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "try_err");
+
+        let zero = disc.get_type().const_int(0, false);
+        let is_err = self
+            .generator
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, disc, zero, "try_is_err")
+            .map_err(|e| CompileError::LlvmError(format!("try compare: {e}")))?;
+        self.generator.build_cond_br(is_err, err_bb, ok_bb)?;
+
+        // Err path: call mimi_try_exit(err_val) → unreachable.
+        self.generator.builder.position_at_end(err_bb);
+        let try_exit_fn = self.generator.get_runtime_fn("mimi_try_exit")?;
+        let err_int = match err_val {
+            BasicValueEnum::IntValue(iv) => {
+                // Ensure i64.
+                if iv.get_type().get_bit_width() < 64 {
+                    self.generator
+                        .builder
+                        .build_int_z_extend(iv, i64_ty, "try_err_zext")
+                        .map_err(|e| CompileError::LlvmError(format!("try err zext: {e}")))?
+                } else {
+                    iv
+                }
+            }
+            _ => i64_ty.const_zero(),
+        };
+        self.generator
+            .builder
+            .build_call(
+                try_exit_fn,
+                &[inkwell::values::BasicMetadataValueEnum::IntValue(err_int)],
+                "try_exit_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("try_exit call: {e}")))?;
+        // mimi_try_exit is noreturn — emit unreachable.
+        self.generator
+            .builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("try unreachable: {e}")))?;
+
+        // Ok path: position at ok_bb, coerce payload to the Try expression's type.
+        self.generator.builder.position_at_end(ok_bb);
+        let target_llvm_ty = self.lower_type(result_ty)?;
+        self.coerce_to(payload, target_llvm_ty)
+    }
+
     fn bind_pattern_uninitialized(
         &mut self,
         body: &ResolvedBody,
@@ -3565,6 +3691,51 @@ func main() -> i32 {
         generator
             .compile_resolved_native(&program)
             .expect("for-in-string-list is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+    }
+
+    /// 0.32.10: Try expression with Result compiles through resolved emitter.
+    #[test]
+    fn try_result_compiles_through_resolved_emitter() {
+        let program = checked(
+            r#"
+func safe_div(a: i64, b: i64) -> Result<i64, i64> {
+    if b == 0 { Err(1) } else { Ok(a / b) }
+}
+func main() -> i32 {
+    let r = safe_div(10, 2)?
+    if r == 5 { 0 } else { 1 }
+}
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_try_result");
+        generator
+            .compile_resolved_native(&program)
+            .expect("Try with Result is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+    }
+
+    /// 0.32.10: Try expression with Option compiles through resolved emitter.
+    #[test]
+    fn try_option_compiles_through_resolved_emitter() {
+        let program = checked(
+            r#"
+func first(xs: List<i64>) -> Option<i64> {
+    if len(xs) > 0 { Some(xs[0]) } else { None }
+}
+func main() -> i32 {
+    let xs: List<i64> = [42, 7]
+    let v = first(xs)?
+    if v == 42 { 0 } else { 1 }
+}
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_try_option");
+        generator
+            .compile_resolved_native(&program)
+            .expect("Try with Option is in the resolved native slice");
         generator.module.verify().expect("valid LLVM");
     }
 
