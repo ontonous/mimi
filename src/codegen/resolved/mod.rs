@@ -1522,100 +1522,112 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     // 0.32.12: Extended to user-defined enum variants
                     // ({i32 tag, i64 payload} — compare tag == ordinal).
                     ResolvedPatternKind::Constructor { variant, .. } => {
-                        let variant_name = self.lookup_variant_name(variant)?;
-                        // Get the scrutinee as a struct value. If it's a
-                        // pointer (alloca), load it first.
-                        let sv = match scrutinee_val {
-                            BasicValueEnum::StructValue(sv) => sv,
-                            BasicValueEnum::PointerValue(pv) => {
-                                let sty = self.lower_type(&scrutinee.ty)?;
-                                self.generator
-                                    .build_load(sty, pv, "ctor_scrutinee")?
-                                    .into_struct_value()
-                            }
-                            _ => {
-                                return Err(CompileError::Unsupported(
-                                    "constructor match on non-struct scrutinee".into(),
-                                ))
-                            }
-                        };
-                        // Extract discriminant (field 0).
-                        let disc = self
-                            .generator
-                            .builder
-                            .build_extract_value(sv, 0, "ctor_disc")
-                            .map_err(|e| CompileError::LlvmError(format!("extract disc: {e}")))?;
-                        let disc_int = match disc {
-                            BasicValueEnum::IntValue(iv) => iv,
-                            other => {
-                                return Err(CompileError::Unsupported(format!(
-                                    "constructor discriminant is not an integer: {other:?}"
-                                )))
-                            }
-                        };
-                        // Determine the expected discriminant value.
-                        let is_builtin =
-                            matches!(variant_name.as_str(), "Some" | "Ok" | "None" | "Err");
-                        if is_builtin {
-                            // Built-in Option/Result: i1 discriminant.
-                            let bool_ty = self.generator.context.bool_type();
-                            let disc_expected = matches!(variant_name.as_str(), "Some" | "Ok");
-                            let expected = bool_ty.const_int(disc_expected as u64, false);
-                            // Ensure disc is i1 for comparison.
-                            let disc_i1 = if disc_int.get_type().get_bit_width() > 1 {
-                                self.generator
-                                    .builder
-                                    .build_int_truncate(disc_int, bool_ty, "disc_trunc")
-                                    .map_err(|e| {
-                                        CompileError::LlvmError(format!("disc trunc: {e}"))
-                                    })?
-                            } else {
-                                disc_int
-                            };
-                            self.generator
-                                .builder
-                                .build_int_compare(
-                                    inkwell::IntPredicate::EQ,
-                                    disc_i1,
-                                    expected,
-                                    "ctor_cmp",
-                                )
-                                .map_err(|e| CompileError::LlvmError(format!("ctor cmp: {e}")))?
+                        // 0.32.15: Newtype constructors always match.
+                        if self.is_newtype_variant(variant) {
+                            // No tag check — newtype has exactly one variant.
+                            self.generator.context.bool_type().const_all_ones()
                         } else {
-                            // User-defined enum: i32 tag == ordinal.
-                            let ordinal = self.enum_variant_ordinal(variant)?;
-                            let i32_ty = self.generator.context.i32_type();
-                            let expected = i32_ty.const_int(ordinal, false);
-                            // Ensure disc is i32.
-                            let disc_i32 = if disc_int.get_type().get_bit_width() != 32 {
-                                if disc_int.get_type().get_bit_width() > 32 {
+                            let variant_name = self.lookup_variant_name(variant)?;
+                            // Get the scrutinee as a struct value. If it's a
+                            // pointer (alloca), load it first.
+                            let sv = match scrutinee_val {
+                                BasicValueEnum::StructValue(sv) => sv,
+                                BasicValueEnum::PointerValue(pv) => {
+                                    let sty = self.lower_type(&scrutinee.ty)?;
+                                    self.generator
+                                        .build_load(sty, pv, "ctor_scrutinee")?
+                                        .into_struct_value()
+                                }
+                                _ => {
+                                    return Err(CompileError::Unsupported(
+                                        "constructor match on non-struct scrutinee".into(),
+                                    ))
+                                }
+                            };
+                            // Extract discriminant (field 0).
+                            let disc = self
+                                .generator
+                                .builder
+                                .build_extract_value(sv, 0, "ctor_disc")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("extract disc: {e}"))
+                                })?;
+                            let disc_int = match disc {
+                                BasicValueEnum::IntValue(iv) => iv,
+                                other => {
+                                    return Err(CompileError::Unsupported(format!(
+                                        "constructor discriminant is not an integer: {other:?}"
+                                    )))
+                                }
+                            };
+                            // Determine the expected discriminant value.
+                            let is_builtin =
+                                matches!(variant_name.as_str(), "Some" | "Ok" | "None" | "Err");
+                            if is_builtin {
+                                // Built-in Option/Result: i1 discriminant.
+                                let bool_ty = self.generator.context.bool_type();
+                                let disc_expected = matches!(variant_name.as_str(), "Some" | "Ok");
+                                let expected = bool_ty.const_int(disc_expected as u64, false);
+                                // Ensure disc is i1 for comparison.
+                                let disc_i1 = if disc_int.get_type().get_bit_width() > 1 {
                                     self.generator
                                         .builder
-                                        .build_int_truncate(disc_int, i32_ty, "disc_trunc32")
+                                        .build_int_truncate(disc_int, bool_ty, "disc_trunc")
                                         .map_err(|e| {
                                             CompileError::LlvmError(format!("disc trunc: {e}"))
                                         })?
                                 } else {
-                                    self.generator
-                                        .builder
-                                        .build_int_z_extend(disc_int, i32_ty, "disc_zext32")
-                                        .map_err(|e| {
-                                            CompileError::LlvmError(format!("disc zext: {e}"))
-                                        })?
-                                }
+                                    disc_int
+                                };
+                                self.generator
+                                    .builder
+                                    .build_int_compare(
+                                        inkwell::IntPredicate::EQ,
+                                        disc_i1,
+                                        expected,
+                                        "ctor_cmp",
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("ctor cmp: {e}"))
+                                    })?
                             } else {
-                                disc_int
-                            };
-                            self.generator
-                                .builder
-                                .build_int_compare(
-                                    inkwell::IntPredicate::EQ,
-                                    disc_i32,
-                                    expected,
-                                    "enum_cmp",
-                                )
-                                .map_err(|e| CompileError::LlvmError(format!("enum cmp: {e}")))?
-                        }
+                                // User-defined enum: i32 tag == ordinal.
+                                let ordinal = self.enum_variant_ordinal(variant)?;
+                                let i32_ty = self.generator.context.i32_type();
+                                let expected = i32_ty.const_int(ordinal, false);
+                                // Ensure disc is i32.
+                                let disc_i32 = if disc_int.get_type().get_bit_width() != 32 {
+                                    if disc_int.get_type().get_bit_width() > 32 {
+                                        self.generator
+                                            .builder
+                                            .build_int_truncate(disc_int, i32_ty, "disc_trunc32")
+                                            .map_err(|e| {
+                                                CompileError::LlvmError(format!("disc trunc: {e}"))
+                                            })?
+                                    } else {
+                                        self.generator
+                                            .builder
+                                            .build_int_z_extend(disc_int, i32_ty, "disc_zext32")
+                                            .map_err(|e| {
+                                                CompileError::LlvmError(format!("disc zext: {e}"))
+                                            })?
+                                    }
+                                } else {
+                                    disc_int
+                                };
+                                self.generator
+                                    .builder
+                                    .build_int_compare(
+                                        inkwell::IntPredicate::EQ,
+                                        disc_i32,
+                                        expected,
+                                        "enum_cmp",
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("enum cmp: {e}"))
+                                    })?
+                            }
+                        } // end else (non-newtype Constructor)
                     }
 
                     _ => {
@@ -1669,181 +1681,204 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 // 0.32.6: Constructor pattern — extract payload fields and
                 // bind sub-patterns. Option: {i1, T}; Result: {i1, T, E}.
                 ResolvedPatternKind::Constructor { variant, fields } => {
-                    let variant_name = self.lookup_variant_name(variant)?;
-                    // Get the scrutinee as a struct value.
-                    let sv = match scrutinee_val {
-                        BasicValueEnum::StructValue(sv) => sv,
-                        BasicValueEnum::PointerValue(pv) => {
-                            let sty = self.lower_type(&scrutinee.ty)?;
-                            self.generator
-                                .build_load(sty, pv, "ctor_bind_scrutinee")?
-                                .into_struct_value()
-                        }
-                        _ => {
-                            return Err(CompileError::Unsupported(
-                                "constructor match on non-struct scrutinee".into(),
-                            ))
-                        }
-                    };
-                    // Determine which struct field holds the payload.
-                    // Built-in: Some/Ok → field 1; Err → field 2; None → no payload.
-                    // User-defined enum: {i32 tag, i64 payload} → field 1.
-                    let is_builtin_variant =
-                        matches!(variant_name.as_str(), "Some" | "Ok" | "Err" | "None");
-                    let payload_field_index: Option<u32> = if is_builtin_variant {
-                        match variant_name.as_str() {
-                            "Some" | "Ok" => Some(1),
-                            "Err" => Some(2),
-                            "None" => None,
-                            _ => unreachable!(),
-                        }
-                    } else {
-                        // 0.32.12: User-defined enum variants have payload
-                        // at field 1 (the i64 slot). For unit variants,
-                        // fields is empty so the loop below won't execute.
-                        Some(1)
-                    };
-                    let callable_body = &self
-                        .program
-                        .callable(&frame.owner)
-                        .ok_or_else(|| {
-                            CompileError::Unsupported("callable absent for ctor binding".into())
-                        })?
-                        .body;
-                    // 0.32.12: User-defined enum payload decoding.
-                    // The struct is {i32 tag, i64 payload}. For variants
-                    // with fields, decode the i64 payload:
-                    //   - 1 field: bitcast i64 → field LLVM type
-                    //   - 2+ fields: inttoptr → load heap struct → extract
-                    if !is_builtin_variant && !fields.is_empty() {
-                        let raw_payload = self
-                            .generator
-                            .builder
-                            .build_extract_value(sv, 1, "enum_raw_payload")
-                            .map_err(|e| {
-                                CompileError::LlvmError(format!("extract enum payload: {e}"))
+                    // 0.32.15: Newtype Constructor — the scrutinee IS the
+                    // inner value. Bind directly to sub-patterns.
+                    if self.is_newtype_variant(variant) {
+                        let callable_body = &self
+                            .program
+                            .callable(&frame.owner)
+                            .ok_or_else(|| {
+                                CompileError::Unsupported(
+                                    "callable absent for newtype binding".into(),
+                                )
                             })?
-                            .into_int_value();
-                        if fields.len() == 1 {
-                            // Single field: bitcast i64 to the field type.
-                            let (_field_id, sub_pattern) = &fields[0];
-                            let field_llvm_ty = self.lower_type(&sub_pattern.ty)?;
-                            let decoded = self.convert_list_elem_i64(raw_payload, field_llvm_ty)?;
-                            self.bind_pattern(callable_body, sub_pattern, decoded, frame)?;
-                        } else {
-                            // Multi-field: inttoptr + load heap struct.
-                            let mut field_tys = Vec::with_capacity(fields.len());
-                            for (_fid, sp) in fields.iter() {
-                                field_tys.push(self.lower_type(&sp.ty)?);
-                            }
-                            let heap_struct_ty =
-                                self.generator.context.struct_type(&field_tys, false);
-                            let ptr = self
-                                .generator
-                                .builder
-                                .build_int_to_ptr(
-                                    raw_payload,
-                                    self.generator
-                                        .context
-                                        .ptr_type(inkwell::AddressSpace::default()),
-                                    "enum_payload_ptr",
-                                )
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("enum inttoptr: {e}"))
-                                })?;
-                            let loaded = self
-                                .generator
-                                .builder
-                                .build_load(
-                                    BasicTypeEnum::StructType(heap_struct_ty),
-                                    ptr,
-                                    "enum_payload_struct",
-                                )
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("enum payload load: {e}"))
-                                })?
-                                .into_struct_value();
-                            for (i, (_field_id, sub_pattern)) in fields.iter().enumerate() {
-                                let field_val = self
-                                    .generator
-                                    .builder
-                                    .build_extract_value(
-                                        loaded,
-                                        i as u32,
-                                        &format!("enum_field_{i}"),
-                                    )
-                                    .map_err(|e| {
-                                        CompileError::LlvmError(format!(
-                                            "extract enum field {i}: {e}"
-                                        ))
-                                    })?;
-                                self.bind_pattern(callable_body, sub_pattern, field_val, frame)?;
-                            }
+                            .body;
+                        for (_field_id, sub_pattern) in fields.iter() {
+                            self.bind_pattern(callable_body, sub_pattern, scrutinee_val, frame)?;
                         }
                     } else {
-                        // Built-in Option/Result payload extraction (existing logic).
-                        for (i, (_field_id, sub_pattern)) in fields.iter().enumerate() {
-                            let field_idx = payload_field_index
-                                .map(|base| base + i as u32)
-                                .unwrap_or(i as u32);
-                            let payload_val = self
+                        let variant_name = self.lookup_variant_name(variant)?;
+                        // Get the scrutinee as a struct value.
+                        let sv = match scrutinee_val {
+                            BasicValueEnum::StructValue(sv) => sv,
+                            BasicValueEnum::PointerValue(pv) => {
+                                let sty = self.lower_type(&scrutinee.ty)?;
+                                self.generator
+                                    .build_load(sty, pv, "ctor_bind_scrutinee")?
+                                    .into_struct_value()
+                            }
+                            _ => {
+                                return Err(CompileError::Unsupported(
+                                    "constructor match on non-struct scrutinee".into(),
+                                ))
+                            }
+                        };
+                        // Determine which struct field holds the payload.
+                        // Built-in: Some/Ok → field 1; Err → field 2; None → no payload.
+                        // User-defined enum: {i32 tag, i64 payload} → field 1.
+                        let is_builtin_variant =
+                            matches!(variant_name.as_str(), "Some" | "Ok" | "Err" | "None");
+                        let payload_field_index: Option<u32> = if is_builtin_variant {
+                            match variant_name.as_str() {
+                                "Some" | "Ok" => Some(1),
+                                "Err" => Some(2),
+                                "None" => None,
+                                _ => unreachable!(),
+                            }
+                        } else {
+                            // 0.32.12: User-defined enum variants have payload
+                            // at field 1 (the i64 slot). For unit variants,
+                            // fields is empty so the loop below won't execute.
+                            Some(1)
+                        };
+                        let callable_body = &self
+                            .program
+                            .callable(&frame.owner)
+                            .ok_or_else(|| {
+                                CompileError::Unsupported("callable absent for ctor binding".into())
+                            })?
+                            .body;
+                        // 0.32.12: User-defined enum payload decoding.
+                        // The struct is {i32 tag, i64 payload}. For variants
+                        // with fields, decode the i64 payload:
+                        //   - 1 field: bitcast i64 → field LLVM type
+                        //   - 2+ fields: inttoptr → load heap struct → extract
+                        if !is_builtin_variant && !fields.is_empty() {
+                            let raw_payload = self
                                 .generator
                                 .builder
-                                .build_extract_value(
-                                    sv,
-                                    field_idx,
-                                    &format!("ctor_payload_{field_idx}"),
-                                )
+                                .build_extract_value(sv, 1, "enum_raw_payload")
                                 .map_err(|e| {
-                                    CompileError::LlvmError(format!(
-                                        "extract payload field {field_idx}: {e}"
-                                    ))
-                                })?;
-                            // For built-in Err, the payload at index 2 is an i64
-                            // ptrtoint to a heap-allocated {i64, i64} tuple (source
-                            // and error, both ptrtoint-encoded). Decode the tuple
-                            // struct before recursing so that Tuple patterns see a
-                            // StructValue instead of a raw i64.
-                            let decoded_val = if variant_name.as_str() == "Err"
-                                && matches!(payload_val, BasicValueEnum::IntValue(_))
-                            {
-                                let i64_ty = self.generator.context.i64_type();
-                                let tuple_llvm_ty = self.generator.context.struct_type(
-                                    &[
-                                        BasicTypeEnum::IntType(i64_ty),
-                                        BasicTypeEnum::IntType(i64_ty),
-                                    ],
-                                    false,
-                                );
+                                    CompileError::LlvmError(format!("extract enum payload: {e}"))
+                                })?
+                                .into_int_value();
+                            if fields.len() == 1 {
+                                // Single field: bitcast i64 to the field type.
+                                let (_field_id, sub_pattern) = &fields[0];
+                                let field_llvm_ty = self.lower_type(&sub_pattern.ty)?;
+                                let decoded =
+                                    self.convert_list_elem_i64(raw_payload, field_llvm_ty)?;
+                                self.bind_pattern(callable_body, sub_pattern, decoded, frame)?;
+                            } else {
+                                // Multi-field: inttoptr + load heap struct.
+                                let mut field_tys = Vec::with_capacity(fields.len());
+                                for (_fid, sp) in fields.iter() {
+                                    field_tys.push(self.lower_type(&sp.ty)?);
+                                }
+                                let heap_struct_ty =
+                                    self.generator.context.struct_type(&field_tys, false);
                                 let ptr = self
                                     .generator
                                     .builder
                                     .build_int_to_ptr(
-                                        payload_val.into_int_value(),
+                                        raw_payload,
                                         self.generator
                                             .context
                                             .ptr_type(inkwell::AddressSpace::default()),
-                                        "err_tuple_ptr",
+                                        "enum_payload_ptr",
                                     )
                                     .map_err(|e| {
-                                        CompileError::LlvmError(format!("inttoptr err: {e}"))
+                                        CompileError::LlvmError(format!("enum inttoptr: {e}"))
                                     })?;
-                                self.generator
+                                let loaded = self
+                                    .generator
                                     .builder
                                     .build_load(
-                                        BasicTypeEnum::StructType(tuple_llvm_ty),
+                                        BasicTypeEnum::StructType(heap_struct_ty),
                                         ptr,
-                                        "err_tuple_val",
+                                        "enum_payload_struct",
                                     )
                                     .map_err(|e| {
-                                        CompileError::LlvmError(format!("load err tuple: {e}"))
+                                        CompileError::LlvmError(format!("enum payload load: {e}"))
                                     })?
-                            } else {
-                                payload_val
-                            };
-                            self.bind_pattern(callable_body, sub_pattern, decoded_val, frame)?;
-                        }
-                    } // end else (builtin variant payload extraction)
+                                    .into_struct_value();
+                                for (i, (_field_id, sub_pattern)) in fields.iter().enumerate() {
+                                    let field_val = self
+                                        .generator
+                                        .builder
+                                        .build_extract_value(
+                                            loaded,
+                                            i as u32,
+                                            &format!("enum_field_{i}"),
+                                        )
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!(
+                                                "extract enum field {i}: {e}"
+                                            ))
+                                        })?;
+                                    self.bind_pattern(
+                                        callable_body,
+                                        sub_pattern,
+                                        field_val,
+                                        frame,
+                                    )?;
+                                }
+                            }
+                        } else {
+                            // Built-in Option/Result payload extraction (existing logic).
+                            for (i, (_field_id, sub_pattern)) in fields.iter().enumerate() {
+                                let field_idx = payload_field_index
+                                    .map(|base| base + i as u32)
+                                    .unwrap_or(i as u32);
+                                let payload_val = self
+                                    .generator
+                                    .builder
+                                    .build_extract_value(
+                                        sv,
+                                        field_idx,
+                                        &format!("ctor_payload_{field_idx}"),
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!(
+                                            "extract payload field {field_idx}: {e}"
+                                        ))
+                                    })?;
+                                // For built-in Err, the payload at index 2 is an i64
+                                // ptrtoint to a heap-allocated {i64, i64} tuple (source
+                                // and error, both ptrtoint-encoded). Decode the tuple
+                                // struct before recursing so that Tuple patterns see a
+                                // StructValue instead of a raw i64.
+                                let decoded_val = if variant_name.as_str() == "Err"
+                                    && matches!(payload_val, BasicValueEnum::IntValue(_))
+                                {
+                                    let i64_ty = self.generator.context.i64_type();
+                                    let tuple_llvm_ty = self.generator.context.struct_type(
+                                        &[
+                                            BasicTypeEnum::IntType(i64_ty),
+                                            BasicTypeEnum::IntType(i64_ty),
+                                        ],
+                                        false,
+                                    );
+                                    let ptr = self
+                                        .generator
+                                        .builder
+                                        .build_int_to_ptr(
+                                            payload_val.into_int_value(),
+                                            self.generator
+                                                .context
+                                                .ptr_type(inkwell::AddressSpace::default()),
+                                            "err_tuple_ptr",
+                                        )
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!("inttoptr err: {e}"))
+                                        })?;
+                                    self.generator
+                                        .builder
+                                        .build_load(
+                                            BasicTypeEnum::StructType(tuple_llvm_ty),
+                                            ptr,
+                                            "err_tuple_val",
+                                        )
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!("load err tuple: {e}"))
+                                        })?
+                                } else {
+                                    payload_val
+                                };
+                                self.bind_pattern(callable_body, sub_pattern, decoded_val, frame)?;
+                            }
+                        } // end else (builtin variant payload extraction)
+                    } // end else (non-newtype Constructor)
                 }
                 _ => {}
             }
@@ -2216,6 +2251,20 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             "variant '{}' not found in any type definition",
             variant_id.0
         )))
+    }
+
+    /// Check if a variant belongs to a newtype (not an enum).
+    /// Newtype constructors always match and bind the scrutinee directly.
+    /// For newtypes, the Constructor pattern's variant NodeId is the type's
+    /// own NodeId (e.g., "type:UserId"), since newtypes don't have separate
+    /// variant entries in variant_ids.
+    fn is_newtype_variant(&self, variant_id: &NodeId) -> bool {
+        self.program.type_defs().values().any(|td| {
+            matches!(td.kind, crate::core::resolved::ResolvedTypeKind::Newtype)
+                && (td.node_id == *variant_id
+                    || td.variant_ids.values().any(|id| id == variant_id)
+                    || variant_id.0.contains(&td.qualified_name))
+        })
     }
 
     /// Look up the field name from a field NodeId by searching type definitions.
