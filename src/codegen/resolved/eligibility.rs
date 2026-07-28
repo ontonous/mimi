@@ -262,20 +262,26 @@ fn require_scalar_type(
                     Ok(())
                 }
                 _ => {
-                    // User-defined nominal: accept only Record kinds.
+                    // User-defined nominal: accept Record and Enum kinds.
                     // Look up the type definition by matching the
                     // NominalTypeId string against type_defs entries.
                     let item_str = item.as_str();
-                    let is_record = program.type_defs().values().any(|td| {
+                    let is_record_or_enum = program.type_defs().values().any(|td| {
                         // NominalTypeId is "type:Name"; qualified_name is "Name".
                         let matches_name = item_str
                             .strip_prefix("type:")
                             .is_some_and(|n| td.qualified_name == n)
                             || td.qualified_name == item_str;
                         matches_name
-                            && matches!(td.kind, crate::core::resolved::ResolvedTypeKind::Record)
+                            && matches!(
+                                td.kind,
+                                crate::core::resolved::ResolvedTypeKind::Record
+                                    // 0.32.12: Enum types accepted. LLVM
+                                    // representation is {i32 tag, i64 payload}.
+                                    | crate::core::resolved::ResolvedTypeKind::Enum
+                            )
                     });
-                    if is_record {
+                    if is_record_or_enum {
                         for arg in arguments {
                             require_scalar_type(program, owner, arg)?;
                         }
@@ -285,7 +291,7 @@ fn require_scalar_type(
                             owner,
                             owner,
                             format!(
-                                "nominal type '{item_str}' is not a record in the resolved native slice"
+                                "nominal type '{item_str}' is not a record or enum in the resolved native slice"
                             ),
                         ))
                     }
