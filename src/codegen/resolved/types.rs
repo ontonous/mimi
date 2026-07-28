@@ -54,16 +54,25 @@ fn lower_resolved_type<'ctx>(
         ResolvedType::Primitive(primitive) => Ok(lower_primitive(context, *primitive)),
         ResolvedType::Option(payload) => {
             let payload = lower_resolved_type(context, types, payload, active)?;
+            // Match legacy ABI: widen sub-64-bit integer payloads to i64.
+            // This ensures Option<i32> uses {i1, i64} layout, matching
+            // mimi_type_to_llvm's Type::Option lowering. Per-function dispatch
+            // (cross-emitter) depends on this ABI compatibility.
+            let payload = crate::codegen::types::widen_int_to_i64(context, payload);
             Ok(BasicTypeEnum::StructType(context.struct_type(
                 &[BasicTypeEnum::IntType(context.bool_type()), payload],
                 false,
             )))
         }
-        ResolvedType::Result { ok, error } => {
+        ResolvedType::Result { ok, error: _error } => {
             let ok = lower_resolved_type(context, types, ok, active)?;
-            let error = lower_resolved_type(context, types, error, active)?;
+            // Match legacy ABI: widen sub-64-bit integer ok-payload to i64,
+            // and ALWAYS use i64 for the error slot regardless of E type.
+            // Per-function dispatch (cross-emitter) depends on this compatibility.
+            let ok = crate::codegen::types::widen_int_to_i64(context, ok);
+            let err_llvm = BasicTypeEnum::IntType(context.i64_type());
             Ok(BasicTypeEnum::StructType(context.struct_type(
-                &[BasicTypeEnum::IntType(context.bool_type()), ok, error],
+                &[BasicTypeEnum::IntType(context.bool_type()), ok, err_llvm],
                 false,
             )))
         }
@@ -274,7 +283,9 @@ mod tests {
         };
         let result_fields = result.get_field_types();
         assert_eq!(int_width(result_fields[0]), 1);
-        assert_eq!(int_width(result_fields[2]), 32);
+        // Error slot widened to i64 for legacy ABI compatibility
+        // (mimi_type_to_llvm uses i64 for all non-bool int error payloads).
+        assert_eq!(int_width(result_fields[2]), 64);
         let BasicTypeEnum::StructType(tuple) = result_fields[1] else {
             panic!("result payload must be tuple")
         };

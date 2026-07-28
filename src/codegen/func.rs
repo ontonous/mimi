@@ -2848,25 +2848,39 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         let (function, ret_type) = self.declare_func(func)?;
-        // Skip functions already compiled by the resolved native emitter.
-        // Exception: resolved_failed_functions — the resolved emitter attempted
-        // compilation but errored partway through, leaving a partial entry block
-        // without a terminator. The legacy emitter CANNOT recompile these because
-        // appending a second "entry" basic block to an existing LLVM function is
-        // unsupported. Skip them cleanly (they will trap at runtime if called,
-        // but in practice these are stdlib functions that only fail when the
-        // eligibility check matched imprecisely).
+        // Skip functions already compiled by the resolved native emitter,
+        // unless they failed emission — those need recompilation.
         if function.count_basic_blocks() != 0 {
             if self.resolved_failed_functions.contains(&func.name) {
+                // Delete all basic blocks from the function, keeping the
+                // declaration intact. The legacy emitter will recompile the
+                // body from scratch. We cannot delete-and-redeclare because
+                // callers compiled by the resolved emitter hold LLVM value
+                // references to this function, and deleting it would leave
+                // dangling pointers.
                 if std::env::var("MIMI_VERBOSE").is_ok() {
                     eprintln!(
-                        "warning: function '{}' was left with partial basic blocks by the \
-                         resolved emitter and cannot be recompiled by the legacy emitter",
+                        "warning: function '{}' has partial blocks from the resolved \
+                         emitter — clearing body and recompiling",
                         func.name
                     );
                 }
+                // Use inkwell's delete() to remove all blocks from the
+                // function while keeping the declaration alive (so callers
+                // compiled by the resolved emitter still have a valid
+                // reference). We iterate get_basic_blocks() which returns a
+                // snapshot — deleting the first block repeatedly until no
+                // blocks remain.
+                unsafe {
+                    while function.count_basic_blocks() > 0 {
+                        if let Some(bb) = function.get_first_basic_block() {
+                            let _ = bb.delete();
+                        }
+                    }
+                }
+            } else {
+                return Ok(()); // successfully compiled by resolved emitter
             }
-            return Ok(());
         }
         // Set calling convention for extern "C" / extern "stdcall" etc.
         if let Some(ref abi) = func.extern_abi {

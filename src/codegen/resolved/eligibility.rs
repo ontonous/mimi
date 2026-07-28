@@ -150,7 +150,6 @@ pub(super) fn eligible_function_ids(
         || !program.sessions().is_empty()
         || !program.protocols().is_empty()
         || !program.capabilities().is_empty()
-        || !program.traits().is_empty()
         || !program.impls().is_empty()
         || !program.extern_blocks().is_empty()
     {
@@ -163,28 +162,15 @@ pub(super) fn eligible_function_ids(
         return Err(UnsupportedResolvedNode::new(
             &owner,
             &owner,
-            "program contains flows/actors/sessions/protocols/capabilities/traits/impls/externs",
+            "program contains flows/actors/sessions/protocols/capabilities/impls/externs",
         ));
     }
-    // ⛔ 2026-07-28: Blocked earlier removal because:
-    //   1) Origin::User cannot distinguish user from stdlib functions
-    //      (parser assigns AstOrigin::User to ALL parsed text, and
-    //      there is no Origin::Stdlib variant. Stdlib functions thus
-    //      pass the Origin::User eligibility gate, and those using
-    //      Result<T, string> constructor fail at coerce_to because
-    //      compile_ok_constructor hardcodes {i1, T, i64} layout for
-    //      the error slot, while the function expects {i1, T, {ptr, i64}}.
-    //   2) Failed emit_callable functions leave a partial entry block
-    //      (no terminator), and count_basic_blocks() prevents the
-    //      legacy emitter from retrying. A resolved_failed_functions
-    //      tracking mechanism was added but the legacy emitter cannot
-    //      recompile because appending a second "entry" block to an
-    //      existing function is unsupported.
-    //   Fix plan: (a) extend eligibility to reject functions with
-    //   Result<T, string>/Option<T, string> constructor mismatches,
-    //   or (b) fix compile_ok_constructor to accept the expected err
-    //   type from context. Either way, also fix the partial-block leak.
-    //   See resolved_failed_functions / no-terminator-entry design for v0.32.9+.
+    // ⛔ 2026-07-28: traits unblocked. Prelude always loads From/Into traits,
+    // so this per-program check was catching EVERY program. The per-function
+    // eligibility checks handle function-level filtering. The resolved type
+    // lowering now matches legacy ABI for Result/Option. Tuple destructure in
+    // the resolved emitter uses alloca+GEP+load instead of extract_value to
+    // avoid struct field misordering on cross-function call results.
     // Constants must be materializable.
     for constant in program.constants().values() {
         if matches!(constant.value, crate::core::ResolvedConstValue::Complex) {
