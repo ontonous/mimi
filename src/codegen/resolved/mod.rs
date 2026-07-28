@@ -2621,12 +2621,30 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         loop_body: &ResolvedBlock,
         frame: &mut ResolvedFrame<'ctx>,
     ) -> Result<(), CompileError> {
-        let ResolvedExprKind::Range { start, end } = &iterable.kind else {
-            return Err(CompileError::Unsupported(
-                "non-range iterable escaped resolved native eligibility".into(),
-            ));
-        };
+        match &iterable.kind {
+            ResolvedExprKind::Range { start, end } => {
+                self.emit_for_range(body, pattern, start, end, loop_body, frame)
+            }
+            // 0.32.8: for-in-list iteration.
+            ResolvedExprKind::Load(place) => {
+                self.emit_for_list(body, pattern, place, &iterable.ty, loop_body, frame)
+            }
+            _ => Err(CompileError::Unsupported(
+                "non-range/non-list iterable escaped resolved native eligibility".into(),
+            )),
+        }
+    }
 
+    /// For-in-range: `for i in range(start, end) { ... }`
+    fn emit_for_range(
+        &mut self,
+        body: &ResolvedBody,
+        pattern: &ResolvedPattern,
+        start: &ResolvedExpr,
+        end: &ResolvedExpr,
+        loop_body: &ResolvedBlock,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<(), CompileError> {
         let start_value = self.emit_expr(start, frame)?;
         let end_value = self.emit_expr(end, frame)?;
 
@@ -2740,6 +2758,173 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
 
         // Exit
         self.generator.builder.position_at_end(exit);
+        Ok(())
+    }
+
+    /// For-in-list: `for x in xs { ... }` where xs: List<T>.
+    /// Lowered to: idx=0; while idx < len(xs) { x = xs[idx]; body; idx++ }
+    fn emit_for_list(
+        &mut self,
+        body: &ResolvedBody,
+        pattern: &ResolvedPattern,
+        place: &crate::core::ir::ResolvedPlace,
+        _iterable_ty: &crate::core::ResolvedTypeId,
+        loop_body: &ResolvedBlock,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<(), CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+
+        // Load the list struct {i64 len, ptr data} from the place.
+        let entry = self.root_place(frame, place)?;
+        let list_val =
+            self.generator
+                .build_load(entry.llvm_type, entry.storage, "for_list_load")?;
+        let list_struct = match list_val {
+            BasicValueEnum::StructValue(sv) => sv,
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "for-in-list iterable is not a list struct".into(),
+                ))
+            }
+        };
+
+        // Extract len (field 0) and data pointer (field 1).
+        let len_val = self
+            .generator
+            .builder
+            .build_extract_value(list_struct, 0, "for_list_len")
+            .map_err(|e| CompileError::LlvmError(format!("extract list len: {e}")))?
+            .into_int_value();
+        let data_ptr = self
+            .generator
+            .builder
+            .build_extract_value(list_struct, 1, "for_list_data")
+            .map_err(|e| CompileError::LlvmError(format!("extract list data: {e}")))?
+            .into_pointer_value();
+
+        // Determine the element LLVM type from the pattern's local metadata.
+        let ResolvedPatternKind::Binding {
+            local,
+            by_reference: None,
+        } = &pattern.kind
+        else {
+            return Err(CompileError::Unsupported(
+                "non-binding for-in-list pattern escaped eligibility".into(),
+            ));
+        };
+        let metadata = body.locals.get(local).ok_or_else(|| {
+            CompileError::Unsupported(format!(
+                "resolved for-in-list local '{}' is absent",
+                local.0 .0
+            ))
+        })?;
+        let elem_llvm_ty = self.lower_type(&metadata.ty)?;
+
+        // Allocate index counter = 0.
+        let idx_storage = self
+            .generator
+            .build_alloca(BasicTypeEnum::IntType(i64_ty), "for_list_idx")?;
+        self.generator
+            .build_store(idx_storage, i64_ty.const_int(0, false))?;
+
+        // Allocate element variable storage.
+        let elem_storage = self
+            .generator
+            .build_alloca(elem_llvm_ty, &metadata.display_name)?;
+        frame.locals.insert(
+            local.clone(),
+            ResolvedVarEntry {
+                storage: elem_storage,
+                llvm_type: elem_llvm_ty,
+            },
+        );
+
+        let function = self.current_function()?;
+        let header = self
+            .generator
+            .context
+            .append_basic_block(function, "for_list_header");
+        let body_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "for_list_body");
+        let exit = self
+            .generator
+            .context
+            .append_basic_block(function, "for_list_exit");
+
+        self.generator.build_br(header)?;
+
+        // Header: idx < len
+        self.generator.builder.position_at_end(header);
+        let idx_val = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                idx_storage,
+                "for_list_idx_val",
+            )?
+            .into_int_value();
+        let cond = self
+            .generator
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                idx_val,
+                len_val,
+                "for_list_cond",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("for-list compare: {e}")))?;
+        self.generator.build_cond_br(cond, body_bb, exit)?;
+
+        // Body: load element, bind, emit loop body.
+        self.generator.builder.position_at_end(body_bb);
+
+        // GEP into data array at idx, load i64, convert to element type.
+        let elem_ptr = self.generator.build_in_bounds_gep(
+            i64_ty,
+            data_ptr,
+            &[idx_val],
+            "for_list_elem_ptr",
+        )?;
+        let elem_i64 = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                elem_ptr,
+                "for_list_elem_i64",
+            )?
+            .into_int_value();
+        let elem_val = self.convert_list_elem_i64(elem_i64, elem_llvm_ty)?;
+        self.generator.build_store(elem_storage, elem_val)?;
+
+        self.loop_stack.push(LoopContext { header, exit });
+        self.emit_block(body, loop_body, frame)?;
+        self.loop_stack.pop();
+
+        // Increment idx and loop back.
+        if !self.current_block_terminated() {
+            let cur_idx = self
+                .generator
+                .build_load(
+                    BasicTypeEnum::IntType(i64_ty),
+                    idx_storage,
+                    "for_list_idx_reload",
+                )?
+                .into_int_value();
+            let next_idx = self
+                .generator
+                .builder
+                .build_int_add(cur_idx, i64_ty.const_int(1, false), "for_list_idx_next")
+                .map_err(|e| CompileError::LlvmError(format!("for-list increment: {e}")))?;
+            self.generator.build_store(idx_storage, next_idx)?;
+            self.generator.build_br(header)?;
+        }
+
+        // Exit
+        self.generator.builder.position_at_end(exit);
+        // Remove the loop variable from the frame after the loop.
+        frame.locals.remove(local);
         Ok(())
     }
 
@@ -3340,6 +3525,54 @@ func main() -> i32 {
         generator
             .compile_resolved_native(&program)
             .expect("Option match with Constructor patterns is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+    }
+
+    /// 0.32.8: For-in-list iteration compiles through the resolved emitter.
+    #[test]
+    fn for_in_list_compiles_through_resolved_emitter() {
+        let program = checked(
+            r#"
+func main() -> i32 {
+    let xs = [10, 20, 30]
+    let mut sum = 0
+    for x in xs {
+        sum += x
+    }
+    if sum == 60 { 0 } else { 1 }
+}
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_for_list");
+        generator
+            .compile_resolved_native(&program)
+            .expect("for-in-list is in the resolved native slice");
+        generator.module.verify().expect("valid LLVM");
+    }
+
+    /// 0.32.8: For-in-list with string elements.
+    #[test]
+    fn for_in_string_list_compiles_through_resolved_emitter() {
+        let program = checked(
+            r#"
+func main() -> i32 {
+    let names = ["alice", "bob", "carol"]
+    let mut count = 0
+    for name in names {
+        if len(name) > 3 {
+            count += 1
+        }
+    }
+    if count == 2 { 0 } else { 1 }
+}
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_for_str_list");
+        generator
+            .compile_resolved_native(&program)
+            .expect("for-in-string-list is in the resolved native slice");
         generator.module.verify().expect("valid LLVM");
     }
 
