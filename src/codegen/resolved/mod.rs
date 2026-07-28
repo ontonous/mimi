@@ -249,6 +249,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     "warning: resolved emitter verification failed for '{}'",
                                     symbol
                                 );
+                                // Dump the function IR for diagnosis.
+                                let ir_str = llvm_fn.to_string();
+                                // Print first 30 lines to avoid flooding.
+                                for (i, line) in ir_str.lines().enumerate() {
+                                    if i >= 30 {
+                                        eprintln!("  ... (truncated)");
+                                        break;
+                                    }
+                                    eprintln!("  | {}", line);
+                                }
                             }
                             // Track failed functions so the legacy emitter
                             // can re-compile them (clearing the partial body
@@ -1328,6 +1338,41 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                         ))
                                     })?;
                                 return self.wrap_builtin_string_result(result, &call.result);
+                            }
+                        }
+                        // 0.32.22: Blacklist builtins that generate inline control
+                        // flow (early returns, unreachable) which corrupts
+                        // the enclosing function's return type. These must
+                        // be compiled by the legacy emitter which handles
+                        // the control flow correctly.
+                        const CONTROL_FLOW_BUILTINS: &[&str] = &[
+                            "write_file", "read_file", "file_exists",
+                        ];
+                        if CONTROL_FLOW_BUILTINS.contains(&name) {
+                            return Err(CompileError::Unsupported(format!(
+                                "builtin '{name}' generates inline control flow \
+                                 (not safe for resolved delegation)"
+                            )));
+                        }
+                        // 0.32.22: Promote i32 integer arguments to i64 before
+                        // delegating to compile_builtin_call. Runtime functions
+                        // (mimi_mutex_new, mimi_mutex_set, etc.) are declared
+                        // with i64 parameters, but the resolved IR types integer
+                        // literals as i32. Without promotion, LLVM verification
+                        // fails on the type mismatch.
+                        let i64_ty = self.generator.context.i64_type();
+                        for arg in arguments.iter_mut() {
+                            if let BasicMetadataValueEnum::IntValue(iv) = *arg {
+                                if iv.get_type().get_bit_width() < 64 {
+                                    let extended = self
+                                        .generator
+                                        .builder
+                                        .build_int_s_extend(iv, i64_ty, "builtin_arg_sext")
+                                        .map_err(|e| {
+                                            CompileError::LlvmError(format!("builtin arg sext: {e}"))
+                                        })?;
+                                    *arg = BasicMetadataValueEnum::IntValue(extended);
+                                }
                             }
                         }
                         let result = self.generator.compile_builtin_call(name, &arguments)?;
