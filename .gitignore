@@ -79,3 +79,4 @@ tests/real_world/**/*
 !tests/real_world/projects/*/*.mimi
 !tests/real_world/projects/*/*.toml
 main
+docs/compose/
