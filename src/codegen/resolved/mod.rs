@@ -1092,6 +1092,110 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 .collect::<Result<_, _>>()?;
                             return self.generator.compile_constructor(name, ctor_args);
                         }
+                        // 0.32.17: Option/Result predicate and accessor methods.
+                        if matches!(
+                            name,
+                            "builtin.method.option.is_some"
+                                | "builtin.method.option.is_none"
+                                | "builtin.method.result.is_ok"
+                                | "builtin.method.result.is_err"
+                        ) {
+                            // Receiver is the first argument (the Option/Result value).
+                            let recv = self.emit_expr(&call.arguments[0].value, frame)?;
+                            let sv = match recv {
+                                BasicValueEnum::StructValue(sv) => sv,
+                                BasicValueEnum::PointerValue(pv) => {
+                                    let sty = self.lower_type(&call.arguments[0].value.ty)?;
+                                    self.generator
+                                        .build_load(sty, pv, "method_recv")?
+                                        .into_struct_value()
+                                }
+                                _ => {
+                                    return Err(CompileError::Unsupported(
+                                        "Option/Result method on non-struct receiver".into(),
+                                    ))
+                                }
+                            };
+                            let disc = self
+                                .generator
+                                .builder
+                                .build_extract_value(sv, 0, "method_disc")
+                                .map_err(|e| CompileError::LlvmError(format!("method disc: {e}")))?
+                                .into_int_value();
+                            let zero = disc.get_type().const_int(0, false);
+                            let is_positive = matches!(
+                                name,
+                                "builtin.method.option.is_some" | "builtin.method.result.is_ok"
+                            );
+                            let pred = if is_positive {
+                                inkwell::IntPredicate::NE
+                            } else {
+                                inkwell::IntPredicate::EQ
+                            };
+                            let result = self
+                                .generator
+                                .builder
+                                .build_int_compare(pred, disc, zero, "method_pred")
+                                .map_err(|e| CompileError::LlvmError(format!("method cmp: {e}")))?;
+                            return Ok(BasicValueEnum::IntValue(result));
+                        }
+                        if matches!(
+                            name,
+                            "builtin.method.option.unwrap_or" | "builtin.method.result.unwrap_or"
+                        ) {
+                            // unwrap_or(default): if disc!=0 return payload, else default.
+                            let recv = self.emit_expr(&call.arguments[0].value, frame)?;
+                            let default_val = self.emit_expr(&call.arguments[1].value, frame)?;
+                            let sv = match recv {
+                                BasicValueEnum::StructValue(sv) => sv,
+                                BasicValueEnum::PointerValue(pv) => {
+                                    let sty = self.lower_type(&call.arguments[0].value.ty)?;
+                                    self.generator
+                                        .build_load(sty, pv, "unwrap_recv")?
+                                        .into_struct_value()
+                                }
+                                _ => {
+                                    return Err(CompileError::Unsupported(
+                                        "unwrap_or on non-struct receiver".into(),
+                                    ))
+                                }
+                            };
+                            let disc = self
+                                .generator
+                                .builder
+                                .build_extract_value(sv, 0, "unwrap_disc")
+                                .map_err(|e| CompileError::LlvmError(format!("unwrap disc: {e}")))?
+                                .into_int_value();
+                            let payload = self
+                                .generator
+                                .builder
+                                .build_extract_value(sv, 1, "unwrap_payload")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("unwrap payload: {e}"))
+                                })?;
+                            let zero = disc.get_type().const_int(0, false);
+                            let has_val = self
+                                .generator
+                                .builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::NE,
+                                    disc,
+                                    zero,
+                                    "unwrap_has",
+                                )
+                                .map_err(|e| CompileError::LlvmError(format!("unwrap cmp: {e}")))?;
+                            let target_ty = self.lower_type(&expression.ty)?;
+                            let payload = self.coerce_to(payload, target_ty)?;
+                            let default_val = self.coerce_to(default_val, target_ty)?;
+                            let result = self
+                                .generator
+                                .builder
+                                .build_select(has_val, payload, default_val, "unwrap_result")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("unwrap select: {e}"))
+                                })?;
+                            return Ok(result);
+                        }
                         // Print-family builtins need arg type hints for formatting dispatch.
                         if matches!(name, "println" | "print" | "eprintln" | "format") {
                             self.generator.pending_print_arg_types = call
