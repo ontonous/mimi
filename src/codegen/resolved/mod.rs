@@ -1701,6 +1701,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             ResolvedExprKind::Slice { target, start, end } => {
                 self.emit_slice(target, start.as_deref(), end.as_deref(), frame)
             }
+            // 0.32.32: Old expression (contract `old(x)`). Identity in codegen —
+            // contracts are erased at runtime; only the verifier distinguishes old().
+            ResolvedExprKind::Old(inner) => self.emit_expr(inner, frame),
+            // 0.32.33: Comprehension ([value for pattern in iterable if guard]).
+            // Lowered to: pre-allocate buffer of iterable_len, loop, filter, store, build list.
+            ResolvedExprKind::Comprehension {
+                pattern,
+                value,
+                iterable,
+                guard,
+            } => self.emit_comprehension(pattern, value, iterable, guard.as_deref(), &expression.ty, frame),
             other => Err(CompileError::Unsupported(format!(
                 "resolved expression {other:?} escaped resolved native eligibility at '{}'",
                 expression.node_id.0
@@ -3797,6 +3808,169 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     /// Try expression (`?` operator): unwrap Result/Option or exit.
     ///
     /// Layout:
+    /// 0.32.33: Comprehension ([value for pattern in iterable if guard]).
+    ///
+    /// Lowering: pre-allocate buffer of iterable_len elements, loop over
+    /// iterable, bind pattern, check guard, evaluate value, store at count
+    /// offset, increment count. Build result list { count, data_ptr }.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_comprehension(
+        &mut self,
+        pattern: &ResolvedPattern,
+        value: &ResolvedExpr,
+        iterable: &ResolvedExpr,
+        guard: Option<&ResolvedExpr>,
+        _result_ty: &ResolvedTypeId,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        let list_ty = self.generator.list_struct_type();
+
+        // Evaluate iterable → list struct.
+        let list_val = self.emit_expr(iterable, frame)?;
+        let list_struct = match list_val {
+            BasicValueEnum::StructValue(sv) => sv,
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "comprehension iterable is not a list struct".into(),
+                ))
+            }
+        };
+        let iter_len = self.generator.builder
+            .build_extract_value(list_struct, 0, "comp_iter_len")
+            .map_err(|e| CompileError::LlvmError(format!("comp extract len: {e}")))?
+            .into_int_value();
+        let iter_data = self.generator.builder
+            .build_extract_value(list_struct, 1, "comp_iter_data")
+            .map_err(|e| CompileError::LlvmError(format!("comp extract data: {e}")))?
+            .into_pointer_value();
+
+        // Pre-allocate result buffer: iter_len * 8 bytes (worst case: all pass guard).
+        let elem_size = i64_ty.const_int(8, false);
+        let alloc_bytes = self.generator.builder
+            .build_int_mul(iter_len, elem_size, "comp_alloc_bytes")
+            .map_err(|e| CompileError::LlvmError(format!("comp alloc mul: {e}")))?;
+        let result_data = self.generator.malloc_or_abort(alloc_bytes, "comp_malloc")?;
+
+        // Count variable (starts at 0).
+        let count_storage = self.generator.build_alloca(
+            BasicTypeEnum::IntType(i64_ty), "comp_count",
+        )?;
+        self.generator.build_store(count_storage, i64_ty.const_int(0, false))?;
+
+        // Index variable (starts at 0).
+        let idx_storage = self.generator.build_alloca(
+            BasicTypeEnum::IntType(i64_ty), "comp_idx",
+        )?;
+        self.generator.build_store(idx_storage, i64_ty.const_int(0, false))?;
+
+        // Bind pattern: allocate storage for the loop variable.
+        let ResolvedPatternKind::Binding { local, by_reference: None } = &pattern.kind else {
+            return Err(CompileError::Unsupported(
+                "comprehension pattern escaped eligibility (not a simple binding)".into(),
+            ));
+        };
+        // We need the body to look up local metadata. Use the expression's type
+        // context — the iterable element type is the pattern's type.
+        let elem_llvm_ty = BasicTypeEnum::IntType(i64_ty); // elements stored as i64
+        let elem_storage = self.generator.build_alloca(elem_llvm_ty, "comp_elem")?;
+        frame.locals.insert(
+            local.clone(),
+            ResolvedVarEntry {
+                storage: elem_storage,
+                llvm_type: elem_llvm_ty,
+            },
+        );
+
+        // Loop blocks.
+        let function = self.current_function()?;
+        let header_bb = self.generator.context.append_basic_block(function, "comp_header");
+        let body_bb = self.generator.context.append_basic_block(function, "comp_body");
+        let guard_bb = self.generator.context.append_basic_block(function, "comp_guard");
+        let push_bb = self.generator.context.append_basic_block(function, "comp_push");
+        let incr_bb = self.generator.context.append_basic_block(function, "comp_incr");
+        let done_bb = self.generator.context.append_basic_block(function, "comp_done");
+
+        // Branch to header.
+        self.generator.build_br(header_bb)?;
+
+        // Header: idx < iter_len?
+        self.generator.builder.position_at_end(header_bb);
+        let idx_val = self.generator.build_load(
+            BasicTypeEnum::IntType(i64_ty), idx_storage, "comp_idx_val",
+        )?.into_int_value();
+        let cond = self.generator.builder.build_int_compare(
+            inkwell::IntPredicate::SLT, idx_val, iter_len, "comp_cond",
+        ).map_err(|e| CompileError::LlvmError(format!("comp cmp: {e}")))?;
+        self.generator.build_cond_br(cond, body_bb, done_bb)?;
+
+        // Body: load element at iter_data[idx], store in elem_storage.
+        self.generator.builder.position_at_end(body_bb);
+        let elem_ptr = self.generator.build_in_bounds_gep(
+            i64_ty, iter_data, &[idx_val], "comp_elem_ptr",
+        )?;
+        let elem_val = self.generator.build_load(
+            BasicTypeEnum::IntType(i64_ty), elem_ptr, "comp_elem_val",
+        )?;
+        self.generator.build_store(elem_storage, elem_val)?;
+
+        // If guard exists, branch to guard_bb; otherwise go to push_bb.
+        if guard.is_some() {
+            self.generator.build_br(guard_bb)?;
+        } else {
+            self.generator.build_br(push_bb)?;
+        }
+
+        // Guard: evaluate guard expression, branch on truthiness.
+        if let Some(guard_expr) = guard {
+            self.generator.builder.position_at_end(guard_bb);
+            let guard_val = self.emit_expr(guard_expr, frame)?;
+            let guard_bool = self.ensure_bool(guard_val)?;
+            self.generator.build_cond_br(guard_bool, push_bb, incr_bb)?;
+        }
+
+        // Push: evaluate value expression, store at result_data[count].
+        self.generator.builder.position_at_end(push_bb);
+        let val = self.emit_expr(value, frame)?;
+        let val_i64 = self.coerce_to_i64(val)?;
+        let count_val = self.generator.build_load(
+            BasicTypeEnum::IntType(i64_ty), count_storage, "comp_count_val",
+        )?.into_int_value();
+        let store_ptr = self.generator.build_in_bounds_gep(
+            i64_ty, result_data, &[count_val], "comp_store_ptr",
+        )?;
+        self.generator.build_store(store_ptr, val_i64)?;
+        // Increment count.
+        let new_count = self.generator.builder.build_int_add(
+            count_val, i64_ty.const_int(1, false), "comp_new_count",
+        ).map_err(|e| CompileError::LlvmError(format!("comp add: {e}")))?;
+        self.generator.build_store(count_storage, new_count)?;
+        self.generator.build_br(incr_bb)?;
+
+        // Incr: increment idx, branch to header.
+        self.generator.builder.position_at_end(incr_bb);
+        let idx_cur = self.generator.build_load(
+            BasicTypeEnum::IntType(i64_ty), idx_storage, "comp_idx_cur",
+        )?.into_int_value();
+        let idx_next = self.generator.builder.build_int_add(
+            idx_cur, i64_ty.const_int(1, false), "comp_idx_next",
+        ).map_err(|e| CompileError::LlvmError(format!("comp idx add: {e}")))?;
+        self.generator.build_store(idx_storage, idx_next)?;
+        self.generator.build_br(header_bb)?;
+
+        // Done: build result list { count, result_data }.
+        self.generator.builder.position_at_end(done_bb);
+        let final_count = self.generator.build_load(
+            BasicTypeEnum::IntType(i64_ty), count_storage, "comp_final_count",
+        )?.into_int_value();
+        let result_ptr = self.generator.build_list_struct(final_count, result_data)?;
+        self.generator.build_load(
+            BasicTypeEnum::StructType(list_ty),
+            result_ptr.into_pointer_value(),
+            "comp_result",
+        )
+    }
+
     /// 0.32.31: Slice expression (xs[start:end]).
     ///
     /// View semantics: no data copy. Builds a new `{i64 len, ptr data}` struct
