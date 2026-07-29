@@ -916,21 +916,21 @@ impl<'a> BytecodeVM<'a> {
         &self.stdout
     }
 
-    // ── Register access helpers ──────────────────────────────
+    // ── Register access helpers (D8: centralized Value conversion) ──
 
-    fn get_reg(&self, r: Reg) -> &Value {
+    pub(crate) fn get_reg(&self, r: Reg) -> &Value {
         &self.stack.last().unwrap().regs[r as usize]
     }
 
-    fn get_reg_mut(&mut self, r: Reg) -> &mut Value {
+    pub(crate) fn get_reg_mut(&mut self, r: Reg) -> &mut Value {
         &mut self.stack.last_mut().unwrap().regs[r as usize]
     }
 
-    fn set_reg(&mut self, r: Reg, v: Value) {
+    pub(crate) fn set_reg(&mut self, r: Reg, v: Value) {
         self.stack.last_mut().unwrap().regs[r as usize] = v;
     }
 
-    fn get_int(&self, r: Reg) -> Result<i64, InterpError> {
+    pub(crate) fn get_int(&self, r: Reg) -> Result<i64, InterpError> {
         match self.get_reg(r) {
             Value::Int(v) => Ok(*v),
             other => Err(InterpError::new(format!(
@@ -940,11 +940,11 @@ impl<'a> BytecodeVM<'a> {
         }
     }
 
-    fn get_int2(&self, ra: Reg, rb: Reg) -> Result<(i64, i64), InterpError> {
+    pub(crate) fn get_int2(&self, ra: Reg, rb: Reg) -> Result<(i64, i64), InterpError> {
         Ok((self.get_int(ra)?, self.get_int(rb)?))
     }
 
-    fn get_float(&self, r: Reg) -> Result<f64, InterpError> {
+    pub(crate) fn get_float(&self, r: Reg) -> Result<f64, InterpError> {
         match self.get_reg(r) {
             Value::Float(v) => Ok(*v),
             other => Err(InterpError::new(format!(
@@ -954,8 +954,38 @@ impl<'a> BytecodeVM<'a> {
         }
     }
 
-    fn get_float2(&self, ra: Reg, rb: Reg) -> Result<(f64, f64), InterpError> {
+    pub(crate) fn get_float2(&self, ra: Reg, rb: Reg) -> Result<(f64, f64), InterpError> {
         Ok((self.get_float(ra)?, self.get_float(rb)?))
+    }
+
+    pub(crate) fn get_bool(&self, r: Reg) -> Result<bool, InterpError> {
+        match self.get_reg(r) {
+            Value::Bool(v) => Ok(*v),
+            other => Err(InterpError::new(format!(
+                "expected Bool, got {}",
+                other
+            ))),
+        }
+    }
+
+    pub(crate) fn get_str(&self, r: Reg) -> Result<String, InterpError> {
+        match self.get_reg(r) {
+            Value::String(v) => Ok(v.clone()),
+            other => Err(InterpError::new(format!(
+                "expected String, got {}",
+                other
+            ))),
+        }
+    }
+
+    pub(crate) fn get_list(&self, r: Reg) -> Result<Vec<Value>, InterpError> {
+        match self.get_reg(r) {
+            Value::List(v) => Ok(v.clone()),
+            other => Err(InterpError::new(format!(
+                "expected List, got {}",
+                other
+            ))),
+        }
     }
 
     fn check_float(&self, v: f64, op: &str) -> Result<(), InterpError> {
