@@ -44,16 +44,15 @@ pub(super) fn resolved_eligible_functions(
         Ok(set) if !set.is_empty() => Some(set),
         Ok(_) => {
             if std::env::var("MIMI_VERBOSE").is_ok() {
-                eprintln!("info: resolved dispatch: 0 eligible functions (all filtered per-function)");
+                eprintln!(
+                    "info: resolved dispatch: 0 eligible functions (all filtered per-function)"
+                );
             }
             None
         }
         Err(blocker) => {
             if std::env::var("MIMI_VERBOSE").is_ok() {
-                eprintln!(
-                    "info: resolved dispatch blocked: {}",
-                    blocker.reason
-                );
+                eprintln!("info: resolved dispatch blocked: {}", blocker.reason);
             }
             None
         }
@@ -336,10 +335,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     // the legacy type_defs to build the LLVM struct type.
                     if let Some(state_path) = item_str.strip_prefix("state:") {
                         let flow_type_name = format!("flow::{state_path}");
-                        let td = self.generator.type_defs.get(&flow_type_name)
+                        let td = self
+                            .generator
+                            .type_defs
+                            .get(&flow_type_name)
                             .or_else(|| {
                                 // Fallback: try unqualified state name.
-                                state_path.rsplit("::").next()
+                                state_path
+                                    .rsplit("::")
+                                    .next()
                                     .and_then(|short| self.generator.type_defs.get(short))
                             })
                             .ok_or_else(|| {
@@ -350,8 +354,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
                             let mut field_types = Vec::with_capacity(fields.len());
                             for field in fields {
-                                let ft = self.generator.llvm_type_for(&field.ty)
-                                    .ok_or_else(|| {
+                                let ft =
+                                    self.generator.llvm_type_for(&field.ty).ok_or_else(|| {
                                         CompileError::Unsupported(format!(
                                             "flow state field '{}' type not lowerable",
                                             field.name
@@ -1345,9 +1349,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         // the enclosing function's return type. These must
                         // be compiled by the legacy emitter which handles
                         // the control flow correctly.
-                        const CONTROL_FLOW_BUILTINS: &[&str] = &[
-                            "write_file", "read_file", "file_exists",
-                        ];
+                        const CONTROL_FLOW_BUILTINS: &[&str] =
+                            &["write_file", "read_file", "file_exists"];
                         if CONTROL_FLOW_BUILTINS.contains(&name) {
                             return Err(CompileError::Unsupported(format!(
                                 "builtin '{name}' generates inline control flow \
@@ -1381,7 +1384,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 _ => runtime_fn_name,
                             }
                         };
-                        if let Some(runtime_fn) = self.generator.module.get_function(&runtime_fn_name) {
+                        if let Some(runtime_fn) =
+                            self.generator.module.get_function(&runtime_fn_name)
+                        {
                             let params = runtime_fn.get_params();
                             for (i, arg) in arguments.iter_mut().enumerate() {
                                 if let Some(param) = params.get(i) {
@@ -1482,10 +1487,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     // like "Counter__inc__from_Zero". These are forward-
                     // declared before the resolved subset is compiled.
                     ResolvedCallee::Transition(ref tid) => {
-                        let symbol = format!(
-                            "{}__{}__from_{}",
-                            tid.flow.0, tid.event, tid.source.name
-                        );
+                        let symbol =
+                            format!("{}__{}__from_{}", tid.flow.0, tid.event, tid.source.name);
                         let callee =
                             self.generator.module.get_function(&symbol).ok_or_else(|| {
                                 CompileError::LlvmError(format!(
@@ -1530,13 +1533,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             .strip_prefix("function:")
                             .and_then(|s: &str| s.split_once(":for:"))
                             .and_then(|(_, rest): (&str, &str)| {
-                                rest.split_once("::").map(|(ty, method_hash): (&str, &str)| {
-                                    let method_name = method_hash
-                                        .rsplit_once(':')
-                                        .map(|(m, _)| m)
-                                        .unwrap_or(method_hash);
-                                    format!("{}_{}", ty, method_name)
-                                })
+                                rest.split_once("::")
+                                    .map(|(ty, method_hash): (&str, &str)| {
+                                        let method_name = method_hash
+                                            .rsplit_once(':')
+                                            .map(|(m, _)| m)
+                                            .unwrap_or(method_hash);
+                                        format!("{}_{}", ty, method_name)
+                                    })
                             })
                             .ok_or_else(|| {
                                 CompileError::Unsupported(format!(
@@ -1580,7 +1584,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     "resolved ProtocolMethod '{symbol}' returned void"
                                 ))
                             })
-}
+                    }
                     ResolvedCallee::Extern(callee_id) => {
                         // 0.32.26: Extern FFI call — look up the wrapper function
                         // by name (declared by legacy emitter in step 1) and call it.
@@ -1592,11 +1596,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 "resolved extern callee '{callee_id:?}' not found in any extern block"
                             )))?;
                         let callee =
-                            self.generator.module.get_function(ext_name).ok_or_else(|| {
-                                CompileError::LlvmError(format!(
-                                    "resolved extern wrapper '{ext_name}' is undeclared"
-                                ))
-                            })?;
+                            self.generator
+                                .module
+                                .get_function(ext_name)
+                                .ok_or_else(|| {
+                                    CompileError::LlvmError(format!(
+                                        "resolved extern wrapper '{ext_name}' is undeclared"
+                                    ))
+                                })?;
                         // Coerce arguments to match the wrapper's parameter types.
                         let params = callee.get_params();
                         for (i, arg) in arguments.iter_mut().enumerate() {
@@ -2855,14 +2862,20 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // pattern "digits:digits-digits:digits" at the end.
         let span_str = span_str
             .rsplit_once('-')
-            .and_then(|(start, end)| {
+            .map(|(start, end)| {
                 // start might be "L:C" or "HASH:L:C"
-                let start = start.rsplit_once(':').map(|(_, c)| {
-                    // Reconstruct "L:C" from the last two segments
-                    let line = start.rsplit_once(':').map(|(l, _)| l.rsplit_once(':').map_or(l, |(_, l2)| l2)).unwrap_or(start);
-                    format!("{}:{}", line, c)
-                }).unwrap_or(start.to_string());
-                Some(format!("{}-{}", start, end))
+                let start = start
+                    .rsplit_once(':')
+                    .map(|(_, c)| {
+                        // Reconstruct "L:C" from the last two segments
+                        let line = start
+                            .rsplit_once(':')
+                            .map(|(l, _)| l.rsplit_once(':').map_or(l, |(_, l2)| l2))
+                            .unwrap_or(start);
+                        format!("{}:{}", line, c)
+                    })
+                    .unwrap_or(start.to_string());
+                format!("{}-{}", start, end)
             })
             .unwrap_or(span_str.to_string());
         Some((format!("flow::{state_name}"), span_str))

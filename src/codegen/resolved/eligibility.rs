@@ -213,7 +213,10 @@ pub(super) fn eligible_function_ids(
         if let (Some(entry_src), Origin::User(span)) = (entry_source, &function.origin) {
             if span.source_id != entry_src {
                 if verbose {
-                    eprintln!("info: resolved skip '{}': module file (source_id mismatch)", name);
+                    eprintln!(
+                        "info: resolved skip '{}': module file (source_id mismatch)",
+                        name
+                    );
                 }
                 continue;
             }
@@ -708,7 +711,11 @@ fn require_expr(
         ResolvedExprKind::Call(call)
             if matches!(
                 call.callee,
-                ResolvedCallee::Function(_) | ResolvedCallee::Builtin(_) | ResolvedCallee::Transition(_) | ResolvedCallee::ProtocolMethod { .. } | ResolvedCallee::Extern(_)
+                ResolvedCallee::Function(_)
+                    | ResolvedCallee::Builtin(_)
+                    | ResolvedCallee::Transition(_)
+                    | ResolvedCallee::ProtocolMethod { .. }
+                    | ResolvedCallee::Extern(_)
             ) =>
         {
             // Reject calls to non-User-origin functions (imported from

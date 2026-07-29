@@ -77,11 +77,7 @@ pub fn verify_checked(
         // from surface AST body expressions. raw_ast() is required here because
         // the Z3 encoding is defined over AST Expr nodes, not ResolvedExpr.
         // The resolved_ir_hash is embedded in ProofArtifact by the flow verifier.
-        flow::flow_verify_file_with_hashes(
-            program.raw_ast(),
-            source_hash,
-            resolved_ir_hash,
-        )
+        flow::flow_verify_file_with_hashes(program.raw_ast(), source_hash, resolved_ir_hash)
     } else {
         // C4 mock path: from CheckedProgram, no raw_ast needed.
         Ok(ctx::mock_verify_checked(program))
@@ -166,10 +162,7 @@ pub fn verify_ffi_checked(
         // C4 Z3 path (permanent): FFI call-site verification encodes extern
         // contract expressions from surface AST. raw_ast() is required because
         // the Z3 encoding is defined over AST Expr nodes.
-        flow::flow_verify_ffi_call_sites_with_externs_or_mock(
-            program.raw_ast(),
-            &externs,
-        )
+        flow::flow_verify_ffi_call_sites_with_externs_or_mock(program.raw_ast(), &externs)
     } else {
         // C4 mock path: from CheckedProgram's extern signatures, no raw_ast needed.
         let mut results: Vec<VerificationResult> = Vec::new();

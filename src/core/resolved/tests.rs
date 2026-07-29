@@ -88,7 +88,10 @@ fn checked_program_owns_its_migration_body_input() {
     };
 
     assert!(program.function("main").is_some());
-    assert!(program.functions().len() > 0, "checked program must own functions, not raw AST items");
+    assert!(
+        program.functions().len() > 0,
+        "checked program must own functions, not raw AST items"
+    );
     let mut interpreter = crate::interp::Interpreter::from_checked(&program);
     assert!(matches!(
         interpreter.run().expect("run owned checked program"),

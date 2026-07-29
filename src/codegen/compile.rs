@@ -999,7 +999,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             // compile_try_expr can emit a fail-closed error (Rejected
             // codegen not yet implemented) instead of mimi_try_exit.
             self.in_fails_transition = t.fails.is_some();
-            let result = self.compile_func_legacy(&func).map_err(|e| e.at(t.meta.span));
+            let result = self
+                .compile_func_legacy(&func)
+                .map_err(|e| e.at(t.meta.span));
             self.in_fails_transition = false;
             result?;
         }
