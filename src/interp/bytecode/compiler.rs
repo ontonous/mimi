@@ -36,6 +36,10 @@ struct FuncCompiler {
     continue_jumps: Vec<Vec<usize>>,
     /// Current source line (1-based) for line_table population (D12).
     current_line: u32,
+    /// Free registers available for reuse (register pressure reduction).
+    free_regs: Vec<Reg>,
+    /// Registers allocated per scope (for reclaim on pop_scope).
+    scope_regs: Vec<Vec<Reg>>,
 }
 
 /// Lightweight type tag for register dispatch.
@@ -57,15 +61,22 @@ impl FuncCompiler {
             break_jumps: Vec::new(),
             continue_jumps: Vec::new(),
             current_line: 0,
+            free_regs: Vec::new(),
+            scope_regs: vec![Vec::new()],
         }
     }
 
     fn push_scope(&mut self) {
         self.vars.push(HashMap::new());
+        self.scope_regs.push(Vec::new());
     }
 
     fn pop_scope(&mut self) {
         self.vars.pop();
+        // Reclaim registers allocated in this scope.
+        if let Some(regs) = self.scope_regs.pop() {
+            self.free_regs.extend(regs);
+        }
     }
 
     /// Look up a variable's register, searching innermost → outermost.
@@ -78,10 +89,18 @@ impl FuncCompiler {
         None
     }
 
-    /// Bind a variable name to a new register.
+    /// Bind a variable name to a register (reuses free registers when available).
     fn bind_var(&mut self, name: &str) -> Reg {
-        let r = self.proto.alloc_reg();
+        let r = if let Some(free) = self.free_regs.pop() {
+            free
+        } else {
+            self.proto.alloc_reg()
+        };
         self.vars.last_mut().unwrap().insert(name.to_string(), r);
+        // Track for scope-based reclaim.
+        if let Some(scope) = self.scope_regs.last_mut() {
+            scope.push(r);
+        }
         r
     }
 
@@ -326,9 +345,58 @@ impl BytecodeCompiler {
                 }
                 // Skip non-executable statements.
                 Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Requires(..)
-                | Stmt::Ensures(..) | Stmt::Invariant(..) | Stmt::Math(..) => {}
+                | Stmt::Ensures(..) | Stmt::Invariant(..) | Stmt::Math(..)
+                | Stmt::MmsBlock { .. } => {}
+
+                // ── Phase B: Stmt 补全 I ──────────────────────
+
+                Stmt::Loop(body) => {
+                    self.compile_loop(fc, body)?;
+                }
+
+                Stmt::WhileLet { pat, init, body } => {
+                    self.compile_while_let(fc, pat, init, body)?;
+                }
+
+                Stmt::Unsafe(block) => {
+                    // Interpreter doesn't enforce safety — just compile the block.
+                    fc.push_scope();
+                    self.compile_block(fc, block)?;
+                    fc.pop_scope();
+                }
+
+                Stmt::Arena(block) => {
+                    // Interpreter doesn't do region-based memory — just compile the block.
+                    fc.push_scope();
+                    self.compile_block(fc, block)?;
+                    fc.pop_scope();
+                }
+
+                Stmt::Drop(expr) => {
+                    // Drop is a no-op in the interpreter (values are GC'd).
+                    // Just compile the expression for side effects.
+                    self.compile_expr(fc, expr)?;
+                }
+
+                Stmt::Alloc { body, .. } => {
+                    // Allocator block — just compile the body.
+                    fc.push_scope();
+                    self.compile_block(fc, body)?;
+                    fc.pop_scope();
+                }
+
+                Stmt::Defer(block) => {
+                    // TODO: true defer semantics (LIFO execution at scope exit).
+                    // For now, compile the block immediately.
+                    fc.push_scope();
+                    self.compile_block(fc, block)?;
+                    fc.pop_scope();
+                }
+
                 _ => {
-                    // Unsupported statement — will be filled in later phases.
+                    // Remaining unsupported statements (Flow-related: Become, Stay,
+                    // Delegate, Pinned, Parasteps, SharedLet, OnFailure, Do).
+                    // These are handled in Phase D (0.33.17-0.33.20).
                 }
             }
         }
@@ -1386,6 +1454,104 @@ impl BytecodeCompiler {
             }
         }
         // Continue jumps back to condition check.
+        if let Some(continues) = fc.continue_jumps.pop() {
+            for c in continues {
+                fc.proto.patch_jump_to(c, loop_start);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Compile `loop { body }` — infinite loop with break.
+    fn compile_loop(
+        &mut self,
+        fc: &mut FuncCompiler,
+        body: &Block,
+    ) -> Result<(), InterpError> {
+        fc.break_jumps.push(Vec::new());
+        fc.continue_jumps.push(Vec::new());
+
+        let loop_start = fc.proto.code.len();
+
+        fc.push_scope();
+        self.compile_block(fc, body)?;
+        fc.pop_scope();
+
+        // Jump back to loop start (infinite).
+        fc.emit(Op::Jmp { offset: 0 });
+        let jmp_back = fc.proto.code.len() - 1;
+        fc.proto.patch_jump_to(jmp_back, loop_start);
+
+        let end = fc.proto.code.len();
+
+        // Patch break jumps.
+        if let Some(breaks) = fc.break_jumps.pop() {
+            for b in breaks {
+                fc.proto.patch_jump_to(b, end);
+            }
+        }
+        // Continue jumps back to loop start.
+        if let Some(continues) = fc.continue_jumps.pop() {
+            for c in continues {
+                fc.proto.patch_jump_to(c, loop_start);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Compile `while let pat = init { body }`.
+    fn compile_while_let(
+        &mut self,
+        fc: &mut FuncCompiler,
+        pat: &Pattern,
+        init: &Expr,
+        body: &Block,
+    ) -> Result<(), InterpError> {
+        fc.break_jumps.push(Vec::new());
+        fc.continue_jumps.push(Vec::new());
+
+        let loop_start = fc.proto.code.len();
+
+        // Evaluate the init expression.
+        let r_init = self.compile_expr(fc, init)?;
+
+        // Try to match the pattern. If it fails, exit the loop.
+        let (test_reg, bindings) = self.compile_pattern_test(fc, pat, r_init)?;
+
+        let jmp_end = if let Some(r_test) = test_reg {
+            Some(fc.emit(Op::JmpIfNot { offset: 0, ra: r_test }))
+        } else {
+            None // Pattern always matches (e.g., variable pattern).
+        };
+
+        // Bind pattern variables and compile body.
+        fc.push_scope();
+        for (name, r) in &bindings {
+            fc.vars.last_mut().unwrap().insert(name.clone(), *r);
+        }
+        self.compile_block(fc, body)?;
+        fc.pop_scope();
+
+        // Jump back to loop start.
+        fc.emit(Op::Jmp { offset: 0 });
+        let jmp_back = fc.proto.code.len() - 1;
+        fc.proto.patch_jump_to(jmp_back, loop_start);
+
+        let end = fc.proto.code.len();
+
+        if let Some(j) = jmp_end {
+            fc.proto.patch_jump_to(j, end);
+        }
+
+        // Patch break jumps.
+        if let Some(breaks) = fc.break_jumps.pop() {
+            for b in breaks {
+                fc.proto.patch_jump_to(b, end);
+            }
+        }
+        // Continue jumps back to loop start (re-evaluate init).
         if let Some(continues) = fc.continue_jumps.pop() {
             for c in continues {
                 fc.proto.patch_jump_to(c, loop_start);
