@@ -128,6 +128,8 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::ActorSpawn { .. } => "ACTOR_SPAWN",
         Op::FlowTransition { .. } => "FLOW_TRANSITION",
         Op::DynMethodCall { .. } => "DYN_METHOD_CALL",
+        Op::SharedNew { .. } => "SHARED_NEW",
+        Op::WeakNew { .. } => "WEAK_NEW",
     }
 }
 
@@ -282,6 +284,8 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 .unwrap_or("?");
             format!("{:04}  {:<16} r{} = dyn_call(r{}, {}, {})", pc, name, rd, args_base, m, argc)
         }
+        Op::SharedNew { rd, ra } => format!("{:04}  {:<16} r{} = shared(r{})", pc, name, rd, ra),
+        Op::WeakNew { rd, ra } => format!("{:04}  {:<16} r{} = weak(r{})", pc, name, rd, ra),
     }
 }
 

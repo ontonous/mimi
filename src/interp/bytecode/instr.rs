@@ -330,6 +330,11 @@ pub enum Op {
         argc: u16,
     },
 
+    /// rd = Shared(ra) — wrap value in Arc<RwLock<>>.
+    SharedNew { rd: Reg, ra: Reg },
+    /// rd = Weak(ra) — downgrade Shared to Weak reference.
+    WeakNew { rd: Reg, ra: Reg },
+
     /// No operation
     Nop,
 }

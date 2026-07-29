@@ -556,14 +556,17 @@ impl BytecodeCompiler {
 
                 // ── Phase B: Stmt 补全 II ─────────────────────
 
-                Stmt::SharedLet { name, init, .. } => {
-                    // Shared ownership binding — compile as regular let.
+                Stmt::SharedLet { name, init, kind, .. } => {
+                    // Shared/Weak ownership binding.
                     let r = self.compile_expr(fc, init)?;
-                    let ty = self.infer_expr_type(fc, init);
-                    fc.set_reg_type(name, ty);
                     let r_var = fc.bind_var(name);
-                    if r != r_var {
-                        fc.emit(Op::Mov { rd: r_var, rs: r });
+                    match kind {
+                        SharedKind::Shared | SharedKind::LocalShared => {
+                            fc.emit(Op::SharedNew { rd: r_var, ra: r });
+                        }
+                        SharedKind::Weak | SharedKind::WeakLocal => {
+                            fc.emit(Op::WeakNew { rd: r_var, ra: r });
+                        }
                     }
                 }
 
