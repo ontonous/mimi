@@ -362,12 +362,12 @@ impl BytecodeCompiler {
             Expr::Field(obj, field) => {
                 let r_obj = self.compile_expr(fc, obj)?;
                 let rd = fc.proto.alloc_reg();
-                // Field access needs type info — for now, use field name hash.
-                // This will be improved with CheckedProgram integration.
-                let field_idx = self.field_index(field);
+                // Field access by name (stored as string constant).
+                let field_idx = fc.proto.add_const(ConstValue::Str(field.clone()));
                 fc.emit(Op::RecordGet { rd, ra: r_obj, field: field_idx });
                 Ok(rd)
             }
+            Expr::Record { ty, fields } => self.compile_record(fc, ty.as_deref(), fields),
             Expr::Match(subject, arms) => self.compile_match(fc, subject, arms),
             _ => Err(InterpError::new(format!(
                 "bytecode compiler: expression {:?} not yet supported",
@@ -1130,6 +1130,45 @@ impl BytecodeCompiler {
             rd,
             base,
             arity: elems.len() as u16,
+        });
+        Ok(rd)
+    }
+
+    fn compile_record(
+        &self,
+        fc: &mut FuncCompiler,
+        ty: Option<&str>,
+        fields: &[RecordFieldExpr],
+    ) -> Result<Reg, InterpError> {
+        // Allocate registers for field values.
+        let base = fc.proto.alloc_reg();
+        for _ in 1..fields.len() {
+            fc.proto.alloc_reg();
+        }
+
+        // Compile each field value.
+        for (i, field) in fields.iter().enumerate() {
+            let r = self.compile_expr(fc, &field.value)?;
+            let target = base + i as Reg;
+            if r != target {
+                fc.emit(Op::Mov { rd: target, rs: r });
+            }
+        }
+
+        // Store field names as constants.
+        let type_name_idx = fc.proto.add_const(ConstValue::Str(
+            ty.map(|s| s.to_string()).unwrap_or_default(),
+        ));
+        for field in fields {
+            fc.proto.add_const(ConstValue::Str(field.name.clone()));
+        }
+
+        let rd = fc.proto.alloc_reg();
+        fc.emit(Op::NewRecord {
+            rd,
+            type_name: type_name_idx,
+            base,
+            count: fields.len() as u16,
         });
         Ok(rd)
     }

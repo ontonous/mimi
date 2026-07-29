@@ -689,6 +689,32 @@ mod tests {
             Ok(1)
         );
     }
+
+    // ═══ Phase 2b: Record ═════════════════════════════════════
+
+    /// Record construction and field access.
+    #[test]
+    fn e2e_record() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let p = Point { x: 10, y: 20 }
+                     p.x + p.y
+                 }"),
+            Ok(30)
+        );
+    }
+
+    /// Record with string field.
+    #[test]
+    fn e2e_record_string() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let p = Person { name: \"Alice\", age: 30 }
+                     p.age
+                 }"),
+            Ok(30)
+        );
+    }
 }
 
 #[cfg(test)]
