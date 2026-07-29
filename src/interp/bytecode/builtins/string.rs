@@ -249,8 +249,8 @@ fn builtin_chr(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Interp
 fn builtin_str_parse_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(s) => match s.trim().parse::<i64>() {
-            Ok(n) => Ok(Value::Int(n)),
-            Err(_) => Ok(Value::Int(0)),
+            Ok(n) => Ok(Value::Tuple(vec![Value::Bool(true), Value::Int(n)])),
+            Err(_) => Ok(Value::Tuple(vec![Value::Bool(false), Value::Int(0)])),
         },
         _ => Err(InterpError::new("parse_int expects a string")),
     }
@@ -259,8 +259,8 @@ fn builtin_str_parse_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
 fn builtin_str_parse_float(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(s) => match s.trim().parse::<f64>() {
-            Ok(n) => Ok(Value::Float(n)),
-            Err(_) => Ok(Value::Float(0.0)),
+            Ok(n) => Ok(Value::Tuple(vec![Value::Bool(true), Value::Float(n)])),
+            Err(_) => Ok(Value::Tuple(vec![Value::Bool(false), Value::Float(0.0)])),
         },
         _ => Err(InterpError::new("parse_float expects a string")),
     }
