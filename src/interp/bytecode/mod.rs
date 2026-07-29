@@ -729,6 +729,33 @@ mod tests {
             Ok(42)
         );
     }
+
+    /// Lambda with capture.
+    #[test]
+    fn e2e_lambda_capture() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let base = 100
+                     let f = fn(x: i32) -> i32 { x + base }
+                     f(42)
+                 }"),
+            Ok(142)
+        );
+    }
+
+    /// Lambda with multiple captures.
+    #[test]
+    fn e2e_lambda_multi_capture() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let a = 10
+                     let b = 20
+                     let f = fn(x: i32) -> i32 { x + a + b }
+                     f(12)
+                 }"),
+            Ok(42)
+        );
+    }
 }
 
 #[cfg(test)]

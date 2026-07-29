@@ -314,6 +314,8 @@ pub struct FunctionProto {
     pub code: Vec<Op>,
     /// Source line table: maps instruction index → source line (for errors).
     pub line_table: Vec<u32>,
+    /// Captured variable names (for closures). Index i corresponds to register param_count + i.
+    pub capture_names: Vec<String>,
 }
 
 /// Compile-time constant values stored in the constant pool.
@@ -338,6 +340,7 @@ impl FunctionProto {
             constants: Vec::new(),
             code: Vec::new(),
             line_table: Vec::new(),
+            capture_names: Vec::new(),
         }
     }
 

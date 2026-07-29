@@ -605,16 +605,19 @@ impl<'a> BytecodeVM<'a> {
                     captures_base,
                     capture_count,
                 } => {
-                    // Collect captured variables.
-                    // For now, captures are stored as (name, value) pairs in registers.
-                    // TODO: implement proper capture analysis.
+                    // Collect captured variables by name.
+                    let target_proto = &self.program.functions[proto_idx as usize];
                     let mut captured = std::collections::HashMap::new();
                     for i in 0..capture_count {
                         let reg = captures_base + i;
-                        // The capture format is: even registers = name (string), odd = value.
-                        // For simplicity, we just store by register index for now.
                         let value = self.get_reg(reg).clone();
-                        captured.insert(format!("_capture_{}", i), value);
+                        // Use the capture name from the proto, or fall back to index.
+                        let name = target_proto
+                            .capture_names
+                            .get(i as usize)
+                            .cloned()
+                            .unwrap_or_else(|| format!("_capture_{}", i));
+                        captured.insert(name, value);
                     }
                     self.set_reg(
                         rd,
@@ -632,15 +635,29 @@ impl<'a> BytecodeVM<'a> {
                 } => {
                     let closure = self.get_reg(callee).clone();
                     match closure {
-                        Value::BytecodeClosure { proto: proto_idx, captured: _ } => {
+                        Value::BytecodeClosure { proto: proto_idx, captured } => {
                             // Collect arguments.
                             let args: Vec<Value> = (0..argc)
                                 .map(|i| self.get_reg(args_base + i).clone())
                                 .collect();
 
                             // Push a new frame for the closure.
-                            // TODO: bind captured variables in the new frame.
                             self.push_frame(proto_idx, &args, Some(rd))?;
+
+                            // Bind captured variables in the new frame.
+                            // Captures go into registers param_count..param_count+capture_count.
+                            let target_proto = &self.program.functions[proto_idx as usize];
+                            let param_count = target_proto.param_count as usize;
+                            for (i, name) in target_proto.capture_names.iter().enumerate() {
+                                if let Some(value) = captured.get(name) {
+                                    let reg = param_count + i;
+                                    if let Some(frame) = self.stack.last_mut() {
+                                        if reg < frame.regs.len() {
+                                            frame.regs[reg] = value.clone();
+                                        }
+                                    }
+                                }
+                            }
                             // Continue loop — new frame is now active.
                         }
                         other => {
