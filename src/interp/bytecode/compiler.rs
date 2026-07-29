@@ -174,6 +174,33 @@ impl BytecodeCompiler {
             }
         }
 
+        // Pass 3: compile impl methods as mangled functions.
+        // Method `foo` on type `Bar` becomes `Bar_foo`.
+        for item in &file.items {
+            if let Item::Impl(impl_def) = item {
+                for method in &impl_def.methods {
+                    let mangled_name = format!("{}_{}", impl_def.type_name, method.name);
+                    // Register the mangled function name.
+                    let idx = self.functions.len() as FuncIdx;
+                    self.func_table.insert(mangled_name.clone(), idx);
+                    self.functions.push(FunctionProto::new(mangled_name, method.params.len() as u16));
+                }
+            }
+        }
+
+        // Pass 4: compile impl method bodies.
+        for item in &file.items {
+            if let Item::Impl(impl_def) = item {
+                for method in &impl_def.methods {
+                    let mangled_name = format!("{}_{}", impl_def.type_name, method.name);
+                    if let Some(&idx) = self.func_table.get(&mangled_name) {
+                        let proto = self.compile_func(method)?;
+                        self.functions[idx as usize] = proto;
+                    }
+                }
+            }
+        }
+
         let entry = self.func_table.get("main").copied().ok_or_else(|| {
             InterpError::new("no main function found")
         })?;
@@ -782,7 +809,7 @@ impl BytecodeCompiler {
             let total_args = args.len() + 1;
 
             // Try to find the method as a function.
-            // Methods are often named like "is_empty" or "List_is_empty".
+            // First try the bare method name (for builtins like len).
             if let Some(&fidx) = self.func_table.get(method.as_str()) {
                 fc.emit(Op::Call {
                     rd,
@@ -791,6 +818,22 @@ impl BytecodeCompiler {
                     argc: total_args as u16,
                 });
                 return Ok(rd);
+            }
+
+            // Try mangled names for common types.
+            // Method `foo` on type `Bar` becomes `Bar_foo`.
+            let type_prefixes = ["List", "list", "String", "string", "Map", "map", "Set", "set"];
+            for prefix in &type_prefixes {
+                let mangled = format!("{}_{}", prefix, method);
+                if let Some(&fidx) = self.func_table.get(&mangled) {
+                    fc.emit(Op::Call {
+                        rd,
+                        func: fidx,
+                        args_base: new_args_base,
+                        argc: total_args as u16,
+                    });
+                    return Ok(rd);
+                }
             }
 
             // Try builtin methods.
