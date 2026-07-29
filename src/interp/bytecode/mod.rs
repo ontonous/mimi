@@ -836,6 +836,57 @@ mod tests {
             Ok(3)
         );
     }
+
+    // ═══ Phase 4b: More builtins ══════════════════════════════
+
+    /// is_empty builtin.
+    #[test]
+    fn e2e_is_empty() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let xs: [i32; 0] = []
+                     if is_empty(xs) { 1 } else { 0 }
+                 }"),
+            Ok(1)
+        );
+    }
+
+    /// any builtin with closure.
+    #[test]
+    fn e2e_any() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let xs = [1, 2, 3]
+                     if any(xs, fn(x: i32) -> bool { x > 2 }) { 1 } else { 0 }
+                 }"),
+            Ok(1)
+        );
+    }
+
+    /// all builtin with closure.
+    #[test]
+    fn e2e_all() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let xs = [2, 4, 6]
+                     if all(xs, fn(x: i32) -> bool { x % 2 == 0 }) { 1 } else { 0 }
+                 }"),
+            Ok(1)
+        );
+    }
+
+    /// find builtin.
+    #[test]
+    fn e2e_find() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let xs = [10, 20, 30]
+                     let (found, idx) = find(xs, 20)
+                     if found { idx } else { -1 }
+                 }"),
+            Ok(1)
+        );
+    }
 }
 
 #[cfg(test)]
