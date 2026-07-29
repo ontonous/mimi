@@ -119,12 +119,7 @@ fn run_once(
     };
 
     // Auto-merge standard library prelude (identity, clamp, is_even, etc.)
-    // Skip for bytecode mode — stdlib uses features not yet supported
-    // (method calls, generics, traits). Higher-order functions are
-    // implemented as VM builtins instead.
-    if !bytecode {
-        loader::merge_prelude_into(&mut merged_file);
-    }
+    loader::merge_prelude_into(&mut merged_file);
 
     let checked_program = if strict {
         mimi::core::check_program_strict(&merged_file)
