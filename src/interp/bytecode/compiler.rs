@@ -26,6 +26,8 @@ pub struct BytecodeCompiler {
     newtype_names: std::collections::HashSet<String>,
     /// Known impl type names (for method resolution prefixes).
     impl_type_names: Vec<String>,
+    /// Constant name → value expression (for Item::Const resolution).
+    constants: HashMap<String, Expr>,
 }
 
 /// Per-function compilation state.
@@ -157,6 +159,7 @@ impl BytecodeCompiler {
             variant_names: std::collections::HashSet::new(),
             newtype_names: std::collections::HashSet::new(),
             impl_type_names: Vec::new(),
+            constants: HashMap::new(),
         }
     }
 
@@ -183,6 +186,10 @@ impl BytecodeCompiler {
                     }
                     _ => {}
                 }
+            }
+            // Collect constants for inline resolution.
+            if let Item::Const { name, value, .. } = item {
+                self.constants.insert(name.clone(), value.clone());
             }
         }
 
@@ -535,6 +542,10 @@ impl BytecodeCompiler {
                     let rd = fc.proto.alloc_reg();
                     fc.emit(Op::None { rd });
                     return Ok(rd);
+                }
+                // Constants: inline the value expression.
+                if let Some(const_expr) = self.constants.get(name).cloned() {
+                    return self.compile_expr(fc, &const_expr);
                 }
                 fc.lookup_var(name).ok_or_else(|| {
                     InterpError::new(format!("undefined variable '{}' in bytecode", name))
