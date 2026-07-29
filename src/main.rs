@@ -98,6 +98,9 @@ enum Command {
         /// Watch mode: re-run on file changes
         #[arg(long, short)]
         watch: bool,
+        /// Use bytecode VM instead of tree-walker interpreter (experimental)
+        #[arg(long)]
+        bytecode: bool,
         /// Extra arguments forwarded to the program (after --)
         #[arg(trailing_var_arg = true)]
         extra_args: Vec<String>,
@@ -368,6 +371,7 @@ fn main() {
             strict,
             watch,
             profile,
+            bytecode,
             extra_args,
         } => {
             let ffi_check = verify_ffi && !skip_verify_ffi;
@@ -379,6 +383,7 @@ fn main() {
                 strict,
                 watch,
                 profile,
+                bytecode,
                 &extra_args,
             ) {
                 Ok(code) => std::process::exit(code),
