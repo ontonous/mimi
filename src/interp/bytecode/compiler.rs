@@ -755,6 +755,56 @@ impl BytecodeCompiler {
             }
         }
 
+        // Method call: obj.method(args) → method(obj, args)
+        if let Expr::Field(obj, method) = callee.unlocated() {
+            // Compile the receiver as the first argument.
+            let recv_reg = self.compile_expr(fc, obj)?;
+
+            // Shift existing args to make room for receiver.
+            let new_args_base = fc.proto.alloc_reg();
+            for _ in 0..args.len() {
+                fc.proto.alloc_reg();
+            }
+            // Move receiver to new_args_base.
+            fc.emit(Op::Mov { rd: new_args_base, rs: recv_reg });
+            // Move existing args to new_args_base + 1..
+            for i in 0..args.len() {
+                let src = args_base + i as Reg;
+                let dst = new_args_base + 1 + i as Reg;
+                fc.emit(Op::Mov { rd: dst, rs: src });
+            }
+
+            let total_args = args.len() + 1;
+
+            // Try to find the method as a function.
+            // Methods are often named like "is_empty" or "List_is_empty".
+            if let Some(&fidx) = self.func_table.get(method.as_str()) {
+                fc.emit(Op::Call {
+                    rd,
+                    func: fidx,
+                    args_base: new_args_base,
+                    argc: total_args as u16,
+                });
+                return Ok(rd);
+            }
+
+            // Try builtin methods.
+            if let Some(&bidx) = self.builtin_table.get(method.as_str()) {
+                fc.emit(Op::CallBuiltin {
+                    rd,
+                    builtin: bidx,
+                    args_base: new_args_base,
+                    argc: total_args as u16,
+                });
+                return Ok(rd);
+            }
+
+            return Err(InterpError::new(format!(
+                "bytecode: cannot resolve method '{}'",
+                method
+            )));
+        }
+
         Err(InterpError::new(format!(
             "bytecode: cannot resolve call target {:?}",
             callee

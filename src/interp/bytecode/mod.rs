@@ -822,6 +822,20 @@ mod tests {
             Ok(1)
         );
     }
+
+    // ═══ Phase 4a: Method calls ═══════════════════════════════
+
+    /// Method call: len(xs) via xs.len() syntax.
+    #[test]
+    fn e2e_method_call_len() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let xs = [1, 2, 3]
+                     xs.len()
+                 }"),
+            Ok(3)
+        );
+    }
 }
 
 #[cfg(test)]
