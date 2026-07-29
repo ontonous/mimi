@@ -9,7 +9,9 @@
 //! It provides 10-30x speedup by eliminating AST match dispatch, HashMap scope
 //! lookups, and per-expression recursion overhead.
 
+pub mod builtins;
 pub mod compiler;
+pub mod disasm;
 pub mod instr;
 pub mod registry;
 pub mod vm;
@@ -972,5 +974,26 @@ func main() -> i32 {
         eprintln!("BC execute:      {:?}", bc_time);
         eprintln!("Speedup (exec):  {:.1}x", tree_time.as_secs_f64() / bc_time.as_secs_f64());
         eprintln!("Speedup (total): {:.1}x", tree_time.as_secs_f64() / (compile_time + bc_time).as_secs_f64());
+    }
+
+    // ═══ Disassembler ════════════════════════════════════════
+
+    #[test]
+    fn disasm_simple_function() {
+        let source = "func main() -> i32 {
+            let x = 10
+            let y = 20
+            x + y
+        }";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let prog = compiler.compile_file(&file).unwrap();
+
+        let output = super::disasm::disassemble_program(&prog);
+        assert!(output.contains("LOAD_CONST"));
+        assert!(output.contains("ADD_INT"));
+        assert!(output.contains("RET"));
+        assert!(output.len() > 100);
     }
 }
