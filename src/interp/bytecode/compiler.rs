@@ -100,6 +100,11 @@ impl FuncCompiler {
     fn reg_is_float(&self, name: &str) -> bool {
         self.var_types.get(name) == Some(&VarType::Float)
     }
+
+    /// Check if a register is known to hold a string.
+    fn reg_is_string(&self, name: &str) -> bool {
+        self.var_types.get(name) == Some(&VarType::String)
+    }
 }
 
 impl BytecodeCompiler {
@@ -169,6 +174,15 @@ impl BytecodeCompiler {
         // Bind parameters to registers 0..param_count.
         for (i, param) in f.params.iter().enumerate() {
             fc.vars[0].insert(param.name.clone(), i as Reg);
+            // Track parameter types for int/float dispatch.
+            let ty = match param.ty.unlocated() {
+                Type::Name(n, _) if n == "f64" || n == "f32" => VarType::Float,
+                Type::Name(n, _) if n == "i32" || n == "i64" => VarType::Int,
+                Type::Name(n, _) if n == "bool" => VarType::Bool,
+                Type::Name(n, _) if n == "string" => VarType::String,
+                _ => VarType::Unknown,
+            };
+            fc.set_reg_type(&param.name, ty);
         }
         // Ensure register_count accounts for params.
         while fc.proto.register_count < f.params.len() as u16 {
@@ -401,6 +415,12 @@ impl BytecodeCompiler {
         // we emit a generic dispatch that checks at runtime.
         // OPTIMIZATION: with type info, emit AddInt vs AddFloat directly.
         let is_float = self.expr_is_float(fc, l) || self.expr_is_float(fc, r);
+
+        // String concatenation: + on strings emits ConcatStr.
+        if matches!(op, BinOp::Add) && (self.expr_is_string(fc, l) || self.expr_is_string(fc, r)) {
+            fc.emit(Op::ConcatStr { rd, ra, rb });
+            return Ok(rd);
+        }
 
         if is_float {
             self.emit_float_binop(fc, op, rd, ra, rb)?;
@@ -679,13 +699,14 @@ impl BytecodeCompiler {
         body: &Block,
     ) -> Result<(), InterpError> {
         fc.break_jumps.push(Vec::new());
+        let mut continue_jumps: Vec<usize> = Vec::new();
 
         let loop_start = fc.proto.code.len();
         let r_cond = self.compile_expr(fc, cond)?;
         let jmp_end = fc.emit(Op::JmpIfNot { offset: 0, ra: r_cond });
 
         fc.push_scope();
-        self.compile_block(fc, body)?;
+        self.compile_block_with_continue(fc, body, &mut continue_jumps)?;
         fc.pop_scope();
 
         // Jump back to loop start.
@@ -703,8 +724,41 @@ impl BytecodeCompiler {
                 fc.proto.patch_jump_to(b, end);
             }
         }
+        // Continue jumps back to condition check.
+        for c in continue_jumps {
+            fc.proto.patch_jump_to(c, loop_start);
+        }
 
         Ok(())
+    }
+
+    /// Compile a block, collecting Continue jump sites for the enclosing loop.
+    fn compile_block_with_continue(
+        &self,
+        fc: &mut FuncCompiler,
+        block: &Block,
+        continue_jumps: &mut Vec<usize>,
+    ) -> Result<Option<Reg>, InterpError> {
+        let mut last_reg = None;
+        for (i, stmt) in block.iter().enumerate() {
+            let is_last = i == block.len() - 1;
+            match stmt.unlocated() {
+                Stmt::Continue => {
+                    let idx = fc.emit(Op::Jmp { offset: 0 });
+                    continue_jumps.push(idx);
+                }
+                _ => {
+                    // Delegate to the standard single-statement compilation.
+                    // We re-use compile_block for the rest by wrapping in a slice.
+                    let single: Block = vec![stmt.clone()];
+                    let r = self.compile_block(fc, &single)?;
+                    if is_last {
+                        last_reg = r;
+                    }
+                }
+            }
+        }
+        Ok(last_reg)
     }
 
     fn compile_for(
@@ -729,6 +783,8 @@ impl BytecodeCompiler {
         fc.emit(Op::Len { rd: r_len, ra: r_iter });
 
         fc.break_jumps.push(Vec::new());
+        // Continue jumps back to the increment step.
+        let mut continue_jumps: Vec<usize> = Vec::new();
 
         let loop_start = fc.proto.code.len();
         // r_cmp = (idx < len)
@@ -736,15 +792,17 @@ impl BytecodeCompiler {
         fc.emit(Op::LtInt { rd: r_cmp, ra: r_idx, rb: r_len });
         let jmp_end = fc.emit(Op::JmpIfNot { offset: 0, ra: r_cmp });
 
+        // Push scope for loop variable (prevents leak to outer scope).
+        fc.push_scope();
         // var = iter[idx]
         let r_var = fc.bind_var(var);
         fc.emit(Op::ListGet { rd: r_var, ra: r_iter, rb: r_idx });
 
-        fc.push_scope();
-        self.compile_block(fc, body)?;
+        self.compile_block_with_continue(fc, body, &mut continue_jumps)?;
         fc.pop_scope();
 
-        // idx += 1
+        // Increment step (continue jumps here).
+        let increment_pos = fc.proto.code.len();
         fc.emit(Op::AddInt { rd: r_idx, ra: r_idx, rb: r_one });
         fc.emit(Op::Jmp { offset: 0 });
         let jmp_back = fc.proto.code.len() - 1;
@@ -756,6 +814,9 @@ impl BytecodeCompiler {
             for b in breaks {
                 fc.proto.patch_jump_to(b, end);
             }
+        }
+        for c in continue_jumps {
+            fc.proto.patch_jump_to(c, increment_pos);
         }
 
         Ok(())
@@ -892,6 +953,18 @@ impl BytecodeCompiler {
                         }
                     })
                 })
+            }
+            _ => false,
+        }
+    }
+
+    /// Determine if an expression produces a string value.
+    fn expr_is_string(&self, fc: &FuncCompiler, expr: &Expr) -> bool {
+        match expr.unlocated() {
+            Expr::Literal(Lit::String(_)) => true,
+            Expr::Ident(name) => fc.reg_is_string(name),
+            Expr::Binary(BinOp::Add, l, r) => {
+                self.expr_is_string(fc, l) || self.expr_is_string(fc, r)
             }
             _ => false,
         }
