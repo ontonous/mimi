@@ -882,6 +882,25 @@ fn require_expr(
             }
             require_expr(program, owner, value, entry_source)
         }
+        // 0.32.34: OptionalChain (receiver?.field). Receiver must be Option/Result.
+        // The field is projected from the payload record. Result is Option<FieldType>.
+        ResolvedExprKind::OptionalChain { receiver, .. } => {
+            require_expr(program, owner, receiver, entry_source)?;
+            // Receiver must be Option or Result.
+            match program.resolved_types().get(&receiver.ty) {
+                Some(ResolvedType::Option(_) | ResolvedType::Result { .. }) => Ok(()),
+                Some(other) => Err(UnsupportedResolvedNode::new(
+                    owner,
+                    &expression.node_id,
+                    format!("optional chain receiver type {other:?} is not Option/Result"),
+                )),
+                None => Err(UnsupportedResolvedNode::new(
+                    owner,
+                    &expression.node_id,
+                    "optional chain receiver has no resolved type",
+                )),
+            }
+        }
         other => Err(UnsupportedResolvedNode::new(
             owner,
             &expression.node_id,
