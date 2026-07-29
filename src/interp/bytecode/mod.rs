@@ -796,6 +796,32 @@ mod tests {
             Ok(10) // 1+2+3+4
         );
     }
+
+    // ═══ Phase 3c: Constant folding ═══════════════════════════
+
+    /// Constant folding: 2 + 3 * 4 should be computed at compile time.
+    #[test]
+    fn e2e_constant_folding() {
+        // This test verifies that constant expressions are folded.
+        // The bytecode should contain LoadConst 14, not AddInt/MulInt.
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     2 + 3 * 4
+                 }"),
+            Ok(14)
+        );
+    }
+
+    /// Constant folding with comparisons.
+    #[test]
+    fn e2e_constant_folding_cmp() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     if 5 > 3 { 1 } else { 0 }
+                 }"),
+            Ok(1)
+        );
+    }
 }
 
 #[cfg(test)]

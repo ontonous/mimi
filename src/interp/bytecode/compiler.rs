@@ -386,6 +386,80 @@ impl BytecodeCompiler {
         }
     }
 
+    /// Constant folding: evaluate binary operations on literals at compile time.
+    fn fold_constants(&self, op: BinOp, l: &Lit, r: &Lit) -> Option<Lit> {
+        match (l, r) {
+            (Lit::Int(a), Lit::Int(b)) => {
+                let result = match op {
+                    BinOp::Add => a.checked_add(*b)?,
+                    BinOp::Sub => a.checked_sub(*b)?,
+                    BinOp::Mul => a.checked_mul(*b)?,
+                    BinOp::Div => {
+                        if *b == 0 {
+                            return None; // Don't fold division by zero
+                        }
+                        a.checked_div(*b)?
+                    }
+                    BinOp::Mod => {
+                        if *b == 0 {
+                            return None;
+                        }
+                        a.checked_rem(*b)?
+                    }
+                    BinOp::EqCmp => return Some(Lit::Bool(a == b)),
+                    BinOp::NeCmp => return Some(Lit::Bool(a != b)),
+                    BinOp::Lt => return Some(Lit::Bool(a < b)),
+                    BinOp::Gt => return Some(Lit::Bool(a > b)),
+                    BinOp::Le => return Some(Lit::Bool(a <= b)),
+                    BinOp::Ge => return Some(Lit::Bool(a >= b)),
+                    BinOp::BitAnd => a & b,
+                    BinOp::BitOr => a | b,
+                    BinOp::BitXor => a ^ b,
+                    BinOp::Shl => a.checked_shl(*b as u32)?,
+                    BinOp::Shr => a.checked_shr(*b as u32)?,
+                    _ => return None,
+                };
+                Some(Lit::Int(result))
+            }
+            (Lit::Float(a), Lit::Float(b)) => {
+                let result = match op {
+                    BinOp::Add => a + b,
+                    BinOp::Sub => a - b,
+                    BinOp::Mul => a * b,
+                    BinOp::Div => {
+                        if *b == 0.0 {
+                            return None; // Don't fold division by zero
+                        }
+                        a / b
+                    }
+                    BinOp::EqCmp => return Some(Lit::Bool(a == b)),
+                    BinOp::NeCmp => return Some(Lit::Bool(a != b)),
+                    BinOp::Lt => return Some(Lit::Bool(a < b)),
+                    BinOp::Gt => return Some(Lit::Bool(a > b)),
+                    BinOp::Le => return Some(Lit::Bool(a <= b)),
+                    BinOp::Ge => return Some(Lit::Bool(a >= b)),
+                    _ => return None,
+                };
+                // Don't fold NaN/Inf results.
+                if result.is_nan() || result.is_infinite() {
+                    return None;
+                }
+                Some(Lit::Float(result))
+            }
+            (Lit::Bool(a), Lit::Bool(b)) => {
+                let result = match op {
+                    BinOp::And => *a && *b,
+                    BinOp::Or => *a || *b,
+                    BinOp::EqCmp => a == b,
+                    BinOp::NeCmp => a != b,
+                    _ => return None,
+                };
+                Some(Lit::Bool(result))
+            }
+            _ => None,
+        }
+    }
+
     fn compile_literal(
         &mut self,
         fc: &mut FuncCompiler,
@@ -427,6 +501,13 @@ impl BytecodeCompiler {
         // Short-circuit for && and ||.
         if matches!(op, BinOp::And | BinOp::Or) {
             return self.compile_short_circuit(fc, op, l, r);
+        }
+
+        // Constant folding: if both operands are literals, compute at compile time.
+        if let (Expr::Literal(l_lit), Expr::Literal(r_lit)) = (l.unlocated(), r.unlocated()) {
+            if let Some(folded) = self.fold_constants(op, l_lit, r_lit) {
+                return self.compile_literal(fc, &folded);
+            }
         }
 
         let ra = self.compile_expr(fc, l)?;
