@@ -33,6 +33,10 @@ pub struct BytecodeVM<'a> {
     stdout: String,
     /// Recursion depth guard.
     depth: usize,
+    /// When > 0, exec_loop returns when depth drops below this value.
+    /// Used by call_closure to stop when the closure frame returns.
+    /// 0 = normal mode (return when stack is empty).
+    stop_depth: usize,
 }
 
 const MAX_DEPTH: usize = 768;
@@ -44,6 +48,7 @@ impl<'a> BytecodeVM<'a> {
             stack: Vec::with_capacity(64),
             stdout: String::new(),
             depth: 0,
+            stop_depth: 0,
         }
     }
 
@@ -96,9 +101,11 @@ impl<'a> BytecodeVM<'a> {
         Ok(())
     }
 
-    /// Iterative dispatch loop: runs until the entry frame returns.
+    /// Iterative dispatch loop: runs until the entry frame returns
+    /// (or until depth drops below stop_depth for closure calls).
     /// Call/Ret are handled by pushing/popping frames — no Rust recursion.
     fn exec_loop(&mut self) -> Result<Value, InterpError> {
+        let stop = self.stop_depth;
         loop {
             let frame = self.stack.last().unwrap();
             let proto = &self.program.functions[frame.proto_idx as usize];
@@ -108,7 +115,7 @@ impl<'a> BytecodeVM<'a> {
                 let return_reg = frame.return_reg;
                 self.stack.pop();
                 self.depth -= 1;
-                if self.stack.is_empty() {
+                if self.stack.is_empty() || (stop > 0 && self.depth < stop) {
                     return Ok(Value::Unit);
                 }
                 if let Some(rd) = return_reg {
@@ -387,7 +394,7 @@ impl<'a> BytecodeVM<'a> {
                     let return_reg = self.stack.last().unwrap().return_reg;
                     self.stack.pop();
                     self.depth -= 1;
-                    if self.stack.is_empty() {
+                    if self.stack.is_empty() || (stop > 0 && self.depth < stop) {
                         return Ok(v);
                     }
                     if let Some(rd) = return_reg {
@@ -398,7 +405,7 @@ impl<'a> BytecodeVM<'a> {
                     let return_reg = self.stack.last().unwrap().return_reg;
                     self.stack.pop();
                     self.depth -= 1;
-                    if self.stack.is_empty() {
+                    if self.stack.is_empty() || (stop > 0 && self.depth < stop) {
                         return Ok(Value::Unit);
                     }
                     if let Some(rd) = return_reg {
@@ -742,42 +749,45 @@ impl<'a> BytecodeVM<'a> {
                     }
                 }
 
-                // ── Option / Result ────────────────────────────
+                // ── Option / Result (Variant encoding — matches tree-walker) ──
                 Op::Some { rd, ra } => {
                     let v = self.get_reg(ra).clone();
-                    self.set_reg(rd, Value::Tuple(vec![Value::Bool(true), v]));
+                    self.set_reg(rd, Value::Variant("Some".into(), vec![v]));
                 }
                 Op::None { rd } => {
-                    self.set_reg(rd, Value::Tuple(vec![Value::Bool(false), Value::Unit]));
+                    self.set_reg(rd, Value::Variant("None".into(), vec![]));
                 }
                 Op::Ok { rd, ra } => {
                     let v = self.get_reg(ra).clone();
-                    self.set_reg(
-                        rd,
-                        Value::Tuple(vec![Value::Bool(true), v, Value::Unit]),
-                    );
+                    self.set_reg(rd, Value::Variant("Ok".into(), vec![v]));
                 }
                 Op::Err { rd, ra } => {
                     let v = self.get_reg(ra).clone();
-                    self.set_reg(
-                        rd,
-                        Value::Tuple(vec![Value::Bool(false), Value::Unit, v]),
-                    );
+                    self.set_reg(rd, Value::Variant("Err".into(), vec![v]));
                 }
                 Op::IsSome { rd, ra } => {
                     let v = self.get_reg(ra);
-                    let is_some = matches!(v, Value::Tuple(t) if t.first() == Some(&Value::Bool(true)));
+                    let is_some =
+                        matches!(v, Value::Variant(name, _) if name == "Some" || name == "Ok");
                     self.set_reg(rd, Value::Bool(is_some));
                 }
                 Op::Unwrap { rd, ra } => {
                     let v = self.get_reg(ra).clone();
                     match v {
-                        Value::Tuple(t) if t.first() == Some(&Value::Bool(true)) => {
-                            let inner = t.get(1).cloned().unwrap_or(Value::Unit);
+                        Value::Variant(name, payload) if name == "Some" || name == "Ok" => {
+                            let inner = payload.into_iter().next().unwrap_or(Value::Unit);
                             self.set_reg(rd, inner);
                         }
-                        _ => {
+                        Value::Variant(name, _) if name == "None" => {
                             return Err(InterpError::new("unwrap called on None"));
+                        }
+                        Value::Variant(name, _) if name == "Err" => {
+                            return Err(InterpError::new("unwrap called on Err"));
+                        }
+                        _ => {
+                            return Err(InterpError::new(
+                                "unwrap: expected Option or Result variant",
+                            ));
                         }
                     }
                 }
@@ -812,10 +822,17 @@ impl<'a> BytecodeVM<'a> {
     // ── Closure call helper ──────────────────────────────────
 
     /// Call a closure synchronously and return the result.
-    /// This is used by higher-order builtins like map_list/filter_list/reduce_list.
+    /// Used by higher-order builtins (map_list/filter_list/reduce_list/any/all).
+    ///
+    /// Pushes a closure frame, sets stop_depth, and delegates to exec_loop.
+    /// This ensures closures can call user functions, other closures, builtins —
+    /// anything the main loop supports. No separate dispatch.
     fn call_closure(&mut self, closure: &Value, args: &[Value]) -> Result<Value, InterpError> {
         match closure {
-            Value::BytecodeClosure { proto: proto_idx, captured } => {
+            Value::BytecodeClosure {
+                proto: proto_idx,
+                captured,
+            } => {
                 // Push a new frame for the closure.
                 self.push_frame(*proto_idx, args, None)?;
 
@@ -833,323 +850,17 @@ impl<'a> BytecodeVM<'a> {
                     }
                 }
 
-                // Execute until the frame returns.
-                // We need to run the exec_loop but stop when our frame pops.
-                let target_depth = self.depth;
-                loop {
-                    let frame = self.stack.last().unwrap();
-                    let proto = &self.program.functions[frame.proto_idx as usize];
-                    if frame.pc >= proto.code.len() {
-                        // Implicit return Unit.
-                        self.stack.pop();
-                        self.depth -= 1;
-                        return Ok(Value::Unit);
-                    }
-                    let op = proto.code[frame.pc].clone();
-                    self.stack.last_mut().unwrap().pc += 1;
-
-                    match op {
-                        Op::Ret { ra } => {
-                            let v = self.get_reg(ra).clone();
-                            self.stack.pop();
-                            self.depth -= 1;
-                            if self.depth < target_depth {
-                                return Ok(v);
-                            }
-                            // Continue executing outer frames.
-                        }
-                        Op::RetUnit => {
-                            self.stack.pop();
-                            self.depth -= 1;
-                            if self.depth < target_depth {
-                                return Ok(Value::Unit);
-                            }
-                        }
-                        _ => {
-                            // Execute the opcode normally.
-                            // We need to handle this recursively or use a different approach.
-                            // For simplicity, let's just execute the opcode inline.
-                            self.exec_op(&op, proto)?;
-                        }
-                    }
-                }
+                // Set stop_depth so exec_loop returns when this frame pops.
+                let prev_stop = self.stop_depth;
+                self.stop_depth = self.depth; // depth was incremented by push_frame
+                let result = self.exec_loop();
+                self.stop_depth = prev_stop;
+                result
             }
-            _ => Err(InterpError::new("call_closure: expected BytecodeClosure")),
+            _ => Err(InterpError::new(
+                "call_closure: expected BytecodeClosure",
+            )),
         }
-    }
-
-    /// Execute a single opcode (used by call_closure).
-    fn exec_op(&mut self, op: &Op, proto: &FunctionProto) -> Result<(), InterpError> {
-        // This is a simplified version that handles the most common opcodes.
-        // For a full implementation, we'd refactor exec_loop to use this.
-        match op {
-            Op::Mov { rd, rs } => {
-                let v = self.get_reg(*rs).clone();
-                self.set_reg(*rd, v);
-            }
-            Op::LoadConst { rd, idx } => {
-                let v = self.load_const(proto, *idx);
-                self.set_reg(*rd, v);
-            }
-            Op::LoadUnit { rd } => {
-                self.set_reg(*rd, Value::Unit);
-            }
-            Op::AddInt { rd, ra, rb } => {
-                let (a, b) = self.get_int2(*ra, *rb)?;
-                let result = a.checked_add(b).ok_or_else(|| {
-                    InterpError::new("integer overflow in addition")
-                })?;
-                self.set_reg(*rd, Value::Int(result));
-            }
-            Op::SubInt { rd, ra, rb } => {
-                let (a, b) = self.get_int2(*ra, *rb)?;
-                let result = a.checked_sub(b).ok_or_else(|| {
-                    InterpError::new("integer overflow in subtraction")
-                })?;
-                self.set_reg(*rd, Value::Int(result));
-            }
-            Op::MulInt { rd, ra, rb } => {
-                let (a, b) = self.get_int2(*ra, *rb)?;
-                let result = a.checked_mul(b).ok_or_else(|| {
-                    InterpError::new("integer overflow in multiplication")
-                })?;
-                self.set_reg(*rd, Value::Int(result));
-            }
-            Op::DivInt { rd, ra, rb } => {
-                let (a, b) = self.get_int2(*ra, *rb)?;
-                if b == 0 {
-                    return Err(InterpError::new("division by zero"));
-                }
-                let result = a.checked_div(b).ok_or_else(|| {
-                    InterpError::new("integer overflow in division")
-                })?;
-                self.set_reg(*rd, Value::Int(result));
-            }
-            Op::ModInt { rd, ra, rb } => {
-                let (a, b) = self.get_int2(*ra, *rb)?;
-                if b == 0 {
-                    return Err(InterpError::new("modulo by zero"));
-                }
-                let result = a.checked_rem(b).ok_or_else(|| {
-                    InterpError::new("integer overflow in modulo")
-                })?;
-                self.set_reg(*rd, Value::Int(result));
-            }
-            Op::LtInt { rd, ra, rb } => {
-                let (a, b) = self.get_int2(*ra, *rb)?;
-                self.set_reg(*rd, Value::Bool(a < b));
-            }
-            Op::GtInt { rd, ra, rb } => {
-                let (a, b) = self.get_int2(*ra, *rb)?;
-                self.set_reg(*rd, Value::Bool(a > b));
-            }
-            Op::EqInt { rd, ra, rb } => {
-                let (a, b) = self.get_int2(*ra, *rb)?;
-                self.set_reg(*rd, Value::Bool(a == b));
-            }
-            Op::Jmp { offset } => {
-                let frame = self.stack.last_mut().unwrap();
-                frame.pc = (frame.pc as i32 + *offset) as usize;
-            }
-            Op::JmpIf { offset, ra } => {
-                let v = self.get_reg(*ra).clone();
-                if crate::interp::is_truthy(&v) {
-                    let frame = self.stack.last_mut().unwrap();
-                    frame.pc = (frame.pc as i32 + *offset) as usize;
-                }
-            }
-            Op::JmpIfNot { offset, ra } => {
-                let v = self.get_reg(*ra).clone();
-                if !crate::interp::is_truthy(&v) {
-                    let frame = self.stack.last_mut().unwrap();
-                    frame.pc = (frame.pc as i32 + *offset) as usize;
-                }
-            }
-            Op::CallBuiltin { rd, builtin, args_base, argc } => {
-                let args: Vec<Value> = (0..*argc)
-                    .map(|i| self.get_reg(*args_base + i).clone())
-                    .collect();
-                let result = self.call_builtin(*builtin, &args)?;
-                self.set_reg(*rd, result);
-            }
-            // Additional opcodes for nested execution
-            Op::LoadTrue { rd } => {
-                self.set_reg(*rd, Value::Bool(true));
-            }
-            Op::LoadFalse { rd } => {
-                self.set_reg(*rd, Value::Bool(false));
-            }
-            Op::NeInt { rd, ra, rb } => {
-                let (a, b) = self.get_int2(*ra, *rb)?;
-                self.set_reg(*rd, Value::Bool(a != b));
-            }
-            Op::LeInt { rd, ra, rb } => {
-                let (a, b) = self.get_int2(*ra, *rb)?;
-                self.set_reg(*rd, Value::Bool(a <= b));
-            }
-            Op::GeInt { rd, ra, rb } => {
-                let (a, b) = self.get_int2(*ra, *rb)?;
-                self.set_reg(*rd, Value::Bool(a >= b));
-            }
-            Op::AddFloat { rd, ra, rb } => {
-                let (a, b) = self.get_float2(*ra, *rb)?;
-                let result = a + b;
-                self.check_float(result, "addition")?;
-                self.set_reg(*rd, Value::Float(result));
-            }
-            Op::SubFloat { rd, ra, rb } => {
-                let (a, b) = self.get_float2(*ra, *rb)?;
-                let result = a - b;
-                self.check_float(result, "subtraction")?;
-                self.set_reg(*rd, Value::Float(result));
-            }
-            Op::MulFloat { rd, ra, rb } => {
-                let (a, b) = self.get_float2(*ra, *rb)?;
-                let result = a * b;
-                self.check_float(result, "multiplication")?;
-                self.set_reg(*rd, Value::Float(result));
-            }
-            Op::DivFloat { rd, ra, rb } => {
-                let (a, b) = self.get_float2(*ra, *rb)?;
-                if b == 0.0 {
-                    return Err(InterpError::new("division by zero"));
-                }
-                let result = a / b;
-                self.check_float(result, "division")?;
-                self.set_reg(*rd, Value::Float(result));
-            }
-            Op::LtFloat { rd, ra, rb } => {
-                let (a, b) = self.get_float2(*ra, *rb)?;
-                self.set_reg(*rd, Value::Bool(a < b));
-            }
-            Op::GtFloat { rd, ra, rb } => {
-                let (a, b) = self.get_float2(*ra, *rb)?;
-                self.set_reg(*rd, Value::Bool(a > b));
-            }
-            Op::LeFloat { rd, ra, rb } => {
-                let (a, b) = self.get_float2(*ra, *rb)?;
-                self.set_reg(*rd, Value::Bool(a <= b));
-            }
-            Op::GeFloat { rd, ra, rb } => {
-                let (a, b) = self.get_float2(*ra, *rb)?;
-                self.set_reg(*rd, Value::Bool(a >= b));
-            }
-            Op::Eq { rd, ra, rb } => {
-                let a = self.get_reg(*ra).clone();
-                let b = self.get_reg(*rb).clone();
-                self.set_reg(*rd, Value::Bool(a == b));
-            }
-            Op::Ne { rd, ra, rb } => {
-                let a = self.get_reg(*ra).clone();
-                let b = self.get_reg(*rb).clone();
-                self.set_reg(*rd, Value::Bool(a != b));
-            }
-            Op::Not { rd, ra } => {
-                let v = self.get_reg(*ra);
-                self.set_reg(*rd, Value::Bool(!crate::interp::is_truthy(v)));
-            }
-            Op::And { rd, ra, rb } => {
-                let a = crate::interp::is_truthy(self.get_reg(*ra));
-                let b = crate::interp::is_truthy(self.get_reg(*rb));
-                self.set_reg(*rd, Value::Bool(a && b));
-            }
-            Op::Or { rd, ra, rb } => {
-                let a = crate::interp::is_truthy(self.get_reg(*ra));
-                let b = crate::interp::is_truthy(self.get_reg(*rb));
-                self.set_reg(*rd, Value::Bool(a || b));
-            }
-            Op::ConcatStr { rd, ra, rb } => {
-                let a = self.get_reg(*ra).to_string();
-                let b = self.get_reg(*rb).to_string();
-                self.set_reg(*rd, Value::String(format!("{}{}", a, b)));
-            }
-            Op::NewList { rd, capacity } => {
-                let list = Vec::with_capacity(*capacity as usize);
-                self.set_reg(*rd, Value::List(list));
-            }
-            Op::ListPush { ra, rb } => {
-                let val = self.get_reg(*rb).clone();
-                let list = self.get_reg_mut(*ra);
-                match list {
-                    Value::List(l) => l.push(val),
-                    other => {
-                        return Err(InterpError::new(format!(
-                            "push: expected List, got {}",
-                            other
-                        )))
-                    }
-                }
-            }
-            Op::ListGet { rd, ra, rb } => {
-                let idx_raw = self.get_int(*rb)?;
-                if idx_raw < 0 {
-                    return Err(InterpError::new("negative list index"));
-                }
-                let idx = idx_raw as usize;
-                let list = self.get_reg(*ra).clone();
-                match list {
-                    Value::List(l) => {
-                        if idx >= l.len() {
-                            return Err(InterpError::new(format!(
-                                "list index {} out of bounds (len {})",
-                                idx,
-                                l.len()
-                            )));
-                        }
-                        self.set_reg(*rd, l[idx].clone());
-                    }
-                    other => {
-                        return Err(InterpError::new(format!(
-                            "list get: expected List, got {}",
-                            other
-                        )))
-                    }
-                }
-            }
-            Op::Len { rd, ra } => {
-                let v = self.get_reg(*ra);
-                let len = match v {
-                    Value::List(l) => l.len(),
-                    Value::String(s) => s.len(),
-                    _ => return Err(InterpError::new("len: expected List or String")),
-                };
-                self.set_reg(*rd, Value::Int(len as i64));
-            }
-            Op::NewTuple { rd, base, arity } => {
-                let elems: Vec<Value> = (0..*arity)
-                    .map(|i| self.get_reg(*base + i).clone())
-                    .collect();
-                self.set_reg(*rd, Value::Tuple(elems));
-            }
-            Op::TupleGet { rd, ra, idx } => {
-                let v = self.get_reg(*ra).clone();
-                match v {
-                    Value::Tuple(t) => {
-                        if (*idx as usize) >= t.len() {
-                            return Err(InterpError::new(format!(
-                                "tuple index {} out of bounds (arity {})",
-                                idx,
-                                t.len()
-                            )));
-                        }
-                        self.set_reg(*rd, t[*idx as usize].clone());
-                    }
-                    other => {
-                        return Err(InterpError::new(format!(
-                            "tuple get: expected Tuple, got {}",
-                            other
-                        )))
-                    }
-                }
-            }
-            _ => {
-                return Err(InterpError::new(format!(
-                    "call_closure: opcode {:?} not supported in nested execution",
-                    op
-                )));
-            }
-        }
-        Ok(())
     }
 
     // ── Builtin dispatch ─────────────────────────────────────
@@ -1430,8 +1141,15 @@ impl<'a> BytecodeVM<'a> {
                     Value::List(l) => l.clone(),
                     _ => return Err(InterpError::new("sort_list: argument must be a list")),
                 };
-                // Sort by string representation (simple but works for ints/strings).
-                list.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+                // Typed comparison: Int<Int, Float<Float, String<String (matches tree-walker).
+                list.sort_by(|a, b| match (a, b) {
+                    (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                    (Value::Float(x), Value::Float(y)) => {
+                        x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                    }
+                    (Value::String(x), Value::String(y)) => x.cmp(y),
+                    _ => std::cmp::Ordering::Equal,
+                });
                 Ok(Value::List(list))
             }
             "find" => {
