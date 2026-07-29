@@ -456,6 +456,8 @@ pub struct BytecodeProgram {
     pub flow_defs: std::collections::HashMap<String, crate::ast::FlowDef>,
     /// Flow transition function indices: (flow_name, transition_name, from_state) → FuncIdx.
     pub flow_transition_funcs: std::collections::HashMap<(String, String, String), FuncIdx>,
+    /// Transitions with `fails` clause: result must be wrapped in Ok(...).
+    pub flow_fails_transitions: std::collections::HashSet<(String, String, String)>,
     /// The original AST (for actor worker threads that use tree-walker internally).
     pub ast: Option<std::sync::Arc<crate::ast::File>>,
 }
