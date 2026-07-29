@@ -9,6 +9,7 @@ pub mod hof;
 pub mod io;
 pub mod list;
 pub mod math;
+pub mod misc;
 pub mod string;
 pub mod system;
 
@@ -23,5 +24,6 @@ pub fn register_all(reg: &mut BuiltinRegistry) {
     list::register(reg);
     hof::register(reg);
     fs::register(reg);
+    misc::register(reg);
     system::register(reg);
 }
