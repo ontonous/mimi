@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — 0.1.2-dev
+## [0.1.2] — 2026-07-29
 
 ### Phase A: Codegen 全量迁移（0.32.1–0.32.15）
 
@@ -37,7 +37,7 @@
   - ABI safety：编译期校验 callee 签名与 caller 期望的类型一致性，防止跨 emitter ABI 漂移。
   - +2 E2E 双后端测试。
 
-### Phase C: 删除 legacy body + 审计（0.32.26–）开始
+### Phase C: 删除 legacy body + 审计（0.32.26–0.32.30）
 
 - **0.32.26 Extern FFI 调用进入 resolved native slice**：
   - `ResolvedCallee::Extern` 现在在 per-function eligibility 检查中被接受（不再是静默回退到 legacy 的原因）。
@@ -52,14 +52,26 @@
   - `ctx.rs::verify_checked_contracts()` 新增方法：遍历 `program.callables()`，为每个有 contracts/math 的 callable 调用 `verify_contracts_from_resolved()`。
   - `ctx.rs::verify_checked()` 的 `verify_file(program.legacy_body_file())` 替换为 `verify_checked_contracts(program)`。
   - 移除 `#[allow(dead_code)]` 注解。新增 `mock_verify_checked()` 作为 C4 scaffold。
-  - 主验证入口 `verify_checked` (mod.rs) 拆分为双路径：Z3 可用时走 flow verifier（仍用 legacy_body_file），Z3 不可用时走 `mock_verify_checked`（CheckedProgram-based，无 legacy_body_file）。
+  - 主验证入口 `verify_checked` (mod.rs) 拆分为双路径：Z3 可用时走 flow verifier（仍用 raw_ast），Z3 不可用时走 `mock_verify_checked`（CheckedProgram-based，无 raw_ast）。
   - `mock_verify_checked` 现在同时处理 callables 合约和 extern block 合约。
   - `verify_ffi_checked` (mod.rs) 同样拆分为双路径。
   - `flow_verify_file_or_mock` 降级为 `pub(crate)` + `#[allow(dead_code)]`（仅被测试助手使用）。
   - 基线：4448 全量测试绿，0 退化。
-  - **C1 签名的迁移**：`compile_file_with_resolved` 签名移除 `file: &File` 参数，caller 不再调用 `program.legacy_body_file()`。改为内部通过 `program.legacy_body_file()` 获取，封装实现细节。
-  - `resolved_expr_to_ast_ffi_arg`：新增正向 R→AST Expr 转换器（Literal/Load/Binary/Unary/Call/Tuple/Old/Project/Cast），编译通过。（FFI 验证迁移尝试回退至基线，等架构升级后重做。）
-  - 当前 `legacy_body_file()` 剩余 4 个调用点：C1 (codegen 内部)、C2 (interp)、C4×2 (verifier Z3 路径)。mock 路径和三部分验证（C3/C5/ctx）已完全脱离。
+  - **C1 签名的迁移**：`compile_file_with_resolved` 签名移除 `file: &File` 参数，caller 不再调用 `program.legacy_body_file()`。改为内部通过 `program.raw_ast()` 获取，封装实现细节。
+  - 当前 `raw_ast()` 剩余 3 个调用点：C1 (codegen 内部)、C2 (interp)、C4×2 (verifier Z3 路径)。mock 路径和三部分验证（C3/C5/ctx）已完全脱离。
+
+- **0.32.28 C1/C4 内部保留决策（文档 sprint）**：
+  - C1（codegen 第五遍）永久保留 `raw_ast()` 内部调用：AST body 注册 + ineligible body class 编译需要 raw AST。
+  - C4（verifier Z3 路径）永久保留 `raw_ast()` 调用：Flow verifier 的 Z3 编码定义在 AST Expr 节点上。
+  - CHANGELOG 补全 Phase A（0.32.1–0.32.15）、Phase B（0.32.16–0.32.25）全部 sprint 记录。
+
+- **0.32.29 legacy_body_file()→raw_ast() 私有化 + compile_func→compile_func_legacy（不可逆）**：
+  - `legacy_body_file()` 重命名为 `raw_ast()`，添加完整架构文档（C1/C2/C4 三个永久 consumer 的理由）。旧名删除（所有 caller 已迁移）。
+  - `compile_func` 重命名为 `compile_func_legacy`，添加文档说明第五遍架构：resolved native emitter（第四遍）处理 eligible subset，legacy emitter（第五遍）处理永久 ineligible body classes（capturing lambdas/generics/async/extern ABI/view-mutate borrow params）。skip guard（`count_basic_blocks != 0`）防止双重发射。
+  - 所有 consumer 调用点添加显式理由注释（C1 codegen/C2 interp/C4 verifier）。
+  - 禁止新代码调用 `raw_ast()`：声明层数据通过 typed accessor 获取。
+  - clippy/fmt 修复：`and_then(|x| Some(y))` → `map(|x| y)`（resolved/mod.rs:2863）。
+  - 基线：4448 lib + 13 real_world + 28 cli 全绿，clippy 0 warnings，fmt 0 diffs。
 
 ---
 
