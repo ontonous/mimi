@@ -37,7 +37,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
     // Char operations
     reg.register(BuiltinDesc { name: "str_char_at", arity: 2, category: BuiltinCategory::String, func: builtin_str_char_at });
     reg.register(BuiltinDesc { name: "char_at", arity: 2, category: BuiltinCategory::String, func: builtin_str_char_at });
-    reg.register(BuiltinDesc { name: "char_code", arity: 1, category: BuiltinCategory::String, func: builtin_char_code });
+    reg.register(BuiltinDesc { name: "char_code", arity: 2, category: BuiltinCategory::String, func: builtin_char_code });
     reg.register(BuiltinDesc { name: "chr", arity: 1, category: BuiltinCategory::String, func: builtin_chr });
     // Parse
     reg.register(BuiltinDesc { name: "str_parse_int", arity: 1, category: BuiltinCategory::String, func: builtin_str_parse_int });
@@ -212,25 +212,31 @@ fn builtin_str_repeat(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value,
 // ── Char operations ─────────────────────────────────────
 
 fn builtin_str_char_at(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    match (&args[0], &args[1]) {
-        (Value::String(s), Value::Int(idx)) => {
-            let i = *idx as usize;
-            s.chars().nth(i)
+    let idx = match &args[1] {
+        Value::Int(i) => *i as usize,
+        Value::Float(f) => *f as usize,
+        _ => return Err(InterpError::new("char_at expects (string, int)")),
+    };
+    match &args[0] {
+        Value::String(s) => {
+            s.chars().nth(idx)
                 .map(|c| Value::String(c.to_string()))
-                .ok_or_else(|| InterpError::new(format!("char_at: index {} out of bounds", i)))
+                .ok_or_else(|| InterpError::new(format!("char_at: index {} out of bounds", idx)))
         }
         _ => Err(InterpError::new("char_at expects (string, int)")),
     }
 }
 
 fn builtin_char_code(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    match &args[0] {
-        Value::String(s) => {
-            s.chars().next()
+    match (&args[0], &args[1]) {
+        (Value::String(s), Value::Int(idx)) => {
+            let i = *idx as usize;
+            s.chars()
+                .nth(i)
                 .map(|c| Value::Int(c as i64))
-                .ok_or_else(|| InterpError::new("char_code: empty string"))
+                .ok_or_else(|| InterpError::new(format!("char_code: index {} out of bounds", i)))
         }
-        _ => Err(InterpError::new("char_code expects a string")),
+        _ => Err(InterpError::new("char_code expects (string, int)")),
     }
 }
 
