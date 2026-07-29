@@ -55,6 +55,24 @@ pub fn register(reg: &mut BuiltinRegistry) {
     reg.register(BuiltinDesc { name: "read_file_bytes", arity: 1, category: BuiltinCategory::System, func: builtin_read_file_bytes });
     reg.register(BuiltinDesc { name: "write_file_bytes", arity: 2, category: BuiltinCategory::System, func: builtin_write_file_bytes });
     reg.register(BuiltinDesc { name: "close_fd", arity: 1, category: BuiltinCategory::System, func: builtin_close_fd });
+    reg.register(BuiltinDesc { name: "read_file_partial", arity: 3, category: BuiltinCategory::System, func: builtin_read_file_partial });
+    reg.register(BuiltinDesc { name: "read_lines_each", arity: 1, category: BuiltinCategory::System, func: builtin_read_lines_each });
+    reg.register(BuiltinDesc { name: "read_lines_json", arity: 1, category: BuiltinCategory::System, func: builtin_read_lines_each });
+    reg.register(BuiltinDesc { name: "read_lines_json_builtin", arity: 1, category: BuiltinCategory::System, func: builtin_read_lines_each });
+    // Regex extended
+    reg.register(BuiltinDesc { name: "regex_capture_groups", arity: 2, category: BuiltinCategory::String, func: builtin_regex_capture_groups });
+    // Shadow memory
+    reg.register(BuiltinDesc { name: "shadow_alloc", arity: 3, category: BuiltinCategory::System, func: builtin_shadow_alloc });
+    reg.register(BuiltinDesc { name: "shadow_tag", arity: 2, category: BuiltinCategory::System, func: builtin_shadow_tag });
+    reg.register(BuiltinDesc { name: "shadow_check", arity: 2, category: BuiltinCategory::System, func: builtin_shadow_check });
+    reg.register(BuiltinDesc { name: "shadow_free", arity: 1, category: BuiltinCategory::System, func: builtin_shadow_free });
+    // Allocator (no-op in interpreter)
+    reg.register(BuiltinDesc { name: "alloc", arity: usize::MAX, category: BuiltinCategory::System, func: builtin_alloc_noop });
+    reg.register(BuiltinDesc { name: "allocator_arena", arity: 0, category: BuiltinCategory::System, func: builtin_alloc_noop });
+    reg.register(BuiltinDesc { name: "allocator_bump", arity: 0, category: BuiltinCategory::System, func: builtin_alloc_noop });
+    reg.register(BuiltinDesc { name: "allocator_system", arity: 0, category: BuiltinCategory::System, func: builtin_alloc_noop });
+    reg.register(BuiltinDesc { name: "arena_reset", arity: 1, category: BuiltinCategory::System, func: builtin_alloc_noop });
+    reg.register(BuiltinDesc { name: "bump_used", arity: 1, category: BuiltinCategory::System, func: builtin_alloc_noop });
 }
 
 // ── JSON ────────────────────────────────────────────────
@@ -482,5 +500,91 @@ fn builtin_write_file_bytes(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<
 
 fn builtin_close_fd(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
     // No-op in the interpreter.
+    Ok(Value::Unit)
+}
+
+fn builtin_read_file_partial(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    match (&args[0], &args[1], &args[2]) {
+        (Value::String(path), Value::Int(offset), Value::Int(len)) => {
+            match std::fs::read(path) {
+                Ok(data) => {
+                    let start = (*offset as usize).min(data.len());
+                    let end = (start + *len as usize).min(data.len());
+                    let slice = &data[start..end];
+                    let content = String::from_utf8_lossy(slice).to_string();
+                    Ok(Value::Variant("Ok".into(), vec![Value::String(content)]))
+                }
+                Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
+            }
+        }
+        _ => Err(InterpError::new("read_file_partial expects (string, int, int)")),
+    }
+}
+
+fn builtin_read_lines_each(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    match &args[0] {
+        Value::String(path) => {
+            match std::fs::read_to_string(path) {
+                Ok(content) => {
+                    let lines: Vec<Value> = content.lines().map(|l| Value::String(l.to_string())).collect();
+                    Ok(Value::List(lines))
+                }
+                Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
+            }
+        }
+        _ => Err(InterpError::new("read_lines_each expects a string path")),
+    }
+}
+
+fn builtin_regex_capture_groups(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    match (&args[0], &args[1]) {
+        (Value::String(text), Value::String(pattern)) => {
+            let re = regex::Regex::new(pattern)
+                .map_err(|e| InterpError::new(format!("regex error: {}", e)))?;
+            match re.captures(text) {
+                Some(caps) => {
+                    let groups: Vec<Value> = caps.iter()
+                        .map(|m| Value::String(m.map(|m| m.as_str().to_string()).unwrap_or_default()))
+                        .collect();
+                    Ok(Value::List(groups))
+                }
+                None => Ok(Value::List(vec![])),
+            }
+        }
+        _ => Err(InterpError::new("regex_capture_groups expects (string, string)")),
+    }
+}
+
+// ── Shadow memory ───────────────────────────────────────
+
+fn builtin_shadow_alloc(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    let size = match &args[0] { Value::Int(n) => *n as usize, _ => return Err(InterpError::new("shadow_alloc: size must be int")) };
+    let tag = match &args[1] { Value::Int(n) => *n as u8, _ => return Err(InterpError::new("shadow_alloc: tag must be int")) };
+    let label = match &args[2] { Value::String(s) => s.clone(), _ => return Err(InterpError::new("shadow_alloc: label must be string")) };
+    let c_label = std::ffi::CString::new(label).unwrap_or_default();
+    let ptr = crate::runtime::mimi_shadow_alloc(size, tag, c_label.as_ptr());
+    Ok(Value::Int(ptr as i64))
+}
+
+fn builtin_shadow_tag(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    let ptr = match &args[0] { Value::Int(n) => *n as *const u8, _ => return Err(InterpError::new("shadow_tag: ptr must be int")) };
+    let tag = match &args[1] { Value::Int(n) => *n as u8, _ => return Err(InterpError::new("shadow_tag: tag must be int")) };
+    Ok(Value::Int(crate::runtime::mimi_shadow_tag(ptr, tag) as i64))
+}
+
+fn builtin_shadow_check(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    let ptr = match &args[0] { Value::Int(n) => *n as *const u8, _ => return Err(InterpError::new("shadow_check: ptr must be int")) };
+    let tag = match &args[1] { Value::Int(n) => *n as u8, _ => return Err(InterpError::new("shadow_check: tag must be int")) };
+    Ok(Value::Bool(crate::runtime::mimi_shadow_check(ptr, tag) == 1))
+}
+
+fn builtin_shadow_free(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    let ptr = match &args[0] { Value::Int(n) => *n as *mut u8, _ => return Err(InterpError::new("shadow_free: ptr must be int")) };
+    crate::runtime::mimi_shadow_free(ptr);
+    Ok(Value::Unit)
+}
+
+fn builtin_alloc_noop(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+    // Allocator builtins are no-ops in the interpreter (memory is GC'd).
     Ok(Value::Unit)
 }
