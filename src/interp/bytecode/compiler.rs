@@ -34,6 +34,8 @@ struct FuncCompiler {
     break_jumps: Vec<Vec<usize>>,
     /// Continue jump sites for the current loop (patched to loop head/increment).
     continue_jumps: Vec<Vec<usize>>,
+    /// Current source line (1-based) for line_table population (D12).
+    current_line: u32,
 }
 
 /// Lightweight type tag for register dispatch.
@@ -54,6 +56,7 @@ impl FuncCompiler {
             var_types: HashMap::new(),
             break_jumps: Vec::new(),
             continue_jumps: Vec::new(),
+            current_line: 0,
         }
     }
 
@@ -92,7 +95,15 @@ impl FuncCompiler {
     }
 
     fn emit(&mut self, op: Op) -> usize {
+        self.proto.line_table.push(self.current_line);
         self.proto.emit(op)
+    }
+
+    /// Set the current source line from an AST node's span (D12).
+    fn set_line_from_meta(&mut self, meta: Option<AstNodeMeta>) {
+        if let Some(m) = meta {
+            self.current_line = m.span.start_line as u32;
+        }
     }
 
     /// Record the inferred type of a register for int/float dispatch.
@@ -237,6 +248,8 @@ impl BytecodeCompiler {
     ) -> Result<Option<Reg>, InterpError> {
         let mut last_reg = None;
         for (i, stmt) in block.iter().enumerate() {
+            // Track source line for error context (D12).
+            fc.set_line_from_meta(stmt.meta());
             let is_last = i == block.len() - 1;
             match stmt.unlocated() {
                 Stmt::Expr(e) => {
@@ -328,6 +341,8 @@ impl BytecodeCompiler {
         fc: &mut FuncCompiler,
         expr: &Expr,
     ) -> Result<Reg, InterpError> {
+        // Track source line for error context (D12).
+        fc.set_line_from_meta(expr.meta());
         match expr.unlocated() {
             Expr::Literal(lit) => self.compile_literal(fc, lit),
             Expr::Ident(name) => {

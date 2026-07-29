@@ -11,6 +11,8 @@ pub struct ErrorContext {
     pub operation: Option<String>,
     pub help: Option<String>,
     pub call_stack: Vec<String>,
+    /// Source line number (1-based), if available.
+    pub line: Option<u32>,
 }
 
 /// A structured interpreter error with a typed error code.
@@ -129,6 +131,7 @@ impl InterpError {
             operation: None,
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 
@@ -140,12 +143,19 @@ impl InterpError {
             operation: Some(operation.into()),
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 
     /// Set the function context.
     pub fn in_func(mut self, func_name: impl Into<String>) -> Self {
         self.ctx_mut().function = Some(func_name.into());
+        self
+    }
+
+    /// Set the source line context.
+    pub fn at_line(mut self, line: u32) -> Self {
+        self.ctx_mut().line = Some(line);
         self
     }
 
@@ -177,6 +187,7 @@ impl InterpError {
             operation: None,
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 
@@ -188,6 +199,7 @@ impl InterpError {
             operation: None,
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 
@@ -199,6 +211,7 @@ impl InterpError {
             operation: None,
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 
@@ -210,6 +223,7 @@ impl InterpError {
             operation: None,
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 
@@ -221,6 +235,7 @@ impl InterpError {
             operation: None,
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 
@@ -232,6 +247,7 @@ impl InterpError {
             operation: None,
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 
@@ -243,6 +259,7 @@ impl InterpError {
             operation: None,
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 
@@ -254,6 +271,7 @@ impl InterpError {
             operation: None,
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 
@@ -265,6 +283,7 @@ impl InterpError {
             operation: None,
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 
@@ -276,6 +295,7 @@ impl InterpError {
             operation: None,
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 
@@ -287,6 +307,7 @@ impl InterpError {
             operation: None,
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 
@@ -298,6 +319,7 @@ impl InterpError {
             operation: None,
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 
@@ -309,6 +331,7 @@ impl InterpError {
             operation: None,
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 
@@ -320,6 +343,7 @@ impl InterpError {
             operation: None,
             help: None,
             call_stack: Vec::new(),
+            line: None,
         })
     }
 }
@@ -333,6 +357,9 @@ impl fmt::Display for InterpError {
         }
         if let Some(func) = &ctx.function {
             write!(f, " [{}]", func)?;
+        }
+        if let Some(line) = ctx.line {
+            write!(f, " (line {})", line)?;
         }
         if let Some(help) = &ctx.help {
             write!(f, "\n  help: {}", help)?;
