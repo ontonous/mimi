@@ -14,6 +14,8 @@ mod bindgen;
 mod build;
 #[path = "main/check.rs"]
 mod check;
+#[path = "main/disasm_cmd.rs"]
+mod disasm_cmd;
 #[path = "main/doc.rs"]
 mod doc;
 #[path = "main/emit.rs"]
@@ -173,6 +175,11 @@ enum Command {
         /// Treat warnings as errors (exit non-zero on warnings)
         #[arg(long)]
         fail_on_warnings: bool,
+    },
+    /// Disassemble a .mimi file to bytecode (debugging)
+    Disasm {
+        /// File to disassemble
+        file: PathBuf,
     },
     /// Verify contracts using Z3 SMT solver
     Verify {
@@ -431,6 +438,7 @@ fn main() {
             files,
             fail_on_warnings,
         } => lint_cmd::lint_files(&files, fail_on_warnings),
+        Command::Disasm { file } => disasm_cmd::disasm_file(&file),
         Command::Verify {
             path,
             stats,
