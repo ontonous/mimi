@@ -178,7 +178,7 @@ impl BytecodeCompiler {
     }
 
     /// Compile a single function definition.
-    fn compile_func(&self, f: &FuncDef) -> Result<FunctionProto, InterpError> {
+    fn compile_func(&mut self, f: &FuncDef) -> Result<FunctionProto, InterpError> {
         let mut fc = FuncCompiler::new(f.name.clone(), f.params.len() as u16);
 
         // Bind parameters to registers 0..param_count.
@@ -216,7 +216,7 @@ impl BytecodeCompiler {
 
     /// Compile a block of statements.
     fn compile_block(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         block: &Block,
     ) -> Result<Option<Reg>, InterpError> {
@@ -309,7 +309,7 @@ impl BytecodeCompiler {
 
     /// Compile an expression, returning the register holding the result.
     fn compile_expr(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         expr: &Expr,
     ) -> Result<Reg, InterpError> {
@@ -368,6 +368,7 @@ impl BytecodeCompiler {
                 Ok(rd)
             }
             Expr::Record { ty, fields } => self.compile_record(fc, ty.as_deref(), fields),
+            Expr::Lambda { params, ret: _, body } => self.compile_lambda(fc, params, body),
             Expr::Match(subject, arms) => self.compile_match(fc, subject, arms),
             _ => Err(InterpError::new(format!(
                 "bytecode compiler: expression {:?} not yet supported",
@@ -377,7 +378,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_literal(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         lit: &Lit,
     ) -> Result<Reg, InterpError> {
@@ -408,7 +409,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_binary(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         op: BinOp,
         l: &Expr,
@@ -457,7 +458,7 @@ impl BytecodeCompiler {
     }
 
     fn emit_int_binop(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         op: BinOp,
         rd: Reg,
@@ -493,7 +494,7 @@ impl BytecodeCompiler {
     }
 
     fn emit_float_binop(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         op: BinOp,
         rd: Reg,
@@ -523,7 +524,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_short_circuit(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         op: BinOp,
         l: &Expr,
@@ -561,7 +562,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_unary(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         op: UnOp,
         e: &Expr,
@@ -591,7 +592,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_call(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         callee: &Expr,
         args: &[Expr],
@@ -671,7 +672,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_if_expr(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         cond: &Expr,
         then_: &Block,
@@ -715,7 +716,7 @@ impl BytecodeCompiler {
     /// bind variables and evaluate the body. Otherwise, fall through to
     /// the next arm.
     fn compile_match(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         subject: &Expr,
         arms: &[MatchArm],
@@ -787,7 +788,7 @@ impl BytecodeCompiler {
     /// - test_reg: Some(reg) if the pattern needs a runtime test, None if it always matches
     /// - bindings: (name, reg) pairs for variables bound by the pattern
     fn compile_pattern_test(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         pat: &Pattern,
         r_subject: Reg,
@@ -917,7 +918,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_if_stmt(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         cond: &Expr,
         then_: &Block,
@@ -944,7 +945,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_while(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         cond: &Expr,
         body: &Block,
@@ -986,7 +987,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_for(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         var: &str,
         iter: &Expr,
@@ -1049,7 +1050,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_assign(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         target: &Expr,
         value: &Expr,
@@ -1080,7 +1081,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_index(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         obj: &Expr,
         idx: &Expr,
@@ -1093,7 +1094,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_list(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         elems: &[Expr],
     ) -> Result<Reg, InterpError> {
@@ -1110,7 +1111,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_tuple(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         elems: &[Expr],
     ) -> Result<Reg, InterpError> {
@@ -1135,7 +1136,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_record(
-        &self,
+        &mut self,
         fc: &mut FuncCompiler,
         ty: Option<&str>,
         fields: &[RecordFieldExpr],
@@ -1169,6 +1170,66 @@ impl BytecodeCompiler {
             type_name: type_name_idx,
             base,
             count: fields.len() as u16,
+        });
+        Ok(rd)
+    }
+
+    /// Compile a lambda expression into a closure.
+    ///
+    /// Strategy:
+    /// 1. Create a new FunctionProto for the lambda body
+    /// 2. Compile the body with parameters bound
+    /// 3. Emit NewClosure with the proto index and captured variables
+    fn compile_lambda(
+        &mut self,
+        fc: &mut FuncCompiler,
+        params: &[Param],
+        body: &Block,
+    ) -> Result<Reg, InterpError> {
+        // Create a new function proto for the lambda.
+        let lambda_name = format!("__lambda_{}", self.functions.len());
+        let mut lambda_fc = FuncCompiler::new(lambda_name.clone(), params.len() as u16);
+
+        // Bind parameters to registers 0..param_count (same as compile_func).
+        for (i, param) in params.iter().enumerate() {
+            lambda_fc.vars[0].insert(param.name.clone(), i as Reg);
+            // Track parameter type for int/float dispatch.
+            if let Type::Name(n, _) = param.ty.unlocated() {
+                if n == "f64" {
+                    lambda_fc.var_types.insert(param.name.clone(), VarType::Float);
+                }
+            }
+        }
+        // Ensure register_count accounts for params.
+        while lambda_fc.proto.register_count < params.len() as u16 {
+            lambda_fc.proto.alloc_reg();
+        }
+
+        // Compile the body.
+        lambda_fc.push_scope();
+        let result_reg = self.compile_block(&mut lambda_fc, body)?;
+        if let Some(r) = result_reg {
+            lambda_fc.emit(Op::Ret { ra: r });
+        } else {
+            let r = lambda_fc.proto.alloc_reg();
+            lambda_fc.emit(Op::LoadUnit { rd: r });
+            lambda_fc.emit(Op::Ret { ra: r });
+        }
+        lambda_fc.pop_scope();
+
+        // Add the lambda proto to the program.
+        let lambda_idx = self.functions.len() as FuncIdx;
+        self.functions.push(lambda_fc.proto);
+
+        // For now, lambdas don't capture variables (simplified implementation).
+        // TODO: implement capture analysis.
+        let captures_base = fc.proto.alloc_reg();
+        let rd = fc.proto.alloc_reg();
+        fc.emit(Op::NewClosure {
+            rd,
+            proto: lambda_idx,
+            captures_base,
+            capture_count: 0,
         });
         Ok(rd)
     }

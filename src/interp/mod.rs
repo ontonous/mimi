@@ -1978,6 +1978,7 @@ impl<'a> Interpreter<'a> {
             Value::Newtype(name, _v) => name.clone(),
             Value::Type(name) => name.clone(),
             Value::Closure { .. } => "closure".into(),
+            Value::BytecodeClosure { .. } => "closure".into(),
             Value::QuoteAst(_) => "AST".into(),
             Value::Shared(_) => "shared".into(),
             Value::LocalShared(_) => "local_shared".into(),

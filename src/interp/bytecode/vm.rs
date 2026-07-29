@@ -382,11 +382,6 @@ impl<'a> BytecodeVM<'a> {
                     let result = self.call_builtin(builtin, &args)?;
                     self.set_reg(rd, result);
                 }
-                Op::CallIndirect { .. } => {
-                    return Err(InterpError::new(
-                        "bytecode VM: CallIndirect not yet implemented",
-                    ));
-                }
                 Op::Ret { ra } => {
                     let v = self.get_reg(ra).clone();
                     let return_reg = self.stack.last().unwrap().return_reg;
@@ -597,6 +592,60 @@ impl<'a> BytecodeVM<'a> {
                         other => {
                             return Err(InterpError::new(format!(
                                 "record set: expected Record, got {}",
+                                other
+                            )))
+                        }
+                    }
+                }
+
+                // ── Closures ───────────────────────────────────
+                Op::NewClosure {
+                    rd,
+                    proto: proto_idx,
+                    captures_base,
+                    capture_count,
+                } => {
+                    // Collect captured variables.
+                    // For now, captures are stored as (name, value) pairs in registers.
+                    // TODO: implement proper capture analysis.
+                    let mut captured = std::collections::HashMap::new();
+                    for i in 0..capture_count {
+                        let reg = captures_base + i;
+                        // The capture format is: even registers = name (string), odd = value.
+                        // For simplicity, we just store by register index for now.
+                        let value = self.get_reg(reg).clone();
+                        captured.insert(format!("_capture_{}", i), value);
+                    }
+                    self.set_reg(
+                        rd,
+                        Value::BytecodeClosure {
+                            proto: proto_idx,
+                            captured,
+                        },
+                    );
+                }
+                Op::CallIndirect {
+                    rd,
+                    callee,
+                    args_base,
+                    argc,
+                } => {
+                    let closure = self.get_reg(callee).clone();
+                    match closure {
+                        Value::BytecodeClosure { proto: proto_idx, captured: _ } => {
+                            // Collect arguments.
+                            let args: Vec<Value> = (0..argc)
+                                .map(|i| self.get_reg(args_base + i).clone())
+                                .collect();
+
+                            // Push a new frame for the closure.
+                            // TODO: bind captured variables in the new frame.
+                            self.push_frame(proto_idx, &args, Some(rd))?;
+                            // Continue loop — new frame is now active.
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "call indirect: expected BytecodeClosure, got {}",
                                 other
                             )))
                         }
