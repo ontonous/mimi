@@ -1696,6 +1696,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             ResolvedExprKind::Try { value, .. } => self.emit_try(value, &expression.ty, frame),
             // 0.32.16: Lambda expression (non-capturing closure).
             ResolvedExprKind::Lambda(lambda) => self.emit_lambda(lambda, &expression.ty, frame),
+            // 0.32.31: Slice expression (xs[start:end]).
+            // View semantics: no data copy, new struct points into existing buffer.
+            ResolvedExprKind::Slice { target, start, end } => {
+                self.emit_slice(target, start.as_deref(), end.as_deref(), frame)
+            }
             other => Err(CompileError::Unsupported(format!(
                 "resolved expression {other:?} escaped resolved native eligibility at '{}'",
                 expression.node_id.0
@@ -3792,6 +3797,134 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     /// Try expression (`?` operator): unwrap Result/Option or exit.
     ///
     /// Layout:
+    /// 0.32.31: Slice expression (xs[start:end]).
+    ///
+    /// View semantics: no data copy. Builds a new `{i64 len, ptr data}` struct
+    /// pointing into the existing list's data buffer at an offset.
+    /// Indices are clamped to [0, list_len] to prevent OOB pointer arithmetic.
+    fn emit_slice(
+        &mut self,
+        target: &ResolvedExpr,
+        start: Option<&ResolvedExpr>,
+        end: Option<&ResolvedExpr>,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i64_ty = self.generator.context.i64_type();
+        let list_ty = self.generator.list_struct_type();
+        let ptr_ty = self.generator.context.ptr_type(inkwell::AddressSpace::default());
+
+        // Emit target → list struct value, then alloca+store to get a pointer.
+        let target_val = self.emit_expr(target, frame)?;
+        let target_alloca = self.generator.build_alloca(
+            BasicTypeEnum::StructType(list_ty),
+            "slice_target",
+        )?;
+        self.generator.build_store(target_alloca, target_val)?;
+        let target_ptr = target_alloca;
+
+        // Load list length (field 0) and data pointer (field 1).
+        let len_gep = self.generator.gep().build_struct_gep(
+            BasicTypeEnum::StructType(list_ty), target_ptr, 0, "slice_len_ptr",
+        ).map_err(|e| CompileError::LlvmError(format!("slice gep len: {e}")))?;
+        let list_len = self.generator.build_load(
+            BasicTypeEnum::IntType(i64_ty), len_gep, "slice_len",
+        )?.into_int_value();
+        let data_gep = self.generator.gep().build_struct_gep(
+            BasicTypeEnum::StructType(list_ty), target_ptr, 1, "slice_data_ptr",
+        ).map_err(|e| CompileError::LlvmError(format!("slice gep data: {e}")))?;
+        let data_ptr = self.generator.build_load(
+            BasicTypeEnum::PointerType(ptr_ty), data_gep, "slice_data",
+        )?.into_pointer_value();
+
+        // Compute start index (default 0).
+        let start_idx = match start {
+            Some(expr) => {
+                let val = self.emit_expr(expr, frame)?;
+                self.coerce_to_i64(val)?
+            }
+            None => i64_ty.const_int(0, false),
+        };
+        // Compute end index (default: list length).
+        let end_idx = match end {
+            Some(expr) => {
+                let val = self.emit_expr(expr, frame)?;
+                self.coerce_to_i64(val)?
+            }
+            None => list_len,
+        };
+
+        // Clamp start to [0, list_len].
+        let zero = i64_ty.const_int(0, false);
+        let start_neg = self.generator.builder.build_int_compare(
+            inkwell::IntPredicate::SLT, start_idx, zero, "start_neg",
+        ).map_err(|e| CompileError::LlvmError(format!("slice cmp: {e}")))?;
+        let start_idx = self.generator.builder.build_select(
+            start_neg, zero, start_idx, "start_clamp_low",
+        ).map_err(|e| CompileError::LlvmError(format!("slice select: {e}")))?
+            .into_int_value();
+        let start_exceeds = self.generator.builder.build_int_compare(
+            inkwell::IntPredicate::SGT, start_idx, list_len, "start_exceeds",
+        ).map_err(|e| CompileError::LlvmError(format!("slice cmp: {e}")))?;
+        let start_idx = self.generator.builder.build_select(
+            start_exceeds, list_len, start_idx, "start_clamp_high",
+        ).map_err(|e| CompileError::LlvmError(format!("slice select: {e}")))?
+            .into_int_value();
+
+        // Clamp end to [0, list_len].
+        let end_neg = self.generator.builder.build_int_compare(
+            inkwell::IntPredicate::SLT, end_idx, zero, "end_neg",
+        ).map_err(|e| CompileError::LlvmError(format!("slice cmp: {e}")))?;
+        let end_idx = self.generator.builder.build_select(
+            end_neg, zero, end_idx, "end_clamp_low",
+        ).map_err(|e| CompileError::LlvmError(format!("slice select: {e}")))?
+            .into_int_value();
+        let end_exceeds = self.generator.builder.build_int_compare(
+            inkwell::IntPredicate::SGT, end_idx, list_len, "end_exceeds",
+        ).map_err(|e| CompileError::LlvmError(format!("slice cmp: {e}")))?;
+        let end_idx = self.generator.builder.build_select(
+            end_exceeds, list_len, end_idx, "end_clamp_high",
+        ).map_err(|e| CompileError::LlvmError(format!("slice select: {e}")))?
+            .into_int_value();
+
+        // new_len = max(0, end - start).
+        let start_gt_end = self.generator.builder.build_int_compare(
+            inkwell::IntPredicate::SGT, start_idx, end_idx, "slice_start_gt_end",
+        ).map_err(|e| CompileError::LlvmError(format!("slice cmp: {e}")))?;
+        let safe_end = self.generator.builder.build_select(
+            start_gt_end, start_idx, end_idx, "slice_safe_end",
+        ).map_err(|e| CompileError::LlvmError(format!("slice select: {e}")))?
+            .into_int_value();
+        let new_len = self.generator.builder.build_int_sub(
+            safe_end, start_idx, "slice_new_len",
+        ).map_err(|e| CompileError::LlvmError(format!("slice sub: {e}")))?;
+
+        // new_data = data + start * 8 (byte offset into i64 array).
+        let elem_size = i64_ty.const_int(8, false);
+        let byte_offset = self.generator.builder.build_int_mul(
+            start_idx, elem_size, "slice_byte_offset",
+        ).map_err(|e| CompileError::LlvmError(format!("slice mul: {e}")))?;
+        let data_i8 = self.generator.builder.build_pointer_cast(
+            data_ptr, ptr_ty, "data_as_i8",
+        ).map_err(|e| CompileError::LlvmError(format!("slice cast: {e}")))?;
+        let new_data_i8 = self.generator.build_in_bounds_gep(
+            self.generator.context.i8_type(),
+            data_i8,
+            &[byte_offset],
+            "slice_new_data",
+        )?;
+        let new_data_ptr = self.generator.builder.build_pointer_cast(
+            new_data_i8, ptr_ty, "slice_data_void",
+        ).map_err(|e| CompileError::LlvmError(format!("slice cast 2: {e}")))?;
+
+        // Build result list struct { new_len, new_data_ptr }.
+        let result_ptr = self.generator.build_list_struct(new_len, new_data_ptr)?;
+        self.generator.build_load(
+            BasicTypeEnum::StructType(list_ty),
+            result_ptr.into_pointer_value(),
+            "slice_result",
+        )
+    }
+
     ///   Result<T, E> → {i1 disc, T ok_val, i64 err_val}
     ///   Option<T>    → {i1 disc, T payload}
     ///

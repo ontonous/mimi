@@ -838,6 +838,18 @@ fn require_expr(
             }
             require_block(program, owner, &lambda.body, entry_source)
         }
+        // 0.32.31: Slice expressions (xs[start:end]). Target must be a List.
+        // Start/end are optional (default 0/len). Indices must be integers.
+        ResolvedExprKind::Slice { target, start, end } => {
+            require_expr(program, owner, target, entry_source)?;
+            if let Some(start_expr) = start {
+                require_integer_expr(program, owner, start_expr, entry_source)?;
+            }
+            if let Some(end_expr) = end {
+                require_integer_expr(program, owner, end_expr, entry_source)?;
+            }
+            Ok(())
+        }
         other => Err(UnsupportedResolvedNode::new(
             owner,
             &expression.node_id,
