@@ -34,50 +34,40 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    pub(crate) fn builtin_push(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+    pub(crate) fn builtin_push(&self, mut args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 {
             return Err(InterpError::new("push expects 2 arguments (list, elem)"));
         }
-        match &args[0] {
-            Value::List(l) => {
-                // v0.28.29 fix for mimichat gap #2: keep the value semantics
-                // — return the new (mutated) list — so the existing
-                // `eval_call_dispatch` special case (which assigns the result
-                // back to the lvalue when args[0] is a mutable variable)
-                // can do the in-place update uniformly. This matches the
-                // codegen backend's behaviour where `push(l, x)` mutates
-                // `l` rather than producing a new value.
-                let mut new_list = l.clone();
-                new_list.push(args[1].clone());
-                Ok(Value::List(new_list))
+        let elem = args[1].clone();
+        // Avoid O(n) clone of the entire list by taking ownership.
+        // Vec::push() already provides amortized O(1) capacity doubling;
+        // the previous l.clone() + push on the clone made every push O(n).
+        match std::mem::replace(&mut args[0], Value::Unit) {
+            Value::List(mut l) => {
+                l.push(elem);
+                Ok(Value::List(l))
             }
             other => Err(InterpError::new(format!(
                 "push: first argument must be a list, found {}",
-                super::value::type_name(other)
+                super::value::type_name(&other)
             ))),
         }
     }
 
-    pub(crate) fn builtin_pop(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+    pub(crate) fn builtin_pop(&self, mut args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 1 {
             return Err(InterpError::new("pop expects 1 argument (list)"));
         }
-        match &args[0] {
-            // Dual with codegen: return the popped element only (list is value-copied;
-            // in-place mutation of the caller's list is codegen's by-ref path).
-            Value::List(l) => {
-                if l.is_empty() {
-                    return Err(InterpError::new("pop from empty list"));
-                }
-                let mut new_list = l.clone();
-                let popped = new_list
-                    .pop()
-                    .ok_or_else(|| InterpError::new("pop from empty list"))?;
-                Ok(popped)
+        // Take ownership to avoid O(n) clone of the whole list.
+        // The list is value-copied in the interpreter (no write-back for pop);
+        // the clone was wasted work since the clone is discarded immediately.
+        match std::mem::replace(&mut args[0], Value::Unit) {
+            Value::List(mut l) => {
+                l.pop().ok_or_else(|| InterpError::new("pop from empty list"))
             }
             other => Err(InterpError::new(format!(
                 "pop: argument must be a list, found {}",
-                super::value::type_name(other)
+                super::value::type_name(&other)
             ))),
         }
     }

@@ -472,6 +472,7 @@ impl<'a> Interpreter<'a> {
             "regex_find_all" => self.builtin_regex_find_all(args),
             "regex_capture_groups" => self.builtin_regex_capture_groups(args),
             "str_index_of" => self.builtin_str_index_of(args),
+            "str_count_substring" => self.builtin_str_count_substring(args),
             "option_value_or" => self.builtin_option_value_or(args),
             "keys" => self.builtin_keys(args),
             "values" => self.builtin_values(args),

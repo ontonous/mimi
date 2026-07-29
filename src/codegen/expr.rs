@@ -1005,6 +1005,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "parse_int" => "Result<i64,string>".to_string(),
             "parse_float" => "Result<f64,string>".to_string(),
             "index_of" => "Option<i32>".to_string(),
+            "count_substring" => "i32".to_string(),
             _ => String::new(),
         }
     }
@@ -1014,6 +1015,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         match name {
             "getenv" | "base64_decode" => return Some("Result<string,string>".to_string()),
             "str_index_of" => return Some("Option<i32>".to_string()),
+            "str_count_substring" => return Some("i32".to_string()),
             "str_replace" | "str_substring" | "str_join" | "str_trim" | "str_to_upper"
             | "str_to_lower" | "str_repeat" | "to_string" | "int_to_string" | "float_to_string"
             | "chr" | "type_name" | "c_str_to_string" | "from_json" => {

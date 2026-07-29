@@ -2834,6 +2834,36 @@ pub extern "C" fn mimi_try_exit_str(str: *const std::ffi::c_char, len: i64) -> !
     std::process::exit(1);
 }
 
+/// Count non-overlapping occurrences of `sub` in `s` (O(n) single scan).
+/// Returns i32 count. Zero heap allocations during scan.
+#[no_mangle]
+pub extern "C" fn mimi_str_count_substring(
+    s: *const std::ffi::c_char,
+    sub: *const std::ffi::c_char,
+) -> i32 {
+    if s.is_null() || sub.is_null() {
+        return 0;
+    }
+    // SAFETY: `CStr::from_ptr` requires a null-terminated string. Mimi strings
+    // are null-terminated at the ABI boundary (see `cstr_to_string`).
+    let s_bytes = unsafe { std::ffi::CStr::from_ptr(s) }.to_bytes();
+    let sub_bytes = unsafe { std::ffi::CStr::from_ptr(sub) }.to_bytes();
+    if sub_bytes.is_empty() {
+        return 0;
+    }
+    let mut count = 0i32;
+    let mut i = 0;
+    while i + sub_bytes.len() <= s_bytes.len() {
+        if s_bytes[i..].starts_with(sub_bytes) {
+            count += 1;
+            i += sub_bytes.len();
+        } else {
+            i += 1;
+        }
+    }
+    count
+}
+
 /// CG-C1: Runtime trap for non-exhaustive match. Called by codegen when a match
 /// fails to cover all cases — prevents UB by printing a diagnostic and aborting.
 #[no_mangle]
