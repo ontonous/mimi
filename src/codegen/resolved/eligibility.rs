@@ -850,6 +850,38 @@ fn require_expr(
             }
             Ok(())
         }
+        // 0.32.32: Old expression (contract `old(x)`). In codegen this is
+        // identity — the runtime value IS the "old" value since contracts
+        // are erased. Only the verifier gives old() distinct semantics.
+        ResolvedExprKind::Old(inner) => require_expr(program, owner, inner, entry_source),
+        // 0.32.33: Comprehension ([value for pattern in iterable if guard]).
+        // Pattern must be a simple binding. Guard (if present) must be bool.
+        ResolvedExprKind::Comprehension {
+            pattern,
+            value,
+            iterable,
+            guard,
+        } => {
+            // Only simple binding patterns supported (same as for-in).
+            if !matches!(
+                &pattern.kind,
+                ResolvedPatternKind::Binding {
+                    by_reference: None,
+                    ..
+                }
+            ) {
+                return Err(UnsupportedResolvedNode::new(
+                    owner,
+                    &pattern.node_id,
+                    "comprehension pattern must be a simple binding",
+                ));
+            }
+            require_expr(program, owner, iterable, entry_source)?;
+            if let Some(guard_expr) = guard {
+                require_condition(program, owner, guard_expr, entry_source)?;
+            }
+            require_expr(program, owner, value, entry_source)
+        }
         other => Err(UnsupportedResolvedNode::new(
             owner,
             &expression.node_id,
