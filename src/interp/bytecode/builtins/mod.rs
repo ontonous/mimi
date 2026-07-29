@@ -3,6 +3,7 @@
 //! Each module exports standalone `fn(vm, args) -> Result<Value>` functions
 //! and a `register(reg: &mut BuiltinRegistry)` function.
 
+pub mod concurrency;
 pub mod convert;
 pub mod fs;
 pub mod hof;
@@ -25,5 +26,6 @@ pub fn register_all(reg: &mut BuiltinRegistry) {
     hof::register(reg);
     fs::register(reg);
     misc::register(reg);
+    concurrency::register(reg);
     system::register(reg);
 }
