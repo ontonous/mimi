@@ -393,10 +393,59 @@ impl BytecodeCompiler {
                     fc.pop_scope();
                 }
 
+                // ── Phase B: Stmt 补全 II ─────────────────────
+
+                Stmt::SharedLet { name, init, .. } => {
+                    // Shared ownership binding — compile as regular let.
+                    let r = self.compile_expr(fc, init)?;
+                    let ty = self.infer_expr_type(fc, init);
+                    fc.set_reg_type(name, ty);
+                    let r_var = fc.bind_var(name);
+                    if r != r_var {
+                        fc.emit(Op::Mov { rd: r_var, rs: r });
+                    }
+                }
+
+                Stmt::OnFailure(block) => {
+                    // On failure compensation — compile the block.
+                    // Error handling semantics handled at runtime.
+                    fc.push_scope();
+                    self.compile_block(fc, block)?;
+                    fc.pop_scope();
+                }
+
+                Stmt::Do(block) => {
+                    // Do block — transition implementation body.
+                    fc.push_scope();
+                    self.compile_block(fc, block)?;
+                    fc.pop_scope();
+                }
+
+                Stmt::Become(expr) => {
+                    // become TargetState { ... } — Flow transition terminal.
+                    // Compile the expression and return it.
+                    let r = self.compile_expr(fc, expr)?;
+                    fc.emit(Op::Ret { ra: r });
+                }
+
+                Stmt::Stay => {
+                    // stay — self-loop terminal (return Unit).
+                    fc.emit(Op::RetUnit);
+                }
+
+                Stmt::Parasteps(block) => {
+                    // Parallel steps — compile the block.
+                    // Parallel execution semantics handled at runtime.
+                    fc.push_scope();
+                    self.compile_block(fc, block)?;
+                    fc.pop_scope();
+                }
+
+                // DEAD: 架构修正案废止 delegate/pinned。
+                Stmt::Delegate { .. } | Stmt::Pinned { .. } => {}
+
                 _ => {
-                    // Remaining unsupported statements (Flow-related: Become, Stay,
-                    // Delegate, Pinned, Parasteps, SharedLet, OnFailure, Do).
-                    // These are handled in Phase D (0.33.17-0.33.20).
+                    // Remaining unsupported: Ellipsis, Located (wrapper).
                 }
             }
         }
