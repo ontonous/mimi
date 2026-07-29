@@ -278,6 +278,8 @@ pub(crate) fn build(
     rt_cmd.arg("--crate-type").arg("staticlib");
     rt_cmd.arg("--cfg").arg("standalone");
     rt_cmd.arg("--crate-name").arg("mimi_runtime");
+    // Runtime symbols are called from LLVM IR (invisible to rustc reachability).
+    rt_cmd.arg("-A").arg("dead_code");
     if let Some(triple) = target {
         rt_cmd.arg("--target").arg(triple);
     }
