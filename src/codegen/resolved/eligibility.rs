@@ -708,7 +708,7 @@ fn require_expr(
         ResolvedExprKind::Call(call)
             if matches!(
                 call.callee,
-                ResolvedCallee::Function(_) | ResolvedCallee::Builtin(_) | ResolvedCallee::Transition(_) | ResolvedCallee::ProtocolMethod { .. }
+                ResolvedCallee::Function(_) | ResolvedCallee::Builtin(_) | ResolvedCallee::Transition(_) | ResolvedCallee::ProtocolMethod { .. } | ResolvedCallee::Extern(_)
             ) =>
         {
             // Reject calls to non-User-origin functions (imported from

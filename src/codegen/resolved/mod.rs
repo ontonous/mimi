@@ -1581,6 +1581,49 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 ))
                             })
 }
+                    ResolvedCallee::Extern(callee_id) => {
+                        // 0.32.26: Extern FFI call — look up the wrapper function
+                        // by name (declared by legacy emitter in step 1) and call it.
+                        let ext_name = self.program.extern_blocks().values()
+                            .flat_map(|block| block.signatures.iter())
+                            .find(|sig| sig.node_id == *callee_id)
+                            .map(|sig| sig.name.as_str())
+                            .ok_or_else(|| CompileError::LlvmError(format!(
+                                "resolved extern callee '{callee_id:?}' not found in any extern block"
+                            )))?;
+                        let callee =
+                            self.generator.module.get_function(ext_name).ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "resolved extern wrapper '{ext_name}' is undeclared"
+                                ))
+                            })?;
+                        // Coerce arguments to match the wrapper's parameter types.
+                        let params = callee.get_params();
+                        for (i, arg) in arguments.iter_mut().enumerate() {
+                            if let Some(param) = params.get(i) {
+                                let param_ty = param.get_type();
+                                let arg_basic: BasicValueEnum = match *arg {
+                                    BasicMetadataValueEnum::IntValue(iv) => iv.into(),
+                                    BasicMetadataValueEnum::FloatValue(fv) => fv.into(),
+                                    BasicMetadataValueEnum::PointerValue(pv) => pv.into(),
+                                    BasicMetadataValueEnum::StructValue(sv) => sv.into(),
+                                    _ => continue,
+                                };
+                                if arg_basic.get_type() != param_ty {
+                                    let coerced = self.coerce_to(arg_basic, param_ty)?;
+                                    *arg = BasicMetadataValueEnum::from(coerced);
+                                }
+                            }
+                        }
+                        self.generator
+                            .build_call(callee, &arguments, "resolved_extern_call")?
+                            .try_as_basic_value_opt()
+                            .ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "resolved extern '{ext_name}' returned void"
+                                ))
+                            })
+                    }
                     _ => Err(CompileError::Unsupported(format!(
                         "resolved callee {:?} escaped resolved native eligibility at '{}'",
                         call.callee, expression.node_id.0
