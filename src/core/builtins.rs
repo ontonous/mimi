@@ -229,6 +229,15 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "regex_replace"
             | "regex_find_all"
             | "regex_capture_groups"
+            // Higher-order list operations (shared across backends)
+            | "map_list"
+            | "filter_list"
+            | "reduce_list"
+            | "sort_list"
+            | "find"
+            | "any"
+            | "all"
+            | "is_empty"
     )
 }
 

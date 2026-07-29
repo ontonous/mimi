@@ -1963,6 +1963,75 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("string".into(), vec![]);
             }
+            // Higher-order list operations (shared across backends)
+            "map_list" => {
+                if args.len() != 2 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "map_list expects 2 arguments (list, fn)");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    let fn_ty = self.infer_expr(&args[1], scopes);
+                    if let Type::Func(_, ret_ty) = fn_ty.into_unlocated() {
+                        return Type::Name("List".into(), vec![*ret_ty]);
+                    }
+                }
+                return Type::Name("List".into(), vec![Type::Name("i32".into(), vec![])]);
+            }
+            "filter_list" => {
+                if args.len() != 2 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "filter_list expects 2 arguments (list, pred)");
+                } else {
+                    let list_ty = self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                    return list_ty;
+                }
+                return Type::Name("List".into(), vec![Type::Name("i32".into(), vec![])]);
+            }
+            "reduce_list" => {
+                if args.len() != 3 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "reduce_list expects 3 arguments (list, fn, init)");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                    let init_ty = self.infer_expr(&args[2], scopes);
+                    return init_ty;
+                }
+                return Type::Name("i32".into(), vec![]);
+            }
+            "sort_list" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "sort_list expects 1 argument (list)");
+                } else {
+                    let list_ty = self.infer_expr(&args[0], scopes);
+                    return list_ty;
+                }
+                return Type::Name("List".into(), vec![Type::Name("i32".into(), vec![])]);
+            }
+            "find" => {
+                if args.len() != 2 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "find expects 2 arguments (list, target)");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Tuple(vec![Type::Name("bool".into(), vec![]), Type::Name("i32".into(), vec![])]);
+            }
+            "any" | "all" => {
+                if args.len() != 2 {
+                    self.emit_code(crate::diagnostic::codes::E0242, format!("{} expects 2 arguments (list, pred)", name));
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
+            "is_empty" => {
+                if args.len() != 1 {
+                    self.emit_code(crate::diagnostic::codes::E0242, "is_empty expects 1 argument");
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                }
+                return Type::Name("bool".into(), vec![]);
+            }
             _ => {}
         }
 

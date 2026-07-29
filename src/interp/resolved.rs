@@ -2093,7 +2093,7 @@ fn eval_runtime_builtin(
     arguments: Vec<RuntimeArgument>,
 ) -> Result<Value, InterpError> {
     match name {
-        "map" | "filter" | "reduce" => {
+        "map" | "filter" | "reduce" | "map_list" | "filter_list" | "reduce_list" => {
             eval_collection_callable(program, state, node, name, arguments)
         }
         "builtin.method.option.map"
@@ -2114,7 +2114,7 @@ fn eval_collection_callable(
     name: &str,
     arguments: Vec<RuntimeArgument>,
 ) -> Result<Value, InterpError> {
-    let expected = if name == "reduce" { 3 } else { 2 };
+    let expected = if name == "reduce" || name == "reduce_list" { 3 } else { 2 };
     if arguments.len() != expected {
         return Err(InterpError::wrong_arg_count(format!(
             "builtin '{name}' expects {expected} arguments, got {}",
@@ -2130,7 +2130,7 @@ fn eval_collection_callable(
         _ => return Err(builtin_type_error(name, "a list and callable")),
     };
     match name {
-        "map" => values
+        "map" | "map_list" => values
             .into_iter()
             .map(|value| {
                 execute_runtime_callable(
@@ -2143,7 +2143,7 @@ fn eval_collection_callable(
             })
             .collect::<Result<Vec<_>, _>>()
             .map(Value::List),
-        "filter" => {
+        "filter" | "filter_list" => {
             let mut selected = Vec::new();
             for value in values {
                 let predicate = execute_runtime_callable(
@@ -2159,7 +2159,7 @@ fn eval_collection_callable(
             }
             Ok(Value::List(selected))
         }
-        "reduce" => {
+        "reduce" | "reduce_list" => {
             let mut accumulator = match &arguments[2] {
                 RuntimeArgument::Value(value) => value.clone(),
                 _ => return Err(builtin_type_error(name, "a concrete initial value")),

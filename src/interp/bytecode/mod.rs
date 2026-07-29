@@ -887,6 +887,33 @@ mod tests {
             Ok(1)
         );
     }
+
+    // ═══ Phase 5d: Register usage ═════════════════════════════
+
+    /// Check register usage for a simple function.
+    #[test]
+    fn debug_register_count() {
+        let src = "func main() -> i32 {
+            let a = 1
+            let b = 2
+            let c = a + b
+            let d = c * 2
+            let e = d - 1
+            let f = e / 2
+            f
+        }";
+        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let prog = compiler.compile_file(&file).unwrap();
+        // With 6 variables + temporaries, we expect ~10-15 registers.
+        // Without optimization, each expression allocates new registers.
+        let main_proto = &prog.functions[prog.entry as usize];
+        eprintln!("main register_count = {}", main_proto.register_count);
+        // Just verify it runs correctly.
+        let result = run_program(&prog);
+        assert_eq!(result, Ok(2));
+    }
 }
 
 #[cfg(test)]
