@@ -300,8 +300,8 @@ impl<'a> BytecodeVM<'a> {
                     self.set_reg(rd, Value::Int(r));
                 }
                 Op::BitNot { rd, ra } => {
-                    let a = self.get_int(ra)?;
-                    self.set_reg(rd, Value::Bool(!crate::interp::is_truthy(self.get_reg(ra))));
+                    let v = self.get_reg(ra);
+                    self.set_reg(rd, Value::Bool(!crate::interp::is_truthy(v)));
                 }
                 Op::Not { rd, ra } => {
                     let v = self.get_reg(ra);
