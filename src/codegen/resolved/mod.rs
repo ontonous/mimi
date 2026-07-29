@@ -682,6 +682,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             ResolvedStmtKind::Drop(_) => Ok(None),
             ResolvedStmtKind::Contract { .. } => Ok(None),
             ResolvedStmtKind::Math(_) => Ok(None),
+            // NestedCallable: no-op (nested function compiled separately).
+            ResolvedStmtKind::NestedCallable(_) => Ok(None),
             other => Err(CompileError::Unsupported(format!(
                 "resolved statement {other:?} escaped resolved native eligibility for '{}'",
                 frame.owner.0
