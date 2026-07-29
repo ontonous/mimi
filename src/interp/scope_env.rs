@@ -5,9 +5,9 @@ use super::*;
 /// Contains the mutable state needed to evaluate expressions within scopes:
 /// variable bindings, mutability tracking, and the call stack for error context.
 ///
-/// This is the first step in demonstrating the (ScopeEnv, Expr) -> Result pattern:
-/// extracting mutable eval state from the Interpreter so that eval functions can
-/// be pure state transitions.
+/// PERF (0.33): scope HashMaps are pooled and reused across push/pop cycles
+/// to eliminate the malloc/free hotspot (perf: >50% in _int_malloc/_int_free
+/// for recursive workloads like fib(25) with 242K calls).
 #[derive(Debug)]
 pub struct ScopeEnv {
     /// Stack of variable bindings (one HashMap per scope)
@@ -18,6 +18,10 @@ pub struct ScopeEnv {
     pub mut_vars: Vec<HashMap<String, bool>>,
     /// Call stack for error context (function names being executed)
     pub call_stack: Vec<String>,
+    /// Pools of cleared HashMaps ready for reuse (avoids repeated alloc/free).
+    env_pool: Vec<HashMap<String, Value>>,
+    moved_pool: Vec<HashMap<String, bool>>,
+    mut_pool: Vec<HashMap<String, bool>>,
 }
 
 impl ScopeEnv {
@@ -27,21 +31,45 @@ impl ScopeEnv {
             moved_vars: vec![HashMap::new()],
             mut_vars: vec![HashMap::new()],
             call_stack: Vec::new(),
+            env_pool: Vec::new(),
+            moved_pool: Vec::new(),
+            mut_pool: Vec::new(),
         }
     }
 
     /// Push a new scope level onto the env stack.
     pub fn push_scope(&mut self) {
-        self.env.push(HashMap::new());
-        self.moved_vars.push(HashMap::new());
-        self.mut_vars.push(HashMap::new());
+        self.env.push(
+            self.env_pool
+                .pop()
+                .unwrap_or_else(|| HashMap::with_capacity(8)),
+        );
+        self.moved_vars.push(
+            self.moved_pool
+                .pop()
+                .unwrap_or_else(|| HashMap::with_capacity(8)),
+        );
+        self.mut_vars.push(
+            self.mut_pool
+                .pop()
+                .unwrap_or_else(|| HashMap::with_capacity(8)),
+        );
     }
 
-    /// Pop the current scope level.
+    /// Pop the current scope level. HashMaps are cleared and pooled for reuse.
     pub fn pop_scope(&mut self) {
-        self.env.pop();
-        self.moved_vars.pop();
-        self.mut_vars.pop();
+        if let Some(mut m) = self.env.pop() {
+            m.clear();
+            self.env_pool.push(m);
+        }
+        if let Some(mut m) = self.moved_vars.pop() {
+            m.clear();
+            self.moved_pool.push(m);
+        }
+        if let Some(mut m) = self.mut_vars.pop() {
+            m.clear();
+            self.mut_pool.push(m);
+        }
     }
 
     /// Run a closure inside a freshly pushed scope, guaranteeing that the
