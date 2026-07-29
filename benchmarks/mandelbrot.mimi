@@ -1,0 +1,35 @@
+// Benchmark: Mandelbrot set computation
+// Tests: floating point arithmetic, nested loops, branch prediction
+func mandelbrot_iterations(cx: f64, cy: f64) -> i32 {
+    let mut zx = 0.0
+    let mut zy = 0.0
+    let mut i = 0
+    while i < 1000 {
+        let zx2 = zx * zx
+        let zy2 = zy * zy
+        if zx2 + zy2 > 4.0 {
+            return i
+        }
+        zy = 2.0 * zx * zy + cy
+        zx = zx2 - zy2 + cx
+        i = i + 1
+    }
+    i
+}
+
+func main() -> i32 {
+    let mut total = 0
+    let mut y = 0
+    while y < 100 {
+        let cy = y as f64 / 50.0 - 1.0
+        let mut x = 0
+        while x < 100 {
+            let cx = x as f64 / 50.0 - 1.5
+            total = total + mandelbrot_iterations(cx, cy)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    println(total)
+    0
+}
