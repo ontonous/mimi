@@ -5,6 +5,7 @@
 //! Scope management: nested scopes share the register file (no reuse yet).
 
 use super::instr::*;
+use super::registry;
 use crate::ast::*;
 use crate::interp::error::InterpError;
 use std::collections::HashMap;
@@ -132,38 +133,11 @@ impl BytecodeCompiler {
             }
         }
 
-        // Register builtins.
-        self.register_builtin("println");
-        self.register_builtin("print");
-        self.register_builtin("print_err");
-        self.register_builtin("len");
-        self.register_builtin("push");
-        self.register_builtin("pop");
-        self.register_builtin("range");
-        self.register_builtin("abs");
-        self.register_builtin("to_int");
-        self.register_builtin("to_float");
-        self.register_builtin("to_string");
-        self.register_builtin("str");
-        self.register_builtin("str_substring");
-        self.register_builtin("str_split");
-        self.register_builtin("str_join");
-        self.register_builtin("str_contains");
-        self.register_builtin("str_parse_int");
-        self.register_builtin("str_parse_float");
-        self.register_builtin("int");
-        self.register_builtin("float");
-        self.register_builtin("exit");
-        self.register_builtin("input_line");
-        self.register_builtin("input_int");
-        self.register_builtin("map_list");
-        self.register_builtin("filter_list");
-        self.register_builtin("reduce_list");
-        self.register_builtin("sort_list");
-        self.register_builtin("find");
-        self.register_builtin("any");
-        self.register_builtin("all");
-        self.register_builtin("is_empty");
+        // Register builtins from the canonical registry (D1: single source of truth).
+        let reg = registry::create_registry();
+        for name in reg.names() {
+            self.register_builtin(&name);
+        }
 
         // Pass 2: compile each function body.
         for item in &file.items {

@@ -7,6 +7,7 @@
 //! - Arithmetic is typed (AddInt vs AddFloat) — zero runtime type dispatch
 
 use super::instr::*;
+use super::registry::{self, BuiltinRegistry};
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
 
@@ -37,6 +38,8 @@ pub struct BytecodeVM<'a> {
     /// Used by call_closure to stop when the closure frame returns.
     /// 0 = normal mode (return when stack is empty).
     stop_depth: usize,
+    /// Builtin function registry (D1: declarative, not giant match).
+    registry: BuiltinRegistry,
 }
 
 const MAX_DEPTH: usize = 768;
@@ -49,6 +52,7 @@ impl<'a> BytecodeVM<'a> {
             stdout: String::new(),
             depth: 0,
             stop_depth: 0,
+            registry: registry::create_registry(),
         }
     }
 
@@ -827,7 +831,7 @@ impl<'a> BytecodeVM<'a> {
     /// Pushes a closure frame, sets stop_depth, and delegates to exec_loop.
     /// This ensures closures can call user functions, other closures, builtins —
     /// anything the main loop supports. No separate dispatch.
-    fn call_closure(&mut self, closure: &Value, args: &[Value]) -> Result<Value, InterpError> {
+    pub(crate) fn call_closure(&mut self, closure: &Value, args: &[Value]) -> Result<Value, InterpError> {
         match closure {
             Value::BytecodeClosure {
                 proto: proto_idx,
@@ -863,445 +867,28 @@ impl<'a> BytecodeVM<'a> {
         }
     }
 
-    // ── Builtin dispatch ─────────────────────────────────────
+    // ── Builtin dispatch (D1: registry, not giant match) ─────
 
     fn call_builtin(
         &mut self,
         idx: BuiltinIdx,
         args: &[Value],
     ) -> Result<Value, InterpError> {
-        let name = &self.program.builtin_names[idx as usize];
-        match name.as_str() {
-            "println" => {
-                let s = args
-                    .iter()
-                    .map(|a| a.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                self.stdout.push_str(&s);
-                self.stdout.push('\n');
-                println!("{}", s);
-                Ok(Value::Unit)
-            }
-            "print" => {
-                let s = args
-                    .iter()
-                    .map(|a| a.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                self.stdout.push_str(&s);
-                print!("{}", s);
-                Ok(Value::Unit)
-            }
-            "len" => {
-                if args.len() != 1 {
-                    return Err(InterpError::new("len expects 1 argument"));
-                }
-                let len = match &args[0] {
-                    Value::List(l) => l.len(),
-                    Value::String(s) => s.len(),
-                    Value::Tuple(t) => t.len(),
-                    Value::Set(s) => s.len(),
-                    other => {
-                        return Err(InterpError::new(format!(
-                            "len: unsupported type {}",
-                            other
-                        )))
-                    }
-                };
-                Ok(Value::Int(len as i64))
-            }
-            "push" => {
-                if args.len() != 2 {
-                    return Err(InterpError::new("push expects 2 arguments"));
-                }
-                match &args[0] {
-                    Value::List(l) => {
-                        let mut new_list = l.clone();
-                        new_list.push(args[1].clone());
-                        Ok(Value::List(new_list))
-                    }
-                    other => Err(InterpError::new(format!(
-                        "push: first argument must be a list, found {}",
-                        other
-                    ))),
-                }
-            }
-            "pop" => {
-                if args.len() != 1 {
-                    return Err(InterpError::new("pop expects 1 argument"));
-                }
-                match &args[0] {
-                    Value::List(l) => {
-                        let mut new_list = l.clone();
-                        new_list
-                            .pop()
-                            .ok_or_else(|| InterpError::new("pop from empty list"))
-                    }
-                    other => Err(InterpError::new(format!(
-                        "pop: argument must be a list, found {}",
-                        other
-                    ))),
-                }
-            }
-            "range" => {
-                if args.len() != 2 {
-                    return Err(InterpError::new("range expects 2 arguments"));
-                }
-                let start = match &args[0] {
-                    Value::Int(v) => *v,
-                    _ => return Err(InterpError::new("range start must be integer")),
-                };
-                let end = match &args[1] {
-                    Value::Int(v) => *v,
-                    _ => return Err(InterpError::new("range end must be integer")),
-                };
-                let list: Vec<Value> = (start..end).map(Value::Int).collect();
-                Ok(Value::List(list))
-            }
-            "abs" => {
-                if args.len() != 1 {
-                    return Err(InterpError::new("abs expects 1 argument"));
-                }
-                match &args[0] {
-                    Value::Int(v) => {
-                        let abs = v.checked_abs().ok_or_else(|| {
-                            InterpError::new("abs: overflow (i64::MIN has no positive equivalent)")
-                        })?;
-                        Ok(Value::Int(abs))
-                    }
-                    Value::Float(v) => Ok(Value::Float(v.abs())),
-                    _ => Err(InterpError::new("abs expects a number")),
-                }
-            }
-            "to_int" => {
-                if args.len() != 1 {
-                    return Err(InterpError::new("to_int expects 1 argument"));
-                }
-                match &args[0] {
-                    Value::Int(v) => Ok(Value::Int(*v)),
-                    Value::Float(v) => Ok(Value::Int(*v as i64)),
-                    Value::String(s) => s
-                        .parse::<i64>()
-                        .map(Value::Int)
-                        .map_err(|e| InterpError::new(format!("to_int parse error: {}", e))),
-                    Value::Bool(b) => Ok(Value::Int(*b as i64)),
-                    _ => Err(InterpError::new("to_int cannot convert this type")),
-                }
-            }
-            "to_float" => {
-                if args.len() != 1 {
-                    return Err(InterpError::new("to_float expects 1 argument"));
-                }
-                match &args[0] {
-                    Value::Float(v) => Ok(Value::Float(*v)),
-                    Value::Int(v) => Ok(Value::Float(*v as f64)),
-                    Value::String(s) => s
-                        .parse::<f64>()
-                        .map(Value::Float)
-                        .map_err(|e| InterpError::new(format!("to_float parse error: {}", e))),
-                    _ => Err(InterpError::new("to_float cannot convert this type")),
-                }
-            }
-            "to_string" => {
-                if args.len() != 1 {
-                    return Err(InterpError::new("to_string expects 1 argument"));
-                }
-                Ok(Value::String(args[0].to_string()))
-            }
-            "str" => {
-                if args.len() != 1 {
-                    return Err(InterpError::new("str expects 1 argument"));
-                }
-                Ok(Value::String(args[0].to_string()))
-            }
-            "exit" => {
-                let code = if args.is_empty() {
-                    0
-                } else {
-                    match &args[0] {
-                        Value::Int(n) => *n as i32,
-                        _ => 1,
-                    }
-                };
-                std::process::exit(code);
-            }
-            "print_err" => {
-                for arg in args.iter() {
-                    eprint!("{}", arg);
-                }
-                eprintln!();
-                Ok(Value::Unit)
-            }
-            "str_parse_int" => {
-                if args.len() != 1 {
-                    return Err(InterpError::new("str_parse_int expects 1 argument"));
-                }
-                match &args[0] {
-                    Value::String(s) => match s.parse::<i64>() {
-                        Ok(n) => Ok(Value::Int(n)),
-                        Err(_) => Ok(Value::Int(0)),
-                    },
-                    _ => Err(InterpError::new("str_parse_int expects a string")),
-                }
-            }
-            "str_parse_float" => {
-                if args.len() != 1 {
-                    return Err(InterpError::new("str_parse_float expects 1 argument"));
-                }
-                match &args[0] {
-                    Value::String(s) => match s.parse::<f64>() {
-                        Ok(n) => Ok(Value::Float(n)),
-                        Err(_) => Ok(Value::Float(0.0)),
-                    },
-                    _ => Err(InterpError::new("str_parse_float expects a string")),
-                }
-            }
-            "input_line" => {
-                let mut input = String::new();
-                std::io::stdin()
-                    .read_line(&mut input)
-                    .map_err(|e| InterpError::new(format!("input_line error: {}", e)))?;
-                Ok(Value::String(input.trim_end().to_string()))
-            }
-            "input_int" => {
-                let mut input = String::new();
-                std::io::stdin()
-                    .read_line(&mut input)
-                    .map_err(|e| InterpError::new(format!("input_int error: {}", e)))?;
-                match input.trim().parse::<i64>() {
-                    Ok(n) => Ok(Value::Int(n)),
-                    Err(_) => Ok(Value::Int(0)),
-                }
-            }
-            "map_list" => {
-                if args.len() != 2 {
-                    return Err(InterpError::new("map_list expects 2 arguments (list, fn)"));
-                }
-                let list = match &args[0] {
-                    Value::List(l) => l.clone(),
-                    _ => return Err(InterpError::new("map_list: first argument must be a list")),
-                };
-                let closure = match &args[1] {
-                    Value::BytecodeClosure { .. } => args[1].clone(),
-                    _ => return Err(InterpError::new("map_list: second argument must be a closure")),
-                };
-                let mut result = Vec::with_capacity(list.len());
-                for elem in list {
-                    // Call the closure with the element.
-                    let ret = self.call_closure(&closure, &[elem])?;
-                    result.push(ret);
-                }
-                Ok(Value::List(result))
-            }
-            "filter_list" => {
-                if args.len() != 2 {
-                    return Err(InterpError::new("filter_list expects 2 arguments (list, pred)"));
-                }
-                let list = match &args[0] {
-                    Value::List(l) => l.clone(),
-                    _ => return Err(InterpError::new("filter_list: first argument must be a list")),
-                };
-                let closure = match &args[1] {
-                    Value::BytecodeClosure { .. } => args[1].clone(),
-                    _ => return Err(InterpError::new("filter_list: second argument must be a closure")),
-                };
-                let mut result = Vec::new();
-                for elem in list {
-                    let ret = self.call_closure(&closure, &[elem.clone()])?;
-                    if crate::interp::is_truthy(&ret) {
-                        result.push(elem);
-                    }
-                }
-                Ok(Value::List(result))
-            }
-            "reduce_list" => {
-                if args.len() != 3 {
-                    return Err(InterpError::new("reduce_list expects 3 arguments (list, fn, init)"));
-                }
-                let list = match &args[0] {
-                    Value::List(l) => l.clone(),
-                    _ => return Err(InterpError::new("reduce_list: first argument must be a list")),
-                };
-                let closure = match &args[1] {
-                    Value::BytecodeClosure { .. } => args[1].clone(),
-                    _ => return Err(InterpError::new("reduce_list: second argument must be a closure")),
-                };
-                let mut acc = args[2].clone();
-                for elem in list {
-                    acc = self.call_closure(&closure, &[acc, elem])?;
-                }
-                Ok(acc)
-            }
-            "sort_list" => {
-                if args.len() != 1 {
-                    return Err(InterpError::new("sort_list expects 1 argument (list)"));
-                }
-                let mut list = match &args[0] {
-                    Value::List(l) => l.clone(),
-                    _ => return Err(InterpError::new("sort_list: argument must be a list")),
-                };
-                // Typed comparison: Int<Int, Float<Float, String<String (matches tree-walker).
-                list.sort_by(|a, b| match (a, b) {
-                    (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                    (Value::Float(x), Value::Float(y)) => {
-                        x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
-                    }
-                    (Value::String(x), Value::String(y)) => x.cmp(y),
-                    _ => std::cmp::Ordering::Equal,
-                });
-                Ok(Value::List(list))
-            }
-            "find" => {
-                if args.len() != 2 {
-                    return Err(InterpError::new("find expects 2 arguments (list, target)"));
-                }
-                let list = match &args[0] {
-                    Value::List(l) => l.clone(),
-                    _ => return Err(InterpError::new("find: first argument must be a list")),
-                };
-                let target = &args[1];
-                for (i, elem) in list.iter().enumerate() {
-                    if elem == target {
-                        return Ok(Value::Tuple(vec![Value::Bool(true), Value::Int(i as i64)]));
-                    }
-                }
-                Ok(Value::Tuple(vec![Value::Bool(false), Value::Int(-1)]))
-            }
-            "any" => {
-                if args.len() != 2 {
-                    return Err(InterpError::new("any expects 2 arguments (list, pred)"));
-                }
-                let list = match &args[0] {
-                    Value::List(l) => l.clone(),
-                    _ => return Err(InterpError::new("any: first argument must be a list")),
-                };
-                let closure = match &args[1] {
-                    Value::BytecodeClosure { .. } => args[1].clone(),
-                    _ => return Err(InterpError::new("any: second argument must be a closure")),
-                };
-                for elem in list {
-                    let ret = self.call_closure(&closure, &[elem])?;
-                    if crate::interp::is_truthy(&ret) {
-                        return Ok(Value::Bool(true));
-                    }
-                }
-                Ok(Value::Bool(false))
-            }
-            "all" => {
-                if args.len() != 2 {
-                    return Err(InterpError::new("all expects 2 arguments (list, pred)"));
-                }
-                let list = match &args[0] {
-                    Value::List(l) => l.clone(),
-                    _ => return Err(InterpError::new("all: first argument must be a list")),
-                };
-                let closure = match &args[1] {
-                    Value::BytecodeClosure { .. } => args[1].clone(),
-                    _ => return Err(InterpError::new("all: second argument must be a closure")),
-                };
-                for elem in list {
-                    let ret = self.call_closure(&closure, &[elem])?;
-                    if !crate::interp::is_truthy(&ret) {
-                        return Ok(Value::Bool(false));
-                    }
-                }
-                Ok(Value::Bool(true))
-            }
-            "is_empty" => {
-                if args.len() != 1 {
-                    return Err(InterpError::new("is_empty expects 1 argument"));
-                }
-                match &args[0] {
-                    Value::List(l) => Ok(Value::Bool(l.is_empty())),
-                    Value::String(s) => Ok(Value::Bool(s.is_empty())),
-                    _ => Err(InterpError::new("is_empty: argument must be a list or string")),
-                }
-            }
-            "str_substring" => {
-                if args.len() != 3 {
-                    return Err(InterpError::new(
-                        "str_substring expects 3 arguments (string, start, end)",
-                    ));
-                }
-                match (&args[0], &args[1], &args[2]) {
-                    (Value::String(s), Value::Int(start), Value::Int(end)) => {
-                        let chars: Vec<char> = s.chars().collect();
-                        let s_idx = (*start as usize).min(chars.len());
-                        let e_idx = (*end as usize).min(chars.len());
-                        if s_idx > e_idx {
-                            return Err(InterpError::new("str_substring: start > end"));
-                        }
-                        Ok(Value::String(chars[s_idx..e_idx].iter().collect()))
-                    }
-                    _ => Err(InterpError::new(
-                        "str_substring expects (string, int, int)",
-                    )),
-                }
-            }
-            "str_split" => {
-                if args.len() != 2 {
-                    return Err(InterpError::new(
-                        "str_split expects 2 arguments (string, delimiter)",
-                    ));
-                }
-                match (&args[0], &args[1]) {
-                    (Value::String(s), Value::String(delimiter)) => {
-                        let parts: Vec<Value> = s
-                            .split(delimiter.as_str())
-                            .map(|p| Value::String(p.to_string()))
-                            .collect();
-                        Ok(Value::List(parts))
-                    }
-                    _ => Err(InterpError::new("str_split expects (string, string)")),
-                }
-            }
-            "str_join" => {
-                if args.len() != 2 {
-                    return Err(InterpError::new(
-                        "str_join expects 2 arguments (list, separator)",
-                    ));
-                }
-                match (&args[0], &args[1]) {
-                    (Value::List(parts), Value::String(sep)) => {
-                        let mut strings = Vec::new();
-                        for p in parts {
-                            match p {
-                                Value::String(s) => strings.push(s.clone()),
-                                _ => {
-                                    return Err(InterpError::new(
-                                        "str_join: list elements must be strings",
-                                    ))
-                                }
-                            }
-                        }
-                        Ok(Value::String(strings.join(sep)))
-                    }
-                    _ => Err(InterpError::new("str_join expects (list, string)")),
-                }
-            }
-            "str_contains" => {
-                if args.len() != 2 {
-                    return Err(InterpError::new("str_contains expects 2 arguments"));
-                }
-                match (&args[0], &args[1]) {
-                    (Value::String(s), Value::String(sub)) => {
-                        Ok(Value::Bool(s.contains(sub.as_str())))
-                    }
-                    _ => Err(InterpError::new("str_contains expects (string, string)")),
-                }
-            }
-            "int" | "float" => {
-                Err(InterpError::new(format!(
-                    "bytecode builtin '{}' not yet implemented",
-                    name
-                )))
-            }
-            _ => Err(InterpError::new(format!(
-                "bytecode: unknown builtin '{}'",
-                name
-            ))),
+        let (func, arity, name) = self.registry.get_func(idx);
+        if arity != usize::MAX && args.len() != arity {
+            return Err(InterpError::new(format!(
+                "{} expects {} argument(s), got {}",
+                name,
+                arity,
+                args.len()
+            )));
         }
+        func(self, args)
+    }
+
+    /// Append to captured stdout (used by builtin io functions).
+    pub fn append_stdout(&mut self, s: &str) {
+        self.stdout.push_str(s);
     }
 
     /// Get captured stdout (for testing).

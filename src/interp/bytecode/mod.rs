@@ -11,10 +11,12 @@
 
 pub mod compiler;
 pub mod instr;
+pub mod registry;
 pub mod vm;
 
 pub use compiler::BytecodeCompiler;
 pub use instr::{BytecodeProgram, ConstValue, FunctionProto, Op};
+pub use registry::{BuiltinRegistry, BuiltinCategory, BuiltinDesc};
 pub use vm::BytecodeVM;
 
 #[cfg(test)]
