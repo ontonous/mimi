@@ -2324,6 +2324,8 @@ impl<'a> Interpreter<'a> {
 
     fn pop_call(&mut self) {
         self.scope_env.pop_call();
+        // PERF (0.33): recursion depth tracked at call boundaries, not per-expression.
+        self.recursion_depth = self.recursion_depth.saturating_sub(1);
     }
 
     /// Convert a string error into an InterpError with current call stack context.
