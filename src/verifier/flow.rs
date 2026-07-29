@@ -284,7 +284,15 @@ pub(crate) fn flow_verify_ffi_call_sites_with_externs_or_mock(
 
 /// Entry for external callers that already have a file (e.g. build pipeline).
 /// Falls back to mock verification if Z3 is unavailable.
-pub fn flow_verify_file_or_mock(
+///
+/// Note: Retained for the test helper `flow_verify_source_unchecked`
+/// (which verifies AST directly without type-checking).
+/// The primary entry point `verify_checked` now routes the Z3 path
+/// through `flow_verify_file_with_hashes` and the mock path through
+/// `mock_verify_checked` (CheckedProgram-based).
+/// Not re-exported; dead_code suppressed — used only in #[cfg(test)].
+#[allow(dead_code)]
+pub(crate) fn flow_verify_file_or_mock(
     file: &File,
     source_hash: String,
     resolved_ir_hash: String,

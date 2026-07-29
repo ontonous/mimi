@@ -547,7 +547,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             } else {
                 None
             };
-        self.compile_file_with_resolved(program.legacy_body_file(), program, eligible.as_ref())
+        self.compile_file_with_resolved(program, eligible.as_ref())
             .map_err(|error| {
                 let mut diagnostic = error.to_diagnostic();
                 if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {
@@ -618,13 +618,15 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// is compiled after the setup phase (forward declarations, impl methods,
     /// vtables) but before the legacy body compilation pass. This ensures all
     /// symbols are declared before the resolved emitter compiles eligible bodies.
+    ///
+    /// 0.32.27+: `file` extracted from `program.legacy_file` internally,
+    /// eliminating the `legacy_body_file()` call at the caller site (C1 migration).
     pub(crate) fn compile_file_with_resolved(
         &mut self,
-        file: &File,
         program: &crate::core::CheckedProgram,
         eligible: Option<&std::collections::BTreeSet<crate::core::NodeId>>,
     ) -> MimiResult<()> {
-        self.compile_file_inner(file, Some((program, eligible)))
+        self.compile_file_inner(program.legacy_body_file(), Some((program, eligible)))
     }
 
     fn compile_file_inner(

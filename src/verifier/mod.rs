@@ -52,6 +52,17 @@ pub fn verify_source_with(
 ///
 /// `source_hash` is the BLAKE3 hash of the source text (for ProofArtifact
 /// tamper detection). Pass an empty string if source text is unavailable.
+///
+/// When Z3 is available, delegates to the Flow verifier state machine
+/// (which still uses `legacy_body_file()` for AST-based function body
+/// encoding). When Z3 is unavailable, uses CheckedProgram-based mock
+/// verification, bypassing `legacy_body_file()` entirely.
+///
+/// Note: The Resolved IR contract path (verify_checked_contracts) is used
+/// by verify_source_with / VerifierCtx::verify_checked for direct contract
+/// verification without the state machine wrapper. Full migration of the
+/// Flow verifier to CheckedProgram-based initialization (C4, including
+/// the Z3 path) is planned for 0.32.28+.
 pub fn verify_checked(
     program: &crate::core::CheckedProgram,
     source_hash: String,
@@ -61,7 +72,18 @@ pub fn verify_checked(
         .map_err(format_check_errors)?;
     // P1-24: compute Resolved IR hash from CheckedProgram signatures.
     let resolved_ir_hash = ctx::compute_resolved_ir_hash(program);
-    flow::flow_verify_file_or_mock(program.legacy_body_file(), source_hash, resolved_ir_hash)
+    if is_z3_available() {
+        // C4 Z3 path: still uses AST body encoding via flow verifier.
+        // The resolved_ir_hash is embedded in ProofArtifact by the flow verifier.
+        flow::flow_verify_file_with_hashes(
+            program.legacy_body_file(),
+            source_hash,
+            resolved_ir_hash,
+        )
+    } else {
+        // C4 mock path: from CheckedProgram, no legacy_body_file needed.
+        Ok(ctx::mock_verify_checked(program))
+    }
 }
 
 /// Parse source and verify extern call sites using Z3.
@@ -138,7 +160,34 @@ pub fn verify_ffi_checked(
             ));
         }
     }
-    flow::flow_verify_ffi_call_sites_with_externs_or_mock(program.legacy_body_file(), &externs)
+    if is_z3_available() {
+        // C4 Z3 path: still uses AST body encoding via flow verifier.
+        // The _or_mock variant uses the Z3 path internally since we checked availability.
+        flow::flow_verify_ffi_call_sites_with_externs_or_mock(
+            program.legacy_body_file(),
+            &externs,
+        )
+    } else {
+        // C4 mock path: from CheckedProgram's extern signatures, no legacy_body_file.
+        let mut results: Vec<VerificationResult> = Vec::new();
+        for block in program.extern_blocks().values() {
+            for signature in &block.signatures {
+                if signature.requires.is_some() || signature.ensures.is_some() {
+                    results.push(VerificationResult {
+                        func_name: format!("extern {}", signature.name),
+                        status: VerifStatus::InfrastructureError,
+                        message: "Z3 solver not available".into(),
+                        diagnostic: None,
+                        duration_us: 0,
+                        constraint_count: 0,
+                        artifact: None,
+                        trusted_subset_domain: None,
+                    });
+                }
+            }
+        }
+        Ok(results)
+    }
 }
 
 /// Check whether the Z3 solver is available at runtime.
