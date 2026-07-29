@@ -188,6 +188,48 @@ impl<'a> Interpreter<'a> {
         let left = self.eval_expr(l)?;
         let right = self.eval_expr(r)?;
 
+        // Fast path: Int×Int arithmetic bypasses BinOp→ResolvedBinaryOp→apply_binary.
+        // Covers the dominant hot loop pattern (counter arithmetic, comparisons).
+        #[cfg(not(test))]
+        if let (Value::Int(a), Value::Int(b)) = (&left, &right) {
+            let result = match op {
+                BinOp::Add => a.checked_add(*b).map(Value::Int),
+                BinOp::Sub => a.checked_sub(*b).map(Value::Int),
+                BinOp::Mul => a.checked_mul(*b).map(Value::Int),
+                BinOp::Div => {
+                    if *b == 0 {
+                        return Err(InterpError::div_by_zero());
+                    }
+                    a.checked_div(*b).map(Value::Int)
+                }
+                BinOp::Mod => {
+                    if *b == 0 {
+                        return Err(InterpError::div_by_zero());
+                    }
+                    a.checked_rem(*b).map(Value::Int)
+                }
+                BinOp::EqCmp => return Ok(Value::Bool(a == b)),
+                BinOp::NeCmp => return Ok(Value::Bool(a != b)),
+                BinOp::Lt => return Ok(Value::Bool(a < b)),
+                BinOp::Gt => return Ok(Value::Bool(a > b)),
+                BinOp::Le => return Ok(Value::Bool(a <= b)),
+                BinOp::Ge => return Ok(Value::Bool(a >= b)),
+                BinOp::BitAnd => return Ok(Value::Int(a & b)),
+                BinOp::BitOr => return Ok(Value::Int(a | b)),
+                BinOp::BitXor => return Ok(Value::Int(a ^ b)),
+                BinOp::Shl => u32::try_from(*b).ok().and_then(|s| a.checked_shl(s)).map(Value::Int),
+                BinOp::Shr => u32::try_from(*b).ok().and_then(|s| a.checked_shr(s)).map(Value::Int),
+                _ => None, // Fall through to general path for Pow, Range, etc.
+            };
+            match result {
+                Some(v) => return Ok(v),
+                None if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Shl | BinOp::Shr) => {
+                    return Err(InterpError::integer_overflow("integer arithmetic overflow"));
+                }
+                _ => {} // Fall through
+            }
+        }
+
         #[cfg(not(test))]
         {
             let resolved = match op {

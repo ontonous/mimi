@@ -81,6 +81,15 @@ impl<'a> Interpreter<'a> {
             return self.call_async_func(func, filled_args);
         }
 
+        // Recursion depth guard (moved from per-expression eval_expr in 0.33).
+        // Checked at function call boundaries where actual stack overflow lives.
+        if self.recursion_depth >= 768 {
+            return Err(InterpError::new(
+                "recursion limit exceeded (possible infinite recursion)",
+            ));
+        }
+        self.recursion_depth += 1;
+
         self.push_call(&func.name);
         self.push_scope();
 

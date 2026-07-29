@@ -158,12 +158,14 @@ impl<'a> Interpreter<'a> {
         cond: &Expr,
         body: &Block,
     ) -> Result<Option<Value>, InterpError> {
+        let has_inv = Self::block_has_invariants(body);
         while is_truthy(&self.eval_expr(cond)?) {
             if self.early_return.is_some() {
                 break;
             }
-            // Check invariants at each iteration start
-            self.check_invariants(body)?;
+            if has_inv {
+                self.check_invariants(body)?;
+            }
             // The trailing expression of a loop body is NOT the loop's return
             // value (that role belongs to explicit `return`/`break val`). Ignore
             // `Value::Unit` from trailing statements so loops with e.g. a final
@@ -198,6 +200,7 @@ impl<'a> Interpreter<'a> {
         init: &Expr,
         body: &Block,
     ) -> Result<Option<Value>, InterpError> {
+        let has_inv = Self::block_has_invariants(body);
         loop {
             let val = self.eval_expr(init)?;
             let bindings = self.match_pattern(pat, &val);
@@ -213,9 +216,11 @@ impl<'a> Interpreter<'a> {
                     self.pop_scope();
                     break;
                 }
-                if let Err(e) = self.check_invariants(body) {
-                    self.pop_scope();
-                    return Err(e);
+                if has_inv {
+                    if let Err(e) = self.check_invariants(body) {
+                        self.pop_scope();
+                        return Err(e);
+                    }
                 }
                 match self.eval_block(body) {
                     Ok(Some(v)) => {
@@ -255,6 +260,25 @@ impl<'a> Interpreter<'a> {
             }
         }
         Ok(None)
+    }
+
+    /// Pre-scan: does this block (or any nested block) contain invariant statements?
+    /// Called once before a loop to decide whether per-iteration checks are needed.
+    fn block_has_invariants(block: &Block) -> bool {
+        block.iter().any(|stmt| match stmt.unlocated() {
+            Stmt::Invariant(..) => true,
+            Stmt::If { then_, else_, .. } => {
+                Self::block_has_invariants(then_)
+                    || else_.as_ref().map_or(false, |b| Self::block_has_invariants(b))
+            }
+            Stmt::While { body, .. } | Stmt::Loop(body) | Stmt::For { body, .. } => {
+                Self::block_has_invariants(body)
+            }
+            Stmt::Block(b) | Stmt::Arena(b) | Stmt::Parasteps(b) | Stmt::OnFailure(b) => {
+                Self::block_has_invariants(b)
+            }
+            _ => false,
+        })
     }
 
     fn check_invariants(&mut self, block: &Block) -> Result<(), InterpError> {
@@ -298,11 +322,14 @@ impl<'a> Interpreter<'a> {
         &mut self,
         body: &Block,
     ) -> Result<Option<Value>, InterpError> {
+        let has_inv = Self::block_has_invariants(body);
         loop {
             if self.early_return.is_some() {
                 break;
             }
-            self.check_invariants(body)?;
+            if has_inv {
+                self.check_invariants(body)?;
+            }
             if let Some(v) = self.eval_block(body)? {
                 // See eval_while: trailing Unit must not terminate the loop.
                 if v != Value::Unit {

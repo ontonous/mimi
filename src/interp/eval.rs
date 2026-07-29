@@ -458,18 +458,15 @@ impl<'a> Interpreter<'a> {
 
     /// Depth-guarded entry point for expression evaluation (IN-H2 / deep-audit
     /// item #12): a self-recursive or diverging expression tree now aborts with a
-    /// clean error instead of overflowing the Rust stack. Every recursive path
-    /// (`eval_expr` → `eval_expr_body` → `eval_expr`) re-enters this guard.
+    /// clean error instead of overflowing the Rust stack.
+    ///
+    /// PERF (0.33): the per-expression increment/decrement was the #1 overhead
+    /// in hot loops (5M+ pairs per million iterations). Recursion depth is now
+    /// checked at function call boundaries only (call_func), where the actual
+    /// stack overflow risk lives. Expression tree depth is bounded by source code
+    /// size and the parser's own recursion limits.
     pub(crate) fn eval_expr(&mut self, expr: &Expr) -> Result<Value, InterpError> {
-        if self.recursion_depth >= Self::MAX_RECURSION_DEPTH {
-            return Err(InterpError::new(
-                "recursion limit exceeded (possible infinite recursion)",
-            ));
-        }
-        self.recursion_depth += 1;
-        let res = self.eval_expr_body(expr);
-        self.recursion_depth = self.recursion_depth.saturating_sub(1);
-        res
+        self.eval_expr_body(expr)
     }
 
     pub(crate) fn eval_expr_body(&mut self, expr: &Expr) -> Result<Value, InterpError> {
