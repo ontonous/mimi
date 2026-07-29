@@ -41,7 +41,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
     reg.register(BuiltinDesc { name: "has_key", arity: 2, category: BuiltinCategory::List, func: builtin_has_key });
     reg.register(BuiltinDesc { name: "keys", arity: 1, category: BuiltinCategory::List, func: builtin_keys });
     reg.register(BuiltinDesc { name: "values", arity: 1, category: BuiltinCategory::List, func: builtin_values });
-    reg.register(BuiltinDesc { name: "insert", arity: 3, category: BuiltinCategory::List, func: builtin_map_set });
+    reg.register(BuiltinDesc { name: "insert", arity: usize::MAX, category: BuiltinCategory::List, func: builtin_insert });
     reg.register(BuiltinDesc { name: "remove", arity: 2, category: BuiltinCategory::List, func: builtin_map_remove });
     // Option
     reg.register(BuiltinDesc { name: "option_value_or", arity: 2, category: BuiltinCategory::List, func: builtin_option_value_or });
@@ -251,6 +251,30 @@ fn builtin_map_remove(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value,
             Ok(Value::Record(ty.clone(), new_fields))
         }
         _ => Err(InterpError::new("map_remove: expected (map, string key)")),
+    }
+}
+
+/// insert: 2 args = set insert (set, value), 3 args = map insert (map, key, value).
+fn builtin_insert(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    match args.len() {
+        2 => {
+            // Set insert: insert(set, value)
+            match &args[0] {
+                Value::Set(s) => {
+                    let mut new_set = s.clone();
+                    if !new_set.contains(&args[1]) {
+                        new_set.push(args[1].clone());
+                    }
+                    Ok(Value::Set(new_set))
+                }
+                _ => Err(InterpError::new("insert: expected set")),
+            }
+        }
+        3 => {
+            // Map insert: insert(map, key, value)
+            builtin_map_set(_vm, args)
+        }
+        _ => Err(InterpError::new("insert expects 2 or 3 arguments")),
     }
 }
 

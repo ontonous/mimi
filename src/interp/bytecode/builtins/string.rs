@@ -122,7 +122,8 @@ fn builtin_str_contains(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     match (&args[0], &args[1]) {
         (Value::String(s), Value::String(sub)) => Ok(Value::Bool(s.contains(sub.as_str()))),
         (Value::List(l), target) => Ok(Value::Bool(l.contains(target))),
-        _ => Err(InterpError::new("contains expects (string, string) or (list, value)")),
+        (Value::Set(s), target) => Ok(Value::Bool(s.contains(target))),
+        _ => Err(InterpError::new("contains expects (string/list/set, value)")),
     }
 }
 
