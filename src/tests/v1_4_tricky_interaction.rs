@@ -385,7 +385,6 @@ fn tricky_option_default() {
 // Combines: generic record, generic higher-order function, closure capture.
 
 #[test]
-#[ignore = "CODEGEN: generic record field access after monomorphization still i64 (v0.31 type engine)"]
 fn tricky_record_generic_closure() {
     check(
         "type Box<T> { value: T }
@@ -404,7 +403,6 @@ fn tricky_record_generic_closure() {
 // 2b: Generic swap on single-type Pair record.
 // Combines: generic record, generic function, field access.
 
-#[ignore = "CODEGEN: generic record Pair<T> field access after monomorphization still i64 (v0.31 type engine)"]
 #[test]
 fn tricky_record_swap_generic() {
     check(
@@ -502,12 +500,12 @@ fn tricky_list_filter_match() {
 
 // 3c: Nested for loops building and accessing 2D list structure.
 // Combines: nested for loops, list push, nested list indexing.
-// ISSUE: type checker cannot infer List<List<i32>> without annotation on `rows`.
-// `let mut rows = []` gives List<unknown>, and push() can't retroactively set the
-// element type at the type-checker level. Fix: add type annotation to `rows`.
-// With annotation, codegen works (inttoptr for i64 heap pointer to inner list struct).
+// NOTE: CLI full pipeline (type check + resolved dispatch) handles this correctly.
+// The test harness compile_and_run() skips type checking and uses the legacy
+// codegen path, which miscompiles nested list indexing inside loops.
+// Tracked: legacy path nested-list-in-loop element reconstruction.
 
-#[ignore = "TYPE_INFERENCE: push() cannot propagate element type to empty list without annotation"]
+#[ignore = "LEGACY_CODEGEN: nested list indexing in loop miscompiles without type-checked pipeline (CLI works)"]
 #[test]
 fn tricky_nested_loop_list() {
     check(
@@ -515,7 +513,7 @@ fn tricky_nested_loop_list() {
              let bases = [0, 10, 20];
              let mut rows: List<List<i32>> = [];
              for b in bases {
-                 let mut row = [];
+                 let mut row: List<i32> = [];
                  push(row, b + 1);
                  push(row, b + 2);
                  push(row, b + 3);
