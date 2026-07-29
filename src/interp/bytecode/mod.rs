@@ -628,6 +628,67 @@ mod tests {
             Ok(1)
         );
     }
+
+    // ═══ Phase 2b: Match ══════════════════════════════════════
+
+    /// Match with literal patterns.
+    #[test]
+    fn e2e_match_literal() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let x = 2
+                     match x {
+                         1 => 10,
+                         2 => 20,
+                         _ => 0,
+                     }
+                 }"),
+            Ok(20)
+        );
+    }
+
+    /// Match with variable binding.
+    #[test]
+    fn e2e_match_variable() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let x = 42
+                     match x {
+                         n => n + 1,
+                     }
+                 }"),
+            Ok(43)
+        );
+    }
+
+    /// Match with wildcard.
+    #[test]
+    fn e2e_match_wildcard() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let x = 99
+                     match x {
+                         _ => 7,
+                     }
+                 }"),
+            Ok(7)
+        );
+    }
+
+    /// Match with guard.
+    #[test]
+    fn e2e_match_guard() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let x = 15
+                     match x {
+                         n if n > 10 => 1,
+                         _ => 0,
+                     }
+                 }"),
+            Ok(1)
+        );
+    }
 }
 
 #[cfg(test)]

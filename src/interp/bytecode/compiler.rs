@@ -368,6 +368,7 @@ impl BytecodeCompiler {
                 fc.emit(Op::RecordGet { rd, ra: r_obj, field: field_idx });
                 Ok(rd)
             }
+            Expr::Match(subject, arms) => self.compile_match(fc, subject, arms),
             _ => Err(InterpError::new(format!(
                 "bytecode compiler: expression {:?} not yet supported",
                 std::mem::discriminant(expr.unlocated())
@@ -706,6 +707,213 @@ impl BytecodeCompiler {
         fc.proto.patch_jump(jmp_end);
 
         Ok(rd)
+    }
+
+    /// Compile a match expression.
+    ///
+    /// Strategy: for each arm, emit a pattern test. If the test passes,
+    /// bind variables and evaluate the body. Otherwise, fall through to
+    /// the next arm.
+    fn compile_match(
+        &self,
+        fc: &mut FuncCompiler,
+        subject: &Expr,
+        arms: &[MatchArm],
+    ) -> Result<Reg, InterpError> {
+        let r_subject = self.compile_expr(fc, subject)?;
+        let rd = fc.proto.alloc_reg();
+
+        let mut end_jumps = Vec::new();
+
+        for arm in arms {
+            // Compile pattern test. Returns (test_reg, bindings).
+            // test_reg is None for patterns that always match (Wildcard, Variable).
+            let (test_reg, bindings) = self.compile_pattern_test(fc, &arm.pat, r_subject)?;
+
+            // If there's a test, emit JmpIfNot to skip this arm.
+            let skip_jump = if let Some(r_test) = test_reg {
+                Some(fc.emit(Op::JmpIfNot { offset: 0, ra: r_test }))
+            } else {
+                None
+            };
+
+            // Check guard if present.
+            let guard_jump = if let Some(guard) = &arm.guard {
+                fc.push_scope();
+                for (name, r) in &bindings {
+                    fc.vars.last_mut().unwrap().insert(name.clone(), *r);
+                }
+                let r_guard = self.compile_expr(fc, guard)?;
+                fc.pop_scope();
+                Some(fc.emit(Op::JmpIfNot { offset: 0, ra: r_guard }))
+            } else {
+                None
+            };
+
+            // Bind pattern variables and compile body.
+            fc.push_scope();
+            for (name, r) in &bindings {
+                fc.vars.last_mut().unwrap().insert(name.clone(), *r);
+            }
+            let r_body = self.compile_expr(fc, &arm.body)?;
+            fc.pop_scope();
+
+            fc.emit(Op::Mov { rd, rs: r_body });
+            end_jumps.push(fc.emit(Op::Jmp { offset: 0 }));
+
+            // Patch skip jumps to here.
+            if let Some(j) = skip_jump {
+                fc.proto.patch_jump(j);
+            }
+            if let Some(j) = guard_jump {
+                fc.proto.patch_jump(j);
+            }
+        }
+
+        // Non-exhaustive match: return Unit (or could emit an error).
+        fc.emit(Op::LoadUnit { rd });
+
+        // Patch all end jumps.
+        for j in end_jumps {
+            fc.proto.patch_jump(j);
+        }
+
+        Ok(rd)
+    }
+
+    /// Compile a pattern test.
+    ///
+    /// Returns (test_reg, bindings):
+    /// - test_reg: Some(reg) if the pattern needs a runtime test, None if it always matches
+    /// - bindings: (name, reg) pairs for variables bound by the pattern
+    fn compile_pattern_test(
+        &self,
+        fc: &mut FuncCompiler,
+        pat: &Pattern,
+        r_subject: Reg,
+    ) -> Result<(Option<Reg>, Vec<(String, Reg)>), InterpError> {
+        match &pat.kind {
+            PatternKind::Wildcard => Ok((None, Vec::new())),
+
+            PatternKind::Variable(name) => {
+                // Always matches; bind the subject to the variable.
+                Ok((None, vec![(name.clone(), r_subject)]))
+            }
+
+            PatternKind::Literal(lit) => {
+                // Compare subject with the literal.
+                let r_lit = self.compile_literal(fc, lit)?;
+                let r_test = fc.proto.alloc_reg();
+                fc.emit(Op::Eq { rd: r_test, ra: r_subject, rb: r_lit });
+                Ok((Some(r_test), Vec::new()))
+            }
+
+            PatternKind::Constructor(name, pats) => {
+                // Check variant tag, then match fields.
+                let r_test = fc.proto.alloc_reg();
+                let tag_idx = fc.proto.add_const(ConstValue::Str(name.clone()));
+                fc.emit(Op::IsVariant { rd: r_test, ra: r_subject, tag: tag_idx });
+
+                let mut bindings = Vec::new();
+                for (i, (field_name, sub_pat)) in pats.iter().enumerate() {
+                    // Extract field i from the variant.
+                    let r_field = fc.proto.alloc_reg();
+                    fc.emit(Op::VariantGet {
+                        rd: r_field,
+                        ra: r_subject,
+                        idx: i as u16,
+                    });
+                    // Recursively match the sub-pattern.
+                    let (sub_test, sub_bindings) =
+                        self.compile_pattern_test(fc, sub_pat, r_field)?;
+                    // If sub-pattern has a test, AND it with the main test.
+                    if let Some(r_sub) = sub_test {
+                        fc.emit(Op::And { rd: r_test, ra: r_test, rb: r_sub });
+                    }
+                    bindings.extend(sub_bindings);
+                    // If field_name is not a placeholder, bind it.
+                    if !field_name.starts_with('_') {
+                        bindings.push((field_name.clone(), r_field));
+                    }
+                }
+
+                Ok((Some(r_test), bindings))
+            }
+
+            PatternKind::Tuple(pats) => {
+                // Match each element.
+                let mut bindings = Vec::new();
+                let mut test_reg = None;
+
+                for (i, sub_pat) in pats.iter().enumerate() {
+                    let r_elem = fc.proto.alloc_reg();
+                    fc.emit(Op::TupleGet {
+                        rd: r_elem,
+                        ra: r_subject,
+                        idx: i as u16,
+                    });
+                    let (sub_test, sub_bindings) =
+                        self.compile_pattern_test(fc, sub_pat, r_elem)?;
+                    if let Some(r_sub) = sub_test {
+                        match test_reg {
+                            None => test_reg = Some(r_sub),
+                            Some(r_main) => {
+                                fc.emit(Op::And { rd: r_main, ra: r_main, rb: r_sub });
+                            }
+                        }
+                    }
+                    bindings.extend(sub_bindings);
+                }
+
+                Ok((test_reg, bindings))
+            }
+
+            PatternKind::Array(pats) | PatternKind::Slice(pats, _) => {
+                // For now, just match the length and elements.
+                // This is a simplified implementation.
+                let mut bindings = Vec::new();
+                let mut test_reg = None;
+
+                // Check length.
+                let r_len = fc.proto.alloc_reg();
+                fc.emit(Op::Len { rd: r_len, ra: r_subject });
+                let r_expected = fc.proto.alloc_reg();
+                let len_idx = fc.proto.add_const(ConstValue::Int(pats.len() as i64));
+                fc.emit(Op::LoadConst { rd: r_expected, idx: len_idx });
+                let r_len_test = fc.proto.alloc_reg();
+                fc.emit(Op::EqInt {
+                    rd: r_len_test,
+                    ra: r_len,
+                    rb: r_expected,
+                });
+                test_reg = Some(r_len_test);
+
+                // Match each element.
+                for (i, sub_pat) in pats.iter().enumerate() {
+                    let r_elem = fc.proto.alloc_reg();
+                    let r_idx = fc.proto.alloc_reg();
+                    let idx_const = fc.proto.add_const(ConstValue::Int(i as i64));
+                    fc.emit(Op::LoadConst { rd: r_idx, idx: idx_const });
+                    fc.emit(Op::ListGet {
+                        rd: r_elem,
+                        ra: r_subject,
+                        rb: r_idx,
+                    });
+                    let (sub_test, sub_bindings) =
+                        self.compile_pattern_test(fc, sub_pat, r_elem)?;
+                    if let Some(r_sub) = sub_test {
+                        if let Some(r_main) = test_reg {
+                            fc.emit(Op::And { rd: r_main, ra: r_main, rb: r_sub });
+                        } else {
+                            test_reg = Some(r_sub);
+                        }
+                    }
+                    bindings.extend(sub_bindings);
+                }
+
+                Ok((test_reg, bindings))
+            }
+        }
     }
 
     fn compile_if_stmt(
