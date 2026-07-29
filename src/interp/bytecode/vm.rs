@@ -22,6 +22,9 @@ struct Frame {
     /// Register in the CALLER's frame where the return value goes.
     /// None for the entry frame (top-level).
     return_reg: Option<Reg>,
+    /// When true, wrap the return value in Ok(...) on Ret.
+    /// Used by FlowTransition for transitions with `fails` clause.
+    wrap_ok: bool,
 }
 
 /// The bytecode VM.
@@ -127,7 +130,20 @@ impl<'a> BytecodeVM<'a> {
             pc: 0,
             proto_idx: func_idx,
             return_reg,
+            wrap_ok: false,
         });
+        Ok(())
+    }
+
+    /// Push a frame with wrap_ok flag (for flow transitions with `fails`).
+    fn push_frame_wrap_ok(
+        &mut self,
+        func_idx: FuncIdx,
+        args: &[Value],
+        return_reg: Option<Reg>,
+    ) -> Result<(), InterpError> {
+        self.push_frame(func_idx, args, return_reg)?;
+        self.stack.last_mut().unwrap().wrap_ok = true;
         Ok(())
     }
 
@@ -511,8 +527,13 @@ impl<'a> BytecodeVM<'a> {
                     self.set_reg(rd, result);
                 }
                 Op::Ret { ra } => {
-                    let v = self.get_reg(ra).clone();
-                    let return_reg = self.stack.last().unwrap().return_reg;
+                    let mut v = self.get_reg(ra).clone();
+                    let frame = self.stack.last().unwrap();
+                    let return_reg = frame.return_reg;
+                    let wrap_ok = frame.wrap_ok;
+                    if wrap_ok {
+                        v = Value::Variant("Ok".to_string(), vec![v]);
+                    }
                     self.stack.pop();
                     self.depth -= 1;
                     if self.stack.is_empty() || (stop > 0 && self.depth < stop) {
@@ -523,14 +544,21 @@ impl<'a> BytecodeVM<'a> {
                     }
                 }
                 Op::RetUnit => {
-                    let return_reg = self.stack.last().unwrap().return_reg;
+                    let frame = self.stack.last().unwrap();
+                    let return_reg = frame.return_reg;
+                    let wrap_ok = frame.wrap_ok;
+                    let v = if wrap_ok {
+                        Value::Variant("Ok".to_string(), vec![Value::Unit])
+                    } else {
+                        Value::Unit
+                    };
                     self.stack.pop();
                     self.depth -= 1;
                     if self.stack.is_empty() || (stop > 0 && self.depth < stop) {
-                        return Ok(Value::Unit);
+                        return Ok(v);
                     }
                     if let Some(rd) = return_reg {
-                        self.set_reg(rd, Value::Unit);
+                        self.set_reg(rd, v);
                     }
                 }
 
@@ -1101,7 +1129,12 @@ impl<'a> BytecodeVM<'a> {
                         .map(|i| self.get_reg(args_base + i).clone())
                         .collect();
                     // Call the transition function.
-                    self.push_frame(func_idx, &args, Some(rd))?;
+                    // If the transition has a `fails` clause, wrap the result in Ok(...).
+                    if self.program.flow_fails_transitions.contains(&key) {
+                        self.push_frame_wrap_ok(func_idx, &args, Some(rd))?;
+                    } else {
+                        self.push_frame(func_idx, &args, Some(rd))?;
+                    }
                 }
 
                 Op::DynMethodCall { rd, method, args_base, argc } => {

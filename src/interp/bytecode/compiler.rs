@@ -38,6 +38,8 @@ pub struct BytecodeCompiler {
     actor_defs: HashMap<String, ActorDef>,
     /// Flow transition function indices: (flow, transition, from_state) → FuncIdx.
     flow_transition_funcs: HashMap<(String, String, String), FuncIdx>,
+    /// Transitions with `fails` clause.
+    flow_fails_transitions: std::collections::HashSet<(String, String, String)>,
     /// The original AST file (stored for actor worker threads).
     ast_file: Option<std::sync::Arc<File>>,
 }
@@ -177,6 +179,7 @@ impl BytecodeCompiler {
             flow_defs: HashMap::new(),
             actor_defs: HashMap::new(),
             flow_transition_funcs: HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
             ast_file: None,
         }
     }
@@ -291,6 +294,12 @@ impl BytecodeCompiler {
                             (flow.name.clone(), t.name.clone(), t.from_state.clone()),
                             idx,
                         );
+                        // Track transitions with `fails` clause.
+                        if t.fails.is_some() {
+                            self.flow_fails_transitions.insert(
+                                (flow.name.clone(), t.name.clone(), t.from_state.clone()),
+                            );
+                        }
                         // Compile the transition body.
                         let mut fc = FuncCompiler::new(func_name, param_count as u16);
                         // Bind `self` to register 0 (direct insert, like compile_func).
@@ -323,6 +332,7 @@ impl BytecodeCompiler {
             actor_defs: std::mem::take(&mut self.actor_defs),
             flow_defs: std::mem::take(&mut self.flow_defs),
             flow_transition_funcs: std::mem::take(&mut self.flow_transition_funcs),
+            flow_fails_transitions: std::mem::take(&mut self.flow_fails_transitions),
             ast: self.ast_file.clone(),
         })
     }
