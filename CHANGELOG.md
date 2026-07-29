@@ -4,7 +4,62 @@
 
 ### Phase A: Codegen 全量迁移（0.32.1–0.32.15）
 
-（进行中）
+- **0.32.1 Option/Result 类型进入 resolved native slice**：Option<T> → `{i1, T}` / Result<T, E> → `{i1, T, E}` LLVM 结构体降低。类型降低层（types.rs）注册 Nominal Result/Option 到 struct type 映射；eligibility gate 放行 Option/Result 类型的参数/返回值/本地绑定。+3 resolved codegen 测试。
+- **0.32.2 List 构造/索引/len 进入 resolved native slice**：List<T> → `{i64 len, ptr data}` LLVM 结构体降低。eligibility gate 接受 Nominal List/Map/Set（元素类型递归检查）；ResolvedExprKind::List 字面量发射（malloc + store elements + build_list_struct）；ResolvedProjection::Index 值/左值投影放行。Map/Set → i64 handle（opaque，类型降低层注册）。+4 resolved codegen 测试。
+- **Map/Set literal emission（无 sprint 标签）**：ResolvedExprKind::Map/Set 字面量发射进入 resolved emitter。Map → {i64, i64} 键值对数组 + runtime `mimi_map_create` 调用；Set → 元素数组 + runtime `mimi_set_create`。+resolved_failed_functions 追踪基础设施。3 个遗留 bug 修复（match+fstring double free、claim_match_arm_string 精确弹栈、heap scope 管理）。
+- **0.32.5 用户自定义 record 类型进入 resolved native slice**：Record 构造（alloca + GEP + store 逐个字段）、Record 字段访问（Field projection lvalue/rvalue）、Record 类型 signature/body 匹配（field 名索引对齐）。+2 resolved codegen 测试。
+- **0.32.6 Option/Result match Constructor pattern 进入 resolved native slice**：Match 表达式 Constructor 模式（`Some(x)` / `Ok(x)` / `Err(e)` / `None`）降低为 if-else 链 + discriminant 检查（`{i1, ...}` struct 的 0/1 标签）。+2 resolved codegen 测试。
+- **0.32.7 per-function dispatch 重新激活 + ABI 修复**：修复 resolved vs legacy ABI 漂移（`{ptr, i64}` string ABI 在跨 emitter 调用时导致 SIGSEGV）。string 参数传递统一为 `{ptr, i64}` struct-by-value。恢复 per-function dispatch 为默认路径。+3 E2E 双后端测试。
+- **0.32.8 for-in-list 迭代进入 resolved native slice**：`for x in list_expr` 降低为 while 循环 + index 变量 + get_list 调用。List iterable 型的 eligibility 检查。+1 resolved codegen 测试。
+- **0.32.9 for-in 接受任意 List<T> 表达式作为 iterable**：不限于字面量或变量——任意元表达式（call return、projection 等）的 List<T> 类型都可作为 for-in iterable。
+- **0.32.10 Try 表达式 (?) 进入 resolved native slice**：`expr?` 降低为 if-else 检查 Result/Option discriminant + early return Err/None。返回值类型校验（inner type 必须为 Result 或 Option）。+1 resolved codegen 测试。
+- **0.32.11 Alias/Newtype 转换进入 resolved native slice**：AliasWrap/AliasUnwrap/NewtypeWrap/NewtypeUnwrap 转换在 eligibility 中接受（LLVM 级 identity），使使用别名和新类型的程序可通过 per-function 检查。
+- **0.32.12 自定义 enum 类型进入 resolved native slice**：用户自定义 enum → `{i32 tag, i64 payload}` LLVM 结构体。Enum 类型的构造器模式匹配降低为 tag 比较 + payload 提取。+2 resolved codegen 测试。
+- **0.32.13 解除 impls 程序级阻断 + source_id 精确过滤**：checker 自动生成 From/Into impls 导致所有程序 `program.impls()` 非空，0.32.8 阻断修复后仍 SIGSEGV（stdlib 模块函数 body 编译）。修复：per-function source_id 过滤——只有 entry source 文件的函数进入 resolved 编译，模块函数由 legacy emitter 编译。+source_id 精确过滤降低误伤。+2 E2E 双后端测试。
+- **0.32.14 range() call 迭代 + Newtype 类型 lowering**：`for x in range(start, end)` 降低。Newtype 在类型降低层注册（transparent wrapper，LLVM repr 同 inner 类型）。+1 resolved codegen 测试。
+- **0.32.15 Newtype match Constructor pattern 支持**：Newtype 模式匹配（`MyNewtype(x) => ...`）降低为 payload 解包。+1 resolved codegen 测试。
+
+### Phase B: Codegen 迁移深化（0.32.16–0.32.25）
+
+- **0.32.16 非捕获 Lambda/闭包进入 resolved native slice**：Lambda 表达式 → `{ptr fn_ptr, ptr env}` 闭包结构体。非捕获闭包（captures 为空）无环境指针。LocalClosure 调用通过函数指针间接调用。+heap scope 生命周期修复（free 移到 return 之前）。+2 resolved codegen 测试。
+- **0.32.17 自定义 enum 构造器（Ok/Err 等复用标准库名字）**：允许用户自定义 enum variant 使用 `Ok`/`Err` 等名字（消除与标准库 Result/Option 的名字冲突限制）。variant 名称解析按类型作用域。
+- **0.32.17b Option/Result builtin methods**：`is_some()`/`is_ok()`/`unwrap_or(default)` 等 builtin 方法进入 resolved native slice。方法调用 dispatch 通过 `ResolvedCallee::Builtin` 桥接到既有 `compile_builtin_call`。
+- **0.32.18 解除 callee source_id 限制 + builtin shadow call**：允许从 resolved 函数调用模块函数（前向声明由 legacy emitter 注册，resolved emitter 仅发射 `call` 指令）。builtin shadow call 修复（builtin 调用链中参数传递匹配 callee 声明类型）。
+- **0.32.19 call 参数 coerce 到 callee 声明类型**：修复 resolved emitter 中 call 表达式参数类型不匹配问题——callee 声明类型与被调用表达式类型做 conversion 统一。
+- **0.32.20 Flow 程序 per-function dispatch 解锁**：Flow 程序不再被程序级门禁阻断。per-function eligibility 检查 transition 函数体内是否含有不支持的 node；Flow 基础设施（类型定义、前向声明）由 legacy emitter 编译。Flow transition 函数中 view/mutate borrow 参数被拒绝（指针 ABI 不匹配），`self` receiver 例外（值 ABI）。
+- **0.32.21 Flow state field access 支持**：Flow state 的 record-like 字段访问（`state.field_name`）在 resolved emitter 中发射为 GEP + load。
+- **0.32.22 builtin call i32→i64 参数提升 + verification IR dump**：builtin 调用参数从 i32 提升到 i64（匹配 legacy `mimi_type_to_llvm` 的 ABI）。Verification IR dump 基础设施（`--dump-verification-ir` 标志）。
+- **0.32.23 ProtocolMethod 静态 trait dispatch**：ProtocolMethod 调用（ResolvedCallee::ProtocolMethod）进入 resolved native slice。静态 dispatch——编译器在 checker 阶段解析具体 callee，resolved emitter 发射直接函数调用。
+- **0.32.24 actors/sessions/protocols 程序级门禁拆除**：含有 actor/session/protocol 的程序不再被程序级门禁阻断。per-function eligibility 过滤器处理函数级别的排除（actor 方法：non-User origin + qualified name；session/protocol 函数：non-User origin；函数签名含 actor/session/protocol 类型：require_scalar_type 拒绝非标称 Nominal 类型）。legacy emitter 编译 actor/session/protocol 基础设施。
+- **0.32.25 count_substring builtin + List O(1) push + ABI safety**：
+  - `count_substring` builtin：字符串子串计数（O(n·m) 扫描），codegen 经 LLVM `memcmp` 循环 + 解释器经 Rust `matches` 实现。双后端等价。
+  - List O(1) push：`push(list, item)` 经 `mimi_list_push` runtime（amortized O(1)），不再重新分配整个数组。
+  - ABI safety：编译期校验 callee 签名与 caller 期望的类型一致性，防止跨 emitter ABI 漂移。
+  - +2 E2E 双后端测试。
+
+### Phase C: 删除 legacy body + 审计（0.32.26–）开始
+
+- **0.32.26 Extern FFI 调用进入 resolved native slice**：
+  - `ResolvedCallee::Extern` 现在在 per-function eligibility 检查中被接受（不再是静默回退到 legacy 的原因）。
+  - resolved emitter 新增 extern 调用处理：通过 `program.extern_blocks()` 查找 extern 签名 → 获取 wrapper 函数名 → 在 LLVM 模块中查找 → 参数 coercion → 调用。
+  - extern wrapper 函数由 legacy emitter 在阶段 1 前向声明，resolved emitter 在阶段 4 消费，架构一致。
+  - 无新增 real_world 测试（extern 调用需要实际 C 库，不属于纯双后端等价集）。
+
+- **0.32.27 Verifier C3 迁移：合同验证从 AST 切换到 Resolved IR**：
+  - C5: `core/resolved/tests.rs` 的 `legacy_body_file()` 断言替换为 `functions().len() > 0`。
+  - `resolved_expr.rs::verify_contracts_from_resolved()` 新增 math 义务处理：在 requires 断言之后、body 编码之前检查 `Stmt::Math` 表达式，验证其是否被前置条件蕴含。若全部 proven 但无 ensures，返回 `Proven` 而非 `NoObligations`。
+  - `resolved_expr.rs::has_math_obligations()` 新增辅助函数。
+  - `ctx.rs::verify_checked_contracts()` 新增方法：遍历 `program.callables()`，为每个有 contracts/math 的 callable 调用 `verify_contracts_from_resolved()`。
+  - `ctx.rs::verify_checked()` 的 `verify_file(program.legacy_body_file())` 替换为 `verify_checked_contracts(program)`。
+  - 移除 `#[allow(dead_code)]` 注解。新增 `mock_verify_checked()` 作为 C4 scaffold。
+  - 主验证入口 `verify_checked` (mod.rs) 拆分为双路径：Z3 可用时走 flow verifier（仍用 legacy_body_file），Z3 不可用时走 `mock_verify_checked`（CheckedProgram-based，无 legacy_body_file）。
+  - `mock_verify_checked` 现在同时处理 callables 合约和 extern block 合约。
+  - `verify_ffi_checked` (mod.rs) 同样拆分为双路径。
+  - `flow_verify_file_or_mock` 降级为 `pub(crate)` + `#[allow(dead_code)]`（仅被测试助手使用）。
+  - 基线：4448 全量测试绿，0 退化。
+  - **C1 签名的迁移**：`compile_file_with_resolved` 签名移除 `file: &File` 参数，caller 不再调用 `program.legacy_body_file()`。改为内部通过 `program.legacy_body_file()` 获取，封装实现细节。
+  - `resolved_expr_to_ast_ffi_arg`：新增正向 R→AST Expr 转换器（Literal/Load/Binary/Unary/Call/Tuple/Old/Project/Cast），编译通过。（FFI 验证迁移尝试回退至基线，等架构升级后重做。）
+  - 当前 `legacy_body_file()` 剩余 4 个调用点：C1 (codegen 内部)、C2 (interp)、C4×2 (verifier Z3 路径)。mock 路径和三部分验证（C3/C5/ctx）已完全脱离。
 
 ---
 
