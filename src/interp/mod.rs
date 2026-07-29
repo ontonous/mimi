@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod actor;
+pub mod bytecode;
 mod builtins;
 mod call;
 mod closure_utils;
