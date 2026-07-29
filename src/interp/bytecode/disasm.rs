@@ -101,6 +101,11 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::RecordSet { .. } => "RECORD_SET",
         Op::NewMap { .. } => "NEW_MAP",
         Op::NewSet { .. } => "NEW_SET",
+        Op::MapGet { .. } => "MAP_GET",
+        Op::MapSet { .. } => "MAP_SET",
+        Op::MapContains { .. } => "MAP_CONTAINS",
+        Op::SetAdd { .. } => "SET_ADD",
+        Op::SetContains { .. } => "SET_CONTAINS",
         Op::NewVariant { .. } => "NEW_VARIANT",
         Op::VariantTag { .. } => "VARIANT_TAG",
         Op::VariantPayload { .. } => "VARIANT_PAYLOAD",
@@ -212,6 +217,11 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         }
         Op::NewMap { rd } => format!("{:04}  {:<16} r{} = map()", pc, name, rd),
         Op::NewSet { rd } => format!("{:04}  {:<16} r{} = set()", pc, name, rd),
+        Op::MapGet { rd, ra, rb } => format!("{:04}  {:<16} r{} = r{}[r{}]", pc, name, rd, ra, rb),
+        Op::MapSet { ra, rb, rc } => format!("{:04}  {:<16} r{}[r{}] = r{}", pc, name, ra, rb, rc),
+        Op::MapContains { rd, ra, rb } => format!("{:04}  {:<16} r{} = contains(r{}, r{})", pc, name, rd, ra, rb),
+        Op::SetAdd { ra, rb } => format!("{:04}  {:<16} r{}.add(r{})", pc, name, ra, rb),
+        Op::SetContains { rd, ra, rb } => format!("{:04}  {:<16} r{} = contains(r{}, r{})", pc, name, rd, ra, rb),
         Op::NewVariant { rd, type_name, variant, base, arity } => {
             let tname = proto.constants.get(*type_name as usize)
                 .map(|c| match c { ConstValue::Str(s) => s.as_str(), _ => "?" })

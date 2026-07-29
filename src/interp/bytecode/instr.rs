@@ -214,6 +214,16 @@ pub enum Op {
     NewMap { rd: Reg },
     /// rd = new Set (empty)
     NewSet { rd: Reg },
+    /// rd = map_get(ra, rb) — get value for key rb from map ra
+    MapGet { rd: Reg, ra: Reg, rb: Reg },
+    /// map_set(ra, rb, rc) — set key rb to value rc in map ra
+    MapSet { ra: Reg, rb: Reg, rc: Reg },
+    /// rd = map_contains(ra, rb) — check if map ra contains key rb
+    MapContains { rd: Reg, ra: Reg, rb: Reg },
+    /// set_add(ra, rb) — add value rb to set ra
+    SetAdd { ra: Reg, rb: Reg },
+    /// rd = set_contains(ra, rb) — check if set ra contains value rb
+    SetContains { rd: Reg, ra: Reg, rb: Reg },
 
     // ═══════════════════════════════════════════════════════════
     // Enum / pattern matching

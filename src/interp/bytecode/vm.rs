@@ -629,6 +629,86 @@ impl<'a> BytecodeVM<'a> {
                     }
                 }
 
+                // ── Map / Set ────────────────────────────────
+                Op::NewMap { rd } => {
+                    self.set_reg(rd, Value::Record(None, std::collections::HashMap::new()));
+                }
+                Op::NewSet { rd } => {
+                    self.set_reg(rd, Value::Set(Vec::new()));
+                }
+                Op::MapGet { rd, ra, rb } => {
+                    let map = self.get_reg(ra).clone();
+                    let key = self.get_reg(rb).clone();
+                    match (&map, &key) {
+                        (Value::Record(_, fields), Value::String(k)) => {
+                            match fields.get(k) {
+                                Some(v) => self.set_reg(rd, v.clone()),
+                                None => self.set_reg(rd, Value::Unit),
+                            }
+                        }
+                        _ => {
+                            return Err(InterpError::new(
+                                "map_get: expected (Map, String key)",
+                            ))
+                        }
+                    }
+                }
+                Op::MapSet { ra, rb, rc } => {
+                    let key = self.get_reg(rb).clone();
+                    let val = self.get_reg(rc).clone();
+                    let map = self.get_reg_mut(ra);
+                    match (map, &key) {
+                        (Value::Record(_, fields), Value::String(k)) => {
+                            fields.insert(k.clone(), val);
+                        }
+                        _ => {
+                            return Err(InterpError::new(
+                                "map_set: expected (Map, String key)",
+                            ))
+                        }
+                    }
+                }
+                Op::MapContains { rd, ra, rb } => {
+                    let map = self.get_reg(ra).clone();
+                    let key = self.get_reg(rb).clone();
+                    match (&map, &key) {
+                        (Value::Record(_, fields), Value::String(k)) => {
+                            self.set_reg(rd, Value::Bool(fields.contains_key(k)));
+                        }
+                        _ => {
+                            return Err(InterpError::new(
+                                "map_contains: expected (Map, String key)",
+                            ))
+                        }
+                    }
+                }
+                Op::SetAdd { ra, rb } => {
+                    let val = self.get_reg(rb).clone();
+                    let set = self.get_reg_mut(ra);
+                    match set {
+                        Value::Set(s) => {
+                            if !s.contains(&val) {
+                                s.push(val);
+                            }
+                        }
+                        _ => {
+                            return Err(InterpError::new("set_add: expected Set"))
+                        }
+                    }
+                }
+                Op::SetContains { rd, ra, rb } => {
+                    let set = self.get_reg(ra).clone();
+                    let val = self.get_reg(rb).clone();
+                    match &set {
+                        Value::Set(s) => {
+                            self.set_reg(rd, Value::Bool(s.contains(&val)));
+                        }
+                        _ => {
+                            return Err(InterpError::new("set_contains: expected Set"))
+                        }
+                    }
+                }
+
                 // ── Closures ───────────────────────────────────
                 Op::NewClosure {
                     rd,
@@ -820,6 +900,11 @@ impl<'a> BytecodeVM<'a> {
                 Op::ToString { rd, ra } => {
                     let v = self.get_reg(ra).clone();
                     self.set_reg(rd, Value::String(v.to_string()));
+                }
+                Op::TypeOf { rd, ra } => {
+                    let v = self.get_reg(ra);
+                    let name = crate::interp::type_name(v);
+                    self.set_reg(rd, Value::String(name.to_string()));
                 }
                 Op::Trap { msg } => {
                     let proto = &self.program.functions

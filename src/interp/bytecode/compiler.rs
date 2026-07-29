@@ -400,6 +400,188 @@ impl BytecodeCompiler {
             Expr::Record { ty, fields } => self.compile_record(fc, ty.as_deref(), fields),
             Expr::Lambda { params, ret: _, body } => self.compile_lambda(fc, params, body),
             Expr::Match(subject, arms) => self.compile_match(fc, subject, arms),
+
+            // ── Phase B: Expr 补全 ──────────────────────────
+
+            Expr::Range { start, end } => {
+                // start..end → list [start, start+1, ..., end-1]
+                let r_start = self.compile_expr(fc, start)?;
+                let r_end = self.compile_expr(fc, end)?;
+                let rd = fc.proto.alloc_reg();
+                // Use range builtin.
+                let args_base = fc.proto.alloc_reg();
+                fc.proto.alloc_reg(); // second arg slot
+                fc.emit(Op::Mov { rd: args_base, rs: r_start });
+                fc.emit(Op::Mov { rd: args_base + 1, rs: r_end });
+                if let Some(&bidx) = self.builtin_table.get("range") {
+                    fc.emit(Op::CallBuiltin { rd, builtin: bidx, args_base, argc: 2 });
+                } else {
+                    return Err(InterpError::new("bytecode: range builtin not registered"));
+                }
+                Ok(rd)
+            }
+
+            Expr::Comprehension { expr, var, iter, guard } => {
+                // [expr for var in iter (if guard)] → loop + list push
+                let r_iter = self.compile_expr(fc, iter)?;
+                let rd = fc.proto.alloc_reg();
+                fc.emit(Op::NewList { rd, capacity: 0 });
+
+                // Loop index.
+                let r_idx = fc.proto.alloc_reg();
+                let r_len = fc.proto.alloc_reg();
+                let r_one = fc.proto.alloc_reg();
+                let c0 = fc.proto.add_const(ConstValue::Int(0));
+                let c1 = fc.proto.add_const(ConstValue::Int(1));
+                fc.emit(Op::LoadConst { rd: r_idx, idx: c0 });
+                fc.emit(Op::LoadConst { rd: r_one, idx: c1 });
+                fc.emit(Op::Len { rd: r_len, ra: r_iter });
+
+                let loop_start = fc.proto.code.len();
+                let r_cmp = fc.proto.alloc_reg();
+                fc.emit(Op::LtInt { rd: r_cmp, ra: r_idx, rb: r_len });
+                let jmp_end = fc.emit(Op::JmpIfNot { offset: 0, ra: r_cmp });
+
+                // Bind loop variable.
+                fc.push_scope();
+                let r_var = fc.bind_var(var);
+                fc.emit(Op::ListGet { rd: r_var, ra: r_iter, rb: r_idx });
+
+                // Guard check.
+                let guard_skip = if let Some(guard_expr) = guard {
+                    let r_guard = self.compile_expr(fc, guard_expr)?;
+                    Some(fc.emit(Op::JmpIfNot { offset: 0, ra: r_guard }))
+                } else {
+                    None
+                };
+
+                // Evaluate expression and push to result list.
+                let r_elem = self.compile_expr(fc, expr)?;
+                fc.emit(Op::ListPush { ra: rd, rb: r_elem });
+
+                if let Some(skip) = guard_skip {
+                    fc.proto.patch_jump(skip);
+                }
+                fc.pop_scope();
+
+                // Increment and loop.
+                fc.emit(Op::AddInt { rd: r_idx, ra: r_idx, rb: r_one });
+                fc.emit(Op::Jmp { offset: 0 });
+                let jmp_back = fc.proto.code.len() - 1;
+                fc.proto.patch_jump_to(jmp_back, loop_start);
+                fc.proto.patch_jump_to(jmp_end, fc.proto.code.len());
+
+                Ok(rd)
+            }
+
+            Expr::SliceExpr { target, start, end } => {
+                // target[start..end] → sublist
+                let r_target = self.compile_expr(fc, target)?;
+                let r_start = if let Some(s) = start {
+                    self.compile_expr(fc, s)?
+                } else {
+                    let r = fc.proto.alloc_reg();
+                    let c0 = fc.proto.add_const(ConstValue::Int(0));
+                    fc.emit(Op::LoadConst { rd: r, idx: c0 });
+                    r
+                };
+                let r_end = if let Some(e) = end {
+                    self.compile_expr(fc, e)?
+                } else {
+                    let r = fc.proto.alloc_reg();
+                    fc.emit(Op::Len { rd: r, ra: r_target });
+                    r
+                };
+
+                // Build sublist via loop.
+                let rd = fc.proto.alloc_reg();
+                fc.emit(Op::NewList { rd, capacity: 0 });
+                let r_idx = fc.proto.alloc_reg();
+                let r_one = fc.proto.alloc_reg();
+                let c0 = fc.proto.add_const(ConstValue::Int(0));
+                let c1 = fc.proto.add_const(ConstValue::Int(1));
+                fc.emit(Op::Mov { rd: r_idx, rs: r_start });
+                fc.emit(Op::LoadConst { rd: r_one, idx: c1 });
+
+                let loop_start = fc.proto.code.len();
+                let r_cmp = fc.proto.alloc_reg();
+                fc.emit(Op::LtInt { rd: r_cmp, ra: r_idx, rb: r_end });
+                let jmp_end = fc.emit(Op::JmpIfNot { offset: 0, ra: r_cmp });
+
+                let r_elem = fc.proto.alloc_reg();
+                fc.emit(Op::ListGet { rd: r_elem, ra: r_target, rb: r_idx });
+                fc.emit(Op::ListPush { ra: rd, rb: r_elem });
+
+                fc.emit(Op::AddInt { rd: r_idx, ra: r_idx, rb: r_one });
+                fc.emit(Op::Jmp { offset: 0 });
+                let jmp_back = fc.proto.code.len() - 1;
+                fc.proto.patch_jump_to(jmp_back, loop_start);
+                fc.proto.patch_jump_to(jmp_end, fc.proto.code.len());
+
+                Ok(rd)
+            }
+
+            Expr::OptionalChain(obj, field) => {
+                // obj?.field → if obj is None → None, else → obj.field
+                let r_obj = self.compile_expr(fc, obj)?;
+                let rd = fc.proto.alloc_reg();
+
+                // Check if obj is None variant.
+                let r_is_none = fc.proto.alloc_reg();
+                let none_tag = fc.proto.add_const(ConstValue::Str("None".into()));
+                fc.emit(Op::IsVariant { rd: r_is_none, ra: r_obj, tag: none_tag });
+                let jmp_else = fc.emit(Op::JmpIfNot { offset: 0, ra: r_is_none });
+
+                // None branch: rd = None.
+                fc.emit(Op::None { rd });
+                let jmp_end = fc.emit(Op::Jmp { offset: 0 });
+
+                // Some branch: rd = obj.field.
+                fc.proto.patch_jump(jmp_else);
+                let field_idx = fc.proto.add_const(ConstValue::Str(field.clone()));
+                fc.emit(Op::RecordGet { rd, ra: r_obj, field: field_idx });
+                fc.proto.patch_jump(jmp_end);
+
+                Ok(rd)
+            }
+
+            Expr::TypeOf(inner) => {
+                let r = self.compile_expr(fc, inner)?;
+                let rd = fc.proto.alloc_reg();
+                fc.emit(Op::TypeOf { rd, ra: r });
+                Ok(rd)
+            }
+
+            Expr::TypeInfo(ty) => {
+                // Return type name as a string constant.
+                let rd = fc.proto.alloc_reg();
+                let type_str = format!("{:?}", ty);
+                let idx = fc.proto.add_const(ConstValue::Str(type_str));
+                fc.emit(Op::LoadConst { rd, idx });
+                Ok(rd)
+            }
+
+            Expr::MapLiteral { entries } => {
+                let rd = fc.proto.alloc_reg();
+                fc.emit(Op::NewMap { rd });
+                for (key_expr, val_expr) in entries {
+                    let r_key = self.compile_expr(fc, key_expr)?;
+                    let r_val = self.compile_expr(fc, val_expr)?;
+                    fc.emit(Op::MapSet { ra: rd, rb: r_key, rc: r_val });
+                }
+                Ok(rd)
+            }
+
+            Expr::SetLiteral(elems) => {
+                let rd = fc.proto.alloc_reg();
+                fc.emit(Op::NewSet { rd });
+                for elem in elems {
+                    let r = self.compile_expr(fc, elem)?;
+                    fc.emit(Op::SetAdd { ra: rd, rb: r });
+                }
+                Ok(rd)
+            }
+
             _ => Err(InterpError::new(format!(
                 "bytecode compiler: expression {:?} not yet supported",
                 std::mem::discriminant(expr.unlocated())
