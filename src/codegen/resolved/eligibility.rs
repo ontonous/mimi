@@ -901,6 +901,37 @@ fn require_expr(
                 )),
             }
         }
+        // 0.32.35: Callable (first-class function value). Only Function callees
+        // that are User-origin and non-qualified. The emitter returns a function
+        // pointer to the declared LLVM symbol.
+        ResolvedExprKind::Callable(callee) => {
+            match callee {
+                ResolvedCallee::Function(callee_owner) => {
+                    if let Some(callee_fn) = program.functions().get(callee_owner) {
+                        if callee_fn.qualified_name.contains("::") {
+                            return Err(UnsupportedResolvedNode::new(
+                                owner,
+                                &expression.node_id,
+                                "callable reference to qualified function not in resolved slice",
+                            ));
+                        }
+                        if !matches!(callee_fn.origin, crate::core::Origin::User(_)) {
+                            return Err(UnsupportedResolvedNode::new(
+                                owner,
+                                &expression.node_id,
+                                "callable reference to non-user-origin function not in resolved slice",
+                            ));
+                        }
+                    }
+                    Ok(())
+                }
+                _ => Err(UnsupportedResolvedNode::new(
+                    owner,
+                    &expression.node_id,
+                    "only Function callees are supported as first-class values in resolved slice",
+                )),
+            }
+        }
         other => Err(UnsupportedResolvedNode::new(
             owner,
             &expression.node_id,

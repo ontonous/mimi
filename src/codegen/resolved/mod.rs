@@ -1718,6 +1718,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             ResolvedExprKind::OptionalChain { receiver, field, field_type } => {
                 self.emit_optional_chain(receiver, field, field_type, frame)
             }
+            // 0.32.35: Callable (first-class function value).
+            // Returns a pointer to the declared LLVM function symbol.
+            ResolvedExprKind::Callable(callee) => self.emit_callable_ref(callee),
             other => Err(CompileError::Unsupported(format!(
                 "resolved expression {other:?} escaped resolved native eligibility at '{}'",
                 expression.node_id.0
@@ -3814,6 +3817,38 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     /// Try expression (`?` operator): unwrap Result/Option or exit.
     ///
     /// Layout:
+    /// 0.32.35: Callable (first-class function value).
+    ///
+    /// Returns a pointer to the declared LLVM function symbol. The function
+    /// must already be declared (by the legacy emitter's forward declaration
+    /// pass or by the resolved emitter's own declarations).
+    fn emit_callable_ref(
+        &self,
+        callee: &ResolvedCallee,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match callee {
+            ResolvedCallee::Function(callee_owner) => {
+                let callee_fn = self.program.functions().get(callee_owner).ok_or_else(|| {
+                    CompileError::Unsupported(format!(
+                        "callable reference to unknown function '{:?}'",
+                        callee_owner
+                    ))
+                })?;
+                let fn_name = &callee_fn.qualified_name;
+                let llvm_fn = self.generator.module.get_function(fn_name).ok_or_else(|| {
+                    CompileError::LlvmError(format!(
+                        "callable reference: function '{}' not declared in LLVM module",
+                        fn_name
+                    ))
+                })?;
+                Ok(llvm_fn.as_global_value().as_pointer_value().into())
+            }
+            _ => Err(CompileError::Unsupported(
+                "only Function callees are supported as first-class values".into(),
+            )),
+        }
+    }
+
     /// 0.32.34: OptionalChain (receiver?.field).
     ///
     /// Semantics: if receiver is Some(x)/Ok(x), project field from x and wrap
