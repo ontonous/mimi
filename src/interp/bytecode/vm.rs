@@ -748,9 +748,18 @@ impl<'a> BytecodeVM<'a> {
                             })?;
                             self.set_reg(rd, value);
                         }
+                        Value::Actor(handle) => {
+                            let actor = handle.inner.read().map_err(|e| {
+                                InterpError::new(format!("actor lock failed: {}", e))
+                            })?;
+                            let value = actor.fields.get(&field_name).cloned().ok_or_else(|| {
+                                InterpError::new(format!("actor has no field '{}'", field_name))
+                            })?;
+                            self.set_reg(rd, value);
+                        }
                         other => {
                             return Err(InterpError::new(format!(
-                                "record get: expected Record, got {}",
+                                "record get: expected Record or Actor, got {}",
                                 other
                             )))
                         }
@@ -767,9 +776,14 @@ impl<'a> BytecodeVM<'a> {
                         Value::Record(_, fields) => {
                             fields.insert(field_name, value);
                         }
+                        Value::Actor(handle) => {
+                            handle.inner.write().map_err(|e| {
+                                InterpError::new(format!("actor lock failed: {}", e))
+                            })?.fields.insert(field_name, value);
+                        }
                         other => {
                             return Err(InterpError::new(format!(
-                                "record set: expected Record, got {}",
+                                "record set: expected Record or Actor, got {}",
                                 other
                             )))
                         }
@@ -1276,6 +1290,17 @@ impl<'a> BytecodeVM<'a> {
         }
     }
 
+    /// Call a function by index with the given arguments.
+    /// Used by actor worker threads to execute actor methods.
+    pub fn call_function(&mut self, func_idx: FuncIdx, args: &[Value]) -> Result<Value, InterpError> {
+        self.push_frame(func_idx, args, None)?;
+        let prev_stop = self.stop_depth;
+        self.stop_depth = self.depth;
+        let result = self.exec_loop();
+        self.stop_depth = prev_stop;
+        result
+    }
+
     // ── Builtin dispatch (D1: registry, not giant match) ─────
 
     fn call_builtin(
@@ -1493,7 +1518,8 @@ impl<'a> BytecodeVM<'a> {
         let program = self.program.ast.clone().ok_or_else(|| {
             InterpError::new("no AST available for actor worker thread")
         })?;
-        let handle = ActorHandle::new(instance, program, None, None);
+        let bc_prog = std::sync::Arc::new(self.program.clone());
+        let handle = ActorHandle::new_bytecode(instance, program, bc_prog);
         self.spawn_count += 1;
         Ok(Value::Actor(handle))
     }

@@ -40,6 +40,8 @@ pub struct BytecodeCompiler {
     flow_transition_funcs: HashMap<(String, String, String), FuncIdx>,
     /// Transitions with `fails` clause.
     flow_fails_transitions: std::collections::HashSet<(String, String, String)>,
+    /// Actor method function indices: (actor_name, method_name) → FuncIdx.
+    actor_method_funcs: HashMap<(String, String), FuncIdx>,
     /// The original AST file (stored for actor worker threads).
     ast_file: Option<std::sync::Arc<File>>,
 }
@@ -180,6 +182,7 @@ impl BytecodeCompiler {
             actor_defs: HashMap::new(),
             flow_transition_funcs: HashMap::new(),
             flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: HashMap::new(),
             ast_file: None,
         }
     }
@@ -321,6 +324,46 @@ impl BytecodeCompiler {
             }
         }
 
+        // Pass 5: compile actor method bodies as functions.
+        // Each method becomes: __actor_{ActorName}_{method}
+        // Parameters: implicit self (register 0) + explicit params.
+        for item in &file.items {
+            if let Item::Actor(actor) = item {
+                for method in &actor.methods {
+                    let func_name = format!("__actor_{}_{}", actor.name, method.name);
+                    let param_count = 1 + method.params.len(); // self + params
+                    let idx = self.functions.len() as FuncIdx;
+                    self.func_table.insert(func_name.clone(), idx);
+                    self.functions.push(FunctionProto::new(
+                        func_name.clone(),
+                        param_count as u16,
+                    ));
+                    self.actor_method_funcs.insert(
+                        (actor.name.clone(), method.name.clone()),
+                        idx,
+                    );
+                    // Compile the method body (like compile_func_impl).
+                    let mut fc = FuncCompiler::new(func_name, param_count as u16);
+                    fc.vars[0].insert("self".to_string(), 0);
+                    for (i, p) in method.params.iter().enumerate() {
+                        fc.vars[0].insert(p.name.clone(), (i + 1) as Reg);
+                    }
+                    let last_reg = self.compile_block(&mut fc, &method.body)?;
+                    // Return the last expression's value, or Unit if none.
+                    if let Some(r) = last_reg {
+                        fc.emit(Op::Ret { ra: r });
+                    } else {
+                        let r_unit = fc.proto.alloc_reg();
+                        let unit_idx = fc.proto.add_const(ConstValue::Unit);
+                        fc.emit(Op::LoadConst { rd: r_unit, idx: unit_idx });
+                        fc.emit(Op::Ret { ra: r_unit });
+                    }
+                    let proto = fc.proto;
+                    self.functions[idx as usize] = proto;
+                }
+            }
+        }
+
         let entry = self.func_table.get("main").copied().ok_or_else(|| {
             InterpError::new("no main function found")
         })?;
@@ -333,6 +376,7 @@ impl BytecodeCompiler {
             flow_defs: std::mem::take(&mut self.flow_defs),
             flow_transition_funcs: std::mem::take(&mut self.flow_transition_funcs),
             flow_fails_transitions: std::mem::take(&mut self.flow_fails_transitions),
+            actor_method_funcs: std::mem::take(&mut self.actor_method_funcs),
             ast: self.ast_file.clone(),
         })
     }
@@ -1980,6 +2024,14 @@ impl BytecodeCompiler {
                 let r_idx = self.compile_expr(fc, idx)?;
                 let r_val = self.compile_expr(fc, value)?;
                 fc.emit(Op::ListSet { ra: r_obj, rb: r_idx, rc: r_val });
+                Ok(())
+            }
+            Expr::Field(obj, field) => {
+                // obj.field = value (record or actor field set)
+                let r_obj = self.compile_expr(fc, obj)?;
+                let r_val = self.compile_expr(fc, value)?;
+                let field_idx = fc.proto.add_const(ConstValue::Str(field.clone()));
+                fc.emit(Op::RecordSet { ra: r_obj, field: field_idx, rb: r_val });
                 Ok(())
             }
             _ => Err(InterpError::new(
