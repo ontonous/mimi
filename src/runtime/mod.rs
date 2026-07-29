@@ -3,6 +3,9 @@
 // This module provides all runtime symbols needed by LLVM-codegened Mimi programs,
 // replacing the previous C implementation (mimi_runtime.c). Every function is
 // `#[no_mangle] pub extern "C"` so it can be linked from generated machine code.
+//
+// dead_code is suppressed module-wide (see lib.rs): these symbols are called
+// from LLVM IR (invisible to rustc's reachability analysis).
 
 pub mod profiler;
 //
