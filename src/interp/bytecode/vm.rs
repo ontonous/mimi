@@ -16,8 +16,11 @@ struct Frame {
     regs: Vec<Value>,
     /// Instruction pointer (index into FunctionProto.code).
     pc: usize,
-    /// Prototype reference (not owned — borrowed from BytecodeProgram).
+    /// Prototype index.
     proto_idx: FuncIdx,
+    /// Register in the CALLER's frame where the return value goes.
+    /// None for the entry frame (top-level).
+    return_reg: Option<Reg>,
 }
 
 /// The bytecode VM.
@@ -47,7 +50,8 @@ impl<'a> BytecodeVM<'a> {
     /// Run the program from the entry point. Returns the exit code.
     pub fn run(&mut self) -> Result<i64, InterpError> {
         let entry = self.program.entry;
-        let result = self.call_function(entry, &[])?;
+        self.push_frame(entry, &[], None)?;
+        let result = self.exec_loop()?;
         match result {
             Value::Int(code) => Ok(code),
             Value::Unit => Ok(0),
@@ -58,12 +62,13 @@ impl<'a> BytecodeVM<'a> {
         }
     }
 
-    /// Call a function by prototype index with the given arguments.
-    fn call_function(
+    /// Push a new function frame onto the call stack.
+    fn push_frame(
         &mut self,
         func_idx: FuncIdx,
         args: &[Value],
-    ) -> Result<Value, InterpError> {
+        return_reg: Option<Reg>,
+    ) -> Result<(), InterpError> {
         if self.depth >= MAX_DEPTH {
             return Err(InterpError::new(
                 "recursion limit exceeded (possible infinite recursion)",
@@ -74,42 +79,45 @@ impl<'a> BytecodeVM<'a> {
         let proto = &self.program.functions[func_idx as usize];
         let reg_count = proto.register_count as usize;
 
-        // Initialize register file: params first, then Unit for locals.
         let mut regs = Vec::with_capacity(reg_count);
         for (i, arg) in args.iter().enumerate() {
             if i < proto.param_count as usize {
                 regs.push(arg.clone());
             }
         }
-        // Fill remaining registers with Unit.
         regs.resize(reg_count, Value::Unit);
 
-        let frame = Frame {
+        self.stack.push(Frame {
             regs,
             pc: 0,
             proto_idx: func_idx,
-        };
-        self.stack.push(frame);
-
-        let result = self.exec_loop();
-
-        self.stack.pop();
-        self.depth -= 1;
-        result
+            return_reg,
+        });
+        Ok(())
     }
 
-    /// Main dispatch loop: fetch-decode-execute until Ret.
+    /// Iterative dispatch loop: runs until the entry frame returns.
+    /// Call/Ret are handled by pushing/popping frames — no Rust recursion.
     fn exec_loop(&mut self) -> Result<Value, InterpError> {
         loop {
             let frame = self.stack.last().unwrap();
             let proto = &self.program.functions[frame.proto_idx as usize];
 
             if frame.pc >= proto.code.len() {
-                return Ok(Value::Unit);
+                // Fell off the end — implicit return Unit.
+                let return_reg = frame.return_reg;
+                self.stack.pop();
+                self.depth -= 1;
+                if self.stack.is_empty() {
+                    return Ok(Value::Unit);
+                }
+                if let Some(rd) = return_reg {
+                    self.set_reg(rd, Value::Unit);
+                }
+                continue;
             }
 
             let op = proto.code[frame.pc];
-            // Advance PC before execution (jumps will override).
             self.stack.last_mut().unwrap().pc += 1;
 
             match op {
@@ -346,8 +354,8 @@ impl<'a> BytecodeVM<'a> {
                     let args: Vec<Value> = (0..argc)
                         .map(|i| self.get_reg(args_base + i).clone())
                         .collect();
-                    let result = self.call_function(func, &args)?;
-                    self.set_reg(rd, result);
+                    self.push_frame(func, &args, Some(rd))?;
+                    // Continue loop — new frame is now active.
                 }
                 Op::CallBuiltin {
                     rd,
@@ -368,9 +376,27 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::Ret { ra } => {
                     let v = self.get_reg(ra).clone();
-                    return Ok(v);
+                    let return_reg = self.stack.last().unwrap().return_reg;
+                    self.stack.pop();
+                    self.depth -= 1;
+                    if self.stack.is_empty() {
+                        return Ok(v);
+                    }
+                    if let Some(rd) = return_reg {
+                        self.set_reg(rd, v);
+                    }
                 }
-                Op::RetUnit => return Ok(Value::Unit),
+                Op::RetUnit => {
+                    let return_reg = self.stack.last().unwrap().return_reg;
+                    self.stack.pop();
+                    self.depth -= 1;
+                    if self.stack.is_empty() {
+                        return Ok(Value::Unit);
+                    }
+                    if let Some(rd) = return_reg {
+                        self.set_reg(rd, Value::Unit);
+                    }
+                }
 
                 // ── Data structures ────────────────────────────
                 Op::NewList { rd, capacity } => {
