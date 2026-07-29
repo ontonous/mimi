@@ -113,6 +113,7 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "to_int"
             | "to_float"
             | "str_index_of"
+            | "str_count_substring"
             | "str_repeat"
             | "str_trim"
             | "str_to_upper"

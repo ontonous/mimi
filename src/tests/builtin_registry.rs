@@ -30,6 +30,7 @@ mod tests {
         ("str_parse_int", true, true, true),
         ("str_parse_float", true, true, true),
         ("str_index_of", true, true, true),
+        ("str_count_substring", true, true, true),
         ("option_value_or", true, true, true),
         ("str_repeat", true, true, true),
         ("str_trim", true, true, true),

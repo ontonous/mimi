@@ -738,4 +738,36 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_pointer_value();
         self.wrap_c_string(raw_ptr)
     }
+
+    pub(in crate::codegen) fn compile_str_count_substring(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 2 {
+            return Err(CompileError::WrongArgCount(
+                "str_count_substring expects 2 arguments".to_string(),
+            ));
+        }
+        let s_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let sub_ptr = self.extract_raw_str_ptr(&args[1])?;
+        let func = self
+            .module
+            .get_function("mimi_str_count_substring")
+            .ok_or_else(|| "mimi_str_count_substring not declared".to_string())?;
+        let result = self
+            .builder
+            .build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::PointerValue(s_ptr),
+                    BasicMetadataValueEnum::PointerValue(sub_ptr),
+                ],
+                "str_count_substring_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("str_count_substring error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_str_count_substring returned void")?
+            .into_int_value();
+        Ok(result.into())
+    }
 }

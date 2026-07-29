@@ -1625,6 +1625,18 @@ impl<'a> Checker<'a> {
                 }
                 return Type::Name("string".into(), vec![]);
             }
+            "str_count_substring" => {
+                if args.len() != 2 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "str_count_substring expects 2 arguments",
+                    );
+                } else {
+                    self.infer_expr(&args[0], scopes);
+                    self.infer_expr(&args[1], scopes);
+                }
+                return Type::Name("i32".into(), vec![]);
+            }
             "str_index_of" => {
                 if args.len() != 2 {
                     self.emit_code(

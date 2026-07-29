@@ -437,6 +437,33 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    pub(crate) fn builtin_str_count_substring(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+        if args.len() != 2 {
+            return Err(InterpError::new("str_count_substring expects 2 arguments"));
+        }
+        match (&args[0], &args[1]) {
+            (Value::String(s), Value::String(sub)) => {
+                if sub.is_empty() {
+                    return Ok(Value::Int(0));
+                }
+                let s_bytes = s.as_bytes();
+                let sub_bytes = sub.as_bytes();
+                let mut count: i64 = 0;
+                let mut i = 0;
+                while i + sub_bytes.len() <= s_bytes.len() {
+                    if s_bytes[i..].starts_with(sub_bytes) {
+                        count += 1;
+                        i += sub_bytes.len();
+                    } else {
+                        i += 1;
+                    }
+                }
+                Ok(Value::Int(count))
+            }
+            _ => Err(InterpError::new("str_count_substring expects (string, string)")),
+        }
+    }
+
     pub(crate) fn builtin_str_index_of(&self, args: Vec<Value>) -> Result<Value, InterpError> {
         if args.len() != 2 {
             return Err(InterpError::new("str_index_of expects 2 arguments"));

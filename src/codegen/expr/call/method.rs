@@ -6362,6 +6362,7 @@ fn string_method_to_builtin(method: &str) -> Option<&'static str> {
         "parse_float" => Some("str_parse_float"),
         "repeat" => Some("str_repeat"),
         "index_of" => Some("str_index_of"),
+        "count_substring" => Some("str_count_substring"),
         _ => None,
     }
 }

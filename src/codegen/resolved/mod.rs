@@ -1360,9 +1360,27 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         // declared with i64 params, but the resolved IR types
                         // integer literals as i32. Look up the runtime function
                         // and coerce to match its signature.
-                        // Runtime function name: "mimi_{builtin_name}" for
-                        // most builtins.
+                        // 0.32.24: Some builtins delegate to differently-named
+                        // runtime functions (e.g. session_send → mimi_channel_send).
+                        // Try the direct name first, then known aliases.
                         let runtime_fn_name = format!("mimi_{name}");
+                        let runtime_fn_name = if self
+                            .generator
+                            .module
+                            .get_function(&runtime_fn_name)
+                            .is_some()
+                        {
+                            runtime_fn_name
+                        } else {
+                            // Alias mapping for builtins that delegate to
+                            // differently-named runtime functions.
+                            match name {
+                                "session_send" => "mimi_channel_send".to_string(),
+                                "session_recv" => "mimi_channel_recv".to_string(),
+                                "session_close" => "mimi_channel_drop".to_string(),
+                                _ => runtime_fn_name,
+                            }
+                        };
                         if let Some(runtime_fn) = self.generator.module.get_function(&runtime_fn_name) {
                             let params = runtime_fn.get_params();
                             for (i, arg) in arguments.iter_mut().enumerate() {
@@ -1531,7 +1549,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     "resolved ProtocolMethod callee '{symbol}' is undeclared"
                                 ))
                             })?;
-                        // Coerce arguments to match the callee's parameter types.
+                        // ⚠ 0.32.24: Do NOT add ABI coercion (struct→ptr)
+                        // here. Builtin types (String= {ptr,i64}, List={i64,ptr})
+                        // use impl methods that expect raw char*/data pointers,
+                        // NOT struct pointers. Coercion produces invalid code.
+                        // Functions needing such fallback should fall through
+                        // to the legacy emitter correctly.
                         let params = callee.get_params();
                         for (i, arg) in arguments.iter_mut().enumerate() {
                             if let Some(param) = params.get(i) {

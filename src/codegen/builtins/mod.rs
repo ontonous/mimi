@@ -2018,6 +2018,18 @@ fn register_string_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_str_count_substring(s, sub) → i32 (count of non-overlapping occurrences)
+    module.add_function(
+        "mimi_str_count_substring",
+        _i32.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
 }
 
 fn register_regex_fns<'ctx>(
@@ -3348,6 +3360,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "str_parse_float" => self.compile_str_parse_float(args),
             "to_float" => self.compile_to_float(args),
             "str_index_of" => self.compile_str_index_of(args),
+            "str_count_substring" => self.compile_str_count_substring(args),
             "str_repeat" => self.compile_str_repeat(args),
             "str_trim" => self.compile_str_trim(args),
             "str_to_upper" => self.compile_str_to_upper(args),
