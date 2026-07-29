@@ -31,6 +31,8 @@ struct FuncCompiler {
     var_types: HashMap<String, VarType>,
     /// Break jump sites for the current loop (patched on loop exit).
     break_jumps: Vec<Vec<usize>>,
+    /// Continue jump sites for the current loop (patched to loop head/increment).
+    continue_jumps: Vec<Vec<usize>>,
 }
 
 /// Lightweight type tag for register dispatch.
@@ -50,6 +52,7 @@ impl FuncCompiler {
             vars: vec![HashMap::new()],
             var_types: HashMap::new(),
             break_jumps: Vec::new(),
+            continue_jumps: Vec::new(),
         }
     }
 
@@ -280,9 +283,11 @@ impl BytecodeCompiler {
                     }
                 }
                 Stmt::Continue => {
-                    // Handled by loop compilation (jump to loop start).
-                    // For now, emit a nop; the loop compiler patches this.
-                    fc.emit(Op::Nop);
+                    // Emit a forward jump; patched to loop head by the enclosing loop.
+                    let idx = fc.emit(Op::Jmp { offset: 0 });
+                    if let Some(jumps) = fc.continue_jumps.last_mut() {
+                        jumps.push(idx);
+                    }
                 }
                 // Skip non-executable statements.
                 Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Requires(..)
@@ -699,14 +704,14 @@ impl BytecodeCompiler {
         body: &Block,
     ) -> Result<(), InterpError> {
         fc.break_jumps.push(Vec::new());
-        let mut continue_jumps: Vec<usize> = Vec::new();
+        fc.continue_jumps.push(Vec::new());
 
         let loop_start = fc.proto.code.len();
         let r_cond = self.compile_expr(fc, cond)?;
         let jmp_end = fc.emit(Op::JmpIfNot { offset: 0, ra: r_cond });
 
         fc.push_scope();
-        self.compile_block_with_continue(fc, body, &mut continue_jumps)?;
+        self.compile_block(fc, body)?;
         fc.pop_scope();
 
         // Jump back to loop start.
@@ -725,40 +730,13 @@ impl BytecodeCompiler {
             }
         }
         // Continue jumps back to condition check.
-        for c in continue_jumps {
-            fc.proto.patch_jump_to(c, loop_start);
+        if let Some(continues) = fc.continue_jumps.pop() {
+            for c in continues {
+                fc.proto.patch_jump_to(c, loop_start);
+            }
         }
 
         Ok(())
-    }
-
-    /// Compile a block, collecting Continue jump sites for the enclosing loop.
-    fn compile_block_with_continue(
-        &self,
-        fc: &mut FuncCompiler,
-        block: &Block,
-        continue_jumps: &mut Vec<usize>,
-    ) -> Result<Option<Reg>, InterpError> {
-        let mut last_reg = None;
-        for (i, stmt) in block.iter().enumerate() {
-            let is_last = i == block.len() - 1;
-            match stmt.unlocated() {
-                Stmt::Continue => {
-                    let idx = fc.emit(Op::Jmp { offset: 0 });
-                    continue_jumps.push(idx);
-                }
-                _ => {
-                    // Delegate to the standard single-statement compilation.
-                    // We re-use compile_block for the rest by wrapping in a slice.
-                    let single: Block = vec![stmt.clone()];
-                    let r = self.compile_block(fc, &single)?;
-                    if is_last {
-                        last_reg = r;
-                    }
-                }
-            }
-        }
-        Ok(last_reg)
     }
 
     fn compile_for(
@@ -783,8 +761,7 @@ impl BytecodeCompiler {
         fc.emit(Op::Len { rd: r_len, ra: r_iter });
 
         fc.break_jumps.push(Vec::new());
-        // Continue jumps back to the increment step.
-        let mut continue_jumps: Vec<usize> = Vec::new();
+        fc.continue_jumps.push(Vec::new());
 
         let loop_start = fc.proto.code.len();
         // r_cmp = (idx < len)
@@ -798,7 +775,7 @@ impl BytecodeCompiler {
         let r_var = fc.bind_var(var);
         fc.emit(Op::ListGet { rd: r_var, ra: r_iter, rb: r_idx });
 
-        self.compile_block_with_continue(fc, body, &mut continue_jumps)?;
+        self.compile_block(fc, body)?;
         fc.pop_scope();
 
         // Increment step (continue jumps here).
@@ -815,8 +792,11 @@ impl BytecodeCompiler {
                 fc.proto.patch_jump_to(b, end);
             }
         }
-        for c in continue_jumps {
-            fc.proto.patch_jump_to(c, increment_pos);
+        // Continue jumps to increment step (skip body, go to idx++).
+        if let Some(continues) = fc.continue_jumps.pop() {
+            for c in continues {
+                fc.proto.patch_jump_to(c, increment_pos);
+            }
         }
 
         Ok(())

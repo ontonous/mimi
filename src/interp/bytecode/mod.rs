@@ -408,6 +408,124 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(vm.stdout().trim(), "610"); // fib(15) = 610
     }
+
+    // ═══════════════════════════════════════════════════════════
+    // Regression tests for Phase 1 audit fixes
+    // ═══════════════════════════════════════════════════════════
+
+    /// #30: f64 parameter type tracking.
+    #[test]
+    fn e2e_float_param() {
+        assert_eq!(
+            e2e("func square(x: f64) -> f64 { x * x }
+                 func main() -> i32 {
+                     let r = square(3.0)
+                     if r > 8.0 { 1 } else { 0 }
+                 }"),
+            Ok(1) // 3.0 * 3.0 = 9.0 > 8.0
+        );
+    }
+
+    /// #25: String concatenation with +.
+    #[test]
+    fn e2e_string_concat() {
+        let tokens = crate::lexer::Lexer::new(
+            "func main() -> i32 { let s = \"hello\" + \" \" + \"world\"; println(s); 0 }",
+        )
+        .tokenize()
+        .unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let prog = compiler.compile_file(&file).unwrap();
+        let mut vm = BytecodeVM::new(&prog);
+        vm.run().unwrap();
+        assert_eq!(vm.stdout().trim(), "hello world");
+    }
+
+    /// #18: Continue jumps to loop head.
+    #[test]
+    fn e2e_continue() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let mut sum = 0
+                     let mut i = 0
+                     while i < 10 {
+                         i = i + 1
+                         if i == 5 { continue }
+                         sum = sum + i
+                     }
+                     sum
+                 }"),
+            Ok(50) // 1+2+3+4+6+7+8+9+10 = 50 (skip 5)
+        );
+    }
+
+    /// #17: For loop variable doesn't leak.
+    #[test]
+    fn e2e_for_loop() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let xs = [10, 20, 30]
+                     let mut sum = 0
+                     for x in xs {
+                         sum = sum + x
+                     }
+                     sum
+                 }"),
+            Ok(60)
+        );
+    }
+
+    /// Break exits the loop.
+    #[test]
+    fn e2e_break() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let mut i = 0
+                     while i < 100 {
+                         if i == 7 { break }
+                         i = i + 1
+                     }
+                     i
+                 }"),
+            Ok(7)
+        );
+    }
+
+    /// Mixed int/float in expressions.
+    #[test]
+    fn e2e_mixed_int_float() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let x = 3
+                     let y = x as f64 * 2.5
+                     if y > 7.0 { 1 } else { 0 }
+                 }"),
+            Ok(1) // 3 * 2.5 = 7.5 > 7.0
+        );
+    }
+
+    /// Nested loops with break.
+    #[test]
+    fn e2e_nested_break() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let mut count = 0
+                     let mut i = 0
+                     while i < 10 {
+                         let mut j = 0
+                         while j < 10 {
+                             if j == 3 { break }
+                             count = count + 1
+                             j = j + 1
+                         }
+                         i = i + 1
+                     }
+                     count
+                 }"),
+            Ok(30) // 10 outer × 3 inner = 30
+        );
+    }
 }
 
 #[cfg(test)]
