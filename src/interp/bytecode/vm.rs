@@ -972,6 +972,176 @@ impl<'a> BytecodeVM<'a> {
                 let result = self.call_builtin(*builtin, &args)?;
                 self.set_reg(*rd, result);
             }
+            // Additional opcodes for nested execution
+            Op::LoadTrue { rd } => {
+                self.set_reg(*rd, Value::Bool(true));
+            }
+            Op::LoadFalse { rd } => {
+                self.set_reg(*rd, Value::Bool(false));
+            }
+            Op::NeInt { rd, ra, rb } => {
+                let (a, b) = self.get_int2(*ra, *rb)?;
+                self.set_reg(*rd, Value::Bool(a != b));
+            }
+            Op::LeInt { rd, ra, rb } => {
+                let (a, b) = self.get_int2(*ra, *rb)?;
+                self.set_reg(*rd, Value::Bool(a <= b));
+            }
+            Op::GeInt { rd, ra, rb } => {
+                let (a, b) = self.get_int2(*ra, *rb)?;
+                self.set_reg(*rd, Value::Bool(a >= b));
+            }
+            Op::AddFloat { rd, ra, rb } => {
+                let (a, b) = self.get_float2(*ra, *rb)?;
+                let result = a + b;
+                self.check_float(result, "addition")?;
+                self.set_reg(*rd, Value::Float(result));
+            }
+            Op::SubFloat { rd, ra, rb } => {
+                let (a, b) = self.get_float2(*ra, *rb)?;
+                let result = a - b;
+                self.check_float(result, "subtraction")?;
+                self.set_reg(*rd, Value::Float(result));
+            }
+            Op::MulFloat { rd, ra, rb } => {
+                let (a, b) = self.get_float2(*ra, *rb)?;
+                let result = a * b;
+                self.check_float(result, "multiplication")?;
+                self.set_reg(*rd, Value::Float(result));
+            }
+            Op::DivFloat { rd, ra, rb } => {
+                let (a, b) = self.get_float2(*ra, *rb)?;
+                if b == 0.0 {
+                    return Err(InterpError::new("division by zero"));
+                }
+                let result = a / b;
+                self.check_float(result, "division")?;
+                self.set_reg(*rd, Value::Float(result));
+            }
+            Op::LtFloat { rd, ra, rb } => {
+                let (a, b) = self.get_float2(*ra, *rb)?;
+                self.set_reg(*rd, Value::Bool(a < b));
+            }
+            Op::GtFloat { rd, ra, rb } => {
+                let (a, b) = self.get_float2(*ra, *rb)?;
+                self.set_reg(*rd, Value::Bool(a > b));
+            }
+            Op::LeFloat { rd, ra, rb } => {
+                let (a, b) = self.get_float2(*ra, *rb)?;
+                self.set_reg(*rd, Value::Bool(a <= b));
+            }
+            Op::GeFloat { rd, ra, rb } => {
+                let (a, b) = self.get_float2(*ra, *rb)?;
+                self.set_reg(*rd, Value::Bool(a >= b));
+            }
+            Op::Eq { rd, ra, rb } => {
+                let a = self.get_reg(*ra).clone();
+                let b = self.get_reg(*rb).clone();
+                self.set_reg(*rd, Value::Bool(a == b));
+            }
+            Op::Ne { rd, ra, rb } => {
+                let a = self.get_reg(*ra).clone();
+                let b = self.get_reg(*rb).clone();
+                self.set_reg(*rd, Value::Bool(a != b));
+            }
+            Op::Not { rd, ra } => {
+                let v = self.get_reg(*ra);
+                self.set_reg(*rd, Value::Bool(!crate::interp::is_truthy(v)));
+            }
+            Op::And { rd, ra, rb } => {
+                let a = crate::interp::is_truthy(self.get_reg(*ra));
+                let b = crate::interp::is_truthy(self.get_reg(*rb));
+                self.set_reg(*rd, Value::Bool(a && b));
+            }
+            Op::Or { rd, ra, rb } => {
+                let a = crate::interp::is_truthy(self.get_reg(*ra));
+                let b = crate::interp::is_truthy(self.get_reg(*rb));
+                self.set_reg(*rd, Value::Bool(a || b));
+            }
+            Op::ConcatStr { rd, ra, rb } => {
+                let a = self.get_reg(*ra).to_string();
+                let b = self.get_reg(*rb).to_string();
+                self.set_reg(*rd, Value::String(format!("{}{}", a, b)));
+            }
+            Op::NewList { rd, capacity } => {
+                let list = Vec::with_capacity(*capacity as usize);
+                self.set_reg(*rd, Value::List(list));
+            }
+            Op::ListPush { ra, rb } => {
+                let val = self.get_reg(*rb).clone();
+                let list = self.get_reg_mut(*ra);
+                match list {
+                    Value::List(l) => l.push(val),
+                    other => {
+                        return Err(InterpError::new(format!(
+                            "push: expected List, got {}",
+                            other
+                        )))
+                    }
+                }
+            }
+            Op::ListGet { rd, ra, rb } => {
+                let idx_raw = self.get_int(*rb)?;
+                if idx_raw < 0 {
+                    return Err(InterpError::new("negative list index"));
+                }
+                let idx = idx_raw as usize;
+                let list = self.get_reg(*ra).clone();
+                match list {
+                    Value::List(l) => {
+                        if idx >= l.len() {
+                            return Err(InterpError::new(format!(
+                                "list index {} out of bounds (len {})",
+                                idx,
+                                l.len()
+                            )));
+                        }
+                        self.set_reg(*rd, l[idx].clone());
+                    }
+                    other => {
+                        return Err(InterpError::new(format!(
+                            "list get: expected List, got {}",
+                            other
+                        )))
+                    }
+                }
+            }
+            Op::Len { rd, ra } => {
+                let v = self.get_reg(*ra);
+                let len = match v {
+                    Value::List(l) => l.len(),
+                    Value::String(s) => s.len(),
+                    _ => return Err(InterpError::new("len: expected List or String")),
+                };
+                self.set_reg(*rd, Value::Int(len as i64));
+            }
+            Op::NewTuple { rd, base, arity } => {
+                let elems: Vec<Value> = (0..*arity)
+                    .map(|i| self.get_reg(*base + i).clone())
+                    .collect();
+                self.set_reg(*rd, Value::Tuple(elems));
+            }
+            Op::TupleGet { rd, ra, idx } => {
+                let v = self.get_reg(*ra).clone();
+                match v {
+                    Value::Tuple(t) => {
+                        if (*idx as usize) >= t.len() {
+                            return Err(InterpError::new(format!(
+                                "tuple index {} out of bounds (arity {})",
+                                idx,
+                                t.len()
+                            )));
+                        }
+                        self.set_reg(*rd, t[*idx as usize].clone());
+                    }
+                    other => {
+                        return Err(InterpError::new(format!(
+                            "tuple get: expected Tuple, got {}",
+                            other
+                        )))
+                    }
+                }
+            }
             _ => {
                 return Err(InterpError::new(format!(
                     "call_closure: opcode {:?} not supported in nested execution",
