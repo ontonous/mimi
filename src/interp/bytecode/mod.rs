@@ -756,6 +756,46 @@ mod tests {
             Ok(42)
         );
     }
+
+    // ═══ Phase 3b: Higher-order builtins ══════════════════════
+
+    /// map_list with closure.
+    #[test]
+    fn e2e_map_list() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let xs = [1, 2, 3]
+                     let ys = map_list(xs, fn(x: i32) -> i32 { x * 2 })
+                     ys[0] + ys[1] + ys[2]
+                 }"),
+            Ok(12) // 2 + 4 + 6
+        );
+    }
+
+    /// filter_list with closure.
+    #[test]
+    fn e2e_filter_list() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let xs = [1, 2, 3, 4, 5]
+                     let ys = filter_list(xs, fn(x: i32) -> bool { x > 2 })
+                     len(ys)
+                 }"),
+            Ok(3) // [3, 4, 5]
+        );
+    }
+
+    /// reduce_list with closure.
+    #[test]
+    fn e2e_reduce_list() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let xs = [1, 2, 3, 4]
+                     reduce_list(xs, fn(acc: i32, x: i32) -> i32 { acc + x }, 0)
+                 }"),
+            Ok(10) // 1+2+3+4
+        );
+    }
 }
 
 #[cfg(test)]
