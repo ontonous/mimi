@@ -368,6 +368,89 @@ impl<'a> Interpreter<'a> {
             "map" => self.builtin_map(args),
             "filter" => self.builtin_filter(args),
             "reduce" => self.builtin_reduce(args),
+            // Aliases for bytecode VM compatibility
+            "map_list" => self.builtin_map(args),
+            "filter_list" => self.builtin_filter(args),
+            "reduce_list" => self.builtin_reduce(args),
+            "sort_list" => self.builtin_sort(args),
+            "is_empty" => {
+                if args.len() != 1 {
+                    return Err(InterpError::new("is_empty expects 1 argument"));
+                }
+                match &args[0] {
+                    Value::List(l) => Ok(Value::Bool(l.is_empty())),
+                    Value::String(s) => Ok(Value::Bool(s.is_empty())),
+                    _ => Err(InterpError::new("is_empty: argument must be a list or string")),
+                }
+            }
+            "any" => {
+                if args.len() != 2 {
+                    return Err(InterpError::new("any expects 2 arguments (list, pred)"));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::List(l), Value::Closure { params, body, captured, .. }) => {
+                        if params.len() != 1 {
+                            return Err(InterpError::new("any closure must take 1 argument"));
+                        }
+                        for item in l {
+                            self.push_scope();
+                            for (n, v) in captured {
+                                let _ = self.bind(n, v.clone());
+                            }
+                            let _ = self.bind(&params[0].name, item.clone());
+                            let result = self.eval_block(body)?.unwrap_or(Value::Unit);
+                            self.pop_scope();
+                            if crate::interp::is_truthy(&result) {
+                                return Ok(Value::Bool(true));
+                            }
+                        }
+                        Ok(Value::Bool(false))
+                    }
+                    _ => Err(InterpError::new("any expects (list, closure)")),
+                }
+            }
+            "all" => {
+                if args.len() != 2 {
+                    return Err(InterpError::new("all expects 2 arguments (list, pred)"));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::List(l), Value::Closure { params, body, captured, .. }) => {
+                        if params.len() != 1 {
+                            return Err(InterpError::new("all closure must take 1 argument"));
+                        }
+                        for item in l {
+                            self.push_scope();
+                            for (n, v) in captured {
+                                let _ = self.bind(n, v.clone());
+                            }
+                            let _ = self.bind(&params[0].name, item.clone());
+                            let result = self.eval_block(body)?.unwrap_or(Value::Unit);
+                            self.pop_scope();
+                            if !crate::interp::is_truthy(&result) {
+                                return Ok(Value::Bool(false));
+                            }
+                        }
+                        Ok(Value::Bool(true))
+                    }
+                    _ => Err(InterpError::new("all expects (list, closure)")),
+                }
+            }
+            "find" => {
+                if args.len() != 2 {
+                    return Err(InterpError::new("find expects 2 arguments (list, target)"));
+                }
+                let list = match &args[0] {
+                    Value::List(l) => l.clone(),
+                    _ => return Err(InterpError::new("find: first argument must be a list")),
+                };
+                let target = &args[1];
+                for (i, elem) in list.iter().enumerate() {
+                    if elem == target {
+                        return Ok(Value::Tuple(vec![Value::Bool(true), Value::Int(i as i64)]));
+                    }
+                }
+                Ok(Value::Tuple(vec![Value::Bool(false), Value::Int(-1)]))
+            }
             "sort" => self.builtin_sort(args),
             "sort_f64" => self.builtin_sort_f64(args),
             "sort_str" => self.builtin_sort_str(args),
