@@ -1,5 +1,7 @@
 # Changelog
 
+## [Unreleased] — 0.1.3-dev
+
 ## [0.1.2] — 2026-07-29
 
 ### Phase A: Codegen 全量迁移（0.32.1–0.32.15）
