@@ -925,6 +925,16 @@ impl<'a> BytecodeVM<'a> {
                 })?;
                 self.set_reg(*rd, Value::Int(result));
             }
+            Op::ModInt { rd, ra, rb } => {
+                let (a, b) = self.get_int2(*ra, *rb)?;
+                if b == 0 {
+                    return Err(InterpError::new("modulo by zero"));
+                }
+                let result = a.checked_rem(b).ok_or_else(|| {
+                    InterpError::new("integer overflow in modulo")
+                })?;
+                self.set_reg(*rd, Value::Int(result));
+            }
             Op::LtInt { rd, ra, rb } => {
                 let (a, b) = self.get_int2(*ra, *rb)?;
                 self.set_reg(*rd, Value::Bool(a < b));
@@ -1241,6 +1251,84 @@ impl<'a> BytecodeVM<'a> {
                     acc = self.call_closure(&closure, &[acc, elem])?;
                 }
                 Ok(acc)
+            }
+            "sort_list" => {
+                if args.len() != 1 {
+                    return Err(InterpError::new("sort_list expects 1 argument (list)"));
+                }
+                let mut list = match &args[0] {
+                    Value::List(l) => l.clone(),
+                    _ => return Err(InterpError::new("sort_list: argument must be a list")),
+                };
+                // Sort by string representation (simple but works for ints/strings).
+                list.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+                Ok(Value::List(list))
+            }
+            "find" => {
+                if args.len() != 2 {
+                    return Err(InterpError::new("find expects 2 arguments (list, target)"));
+                }
+                let list = match &args[0] {
+                    Value::List(l) => l.clone(),
+                    _ => return Err(InterpError::new("find: first argument must be a list")),
+                };
+                let target = &args[1];
+                for (i, elem) in list.iter().enumerate() {
+                    if elem == target {
+                        return Ok(Value::Tuple(vec![Value::Bool(true), Value::Int(i as i64)]));
+                    }
+                }
+                Ok(Value::Tuple(vec![Value::Bool(false), Value::Int(-1)]))
+            }
+            "any" => {
+                if args.len() != 2 {
+                    return Err(InterpError::new("any expects 2 arguments (list, pred)"));
+                }
+                let list = match &args[0] {
+                    Value::List(l) => l.clone(),
+                    _ => return Err(InterpError::new("any: first argument must be a list")),
+                };
+                let closure = match &args[1] {
+                    Value::BytecodeClosure { .. } => args[1].clone(),
+                    _ => return Err(InterpError::new("any: second argument must be a closure")),
+                };
+                for elem in list {
+                    let ret = self.call_closure(&closure, &[elem])?;
+                    if crate::interp::is_truthy(&ret) {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                Ok(Value::Bool(false))
+            }
+            "all" => {
+                if args.len() != 2 {
+                    return Err(InterpError::new("all expects 2 arguments (list, pred)"));
+                }
+                let list = match &args[0] {
+                    Value::List(l) => l.clone(),
+                    _ => return Err(InterpError::new("all: first argument must be a list")),
+                };
+                let closure = match &args[1] {
+                    Value::BytecodeClosure { .. } => args[1].clone(),
+                    _ => return Err(InterpError::new("all: second argument must be a closure")),
+                };
+                for elem in list {
+                    let ret = self.call_closure(&closure, &[elem])?;
+                    if !crate::interp::is_truthy(&ret) {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                Ok(Value::Bool(true))
+            }
+            "is_empty" => {
+                if args.len() != 1 {
+                    return Err(InterpError::new("is_empty expects 1 argument"));
+                }
+                match &args[0] {
+                    Value::List(l) => Ok(Value::Bool(l.is_empty())),
+                    Value::String(s) => Ok(Value::Bool(s.is_empty())),
+                    _ => Err(InterpError::new("is_empty: argument must be a list or string")),
+                }
             }
             "str_substring" => {
                 if args.len() != 3 {

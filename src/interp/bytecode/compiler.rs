@@ -159,6 +159,11 @@ impl BytecodeCompiler {
         self.register_builtin("map_list");
         self.register_builtin("filter_list");
         self.register_builtin("reduce_list");
+        self.register_builtin("sort_list");
+        self.register_builtin("find");
+        self.register_builtin("any");
+        self.register_builtin("all");
+        self.register_builtin("is_empty");
 
         // Pass 2: compile each function body.
         for item in &file.items {
