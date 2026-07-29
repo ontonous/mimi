@@ -16,6 +16,7 @@ pub(crate) fn run(
     strict: bool,
     watch: bool,
     profile: bool,
+    bytecode: bool,
     extra_args: &[String],
 ) -> Result<i32, String> {
     let path = resolve_path(path)?;
@@ -39,6 +40,7 @@ pub(crate) fn run(
             verify_ffi,
             allocator,
             strict,
+            bytecode,
             extra_args,
         )?
     };
@@ -72,6 +74,7 @@ fn run_once(
     verify_ffi: bool,
     allocator: &str,
     strict: bool,
+    bytecode: bool,
     extra_args: &[String],
 ) -> Result<i32, String> {
     // CL-H1: size-capped source load (shared with other CLI entry points).
@@ -116,7 +119,11 @@ fn run_once(
     };
 
     // Auto-merge standard library prelude (identity, clamp, is_even, etc.)
-    loader::merge_prelude_into(&mut merged_file);
+    // Skip for bytecode mode (experimental) — prelude uses closures with captures
+    // which the bytecode VM doesn't support yet.
+    if !bytecode {
+        loader::merge_prelude_into(&mut merged_file);
+    }
 
     let checked_program = if strict {
         mimi::core::check_program_strict(&merged_file)
@@ -145,42 +152,66 @@ fn run_once(
             return Err("type checking failed".into());
         }
     };
-    let mut interp = interp::Interpreter::from_checked(&checked_program);
-    interp.verify_contracts = verify_contracts;
-    interp.verify_ffi = verify_ffi;
-    interp.default_allocator = match allocator {
-        "arena" => interp::AllocatorKind::Arena,
-        "bump" => interp::AllocatorKind::Bump,
-        _ => interp::AllocatorKind::System,
-    };
-    interp.cli_args = extra_args.to_vec();
-    match interp.run() {
-        Ok(value) => {
-            // P1-19: suppress the `-> ()` noise when the program's
-            // return value is Unit (most main() functions). Show the
-            // value only when it carries real information.
-            if value != mimi::interp::Value::Unit {
-                println!("-> {}", value);
-            }
-            Ok(value_to_exit_code(&value))
-        }
-        Err(interp_err) => {
-            let use_color = colors_enabled();
-            let src = mimi::path_safety::read_source_capped(path).ok();
-            let src_ref = src.as_deref();
-            let mut diagnostic = interp_err.to_diagnostic();
-            if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {
-                if let Some(span) = checked_program.entry_span() {
-                    diagnostic = diagnostic.with_span(span);
+
+    // Bytecode VM path (experimental).
+    if bytecode {
+        use mimi::interp::bytecode::{BytecodeCompiler, BytecodeVM};
+        let mut compiler = BytecodeCompiler::new();
+        let prog = compiler
+            .compile_file(&merged_file)
+            .map_err(|e| format!("bytecode compile error: {}", e))?;
+        let mut vm = BytecodeVM::new(&prog);
+        match vm.run() {
+            Ok(exit_code) => {
+                if exit_code != 0 {
+                    println!("-> {}", exit_code);
                 }
+                Ok(exit_code as i32)
             }
-            let formatted = format_diagnostic(&diagnostic, src_ref, &path.display().to_string());
-            if use_color {
-                eprintln!("{}", formatted);
-            } else {
-                eprintln!("{}", strip_ansi(&formatted));
+            Err(e) => {
+                eprintln!("bytecode runtime error: {}", e);
+                Err("runtime error".into())
             }
-            Err("runtime error".into())
+        }
+    } else {
+        // Tree-walker interpreter path.
+        let mut interp = interp::Interpreter::from_checked(&checked_program);
+        interp.verify_contracts = verify_contracts;
+        interp.verify_ffi = verify_ffi;
+        interp.default_allocator = match allocator {
+            "arena" => interp::AllocatorKind::Arena,
+            "bump" => interp::AllocatorKind::Bump,
+            _ => interp::AllocatorKind::System,
+        };
+        interp.cli_args = extra_args.to_vec();
+        match interp.run() {
+            Ok(value) => {
+                // P1-19: suppress the `-> ()` noise when the program's
+                // return value is Unit (most main() functions). Show the
+                // value only when it carries real information.
+                if value != mimi::interp::Value::Unit {
+                    println!("-> {}", value);
+                }
+                Ok(value_to_exit_code(&value))
+            }
+            Err(interp_err) => {
+                let use_color = colors_enabled();
+                let src = mimi::path_safety::read_source_capped(path).ok();
+                let src_ref = src.as_deref();
+                let mut diagnostic = interp_err.to_diagnostic();
+                if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {
+                    if let Some(span) = checked_program.entry_span() {
+                        diagnostic = diagnostic.with_span(span);
+                    }
+                }
+                let formatted = format_diagnostic(&diagnostic, src_ref, &path.display().to_string());
+                if use_color {
+                    eprintln!("{}", formatted);
+                } else {
+                    eprintln!("{}", strip_ansi(&formatted));
+                }
+                Err("runtime error".into())
+            }
         }
     }
 }
@@ -219,6 +250,7 @@ fn run_watch(
         verify_ffi,
         allocator,
         strict,
+        false, // bytecode: not supported in watch mode
         extra_args,
     ) {
         eprintln!("{}", e);
@@ -238,6 +270,7 @@ fn run_watch(
                     verify_ffi,
                     allocator,
                     strict,
+                    false, // bytecode: not supported in watch mode
                     extra_args,
                 ) {
                     eprintln!("{}", e);
