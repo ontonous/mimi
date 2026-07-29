@@ -103,8 +103,13 @@ impl<'a> Interpreter<'a> {
         // CG-H10 / IN mirror: only snapshot params when contract checking is on
         // and `ensures` may reference `old(...)`. O(1) flag read replaces
         // per-call body scan (0.31.19 追加 B).
-        let mut old_snapshots: HashMap<String, Value> = HashMap::new();
+        // PERF (0.33): defer HashMap allocation until actually needed.
         let need_old = self.verify_contracts && func.has_ensures;
+        let mut old_snapshots: HashMap<String, Value> = if need_old {
+            HashMap::with_capacity(func.params.len())
+        } else {
+            HashMap::new() // zero-cap: no allocation
+        };
         for (p, a) in func.params.iter().zip(filled_args) {
             if need_old {
                 old_snapshots.insert(p.name.clone(), a.clone());
