@@ -167,35 +167,75 @@ impl<'a> BytecodeVM<'a> {
 
                 // ── Integer arithmetic ─────────────────────────
                 Op::AddInt { rd, ra, rb } => {
-                    let (a, b) = self.get_int2(ra, rb)?;
-                    let r = a.checked_add(b).ok_or_else(|| {
-                        InterpError::integer_overflow("integer addition overflow")
-                    })?;
-                    self.set_reg(rd, Value::Int(r));
+                    // Runtime fallback: if either operand is Float, use float arithmetic.
+                    if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
+                        let a = self.get_reg(ra).clone();
+                        let b = self.get_reg(rb).clone();
+                        let (af, bf) = (value_to_f64(&a), value_to_f64(&b));
+                        let r = af + bf;
+                        self.check_float(r, "+")?;
+                        self.set_reg(rd, Value::Float(r));
+                    } else {
+                        let (a, b) = self.get_int2(ra, rb)?;
+                        let r = a.checked_add(b).ok_or_else(|| {
+                            InterpError::integer_overflow("integer addition overflow")
+                        })?;
+                        self.set_reg(rd, Value::Int(r));
+                    }
                 }
                 Op::SubInt { rd, ra, rb } => {
-                    let (a, b) = self.get_int2(ra, rb)?;
-                    let r = a.checked_sub(b).ok_or_else(|| {
-                        InterpError::integer_overflow("integer subtraction overflow")
-                    })?;
-                    self.set_reg(rd, Value::Int(r));
+                    if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
+                        let a = self.get_reg(ra).clone();
+                        let b = self.get_reg(rb).clone();
+                        let (af, bf) = (value_to_f64(&a), value_to_f64(&b));
+                        let r = af - bf;
+                        self.check_float(r, "-")?;
+                        self.set_reg(rd, Value::Float(r));
+                    } else {
+                        let (a, b) = self.get_int2(ra, rb)?;
+                        let r = a.checked_sub(b).ok_or_else(|| {
+                            InterpError::integer_overflow("integer subtraction overflow")
+                        })?;
+                        self.set_reg(rd, Value::Int(r));
+                    }
                 }
                 Op::MulInt { rd, ra, rb } => {
-                    let (a, b) = self.get_int2(ra, rb)?;
-                    let r = a.checked_mul(b).ok_or_else(|| {
-                        InterpError::integer_overflow("integer multiplication overflow")
-                    })?;
-                    self.set_reg(rd, Value::Int(r));
+                    if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
+                        let a = self.get_reg(ra).clone();
+                        let b = self.get_reg(rb).clone();
+                        let (af, bf) = (value_to_f64(&a), value_to_f64(&b));
+                        let r = af * bf;
+                        self.check_float(r, "*")?;
+                        self.set_reg(rd, Value::Float(r));
+                    } else {
+                        let (a, b) = self.get_int2(ra, rb)?;
+                        let r = a.checked_mul(b).ok_or_else(|| {
+                            InterpError::integer_overflow("integer multiplication overflow")
+                        })?;
+                        self.set_reg(rd, Value::Int(r));
+                    }
                 }
                 Op::DivInt { rd, ra, rb } => {
-                    let (a, b) = self.get_int2(ra, rb)?;
-                    if b == 0 {
-                        return Err(InterpError::div_by_zero());
+                    if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
+                        let a = self.get_reg(ra).clone();
+                        let b = self.get_reg(rb).clone();
+                        let (af, bf) = (value_to_f64(&a), value_to_f64(&b));
+                        if bf == 0.0 {
+                            return Err(InterpError::div_by_zero());
+                        }
+                        let r = af / bf;
+                        self.check_float(r, "/")?;
+                        self.set_reg(rd, Value::Float(r));
+                    } else {
+                        let (a, b) = self.get_int2(ra, rb)?;
+                        if b == 0 {
+                            return Err(InterpError::div_by_zero());
+                        }
+                        let r = a.checked_div(b).ok_or_else(|| {
+                            InterpError::integer_overflow("integer division overflow")
+                        })?;
+                        self.set_reg(rd, Value::Int(r));
                     }
-                    let r = a.checked_div(b).ok_or_else(|| {
-                        InterpError::integer_overflow("integer division overflow")
-                    })?;
-                    self.set_reg(rd, Value::Int(r));
                 }
                 Op::ModInt { rd, ra, rb } => {
                     let (a, b) = self.get_int2(ra, rb)?;
@@ -781,6 +821,22 @@ impl<'a> BytecodeVM<'a> {
                 }
 
                 // ── Variant (enum) ─────────────────────────────
+                Op::NewVariant {
+                    rd,
+                    type_name,
+                    variant: _,
+                    base,
+                    arity,
+                } => {
+                    let tag = match &proto.constants[type_name as usize] {
+                        ConstValue::Str(s) => s.clone(),
+                        _ => String::new(),
+                    };
+                    let payload: Vec<Value> = (0..arity)
+                        .map(|i| self.get_reg(base + i).clone())
+                        .collect();
+                    self.set_reg(rd, Value::Variant(tag, payload));
+                }
                 Op::IsVariant { rd, ra, tag } => {
                     let v = self.get_reg(ra);
                     let expected_tag = match &proto.constants[tag as usize] {
@@ -1091,5 +1147,14 @@ impl<'a> BytecodeVM<'a> {
             ConstValue::Str(v) => Value::String(v.clone()),
             ConstValue::Unit => Value::Unit,
         }
+    }
+}
+
+/// Convert a Value to f64 (for runtime int/float dispatch fallback).
+fn value_to_f64(v: &Value) -> f64 {
+    match v {
+        Value::Float(f) => *f,
+        Value::Int(i) => *i as f64,
+        _ => 0.0,
     }
 }

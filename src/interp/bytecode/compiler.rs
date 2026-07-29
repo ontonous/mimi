@@ -20,6 +20,12 @@ pub struct BytecodeCompiler {
     pub functions: Vec<FunctionProto>,
     /// Builtin names in index order.
     pub builtin_names: Vec<String>,
+    /// Known enum variant names (for variant constructor resolution).
+    variant_names: std::collections::HashSet<String>,
+    /// Known newtype names (for newtype constructor resolution).
+    newtype_names: std::collections::HashSet<String>,
+    /// Known impl type names (for method resolution prefixes).
+    impl_type_names: Vec<String>,
 }
 
 /// Per-function compilation state.
@@ -148,12 +154,15 @@ impl BytecodeCompiler {
             builtin_table: HashMap::new(),
             functions: Vec::new(),
             builtin_names: Vec::new(),
+            variant_names: std::collections::HashSet::new(),
+            newtype_names: std::collections::HashSet::new(),
+            impl_type_names: Vec::new(),
         }
     }
 
     /// Compile a full AST file into a BytecodeProgram.
     pub fn compile_file(&mut self, file: &File) -> Result<BytecodeProgram, InterpError> {
-        // Pass 1: register all function names.
+        // Pass 1: register all function names + collect variant names.
         for item in &file.items {
             if let Item::Func(f) = item {
                 let idx = self.functions.len() as FuncIdx;
@@ -161,12 +170,30 @@ impl BytecodeCompiler {
                 // Push placeholder.
                 self.functions.push(FunctionProto::new(f.name.clone(), f.params.len() as u16));
             }
+            // Collect enum variant names and newtype names for constructor resolution.
+            if let Item::Type(td) = item {
+                match &td.kind {
+                    TypeDefKind::Enum(variants) => {
+                        for variant in variants {
+                            self.variant_names.insert(variant.name.clone());
+                        }
+                    }
+                    TypeDefKind::Newtype(_) => {
+                        self.newtype_names.insert(td.name.clone());
+                    }
+                    _ => {}
+                }
+            }
         }
 
         // Pass 1.5: register impl method names (must precede body compilation
         // so that method calls in function bodies can resolve mangled names).
         for item in &file.items {
             if let Item::Impl(impl_def) = item {
+                // Collect impl type name for method resolution.
+                if !self.impl_type_names.contains(&impl_def.type_name) {
+                    self.impl_type_names.push(impl_def.type_name.clone());
+                }
                 for method in &impl_def.methods {
                     let mangled_name = format!("{}_{}", impl_def.type_name, method.name);
                     let idx = self.functions.len() as FuncIdx;
@@ -1182,6 +1209,32 @@ impl BytecodeCompiler {
                 }
                 _ => {}
             }
+            // Enum variant constructors: Circle(5), Point(1, 2), etc.
+            if self.variant_names.contains(name.as_str()) {
+                let type_name_idx = fc.proto.add_const(ConstValue::Str(name.clone()));
+                fc.emit(Op::NewVariant {
+                    rd,
+                    type_name: type_name_idx,
+                    variant: 0,
+                    base: args_base,
+                    arity: args.len() as u16,
+                });
+                return Ok(rd);
+            }
+            // Newtype constructors: UserId(42), etc.
+            if self.newtype_names.contains(name.as_str()) {
+                let r_inner = self.compile_expr(fc, &args[0])?;
+                // Newtype is represented as Variant(name, [inner]).
+                let type_name_idx = fc.proto.add_const(ConstValue::Str(name.clone()));
+                fc.emit(Op::NewVariant {
+                    rd,
+                    type_name: type_name_idx,
+                    variant: 0,
+                    base: r_inner,
+                    arity: 1,
+                });
+                return Ok(rd);
+            }
             // Might be a closure variable.
             if let Some(callee_reg) = fc.lookup_var(name) {
                 fc.emit(Op::CallIndirect {
@@ -1215,6 +1268,38 @@ impl BytecodeCompiler {
 
             let total_args = args.len() + 1;
 
+            // Option/Result built-in methods (handled via opcodes, not function calls).
+            match method.as_str() {
+                "is_some" | "is_ok" => {
+                    fc.emit(Op::IsSome { rd, ra: recv_reg });
+                    return Ok(rd);
+                }
+                "is_none" | "is_err" => {
+                    let r_tmp = fc.proto.alloc_reg();
+                    fc.emit(Op::IsSome { rd: r_tmp, ra: recv_reg });
+                    fc.emit(Op::Not { rd, ra: r_tmp });
+                    return Ok(rd);
+                }
+                "unwrap" | "expect" => {
+                    fc.emit(Op::Unwrap { rd, ra: recv_reg });
+                    return Ok(rd);
+                }
+                "unwrap_or" => {
+                    // if is_some(recv) { unwrap(recv) } else { default }
+                    let r_test = fc.proto.alloc_reg();
+                    fc.emit(Op::IsSome { rd: r_test, ra: recv_reg });
+                    let jmp_else = fc.emit(Op::JmpIfNot { offset: 0, ra: r_test });
+                    fc.emit(Op::Unwrap { rd, ra: recv_reg });
+                    let jmp_end = fc.emit(Op::Jmp { offset: 0 });
+                    fc.proto.patch_jump(jmp_else);
+                    let r_default = self.compile_expr(fc, &args[0])?;
+                    fc.emit(Op::Mov { rd, rs: r_default });
+                    fc.proto.patch_jump(jmp_end);
+                    return Ok(rd);
+                }
+                _ => {}
+            }
+
             // Try to find the method as a function.
             // First try the bare method name (for builtins like len).
             if let Some(&fidx) = self.func_table.get(method.as_str()) {
@@ -1227,10 +1312,14 @@ impl BytecodeCompiler {
                 return Ok(rd);
             }
 
-            // Try mangled names for common types.
-            // Method `foo` on type `Bar` becomes `Bar_foo`.
-            let type_prefixes = ["List", "list", "String", "string", "Map", "map", "Set", "set"];
-            for prefix in &type_prefixes {
+            // Try mangled names: impl type prefixes + common built-in type prefixes.
+            let mut prefixes: Vec<&str> = self.impl_type_names.iter().map(|s| s.as_str()).collect();
+            for p in ["List", "list", "String", "string", "Map", "map", "Set", "set"] {
+                if !prefixes.contains(&p) {
+                    prefixes.push(p);
+                }
+            }
+            for prefix in &prefixes {
                 let mangled = format!("{}_{}", prefix, method);
                 if let Some(&fidx) = self.func_table.get(&mangled) {
                     fc.emit(Op::Call {
