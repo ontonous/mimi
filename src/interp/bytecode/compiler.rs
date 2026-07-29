@@ -28,6 +28,18 @@ pub struct BytecodeCompiler {
     impl_type_names: Vec<String>,
     /// Constant name → value expression (for Item::Const resolution).
     constants: HashMap<String, Expr>,
+    /// Known flow names (for transition call resolution).
+    flow_names: std::collections::HashSet<String>,
+    /// Known actor names (for spawn resolution).
+    actor_names: std::collections::HashSet<String>,
+    /// Flow definitions (for transition compilation).
+    flow_defs: HashMap<String, FlowDef>,
+    /// Actor definitions (for runtime spawn).
+    actor_defs: HashMap<String, ActorDef>,
+    /// Flow transition function indices: (flow, transition, from_state) → FuncIdx.
+    flow_transition_funcs: HashMap<(String, String, String), FuncIdx>,
+    /// The original AST file (stored for actor worker threads).
+    ast_file: Option<std::sync::Arc<File>>,
 }
 
 /// Per-function compilation state.
@@ -160,12 +172,21 @@ impl BytecodeCompiler {
             newtype_names: std::collections::HashSet::new(),
             impl_type_names: Vec::new(),
             constants: HashMap::new(),
+            flow_names: std::collections::HashSet::new(),
+            actor_names: std::collections::HashSet::new(),
+            flow_defs: HashMap::new(),
+            actor_defs: HashMap::new(),
+            flow_transition_funcs: HashMap::new(),
+            ast_file: None,
         }
     }
 
     /// Compile a full AST file into a BytecodeProgram.
     pub fn compile_file(&mut self, file: &File) -> Result<BytecodeProgram, InterpError> {
-        // Pass 1: register all function names + collect variant names.
+        // Store AST for actor worker threads.
+        self.ast_file = Some(std::sync::Arc::new(file.clone()));
+
+        // Pass 1: register all function names + collect variant/actor/flow names.
         for item in &file.items {
             if let Item::Func(f) = item {
                 let idx = self.functions.len() as FuncIdx;
@@ -190,6 +211,16 @@ impl BytecodeCompiler {
             // Collect constants for inline resolution.
             if let Item::Const { name, value, .. } = item {
                 self.constants.insert(name.clone(), value.clone());
+            }
+            // Collect flow definitions.
+            if let Item::Flow(f) = item {
+                self.flow_names.insert(f.name.clone());
+                self.flow_defs.insert(f.name.clone(), f.clone());
+            }
+            // Collect actor definitions.
+            if let Item::Actor(a) = item {
+                self.actor_names.insert(a.name.clone());
+                self.actor_defs.insert(a.name.clone(), a.clone());
             }
         }
 
@@ -239,6 +270,48 @@ impl BytecodeCompiler {
             }
         }
 
+        // Pass 4: compile flow transition bodies as functions.
+        // Each transition becomes a function: __flow_{Flow}_{transition}_{from_state}
+        // Parameters: self (from-state value) + transition params.
+        for item in &file.items {
+            if let Item::Flow(flow) = item {
+                for t in &flow.transitions {
+                    if let Some(body) = &t.body {
+                        let func_name = format!(
+                            "__flow_{}_{}_{}", flow.name, t.name, t.from_state
+                        );
+                        let param_count = 1 + t.params.len(); // self + params
+                        let idx = self.functions.len() as FuncIdx;
+                        self.func_table.insert(func_name.clone(), idx);
+                        self.functions.push(FunctionProto::new(
+                            func_name.clone(),
+                            param_count as u16,
+                        ));
+                        self.flow_transition_funcs.insert(
+                            (flow.name.clone(), t.name.clone(), t.from_state.clone()),
+                            idx,
+                        );
+                        // Compile the transition body.
+                        let mut fc = FuncCompiler::new(func_name, param_count as u16);
+                        // Bind `self` to register 0 (direct insert, like compile_func).
+                        fc.vars[0].insert("self".to_string(), 0);
+                        // Bind transition params to registers 1..n.
+                        for (i, p) in t.params.iter().enumerate() {
+                            fc.vars[0].insert(p.name.clone(), (i + 1) as Reg);
+                        }
+                        self.compile_block(&mut fc, body)?;
+                        // Ensure the function returns Unit if no explicit return.
+                        let r_unit = fc.proto.alloc_reg();
+                        let unit_idx = fc.proto.add_const(ConstValue::Unit);
+                        fc.emit(Op::LoadConst { rd: r_unit, idx: unit_idx });
+                        fc.emit(Op::Ret { ra: r_unit });
+                        let proto = fc.proto;
+                        self.functions[idx as usize] = proto;
+                    }
+                }
+            }
+        }
+
         let entry = self.func_table.get("main").copied().ok_or_else(|| {
             InterpError::new("no main function found")
         })?;
@@ -247,6 +320,10 @@ impl BytecodeCompiler {
             functions: std::mem::take(&mut self.functions),
             entry,
             builtin_names: std::mem::take(&mut self.builtin_names),
+            actor_defs: std::mem::take(&mut self.actor_defs),
+            flow_defs: std::mem::take(&mut self.flow_defs),
+            flow_transition_funcs: std::mem::take(&mut self.flow_transition_funcs),
+            ast: self.ast_file.clone(),
         })
     }
 
@@ -1263,6 +1340,31 @@ impl BytecodeCompiler {
 
         // Method call: obj.method(args) → method(obj, args)
         if let Expr::Field(obj, method) = callee.unlocated() {
+            // ── Flow transition call: FlowName::method(state, args) ──
+            if let Expr::Ident(flow_name) = obj.unlocated() {
+                if self.flow_names.contains(flow_name.as_str()) {
+                    // Compile all args (first arg is the from-state value).
+                    let flow_idx = fc.proto.add_const(ConstValue::Str(flow_name.clone()));
+                    let method_idx = fc.proto.add_const(ConstValue::Str(method.clone()));
+                    fc.emit(Op::FlowTransition {
+                        rd,
+                        flow: flow_idx,
+                        method: method_idx,
+                        args_base,
+                        argc: args.len() as u16,
+                    });
+                    return Ok(rd);
+                }
+                // ── Actor spawn: ActorName.spawn() / ActorName.spawn_detached() ──
+                if self.actor_names.contains(flow_name.as_str())
+                    && (method == "spawn" || method == "spawn_detached")
+                {
+                    let actor_idx = fc.proto.add_const(ConstValue::Str(flow_name.clone()));
+                    fc.emit(Op::ActorSpawn { rd, actor: actor_idx });
+                    return Ok(rd);
+                }
+            }
+
             // Compile the receiver as the first argument.
             let recv_reg = self.compile_expr(fc, obj)?;
 
@@ -1314,12 +1416,12 @@ impl BytecodeCompiler {
                 _ => {}
             }
 
-            // Try to find the method as a function.
-            // First try the bare method name (for builtins like len).
-            if let Some(&fidx) = self.func_table.get(method.as_str()) {
-                fc.emit(Op::Call {
+            // Try builtin methods FIRST (before user functions, to avoid
+            // shadowing actor methods with stdlib functions like `increment`).
+            if let Some(&bidx) = self.builtin_table.get(method.as_str()) {
+                fc.emit(Op::CallBuiltin {
                     rd,
-                    func: fidx,
+                    builtin: bidx,
                     args_base: new_args_base,
                     argc: total_args as u16,
                 });
@@ -1346,21 +1448,18 @@ impl BytecodeCompiler {
                 }
             }
 
-            // Try builtin methods.
-            if let Some(&bidx) = self.builtin_table.get(method.as_str()) {
-                fc.emit(Op::CallBuiltin {
-                    rd,
-                    builtin: bidx,
-                    args_base: new_args_base,
-                    argc: total_args as u16,
-                });
-                return Ok(rd);
-            }
-
-            return Err(InterpError::new(format!(
-                "bytecode: cannot resolve method '{}'",
-                method
-            )));
+            // Fallback: dynamic method call (runtime dispatch for actors, records, etc.).
+            // This MUST come before bare user function lookup to prevent stdlib
+            // functions from shadowing actor methods (e.g., `c.increment()` must
+            // dispatch to the actor, not to a stdlib `increment` function).
+            let method_idx = fc.proto.add_const(ConstValue::Str(method.clone()));
+            fc.emit(Op::DynMethodCall {
+                rd,
+                method: method_idx,
+                args_base: new_args_base,
+                argc: total_args as u16,
+            });
+            return Ok(rd);
         }
 
         Err(InterpError::new(format!(
@@ -1937,6 +2036,17 @@ impl BytecodeCompiler {
         ty: Option<&str>,
         fields: &[RecordFieldExpr],
     ) -> Result<Reg, InterpError> {
+        // IMPORTANT: Add type name + field names to constant pool FIRST,
+        // before compiling field values. Use add_const_raw (no dedup) to
+        // ensure contiguous indices — the VM's NewRecord handler reads
+        // field names from constants[type_name+1..type_name+1+count].
+        let type_name_idx = fc.proto.add_const_raw(ConstValue::Str(
+            ty.map(|s| s.to_string()).unwrap_or_default(),
+        ));
+        for field in fields {
+            fc.proto.add_const_raw(ConstValue::Str(field.name.clone()));
+        }
+
         // Allocate registers for field values.
         let base = fc.proto.alloc_reg();
         for _ in 1..fields.len() {
@@ -1950,14 +2060,6 @@ impl BytecodeCompiler {
             if r != target {
                 fc.emit(Op::Mov { rd: target, rs: r });
             }
-        }
-
-        // Store field names as constants.
-        let type_name_idx = fc.proto.add_const(ConstValue::Str(
-            ty.map(|s| s.to_string()).unwrap_or_default(),
-        ));
-        for field in fields {
-            fc.proto.add_const(ConstValue::Str(field.name.clone()));
         }
 
         let rd = fc.proto.alloc_reg();

@@ -40,6 +40,10 @@ pub struct BytecodeVM<'a> {
     stop_depth: usize,
     /// Builtin function registry (D1: declarative, not giant match).
     registry: BuiltinRegistry,
+    /// Actor spawn quota (None = unlimited).
+    pub max_children: Option<usize>,
+    /// Total actors spawned in this VM session.
+    pub spawn_count: usize,
 }
 
 const MAX_DEPTH: usize = 768;
@@ -53,6 +57,8 @@ impl<'a> BytecodeVM<'a> {
             depth: 0,
             stop_depth: 0,
             registry: registry::create_registry(),
+            max_children: None,
+            spawn_count: 0,
         }
     }
 
@@ -1049,6 +1055,84 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::Nop => {}
 
+                // ── Actor / Flow / Session (Phase D) ──────────
+
+                Op::ActorSpawn { rd, actor } => {
+                    let proto = &self.program.functions
+                        [self.stack.last().unwrap().proto_idx as usize];
+                    let actor_name = match &proto.constants[actor as usize] {
+                        ConstValue::Str(s) => s.clone(),
+                        _ => return Err(InterpError::new("ActorSpawn: invalid actor name")),
+                    };
+                    let val = self.spawn_actor(&actor_name)?;
+                    self.set_reg(rd, val);
+                }
+
+                Op::FlowTransition { rd, flow, method, args_base, argc } => {
+                    let proto = &self.program.functions
+                        [self.stack.last().unwrap().proto_idx as usize];
+                    let flow_name = match &proto.constants[flow as usize] {
+                        ConstValue::Str(s) => s.clone(),
+                        _ => return Err(InterpError::new("FlowTransition: invalid flow name")),
+                    };
+                    let method_name = match &proto.constants[method as usize] {
+                        ConstValue::Str(s) => s.clone(),
+                        _ => return Err(InterpError::new("FlowTransition: invalid method name")),
+                    };
+                    // Extract from-state name from the first argument.
+                    let state_val = self.get_reg(args_base).clone();
+                    let from_state = match &state_val {
+                        Value::Record(Some(name), _) => name.clone(),
+                        _ => return Err(InterpError::new(format!(
+                            "FlowTransition: first arg must be a state Record, got {}",
+                            state_val
+                        ))),
+                    };
+                    // Look up the compiled transition function.
+                    let key = (flow_name.clone(), method_name.clone(), from_state.clone());
+                    let func_idx = self.program.flow_transition_funcs.get(&key)
+                        .copied()
+                        .ok_or_else(|| InterpError::new(format!(
+                            "no transition {}::{} from state {}",
+                            flow_name, method_name, from_state
+                        )))?;
+                    // Collect args.
+                    let args: Vec<Value> = (0..argc)
+                        .map(|i| self.get_reg(args_base + i).clone())
+                        .collect();
+                    // Call the transition function.
+                    self.push_frame(func_idx, &args, Some(rd))?;
+                }
+
+                Op::DynMethodCall { rd, method, args_base, argc } => {
+                    let proto = &self.program.functions
+                        [self.stack.last().unwrap().proto_idx as usize];
+                    let method_name = match &proto.constants[method as usize] {
+                        ConstValue::Str(s) => s.clone(),
+                        _ => return Err(InterpError::new("DynMethodCall: invalid method name")),
+                    };
+                    let receiver = self.get_reg(args_base).clone();
+                    match &receiver {
+                        Value::Actor(handle) => {
+                            // Actor method call: enqueue and wait for result.
+                            let args: Vec<Value> = (1..argc)
+                                .map(|i| self.get_reg(args_base + i).clone())
+                                .collect();
+                            let rx = handle.try_enqueue(method_name, args)?;
+                            let result = rx.recv().map_err(|_| {
+                                InterpError::new("actor worker thread died")
+                            })??;
+                            self.set_reg(rd, result);
+                        }
+                        _ => {
+                            return Err(InterpError::new(format!(
+                                "cannot call method '{}' on {}",
+                                method_name, receiver
+                            )));
+                        }
+                    }
+                }
+
                 // ── Not yet implemented ────────────────────────
                 _ => {
                     return Err(InterpError::new(format!(
@@ -1223,6 +1307,107 @@ impl<'a> BytecodeVM<'a> {
             ConstValue::Str(v) => Value::String(v.clone()),
             ConstValue::Unit => Value::Unit,
         }
+    }
+
+    // ── Actor spawn helper ───────────────────────────────────
+
+    /// Spawn an actor by name, reusing the tree-walker's ActorHandle infrastructure.
+    /// The actor's worker thread uses the tree-walker internally (it creates a fresh
+    /// Interpreter for each message). This is a pragmatic hybrid: main program runs
+    /// on bytecode, actor workers use tree-walker.
+    fn spawn_actor(&mut self, actor_name: &str) -> Result<Value, InterpError> {
+        use crate::interp::value::{ActorInstance, ActorHandle};
+        use std::collections::HashMap;
+
+        // Check spawn quota.
+        if let Some(max) = self.max_children {
+            if self.spawn_count >= max {
+                return Err(InterpError::new(
+                    "QuotaExceeded: spawn would exceed @max_children limit",
+                ));
+            }
+        }
+
+        let actor_def = self.program.actor_defs.get(actor_name)
+            .ok_or_else(|| InterpError::new(format!("actor '{}' not found", actor_name)))?;
+
+        // Initialize fields with defaults.
+        let mut fields = HashMap::new();
+        for field in &actor_def.fields {
+            let value = match field.ty.unlocated() {
+                crate::ast::Type::Name(n, _) if n == "i32" || n == "i64" => Value::Int(0),
+                crate::ast::Type::Name(n, _) if n == "f64" => Value::Float(0.0),
+                crate::ast::Type::Name(n, _) if n == "bool" => Value::Bool(false),
+                crate::ast::Type::Name(n, _) if n == "string" => Value::String(String::new()),
+                _ => Value::Unit,
+            };
+            // If there's an init expression that's a simple literal, evaluate it.
+            let value = if let Some(init) = &field.init {
+                match init.unlocated() {
+                    crate::ast::Expr::Literal(crate::ast::Lit::Int(n)) => Value::Int(*n),
+                    crate::ast::Expr::Literal(crate::ast::Lit::Float(f)) => Value::Float(*f),
+                    crate::ast::Expr::Literal(crate::ast::Lit::Bool(b)) => Value::Bool(*b),
+                    crate::ast::Expr::Literal(crate::ast::Lit::String(s)) => Value::String(s.clone()),
+                    _ => value, // complex init: use default (tree-walker eval not available)
+                }
+            } else {
+                value
+            };
+            fields.insert(field.name.clone(), value);
+        }
+
+        // Initialize flow_state for actors that run a flow.
+        let flow_state = if let Some(flow_name) = &actor_def.runs_flow {
+            self.program.flow_defs.get(flow_name).and_then(|flow| {
+                flow.states.first().map(|root_state| {
+                    let fields: HashMap<String, Value> = root_state
+                        .payload
+                        .as_ref()
+                        .map(|payload| {
+                            payload
+                                .iter()
+                                .map(|f| {
+                                    let default_val = match f.ty.unlocated() {
+                                        crate::ast::Type::Name(n, _) if n == "i32" || n == "i64" => Value::Int(0),
+                                        crate::ast::Type::Name(n, _) if n == "f64" => Value::Float(0.0),
+                                        crate::ast::Type::Name(n, _) if n == "bool" => Value::Bool(false),
+                                        crate::ast::Type::Name(n, _) if n == "string" => Value::String(String::new()),
+                                        _ => Value::Unit,
+                                    };
+                                    (f.name.clone(), default_val)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Value::Record(Some(root_state.name.clone()), fields)
+                })
+            })
+        } else {
+            None
+        };
+
+        let instance = ActorInstance {
+            actor_name: actor_name.to_string(),
+            fields,
+            methods: actor_def.methods.clone(),
+            runs_flow: actor_def.runs_flow.clone(),
+            flow_state,
+            faulted: false,
+            peer_links: Vec::new(),
+            parent_id: crate::interp::value::CURRENT_ACTOR_ID.with(|id| {
+                let id = id.get();
+                if id == 0 { None } else { Some(id) }
+            }),
+            is_detached: false,
+            producers: Vec::new(),
+        };
+
+        let program = self.program.ast.clone().ok_or_else(|| {
+            InterpError::new("no AST available for actor worker thread")
+        })?;
+        let handle = ActorHandle::new(instance, program, None, None);
+        self.spawn_count += 1;
+        Ok(Value::Actor(handle))
     }
 }
 

@@ -44,6 +44,10 @@ mod tests {
             functions: vec![main],
             entry: 0,
             builtin_names: vec![],
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            ast: None,
         };
         assert_eq!(run_program(&prog), Ok(42));
     }
@@ -78,6 +82,10 @@ mod tests {
             functions: vec![main],
             entry: 0,
             builtin_names: vec![],
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            ast: None,
         };
         assert_eq!(run_program(&prog), Ok(50));
     }
@@ -114,6 +122,10 @@ mod tests {
             functions: vec![add_fn, main],
             entry: 1,
             builtin_names: vec![],
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            ast: None,
         };
         assert_eq!(run_program(&prog), Ok(7));
     }
@@ -179,6 +191,10 @@ mod tests {
             functions: vec![fib, main],
             entry: 1,
             builtin_names: vec![],
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            ast: None,
         };
         // fib(10) = 55
         assert_eq!(run_program(&prog), Ok(55));
@@ -236,6 +252,10 @@ mod tests {
             functions: vec![main],
             entry: 0,
             builtin_names: vec![],
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            ast: None,
         };
         // sum(0..99) = 4950
         assert_eq!(run_program(&prog), Ok(4950));
