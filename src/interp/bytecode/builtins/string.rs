@@ -6,12 +6,44 @@ use crate::interp::error::InterpError;
 use crate::interp::value::Value;
 
 pub fn register(reg: &mut BuiltinRegistry) {
+    reg.register(BuiltinDesc { name: "format", arity: usize::MAX, category: BuiltinCategory::String, func: builtin_format });
     reg.register(BuiltinDesc { name: "str_substring", arity: 3, category: BuiltinCategory::String, func: builtin_str_substring });
     reg.register(BuiltinDesc { name: "str_split", arity: 2, category: BuiltinCategory::String, func: builtin_str_split });
     reg.register(BuiltinDesc { name: "str_join", arity: 2, category: BuiltinCategory::String, func: builtin_str_join });
     reg.register(BuiltinDesc { name: "str_contains", arity: 2, category: BuiltinCategory::String, func: builtin_str_contains });
     reg.register(BuiltinDesc { name: "str_parse_int", arity: 1, category: BuiltinCategory::String, func: builtin_str_parse_int });
     reg.register(BuiltinDesc { name: "str_parse_float", arity: 1, category: BuiltinCategory::String, func: builtin_str_parse_float });
+}
+
+fn builtin_format(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    if args.is_empty() {
+        return Err(InterpError::new(
+            "format expects at least 1 argument (template string)",
+        ));
+    }
+    let template = match &args[0] {
+        Value::String(s) => s.clone(),
+        _ => {
+            return Err(InterpError::new(
+                "format expects a string template as first argument",
+            ))
+        }
+    };
+    let mut result = String::new();
+    let mut rest = template.as_str();
+    let mut arg_idx = 1;
+    while let Some(pos) = rest.find("{}") {
+        result.push_str(&rest[..pos]);
+        if arg_idx < args.len() {
+            result.push_str(&args[arg_idx].to_string());
+            arg_idx += 1;
+        } else {
+            result.push_str("{}");
+        }
+        rest = &rest[pos + 2..];
+    }
+    result.push_str(rest);
+    Ok(Value::String(result))
 }
 
 fn builtin_str_substring(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
