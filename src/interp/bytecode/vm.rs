@@ -60,14 +60,34 @@ impl<'a> BytecodeVM<'a> {
     pub fn run(&mut self) -> Result<i64, InterpError> {
         let entry = self.program.entry;
         self.push_frame(entry, &[], None)?;
-        let result = self.exec_loop()?;
+        let result = self.exec_loop();
+        // Enrich errors with function name + line (D5/D12).
+        let result = result.map_err(|e| self.enrich_error(e));
         match result {
-            Value::Int(code) => Ok(code),
-            Value::Unit => Ok(0),
-            other => Err(InterpError::new(format!(
+            Ok(Value::Int(code)) => Ok(code),
+            Ok(Value::Unit) => Ok(0),
+            Ok(other) => Err(InterpError::new(format!(
                 "main returned non-integer: {}",
                 other
             ))),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Enrich an error with the current frame's function name and source line.
+    fn enrich_error(&self, err: InterpError) -> InterpError {
+        if let Some(frame) = self.stack.last() {
+            let proto = &self.program.functions[frame.proto_idx as usize];
+            let err = err.in_func(proto.name.clone());
+            let pc = if frame.pc > 0 { frame.pc - 1 } else { 0 };
+            if let Some(&line) = proto.line_table.get(pc) {
+                if line > 0 {
+                    return err.at_line(line);
+                }
+            }
+            err
+        } else {
+            err
         }
     }
 

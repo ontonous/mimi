@@ -573,6 +573,7 @@ impl SharedList {
                 operation: Some("list_set".to_string()),
                 help: None,
                 call_stack: vec![],
+                line: None,
             }));
         }
         list[index] = value;
