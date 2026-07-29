@@ -926,6 +926,9 @@ pub struct ActorHandle {
     pub program: std::sync::Arc<crate::ast::File>,
     /// v0.29.21: mailbox backpressure state (depth / mute / cooldown / TTL).
     pub bp: std::sync::Arc<MailboxBpState>,
+    /// v0.33: compiled bytecode program for actor worker threads.
+    /// When set, the worker thread uses BytecodeVM instead of tree-walker.
+    pub bytecode_program: Option<std::sync::Arc<crate::interp::bytecode::BytecodeProgram>>,
 }
 
 // SAFETY: ActorHandle is Send because all fields are Send: Arc<RwLock<ActorInstance>>
@@ -979,6 +982,7 @@ impl WeakActorEntry {
             id: self.id,
             program: self.program.upgrade()?,
             bp: self.bp.upgrade()?,
+            bytecode_program: None,
         })
     }
 }
@@ -1213,6 +1217,7 @@ impl ActorHandle {
                             id,
                             program: worker_program.clone(),
                             bp: worker_bp.clone(),
+                            bytecode_program: None,
                         });
                         interp.push_scope();
                         if let Err(e) = interp.bind("self", self_val) {
@@ -1345,6 +1350,7 @@ impl ActorHandle {
             id,
             program,
             bp,
+            bytecode_program: None,
         };
         // v0.29.20: register weak entry for PeerFault peer resolution (R-C9).
         // Also prune dead weak entries so the registry does not grow unboundedly
@@ -1360,6 +1366,133 @@ impl ActorHandle {
                 actor.faulted = true;
                 actor.fields.clear();
             }
+        }
+        handle
+    }
+
+    /// v0.33: Create actor with bytecode VM worker thread.
+    /// The worker thread uses BytecodeVM to execute actor methods instead of
+    /// the tree-walker Interpreter. This is the path used by the bytecode VM's
+    /// spawn_actor; the tree-walker path uses new_with_depth.
+    pub(crate) fn new_bytecode(
+        instance: ActorInstance,
+        program: std::sync::Arc<crate::ast::File>,
+        bytecode_prog: std::sync::Arc<crate::interp::bytecode::BytecodeProgram>,
+    ) -> Self {
+        let id = ACTOR_HANDLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let (mailbox_tx, mailbox_rx) = std::sync::mpsc::channel::<ActorMailboxMsg>();
+        let inner = std::sync::Arc::new(std::sync::RwLock::new(instance));
+        let bp = std::sync::Arc::new(MailboxBpState::new(DEFAULT_MAILBOX_DEPTH));
+
+        let worker_inner = inner.clone();
+        let worker_bp = bp.clone();
+        let worker_bc = bytecode_prog.clone();
+        let mailbox_tx_clone = mailbox_tx.clone();
+        let worker_program = program.clone();
+
+        let _ = std::thread::Builder::new()
+            .name(format!("actor-{}", id))
+            .spawn(move || {
+                CURRENT_ACTOR_ID.with(|a| a.set(id));
+                while let Ok(msg) = mailbox_rx.recv() {
+                    worker_bp.on_dequeue();
+                    if let Some(deadline) = msg.deadline {
+                        if std::time::Instant::now() >= deadline {
+                            let _ = msg.response.send(Err(InterpError::new(
+                                "SendErrorNotWriteable: mailbox message TTL expired",
+                            )));
+                            continue;
+                        }
+                    }
+                    // Fault check: drain without dispatch.
+                    if worker_inner.read().map(|a| a.faulted).unwrap_or(false) {
+                        let _ = msg.response.send(Err(InterpError::new(
+                            "actor mailbox short-circuited (Fault)",
+                        )));
+                        continue;
+                    }
+
+                    // Determine if this is a flow actor or regular actor.
+                    let (runs_flow, flow_state) = {
+                        let actor = worker_inner.read().unwrap_or_else(|e| e.into_inner());
+                        (actor.runs_flow.clone(), actor.flow_state.clone())
+                    };
+
+                    let result = if let Some(flow_name) = runs_flow {
+                        // Flow actor: dispatch through transition functions.
+                        let from_state = match &flow_state {
+                            Some(Value::Record(Some(name), _)) => name.clone(),
+                            _ => {
+                                let _ = msg.response.send(Err(InterpError::new(
+                                    "flow actor: no valid flow_state",
+                                )));
+                                continue;
+                            }
+                        };
+                        let key = (flow_name, msg.method.clone(), from_state);
+                        match worker_bc.flow_transition_funcs.get(&key) {
+                            Some(&func_idx) => {
+                                let mut args = vec![flow_state.unwrap_or(Value::Unit)];
+                                args.extend(msg.args);
+                                let mut vm = crate::interp::bytecode::BytecodeVM::new(&worker_bc);
+                                let r = vm.call_function(func_idx, &args);
+                                // Update flow_state on success.
+                                if let Ok(ref new_state) = r {
+                                    if let Ok(mut actor) = worker_inner.write() {
+                                        actor.flow_state = Some(new_state.clone());
+                                    }
+                                }
+                                r
+                            }
+                            None => Err(InterpError::new(format!(
+                                "no transition {} from state {}",
+                                msg.method, key.2
+                            ))),
+                        }
+                    } else {
+                        // Regular actor: call method function.
+                        let actor_name = {
+                            let actor = worker_inner.read().unwrap_or_else(|e| e.into_inner());
+                            actor.actor_name.clone()
+                        };
+                        let key = (actor_name, msg.method.clone());
+                        match worker_bc.actor_method_funcs.get(&key) {
+                            Some(&func_idx) => {
+                                // Build self handle for the method.
+                                let self_val = Value::Actor(ActorHandle {
+                                    inner: worker_inner.clone(),
+                                    mailbox: mailbox_tx_clone.clone(),
+                                    id,
+                                    program: worker_program.clone(),
+                                    bp: worker_bp.clone(),
+                                    bytecode_program: Some(worker_bc.clone()),
+                                });
+                                let mut args = vec![self_val];
+                                args.extend(msg.args);
+                                let mut vm = crate::interp::bytecode::BytecodeVM::new(&worker_bc);
+                                vm.call_function(func_idx, &args)
+                            }
+                            None => Err(InterpError::new(format!(
+                                "actor method '{}' not found", msg.method
+                            ))),
+                        }
+                    };
+                    let _ = msg.response.send(result);
+                }
+                CURRENT_ACTOR_ID.with(|a| a.set(0));
+            });
+
+        let handle = ActorHandle {
+            inner,
+            mailbox: mailbox_tx,
+            id,
+            program,
+            bp,
+            bytecode_program: Some(bytecode_prog),
+        };
+        if let Ok(mut map) = actor_handles().lock() {
+            map.retain(|_, e| e.upgrade().is_some());
+            map.insert(id, WeakActorEntry::from_handle(&handle));
         }
         handle
     }
