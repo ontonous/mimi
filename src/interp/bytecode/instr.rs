@@ -198,16 +198,17 @@ pub enum Op {
     TupleGet { rd: Reg, ra: Reg, idx: FieldIdx },
 
     /// rd = new Record of type `type_name_idx` with fields from [base..base+count)
+    /// Field names are stored in constants[type_name..type_name+count].
     NewRecord {
         rd: Reg,
         type_name: ConstIdx,
         base: Reg,
         count: u16,
     },
-    /// rd = ra.field[field_idx]
-    RecordGet { rd: Reg, ra: Reg, field: FieldIdx },
-    /// ra.field[field_idx] = rb
-    RecordSet { ra: Reg, field: FieldIdx, rb: Reg },
+    /// rd = ra.field[field_name] — field name is a string constant
+    RecordGet { rd: Reg, ra: Reg, field: ConstIdx },
+    /// ra.field[field_name] = rb — field name is a string constant
+    RecordSet { ra: Reg, field: ConstIdx, rb: Reg },
 
     /// rd = new Map (empty)
     NewMap { rd: Reg },

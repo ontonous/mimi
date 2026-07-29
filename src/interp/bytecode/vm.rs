@@ -533,6 +533,76 @@ impl<'a> BytecodeVM<'a> {
                     }
                 }
 
+                // ── Record ─────────────────────────────────────
+                Op::NewRecord {
+                    rd,
+                    type_name,
+                    base,
+                    count,
+                } => {
+                    let type_name_str = match &proto.constants[type_name as usize] {
+                        ConstValue::Str(s) => {
+                            if s.is_empty() {
+                                None
+                            } else {
+                                Some(s.clone())
+                            }
+                        }
+                        _ => None,
+                    };
+                    // Field names are stored in constants[type_name+1..type_name+1+count].
+                    let mut fields = std::collections::HashMap::new();
+                    for i in 0..count {
+                        let field_name = match &proto.constants[(type_name + 1 + i as u32) as usize] {
+                            ConstValue::Str(s) => s.clone(),
+                            _ => format!("_{}", i),
+                        };
+                        let value = self.get_reg(base + i).clone();
+                        fields.insert(field_name, value);
+                    }
+                    self.set_reg(rd, Value::Record(type_name_str, fields));
+                }
+                Op::RecordGet { rd, ra, field } => {
+                    let v = self.get_reg(ra).clone();
+                    let field_name = match &proto.constants[field as usize] {
+                        ConstValue::Str(s) => s.clone(),
+                        _ => String::new(),
+                    };
+                    match v {
+                        Value::Record(_, fields) => {
+                            let value = fields.get(&field_name).cloned().ok_or_else(|| {
+                                InterpError::new(format!("record has no field '{}'", field_name))
+                            })?;
+                            self.set_reg(rd, value);
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "record get: expected Record, got {}",
+                                other
+                            )))
+                        }
+                    }
+                }
+                Op::RecordSet { ra, field, rb } => {
+                    let field_name = match &proto.constants[field as usize] {
+                        ConstValue::Str(s) => s.clone(),
+                        _ => String::new(),
+                    };
+                    let value = self.get_reg(rb).clone();
+                    let record = self.get_reg_mut(ra);
+                    match record {
+                        Value::Record(_, fields) => {
+                            fields.insert(field_name, value);
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "record set: expected Record, got {}",
+                                other
+                            )))
+                        }
+                    }
+                }
+
                 // ── Variant (enum) ─────────────────────────────
                 Op::IsVariant { rd, ra, tag } => {
                     let v = self.get_reg(ra);
