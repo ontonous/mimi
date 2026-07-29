@@ -73,6 +73,20 @@
   - clippy/fmt 修复：`and_then(|x| Some(y))` → `map(|x| y)`（resolved/mod.rs:2863）。
   - 基线：4448 lib + 13 real_world + 28 cli 全绿，clippy 0 warnings，fmt 0 diffs。
 
+### Phase D: 缺口审查 + 填补（0.32.31–0.32.35）
+
+- **0.32.31 Slice 表达式进入 resolved native slice**：`xs[start:end]` view 语义（不拷贝数据），构建新 `{i64 len, ptr data}` struct 指向原有 buffer 偏移处。索引 clamp 到 [0, list_len] 防止 OOB 指针算术。
+- **0.32.32 Old 表达式进入 resolved native slice**：合约 `old(x)` 在 codegen 为 identity（合约运行时擦除，只有 verifier 区分 old 语义）。
+- **0.32.33 Comprehension 进入 resolved native slice**：`[value for pattern in iterable if guard]` 降低为预分配 buffer + 循环 + guard 过滤 + 计数 + 构建结果 list。
+- **0.32.34 OptionalChain 进入 resolved native slice**：`receiver?.field` 降低为 discriminant 分支 + 字段投影 + PHI 合并。Some/Ok → 投影字段包装 Some；None/Err → 返回 None。
+- **0.32.35 Callable（一等函数值）进入 resolved native slice**：`ResolvedCallee::Function` 返回 LLVM 函数指针（`GlobalValue.as_pointer_value()`）。仅 User-origin 非 qualified 函数。
+- **0.32.35b NestedCallable 语句修复**：嵌套函数声明标记在 eligibility 中放行（no-op），修复含嵌套函数的程序被错误拒绝。
+
+### Phase E: 性能基线（0.32.37–0.32.38）
+
+- **0.32.37 性能基线基础设施**：`benchmarks/` 目录（fib/mandelbrot），Mimi codegen/interp + C (gcc -O2) + CPython 四路对比。`run.sh` 自动编译/运行/计时/异常检测（>2x 偏差标红）。
+- **0.32.38 性能异常分析**：Mimi/C ≈ 4x（MIMI_OPT=1）。根因：SD-7 checked arithmetic（每个 add/sub/mul 走 `llvm.sadd.with.overflow` + overflow 检查 + trap 分支，3-4 指令 vs C 的 1 指令）。设计决策非 bug。MIMI_OPT 默认关闭（需 `MIMI_OPT=1` 启用 O2）。
+
 ---
 
 ## [0.1.1] — 2026-07-28
