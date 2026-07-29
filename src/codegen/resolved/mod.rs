@@ -1712,6 +1712,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 iterable,
                 guard,
             } => self.emit_comprehension(pattern, value, iterable, guard.as_deref(), &expression.ty, frame),
+            // 0.32.34: OptionalChain (receiver?.field).
+            // If receiver is Some/Ok: project field from payload, wrap in Some.
+            // If receiver is None/Err: return None.
+            ResolvedExprKind::OptionalChain { receiver, field, field_type } => {
+                self.emit_optional_chain(receiver, field, field_type, frame)
+            }
             other => Err(CompileError::Unsupported(format!(
                 "resolved expression {other:?} escaped resolved native eligibility at '{}'",
                 expression.node_id.0
@@ -3808,6 +3814,136 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     /// Try expression (`?` operator): unwrap Result/Option or exit.
     ///
     /// Layout:
+    /// 0.32.34: OptionalChain (receiver?.field).
+    ///
+    /// Semantics: if receiver is Some(x)/Ok(x), project field from x and wrap
+    /// in Some. If receiver is None/Err, return None.
+    ///
+    /// LLVM lowering:
+    /// 1. Emit receiver → Option/Result struct {i1 disc, T payload, ...}
+    /// 2. Branch on discriminant
+    /// 3. Some/Ok: extract payload, project field, build {i1 1, field_val}
+    /// 4. None/Err: build {i1 0, zero}
+    /// 5. PHI merge
+    fn emit_optional_chain(
+        &mut self,
+        receiver: &ResolvedExpr,
+        field: &NodeId,
+        field_type: &ResolvedTypeId,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // Emit receiver → struct value.
+        let recv_val = self.emit_expr(receiver, frame)?;
+        let sv = match recv_val {
+            BasicValueEnum::StructValue(sv) => sv,
+            BasicValueEnum::PointerValue(pv) => {
+                let llvm_ty = self.lower_type(&receiver.ty)?;
+                self.generator.build_load(llvm_ty, pv, "opt_chain_load")?
+                    .into_struct_value()
+            }
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "optional chain receiver is not a struct".into(),
+                ))
+            }
+        };
+
+        // Extract discriminant (field 0).
+        let disc = self.generator.builder
+            .build_extract_value(sv, 0, "opt_chain_disc")
+            .map_err(|e| CompileError::LlvmError(format!("opt_chain disc: {e}")))?
+            .into_int_value();
+
+        // Extract payload (field 1) — the record value.
+        let payload = self.generator.builder
+            .build_extract_value(sv, 1, "opt_chain_payload")
+            .map_err(|e| CompileError::LlvmError(format!("opt_chain payload: {e}")))?;
+
+        // Get field name and index.
+        let field_name = self.program.resolved_member_name(field).ok_or_else(|| {
+            CompileError::Unsupported(format!(
+                "optional chain field '{:?}' has no resolved name",
+                field
+            ))
+        })?;
+        let field_index = self.lookup_field_index(field, field_name)?;
+
+        // Determine the result LLVM type: Option<FieldType> = {i1, FieldType}.
+        let result_llvm_ty = self.lower_type(field_type)?;
+
+        // Branch on discriminant.
+        let function = self.current_function()?;
+        let some_bb = self.generator.context.append_basic_block(function, "opt_chain_some");
+        let none_bb = self.generator.context.append_basic_block(function, "opt_chain_none");
+        let merge_bb = self.generator.context.append_basic_block(function, "opt_chain_merge");
+
+        let is_some = self.generator.builder.build_int_compare(
+            inkwell::IntPredicate::NE,
+            disc,
+            disc.get_type().const_zero(),
+            "opt_chain_is_some",
+        ).map_err(|e| CompileError::LlvmError(format!("opt_chain cmp: {e}")))?;
+        self.generator.build_cond_br(is_some, some_bb, none_bb)?;
+
+        // Some/Ok branch: project field from payload, build Some result.
+        self.generator.builder.position_at_end(some_bb);
+        let payload_struct = match payload {
+            BasicValueEnum::StructValue(psv) => psv,
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "optional chain payload is not a struct (expected record)".into(),
+                ))
+            }
+        };
+        let field_val = self.generator.builder
+            .build_extract_value(payload_struct, field_index, "opt_chain_field")
+            .map_err(|e| CompileError::LlvmError(format!("opt_chain field extract: {e}")))?;
+        // Build Some {i1 1, field_val}.
+        let bool_ty = self.generator.context.bool_type();
+        let some_result = self.generator.context.struct_type(
+            &[BasicTypeEnum::IntType(bool_ty), field_val.get_type()],
+            false,
+        );
+        let some_val = some_result.get_undef();
+        let some_val = self.generator.builder
+            .build_insert_value(some_val, bool_ty.const_int(1, false), 0, "some_disc")
+            .map_err(|e| CompileError::LlvmError(format!("opt_chain some disc: {e}")))?
+            .into_struct_value();
+        let some_val = self.generator.builder
+            .build_insert_value(some_val, field_val, 1, "some_payload")
+            .map_err(|e| CompileError::LlvmError(format!("opt_chain some payload: {e}")))?
+            .into_struct_value();
+        self.generator.build_br(merge_bb)?;
+        let some_bb_end = self.generator.builder.get_insert_block()
+            .ok_or_else(|| CompileError::LlvmError("opt_chain: no insert block after some_bb".into()))?;
+
+        // None/Err branch: build None {i1 0, zero}.
+        self.generator.builder.position_at_end(none_bb);
+        let none_val = some_result.get_undef();
+        let none_val = self.generator.builder
+            .build_insert_value(none_val, bool_ty.const_int(0, false), 0, "none_disc")
+            .map_err(|e| CompileError::LlvmError(format!("opt_chain none disc: {e}")))?
+            .into_struct_value();
+        let zero_payload = field_val.get_type().const_zero();
+        let none_val = self.generator.builder
+            .build_insert_value(none_val, zero_payload, 1, "none_payload")
+            .map_err(|e| CompileError::LlvmError(format!("opt_chain none payload: {e}")))?
+            .into_struct_value();
+        self.generator.build_br(merge_bb)?;
+        let none_bb_end = self.generator.builder.get_insert_block()
+            .ok_or_else(|| CompileError::LlvmError("opt_chain: no insert block after none_bb".into()))?;
+
+        // Merge: PHI node.
+        self.generator.builder.position_at_end(merge_bb);
+        let phi = self.generator.builder.build_phi(result_llvm_ty, "opt_chain_result")
+            .map_err(|e| CompileError::LlvmError(format!("opt_chain phi: {e}")))?;
+        phi.add_incoming(&[
+            (&some_val as &dyn inkwell::values::BasicValue, some_bb_end),
+            (&none_val as &dyn inkwell::values::BasicValue, none_bb_end),
+        ]);
+        Ok(phi.as_basic_value())
+    }
+
     /// 0.32.33: Comprehension ([value for pattern in iterable if guard]).
     ///
     /// Lowering: pre-allocate buffer of iterable_len elements, loop over
