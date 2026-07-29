@@ -1177,23 +1177,34 @@ impl BytecodeCompiler {
     /// Compile a lambda expression into a closure.
     ///
     /// Strategy:
-    /// 1. Create a new FunctionProto for the lambda body
-    /// 2. Compile the body with parameters bound
-    /// 3. Emit NewClosure with the proto index and captured variables
+    /// 1. Collect free variables (capture analysis)
+    /// 2. Create a new FunctionProto for the lambda body
+    /// 3. Compile the body with parameters + captured variables bound
+    /// 4. Emit NewClosure with the proto index and captured variables
     fn compile_lambda(
         &mut self,
         fc: &mut FuncCompiler,
         params: &[Param],
         body: &Block,
     ) -> Result<Reg, InterpError> {
+        // Step 1: Collect free variables that need to be captured.
+        let free_vars = self.collect_free_vars(body, params);
+
+        // Filter to only variables that exist in the outer scope.
+        let captures: Vec<(String, Reg)> = free_vars
+            .iter()
+            .filter_map(|name| {
+                fc.lookup_var(name).map(|reg| (name.clone(), reg))
+            })
+            .collect();
+
         // Create a new function proto for the lambda.
         let lambda_name = format!("__lambda_{}", self.functions.len());
         let mut lambda_fc = FuncCompiler::new(lambda_name.clone(), params.len() as u16);
 
-        // Bind parameters to registers 0..param_count (same as compile_func).
+        // Bind parameters to registers 0..param_count.
         for (i, param) in params.iter().enumerate() {
             lambda_fc.vars[0].insert(param.name.clone(), i as Reg);
-            // Track parameter type for int/float dispatch.
             if let Type::Name(n, _) = param.ty.unlocated() {
                 if n == "f64" {
                     lambda_fc.var_types.insert(param.name.clone(), VarType::Float);
@@ -1202,6 +1213,17 @@ impl BytecodeCompiler {
         }
         // Ensure register_count accounts for params.
         while lambda_fc.proto.register_count < params.len() as u16 {
+            lambda_fc.proto.alloc_reg();
+        }
+
+        // Bind captured variables to registers param_count..param_count+capture_count.
+        // The VM will load these from the closure's captured map when calling.
+        for (i, (name, _outer_reg)) in captures.iter().enumerate() {
+            let capture_reg = params.len() as Reg + i as Reg;
+            lambda_fc.vars[0].insert(name.clone(), capture_reg);
+        }
+        // Ensure register_count accounts for captures.
+        while lambda_fc.proto.register_count < (params.len() + captures.len()) as u16 {
             lambda_fc.proto.alloc_reg();
         }
 
@@ -1219,17 +1241,29 @@ impl BytecodeCompiler {
 
         // Add the lambda proto to the program.
         let lambda_idx = self.functions.len() as FuncIdx;
+        // Set capture names in the proto.
+        lambda_fc.proto.capture_names = captures.iter().map(|(name, _)| name.clone()).collect();
         self.functions.push(lambda_fc.proto);
 
-        // For now, lambdas don't capture variables (simplified implementation).
-        // TODO: implement capture analysis.
+        // Emit code to capture the variables.
+        // Captures are stored as (name, value) pairs in consecutive registers.
         let captures_base = fc.proto.alloc_reg();
+        for _ in 1..captures.len() {
+            fc.proto.alloc_reg();
+        }
+        for (i, (_name, outer_reg)) in captures.iter().enumerate() {
+            let target = captures_base + i as Reg;
+            if *outer_reg != target {
+                fc.emit(Op::Mov { rd: target, rs: *outer_reg });
+            }
+        }
+
         let rd = fc.proto.alloc_reg();
         fc.emit(Op::NewClosure {
             rd,
             proto: lambda_idx,
             captures_base,
-            capture_count: 0,
+            capture_count: captures.len() as u16,
         });
         Ok(rd)
     }
@@ -1299,6 +1333,173 @@ impl BytecodeCompiler {
     fn field_index(&self, _field: &str) -> u16 {
         // TODO: resolve from CheckedProgram type definitions.
         0
+    }
+
+    /// Collect free variables from a block (variables used but not defined locally).
+    /// Returns a set of variable names that need to be captured.
+    fn collect_free_vars(&self, block: &Block, params: &[Param]) -> std::collections::HashSet<String> {
+        let mut free_vars = std::collections::HashSet::new();
+        let mut local_vars: std::collections::HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+        self.collect_free_vars_block(block, &mut local_vars, &mut free_vars);
+        free_vars
+    }
+
+    fn collect_free_vars_block(
+        &self,
+        block: &Block,
+        local_vars: &mut std::collections::HashSet<String>,
+        free_vars: &mut std::collections::HashSet<String>,
+    ) {
+        for stmt in block {
+            self.collect_free_vars_stmt(stmt, local_vars, free_vars);
+        }
+    }
+
+    fn collect_free_vars_stmt(
+        &self,
+        stmt: &Stmt,
+        local_vars: &mut std::collections::HashSet<String>,
+        free_vars: &mut std::collections::HashSet<String>,
+    ) {
+        match stmt.unlocated() {
+            Stmt::Let { pat, init, .. } => {
+                // First collect from init (before binding the pattern).
+                if let Some(init_expr) = init {
+                    self.collect_free_vars_expr(init_expr, local_vars, free_vars);
+                }
+                // Then bind the pattern variables.
+                self.collect_pattern_vars(pat, local_vars);
+            }
+            Stmt::Expr(e) => {
+                self.collect_free_vars_expr(e, local_vars, free_vars);
+            }
+            Stmt::If { cond, then_, else_ } => {
+                self.collect_free_vars_expr(cond, local_vars, free_vars);
+                self.collect_free_vars_block(then_, local_vars, free_vars);
+                if let Some(else_block) = else_ {
+                    self.collect_free_vars_block(else_block, local_vars, free_vars);
+                }
+            }
+            Stmt::While { cond, body } => {
+                self.collect_free_vars_expr(cond, local_vars, free_vars);
+                self.collect_free_vars_block(body, local_vars, free_vars);
+            }
+            Stmt::For { var, iterable, body } => {
+                self.collect_free_vars_expr(iterable, local_vars, free_vars);
+                local_vars.insert(var.clone());
+                self.collect_free_vars_block(body, local_vars, free_vars);
+            }
+            Stmt::Return(e) => {
+                if let Some(ret_expr) = e {
+                    self.collect_free_vars_expr(ret_expr, local_vars, free_vars);
+                }
+            }
+            Stmt::Assign { target, value } => {
+                self.collect_free_vars_expr(target, local_vars, free_vars);
+                self.collect_free_vars_expr(value, local_vars, free_vars);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_free_vars_expr(
+        &self,
+        expr: &Expr,
+        local_vars: &mut std::collections::HashSet<String>,
+        free_vars: &mut std::collections::HashSet<String>,
+    ) {
+        match expr.unlocated() {
+            Expr::Ident(name) => {
+                if !local_vars.contains(name) {
+                    free_vars.insert(name.clone());
+                }
+            }
+            Expr::Binary(_, l, r) => {
+                self.collect_free_vars_expr(l, local_vars, free_vars);
+                self.collect_free_vars_expr(r, local_vars, free_vars);
+            }
+            Expr::Unary(_, e) => {
+                self.collect_free_vars_expr(e, local_vars, free_vars);
+            }
+            Expr::Call(callee, args) => {
+                self.collect_free_vars_expr(callee, local_vars, free_vars);
+                for arg in args {
+                    self.collect_free_vars_expr(arg, local_vars, free_vars);
+                }
+            }
+            Expr::If { cond, then_, else_ } => {
+                self.collect_free_vars_expr(cond, local_vars, free_vars);
+                self.collect_free_vars_block(then_, local_vars, free_vars);
+                if let Some(else_block) = else_ {
+                    self.collect_free_vars_block(else_block, local_vars, free_vars);
+                }
+            }
+            Expr::Block(b) => {
+                self.collect_free_vars_block(b, local_vars, free_vars);
+            }
+            Expr::Index(obj, idx) => {
+                self.collect_free_vars_expr(obj, local_vars, free_vars);
+                self.collect_free_vars_expr(idx, local_vars, free_vars);
+            }
+            Expr::List(elems) => {
+                for elem in elems {
+                    self.collect_free_vars_expr(elem, local_vars, free_vars);
+                }
+            }
+            Expr::Tuple(elems) => {
+                for elem in elems {
+                    self.collect_free_vars_expr(elem, local_vars, free_vars);
+                }
+            }
+            Expr::Field(obj, _) => {
+                self.collect_free_vars_expr(obj, local_vars, free_vars);
+            }
+            Expr::Match(subject, arms) => {
+                self.collect_free_vars_expr(subject, local_vars, free_vars);
+                for arm in arms {
+                    // Pattern variables are local to the arm.
+                    let mut arm_locals = local_vars.clone();
+                    self.collect_pattern_vars(&arm.pat, &mut arm_locals);
+                    if let Some(guard) = &arm.guard {
+                        self.collect_free_vars_expr(guard, &mut arm_locals, free_vars);
+                    }
+                    self.collect_free_vars_expr(&arm.body, &mut arm_locals, free_vars);
+                }
+            }
+            Expr::Lambda { params, body, .. } => {
+                // Nested lambda: params are local, body may capture from outer.
+                let mut nested_locals: std::collections::HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+                self.collect_free_vars_block(body, &mut nested_locals, free_vars);
+            }
+            Expr::Cast(inner, _) => {
+                self.collect_free_vars_expr(inner, local_vars, free_vars);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_pattern_vars(&self, pat: &Pattern, local_vars: &mut std::collections::HashSet<String>) {
+        match &pat.kind {
+            PatternKind::Variable(name) => {
+                local_vars.insert(name.clone());
+            }
+            PatternKind::Tuple(pats) => {
+                for p in pats {
+                    self.collect_pattern_vars(p, local_vars);
+                }
+            }
+            PatternKind::Constructor(_, pats) => {
+                for (_, p) in pats {
+                    self.collect_pattern_vars(p, local_vars);
+                }
+            }
+            PatternKind::Array(pats) | PatternKind::Slice(pats, _) => {
+                for p in pats {
+                    self.collect_pattern_vars(p, local_vars);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Infer the VarType of an expression (lightweight, for int/float dispatch).
