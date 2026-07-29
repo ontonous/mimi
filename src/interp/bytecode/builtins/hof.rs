@@ -13,7 +13,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
     reg.register(BuiltinDesc { name: "all", arity: 2, category: BuiltinCategory::HigherOrder, func: builtin_all });
 }
 
-fn builtin_map_list(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+pub(crate) fn builtin_map_list(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let list = match &args[0] {
         Value::List(l) => l.clone(),
         _ => return Err(InterpError::new("map_list: first argument must be a list")),
@@ -27,7 +27,7 @@ fn builtin_map_list(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
     Ok(Value::List(result))
 }
 
-fn builtin_filter_list(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+pub(crate) fn builtin_filter_list(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let list = match &args[0] {
         Value::List(l) => l.clone(),
         _ => return Err(InterpError::new("filter_list: first argument must be a list")),
@@ -43,7 +43,7 @@ fn builtin_filter_list(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value,
     Ok(Value::List(result))
 }
 
-fn builtin_reduce_list(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+pub(crate) fn builtin_reduce_list(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let list = match &args[0] {
         Value::List(l) => l.clone(),
         _ => return Err(InterpError::new("reduce_list: first argument must be a list")),
