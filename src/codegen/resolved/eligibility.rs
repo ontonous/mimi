@@ -522,6 +522,10 @@ fn require_block(
                     require_expr(program, owner, condition, entry_source)?;
                 }
             }
+            // NestedCallable: declaration marker for nested functions. The nested
+            // function is compiled separately (by the resolved emitter or legacy
+            // emitter). This statement is a no-op in both backends.
+            ResolvedStmtKind::NestedCallable(_) => {}
             other => {
                 return Err(UnsupportedResolvedNode::new(
                     owner,
