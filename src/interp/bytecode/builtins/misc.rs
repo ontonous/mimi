@@ -133,8 +133,8 @@ fn builtin_from_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     match &args[0] {
         Value::String(s) => {
             match serde_json::from_str::<serde_json::Value>(s) {
-                Ok(json) => Ok(Value::Variant("Ok".into(), vec![json_to_value(&json)])),
-                Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
+                Ok(json) => Ok(json_to_value(&json)),
+                Err(e) => Err(InterpError::new(format!("from_json parse error: {}", e))),
             }
         }
         _ => Err(InterpError::new("from_json expects a string")),

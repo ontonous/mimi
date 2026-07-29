@@ -294,12 +294,25 @@ impl<'a> BytecodeVM<'a> {
 
                 // ── Comparison ─────────────────────────────────
                 Op::EqInt { rd, ra, rb } => {
-                    let (a, b) = self.get_int2(ra, rb)?;
-                    self.set_reg(rd, Value::Bool(a == b));
+                    // Runtime fallback: use generic equality for non-Int values.
+                    if !matches!(self.get_reg(ra), Value::Int(_)) || !matches!(self.get_reg(rb), Value::Int(_)) {
+                        let a = self.get_reg(ra).clone();
+                        let b = self.get_reg(rb).clone();
+                        self.set_reg(rd, Value::Bool(crate::interp::values_equal(&a, &b)));
+                    } else {
+                        let (a, b) = self.get_int2(ra, rb)?;
+                        self.set_reg(rd, Value::Bool(a == b));
+                    }
                 }
                 Op::NeInt { rd, ra, rb } => {
-                    let (a, b) = self.get_int2(ra, rb)?;
-                    self.set_reg(rd, Value::Bool(a != b));
+                    if !matches!(self.get_reg(ra), Value::Int(_)) || !matches!(self.get_reg(rb), Value::Int(_)) {
+                        let a = self.get_reg(ra).clone();
+                        let b = self.get_reg(rb).clone();
+                        self.set_reg(rd, Value::Bool(!crate::interp::values_equal(&a, &b)));
+                    } else {
+                        let (a, b) = self.get_int2(ra, rb)?;
+                        self.set_reg(rd, Value::Bool(a != b));
+                    }
                 }
                 Op::LtInt { rd, ra, rb } => {
                     let (a, b) = self.get_int2(ra, rb)?;
