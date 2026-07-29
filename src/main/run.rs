@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::{is_production, is_sketch, resolve_path};
 use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
-use mimi::{interp, lexer, loader};
+use mimi::{lexer, loader};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
@@ -16,7 +16,6 @@ pub(crate) fn run(
     strict: bool,
     watch: bool,
     profile: bool,
-    bytecode: bool,
     extra_args: &[String],
 ) -> Result<i32, String> {
     let path = resolve_path(path)?;
@@ -40,7 +39,6 @@ pub(crate) fn run(
             verify_ffi,
             allocator,
             strict,
-            bytecode,
             extra_args,
         )?
     };
@@ -50,31 +48,12 @@ pub(crate) fn run(
     Ok(result)
 }
 
-/// Extract the integer exit code from an interpreter return value.
-/// Unit returns are mapped to 0 (success). Bool maps to 0=true (success)
-/// and 1=false (failure), matching Unix convention.
-fn value_to_exit_code(value: &mimi::interp::Value) -> i32 {
-    match value {
-        mimi::interp::Value::Int(n) => *n as i32,
-        mimi::interp::Value::Bool(b) => {
-            if *b {
-                0
-            } else {
-                1
-            }
-        }
-        mimi::interp::Value::Unit => 0,
-        _ => 0,
-    }
-}
-
 fn run_once(
     path: &Path,
     verify_contracts: bool,
     verify_ffi: bool,
     allocator: &str,
     strict: bool,
-    bytecode: bool,
     extra_args: &[String],
 ) -> Result<i32, String> {
     // CL-H1: size-capped source load (shared with other CLI entry points).
@@ -149,8 +128,8 @@ fn run_once(
         }
     };
 
-    // Bytecode VM path (experimental).
-    if bytecode {
+    // Bytecode VM path (sole interpreter since v0.33).
+    {
         use mimi::interp::bytecode::{BytecodeCompiler, BytecodeVM};
         let mut compiler = BytecodeCompiler::new();
         let prog = compiler
@@ -166,46 +145,6 @@ fn run_once(
             }
             Err(e) => {
                 eprintln!("bytecode runtime error: {}", e);
-                Err("runtime error".into())
-            }
-        }
-    } else {
-        // Tree-walker interpreter path.
-        let mut interp = interp::Interpreter::from_checked(&checked_program);
-        interp.verify_contracts = verify_contracts;
-        interp.verify_ffi = verify_ffi;
-        interp.default_allocator = match allocator {
-            "arena" => interp::AllocatorKind::Arena,
-            "bump" => interp::AllocatorKind::Bump,
-            _ => interp::AllocatorKind::System,
-        };
-        interp.cli_args = extra_args.to_vec();
-        match interp.run() {
-            Ok(value) => {
-                // P1-19: suppress the `-> ()` noise when the program's
-                // return value is Unit (most main() functions). Show the
-                // value only when it carries real information.
-                if value != mimi::interp::Value::Unit {
-                    println!("-> {}", value);
-                }
-                Ok(value_to_exit_code(&value))
-            }
-            Err(interp_err) => {
-                let use_color = colors_enabled();
-                let src = mimi::path_safety::read_source_capped(path).ok();
-                let src_ref = src.as_deref();
-                let mut diagnostic = interp_err.to_diagnostic();
-                if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {
-                    if let Some(span) = checked_program.entry_span() {
-                        diagnostic = diagnostic.with_span(span);
-                    }
-                }
-                let formatted = format_diagnostic(&diagnostic, src_ref, &path.display().to_string());
-                if use_color {
-                    eprintln!("{}", formatted);
-                } else {
-                    eprintln!("{}", strip_ansi(&formatted));
-                }
                 Err("runtime error".into())
             }
         }
@@ -246,7 +185,6 @@ fn run_watch(
         verify_ffi,
         allocator,
         strict,
-        false, // bytecode: not supported in watch mode
         extra_args,
     ) {
         eprintln!("{}", e);
@@ -266,7 +204,6 @@ fn run_watch(
                     verify_ffi,
                     allocator,
                     strict,
-                    false, // bytecode: not supported in watch mode
                     extra_args,
                 ) {
                     eprintln!("{}", e);
