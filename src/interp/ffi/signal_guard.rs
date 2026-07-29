@@ -251,6 +251,8 @@ mod tests {
     fn signal_guard_restores_handlers_after_crash() {
         // After a crash, the default handlers should be restored.
         let _ =
+            // SAFETY: this deliberately reads from a null pointer to produce a
+            // SIGSEGV that tests the signal guard recovery mechanism.
             call_guarded(|| -> i32 { unsafe { std::ptr::read_volatile(std::ptr::null::<i32>()) } });
         // If handlers weren't restored, this second call would also be caught.
         // But since crash_handler restores SIG_DFL, a second crash would
@@ -284,6 +286,7 @@ mod tests {
         // point catches it (inner has no separate recovery point).
         let result = call_guarded(|| -> i32 {
             let inner = call_guarded(|| -> i32 {
+                // SAFETY: deliberately crashes to test signal guard reentrancy
                 unsafe { std::ptr::read_volatile(std::ptr::null::<i32>()) }
             });
             // inner crash is caught by outer's recovery point,
