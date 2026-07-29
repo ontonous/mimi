@@ -28,6 +28,33 @@ pub fn register(reg: &mut BuiltinRegistry) {
     reg.register(BuiltinDesc { name: "input_bool", arity: 0, category: BuiltinCategory::Io, func: builtin_input_bool });
     // Convert misc
     reg.register(BuiltinDesc { name: "from_int", arity: 1, category: BuiltinCategory::Convert, func: builtin_from_int });
+    // JSON extended
+    reg.register(BuiltinDesc { name: "json_get_element", arity: 2, category: BuiltinCategory::System, func: builtin_json_get_element });
+    reg.register(BuiltinDesc { name: "json_has_key", arity: 2, category: BuiltinCategory::System, func: builtin_json_has_key });
+    reg.register(BuiltinDesc { name: "json_array_length", arity: 1, category: BuiltinCategory::System, func: builtin_json_array_length });
+    // Regex extended
+    reg.register(BuiltinDesc { name: "regex_find_all", arity: 2, category: BuiltinCategory::String, func: builtin_regex_find_all });
+    // Misc value ops
+    reg.register(BuiltinDesc { name: "eq", arity: 2, category: BuiltinCategory::System, func: builtin_eq });
+    reg.register(BuiltinDesc { name: "bind", arity: 2, category: BuiltinCategory::System, func: builtin_bind });
+    reg.register(BuiltinDesc { name: "inner", arity: 1, category: BuiltinCategory::System, func: builtin_inner });
+    reg.register(BuiltinDesc { name: "deref", arity: 1, category: BuiltinCategory::System, func: builtin_inner });
+    reg.register(BuiltinDesc { name: "fields", arity: 1, category: BuiltinCategory::System, func: builtin_fields });
+    reg.register(BuiltinDesc { name: "type_fields", arity: 1, category: BuiltinCategory::System, func: builtin_fields });
+    reg.register(BuiltinDesc { name: "type_variants", arity: 1, category: BuiltinCategory::System, func: builtin_type_variants });
+    reg.register(BuiltinDesc { name: "assert_state", arity: 2, category: BuiltinCategory::System, func: builtin_assert_state });
+    // C string
+    reg.register(BuiltinDesc { name: "str_to_c_str", arity: 1, category: BuiltinCategory::String, func: builtin_str_to_c_str });
+    reg.register(BuiltinDesc { name: "c_str_to_string", arity: 1, category: BuiltinCategory::String, func: builtin_c_str_to_string });
+    // Process
+    reg.register(BuiltinDesc { name: "exec", arity: usize::MAX, category: BuiltinCategory::System, func: builtin_exec });
+    reg.register(BuiltinDesc { name: "exec_pipe", arity: usize::MAX, category: BuiltinCategory::System, func: builtin_exec });
+    reg.register(BuiltinDesc { name: "exec_safe", arity: usize::MAX, category: BuiltinCategory::System, func: builtin_exec });
+    // FS extended
+    reg.register(BuiltinDesc { name: "file_stat", arity: 1, category: BuiltinCategory::System, func: builtin_file_stat });
+    reg.register(BuiltinDesc { name: "read_file_bytes", arity: 1, category: BuiltinCategory::System, func: builtin_read_file_bytes });
+    reg.register(BuiltinDesc { name: "write_file_bytes", arity: 2, category: BuiltinCategory::System, func: builtin_write_file_bytes });
+    reg.register(BuiltinDesc { name: "close_fd", arity: 1, category: BuiltinCategory::System, func: builtin_close_fd });
 }
 
 // ── JSON ────────────────────────────────────────────────
@@ -252,4 +279,208 @@ fn builtin_from_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
         Value::Float(f) => Ok(Value::Float(*f)),
         _ => Err(InterpError::new("from_int expects a number")),
     }
+}
+
+// ── JSON extended ───────────────────────────────────────
+
+fn builtin_json_get_element(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    match (&args[0], &args[1]) {
+        (Value::String(json_str), Value::Int(idx)) => {
+            match serde_json::from_str::<serde_json::Value>(json_str) {
+                Ok(json) => {
+                    match json.get(*idx as usize) {
+                        Some(v) => Ok(Value::Variant("Some".into(), vec![json_to_value(v)])),
+                        None => Ok(Value::Variant("None".into(), vec![])),
+                    }
+                }
+                Err(_) => Ok(Value::Variant("None".into(), vec![])),
+            }
+        }
+        _ => Err(InterpError::new("json_get_element expects (string, int)")),
+    }
+}
+
+fn builtin_json_has_key(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    match (&args[0], &args[1]) {
+        (Value::String(json_str), Value::String(key)) => {
+            match serde_json::from_str::<serde_json::Value>(json_str) {
+                Ok(json) => Ok(Value::Bool(json.get(key).is_some())),
+                Err(_) => Ok(Value::Bool(false)),
+            }
+        }
+        _ => Err(InterpError::new("json_has_key expects (string, string)")),
+    }
+}
+
+fn builtin_json_array_length(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    match &args[0] {
+        Value::String(json_str) => {
+            match serde_json::from_str::<serde_json::Value>(json_str) {
+                Ok(json) => {
+                    match json.as_array() {
+                        Some(arr) => Ok(Value::Int(arr.len() as i64)),
+                        None => Ok(Value::Int(0)),
+                    }
+                }
+                Err(_) => Ok(Value::Int(0)),
+            }
+        }
+        _ => Err(InterpError::new("json_array_length expects a string")),
+    }
+}
+
+// ── Regex extended ──────────────────────────────────────
+
+fn builtin_regex_find_all(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    match (&args[0], &args[1]) {
+        (Value::String(text), Value::String(pattern)) => {
+            let re = regex::Regex::new(pattern)
+                .map_err(|e| InterpError::new(format!("regex error: {}", e)))?;
+            let matches: Vec<Value> = re.find_iter(text)
+                .map(|m| Value::String(m.as_str().to_string()))
+                .collect();
+            Ok(Value::List(matches))
+        }
+        _ => Err(InterpError::new("regex_find_all expects (string, string)")),
+    }
+}
+
+// ── Misc value ops ──────────────────────────────────────
+
+fn builtin_eq(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    Ok(Value::Bool(crate::interp::values_equal(&args[0], &args[1])))
+}
+
+fn builtin_bind(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    // bind(value, fn) — apply fn to value (monadic bind).
+    // For now, just return the value.
+    Ok(args[0].clone())
+}
+
+fn builtin_inner(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    // inner/deref — unwrap a wrapper type.
+    match &args[0] {
+        Value::Variant(_, payload) => Ok(payload.first().cloned().unwrap_or(Value::Unit)),
+        Value::Newtype(_, inner) => Ok(*inner.clone()),
+        other => Ok(other.clone()),
+    }
+}
+
+fn builtin_fields(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    match &args[0] {
+        Value::Record(_, fields) => {
+            let keys: Vec<Value> = fields.keys().map(|k| Value::String(k.clone())).collect();
+            Ok(Value::List(keys))
+        }
+        _ => Ok(Value::List(vec![])),
+    }
+}
+
+fn builtin_type_variants(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    match &args[0] {
+        Value::Variant(name, _) => Ok(Value::List(vec![Value::String(name.clone())])),
+        _ => Ok(Value::List(vec![])),
+    }
+}
+
+fn builtin_assert_state(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    // assert_state(actual, expected) — assert that actual matches expected state.
+    if !crate::interp::values_equal(&args[0], &args[1]) {
+        return Err(InterpError::new(format!(
+            "state assertion failed: expected {}, got {}",
+            args[1], args[0]
+        )));
+    }
+    Ok(Value::Unit)
+}
+
+// ── C string ────────────────────────────────────────────
+
+fn builtin_str_to_c_str(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    // In the interpreter, C strings are just regular strings.
+    Ok(args[0].clone())
+}
+
+fn builtin_c_str_to_string(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    Ok(args[0].clone())
+}
+
+// ── Process ─────────────────────────────────────────────
+
+fn builtin_exec(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    if args.is_empty() {
+        return Err(InterpError::new("exec expects at least 1 argument (command)"));
+    }
+    let cmd = args[0].to_string();
+    let cmd_args: Vec<String> = args[1..].iter().map(|a| a.to_string()).collect();
+    match std::process::Command::new(&cmd).args(&cmd_args).output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let status = output.status.code().unwrap_or(-1);
+            Ok(Value::Tuple(vec![
+                Value::Int(status as i64),
+                Value::String(stdout),
+            ]))
+        }
+        Err(e) => Ok(Value::Tuple(vec![
+            Value::Int(-1),
+            Value::String(e.to_string()),
+        ])),
+    }
+}
+
+// ── FS extended ─────────────────────────────────────────
+
+fn builtin_file_stat(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    match &args[0] {
+        Value::String(path) => {
+            match std::fs::metadata(path) {
+                Ok(meta) => {
+                    let mut fields = std::collections::HashMap::new();
+                    fields.insert("size".to_string(), Value::Int(meta.len() as i64));
+                    fields.insert("is_dir".to_string(), Value::Bool(meta.is_dir()));
+                    fields.insert("is_file".to_string(), Value::Bool(meta.is_file()));
+                    Ok(Value::Record(None, fields))
+                }
+                Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
+            }
+        }
+        _ => Err(InterpError::new("file_stat expects a string path")),
+    }
+}
+
+fn builtin_read_file_bytes(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    match &args[0] {
+        Value::String(path) => {
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    let list: Vec<Value> = bytes.iter().map(|b| Value::Int(*b as i64)).collect();
+                    Ok(Value::Variant("Ok".into(), vec![Value::List(list)]))
+                }
+                Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
+            }
+        }
+        _ => Err(InterpError::new("read_file_bytes expects a string path")),
+    }
+}
+
+fn builtin_write_file_bytes(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    match (&args[0], &args[1]) {
+        (Value::String(path), Value::List(bytes)) => {
+            let data: Vec<u8> = bytes.iter().filter_map(|b| match b {
+                Value::Int(i) => Some(*i as u8),
+                _ => None,
+            }).collect();
+            match std::fs::write(path, &data) {
+                Ok(()) => Ok(Value::Variant("Ok".into(), vec![Value::Unit])),
+                Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
+            }
+        }
+        _ => Err(InterpError::new("write_file_bytes expects (string, list of ints)")),
+    }
+}
+
+fn builtin_close_fd(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+    // No-op in the interpreter.
+    Ok(Value::Unit)
 }
