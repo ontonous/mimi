@@ -187,18 +187,21 @@ impl<'a> BytecodeVM<'a> {
                 // ── Float arithmetic ───────────────────────────
                 Op::AddFloat { rd, ra, rb } => {
                     let (a, b) = self.get_float2(ra, rb)?;
-                    self.check_float(a + b, "+")?;
-                    self.set_reg(rd, Value::Float(a + b));
+                    let r = a + b;
+                    self.check_float(r, "+")?;
+                    self.set_reg(rd, Value::Float(r));
                 }
                 Op::SubFloat { rd, ra, rb } => {
                     let (a, b) = self.get_float2(ra, rb)?;
-                    self.check_float(a - b, "-")?;
-                    self.set_reg(rd, Value::Float(a - b));
+                    let r = a - b;
+                    self.check_float(r, "-")?;
+                    self.set_reg(rd, Value::Float(r));
                 }
                 Op::MulFloat { rd, ra, rb } => {
                     let (a, b) = self.get_float2(ra, rb)?;
-                    self.check_float(a * b, "*")?;
-                    self.set_reg(rd, Value::Float(a * b));
+                    let r = a * b;
+                    self.check_float(r, "*")?;
+                    self.set_reg(rd, Value::Float(r));
                 }
                 Op::DivFloat { rd, ra, rb } => {
                     let (a, b) = self.get_float2(ra, rb)?;
@@ -308,8 +311,8 @@ impl<'a> BytecodeVM<'a> {
                     self.set_reg(rd, Value::Int(r));
                 }
                 Op::BitNot { rd, ra } => {
-                    let v = self.get_reg(ra);
-                    self.set_reg(rd, Value::Bool(!crate::interp::is_truthy(v)));
+                    let a = self.get_int(ra)?;
+                    self.set_reg(rd, Value::Int(!a));
                 }
                 Op::Not { rd, ra } => {
                     let v = self.get_reg(ra);
@@ -417,7 +420,14 @@ impl<'a> BytecodeVM<'a> {
                     }
                 }
                 Op::ListGet { rd, ra, rb } => {
-                    let idx = self.get_int(rb)? as usize;
+                    let idx_raw = self.get_int(rb)?;
+                    if idx_raw < 0 {
+                        return Err(InterpError::new(format!(
+                            "negative index {} out of bounds",
+                            idx_raw
+                        )));
+                    }
+                    let idx = idx_raw as usize;
                     let list = self.get_reg(ra).clone();
                     match list {
                         Value::List(l) => {
@@ -440,7 +450,14 @@ impl<'a> BytecodeVM<'a> {
                     }
                 }
                 Op::ListSet { ra, rb, rc } => {
-                    let idx = self.get_int(rb)? as usize;
+                    let idx_raw = self.get_int(rb)?;
+                    if idx_raw < 0 {
+                        return Err(InterpError::new(format!(
+                            "negative index {} out of bounds",
+                            idx_raw
+                        )));
+                    }
+                    let idx = idx_raw as usize;
                     let val = self.get_reg(rc).clone();
                     let list = self.get_reg_mut(ra);
                     match list {
@@ -590,7 +607,7 @@ impl<'a> BytecodeVM<'a> {
                     .join(" ");
                 self.stdout.push_str(&s);
                 self.stdout.push('\n');
-                eprintln!("{}", s);
+                println!("{}", s);
                 Ok(Value::Unit)
             }
             "print" => {
@@ -600,7 +617,7 @@ impl<'a> BytecodeVM<'a> {
                     .collect::<Vec<_>>()
                     .join(" ");
                 self.stdout.push_str(&s);
-                eprint!("{}", s);
+                print!("{}", s);
                 Ok(Value::Unit)
             }
             "len" => {
