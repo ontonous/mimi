@@ -138,9 +138,16 @@ impl BytecodeCompiler {
         self.register_builtin("len");
         self.register_builtin("push");
         self.register_builtin("pop");
-        self.register_builtin("to_string");
+        self.register_builtin("range");
         self.register_builtin("abs");
+        self.register_builtin("to_int");
+        self.register_builtin("to_float");
+        self.register_builtin("to_string");
         self.register_builtin("str");
+        self.register_builtin("str_substring");
+        self.register_builtin("str_split");
+        self.register_builtin("str_join");
+        self.register_builtin("str_contains");
         self.register_builtin("int");
         self.register_builtin("float");
 
@@ -427,6 +434,19 @@ impl BytecodeCompiler {
             return Ok(rd);
         }
 
+        // String equality: == / != on strings emits generic Eq/Ne.
+        if matches!(op, BinOp::EqCmp | BinOp::NeCmp)
+            && (self.expr_is_string(fc, l) || self.expr_is_string(fc, r))
+        {
+            let instr = match op {
+                BinOp::EqCmp => Op::Eq { rd, ra, rb },
+                BinOp::NeCmp => Op::Ne { rd, ra, rb },
+                _ => unreachable!(),
+            };
+            fc.emit(instr);
+            return Ok(rd);
+        }
+
         if is_float {
             self.emit_float_binop(fc, op, rd, ra, rb)?;
         } else {
@@ -593,6 +613,24 @@ impl BytecodeCompiler {
         let rd = fc.proto.alloc_reg();
 
         if let Expr::Ident(name) = callee.unlocated() {
+            // Special case: push(var, elem) → ListPush (in-place mutation).
+            if name == "push" && args.len() == 2 {
+                if let Expr::Ident(var_name) = args[0].unlocated() {
+                    if let Some(var_reg) = fc.lookup_var(var_name) {
+                        let elem_reg = self.compile_expr(fc, &args[1])?;
+                        fc.emit(Op::ListPush {
+                            ra: var_reg,
+                            rb: elem_reg,
+                        });
+                        // push returns Unit (matches tree-walker semantics).
+                        let rd = fc.proto.alloc_reg();
+                        let unit_idx = fc.proto.add_const(ConstValue::Unit);
+                        fc.emit(Op::LoadConst { rd, idx: unit_idx });
+                        return Ok(rd);
+                    }
+                }
+            }
+
             // Check builtins first.
             if let Some(&bidx) = self.builtin_table.get(name.as_str()) {
                 fc.emit(Op::CallBuiltin {

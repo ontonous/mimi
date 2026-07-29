@@ -526,6 +526,108 @@ mod tests {
             Ok(30) // 10 outer × 3 inner = 30
         );
     }
+
+    // ═══ Phase 2a: Builtins ═══════════════════════════════════
+
+    /// push(list, elem) — in-place mutation via ListPush opcode.
+    #[test]
+    fn e2e_push() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let mut xs: [i32; 0] = []
+                     push(xs, 10)
+                     push(xs, 20)
+                     push(xs, 30)
+                     len(xs)
+                 }"),
+            Ok(3)
+        );
+    }
+
+    /// pop(list) — remove last element.
+    #[test]
+    fn e2e_pop() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let mut xs: [i32; 3] = [1, 2, 3]
+                     let last = pop(xs)
+                     last
+                 }"),
+            Ok(3)
+        );
+    }
+
+    /// range(start, end) — generate list.
+    #[test]
+    fn e2e_range() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let xs = range(0, 5)
+                     len(xs)
+                 }"),
+            Ok(5)
+        );
+    }
+
+    /// abs(x) — absolute value.
+    #[test]
+    fn e2e_abs() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     abs(-42)
+                 }"),
+            Ok(42)
+        );
+    }
+
+    /// to_int / to_float — type conversion.
+    #[test]
+    fn e2e_conversions() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let x = 3.7
+                     let y = to_int(x)
+                     let z = to_float(y)
+                     if z == 3.0 { 1 } else { 0 }
+                 }"),
+            Ok(1)
+        );
+    }
+
+    /// str_substring / str_split / str_join / str_contains.
+    #[test]
+    fn e2e_string_ops() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let s = \"hello world\"
+                     let sub = str_substring(s, 0, 5)
+                     if sub == \"hello\" { 1 } else { 0 }
+                 }"),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn e2e_str_split_join() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let parts = str_split(\"a,b,c\", \",\")
+                     let joined = str_join(parts, \"-\")
+                     if joined == \"a-b-c\" { 1 } else { 0 }
+                 }"),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn e2e_str_contains() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     if str_contains(\"hello\", \"ell\") { 1 } else { 0 }
+                 }"),
+            Ok(1)
+        );
+    }
 }
 
 #[cfg(test)]

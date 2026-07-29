@@ -642,12 +642,93 @@ impl<'a> BytecodeVM<'a> {
                 if args.len() != 2 {
                     return Err(InterpError::new("push expects 2 arguments"));
                 }
-                // push modifies the list in place — but our args are clones.
-                // For bytecode, we handle push via ListPush opcode instead.
-                // This fallback is for direct builtin calls.
-                Err(InterpError::new(
-                    "push: use ListPush opcode in bytecode (direct builtin call not supported)",
-                ))
+                match &args[0] {
+                    Value::List(l) => {
+                        let mut new_list = l.clone();
+                        new_list.push(args[1].clone());
+                        Ok(Value::List(new_list))
+                    }
+                    other => Err(InterpError::new(format!(
+                        "push: first argument must be a list, found {}",
+                        other
+                    ))),
+                }
+            }
+            "pop" => {
+                if args.len() != 1 {
+                    return Err(InterpError::new("pop expects 1 argument"));
+                }
+                match &args[0] {
+                    Value::List(l) => {
+                        let mut new_list = l.clone();
+                        new_list
+                            .pop()
+                            .ok_or_else(|| InterpError::new("pop from empty list"))
+                    }
+                    other => Err(InterpError::new(format!(
+                        "pop: argument must be a list, found {}",
+                        other
+                    ))),
+                }
+            }
+            "range" => {
+                if args.len() != 2 {
+                    return Err(InterpError::new("range expects 2 arguments"));
+                }
+                let start = match &args[0] {
+                    Value::Int(v) => *v,
+                    _ => return Err(InterpError::new("range start must be integer")),
+                };
+                let end = match &args[1] {
+                    Value::Int(v) => *v,
+                    _ => return Err(InterpError::new("range end must be integer")),
+                };
+                let list: Vec<Value> = (start..end).map(Value::Int).collect();
+                Ok(Value::List(list))
+            }
+            "abs" => {
+                if args.len() != 1 {
+                    return Err(InterpError::new("abs expects 1 argument"));
+                }
+                match &args[0] {
+                    Value::Int(v) => {
+                        let abs = v.checked_abs().ok_or_else(|| {
+                            InterpError::new("abs: overflow (i64::MIN has no positive equivalent)")
+                        })?;
+                        Ok(Value::Int(abs))
+                    }
+                    Value::Float(v) => Ok(Value::Float(v.abs())),
+                    _ => Err(InterpError::new("abs expects a number")),
+                }
+            }
+            "to_int" => {
+                if args.len() != 1 {
+                    return Err(InterpError::new("to_int expects 1 argument"));
+                }
+                match &args[0] {
+                    Value::Int(v) => Ok(Value::Int(*v)),
+                    Value::Float(v) => Ok(Value::Int(*v as i64)),
+                    Value::String(s) => s
+                        .parse::<i64>()
+                        .map(Value::Int)
+                        .map_err(|e| InterpError::new(format!("to_int parse error: {}", e))),
+                    Value::Bool(b) => Ok(Value::Int(*b as i64)),
+                    _ => Err(InterpError::new("to_int cannot convert this type")),
+                }
+            }
+            "to_float" => {
+                if args.len() != 1 {
+                    return Err(InterpError::new("to_float expects 1 argument"));
+                }
+                match &args[0] {
+                    Value::Float(v) => Ok(Value::Float(*v)),
+                    Value::Int(v) => Ok(Value::Float(*v as f64)),
+                    Value::String(s) => s
+                        .parse::<f64>()
+                        .map(Value::Float)
+                        .map_err(|e| InterpError::new(format!("to_float parse error: {}", e))),
+                    _ => Err(InterpError::new("to_float cannot convert this type")),
+                }
             }
             "to_string" => {
                 if args.len() != 1 {
@@ -661,7 +742,80 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Ok(Value::String(args[0].to_string()))
             }
-            "int" | "float" | "abs" => {
+            "str_substring" => {
+                if args.len() != 3 {
+                    return Err(InterpError::new(
+                        "str_substring expects 3 arguments (string, start, end)",
+                    ));
+                }
+                match (&args[0], &args[1], &args[2]) {
+                    (Value::String(s), Value::Int(start), Value::Int(end)) => {
+                        let chars: Vec<char> = s.chars().collect();
+                        let s_idx = (*start as usize).min(chars.len());
+                        let e_idx = (*end as usize).min(chars.len());
+                        if s_idx > e_idx {
+                            return Err(InterpError::new("str_substring: start > end"));
+                        }
+                        Ok(Value::String(chars[s_idx..e_idx].iter().collect()))
+                    }
+                    _ => Err(InterpError::new(
+                        "str_substring expects (string, int, int)",
+                    )),
+                }
+            }
+            "str_split" => {
+                if args.len() != 2 {
+                    return Err(InterpError::new(
+                        "str_split expects 2 arguments (string, delimiter)",
+                    ));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::String(delimiter)) => {
+                        let parts: Vec<Value> = s
+                            .split(delimiter.as_str())
+                            .map(|p| Value::String(p.to_string()))
+                            .collect();
+                        Ok(Value::List(parts))
+                    }
+                    _ => Err(InterpError::new("str_split expects (string, string)")),
+                }
+            }
+            "str_join" => {
+                if args.len() != 2 {
+                    return Err(InterpError::new(
+                        "str_join expects 2 arguments (list, separator)",
+                    ));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::List(parts), Value::String(sep)) => {
+                        let mut strings = Vec::new();
+                        for p in parts {
+                            match p {
+                                Value::String(s) => strings.push(s.clone()),
+                                _ => {
+                                    return Err(InterpError::new(
+                                        "str_join: list elements must be strings",
+                                    ))
+                                }
+                            }
+                        }
+                        Ok(Value::String(strings.join(sep)))
+                    }
+                    _ => Err(InterpError::new("str_join expects (list, string)")),
+                }
+            }
+            "str_contains" => {
+                if args.len() != 2 {
+                    return Err(InterpError::new("str_contains expects 2 arguments"));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::String(sub)) => {
+                        Ok(Value::Bool(s.contains(sub.as_str())))
+                    }
+                    _ => Err(InterpError::new("str_contains expects (string, string)")),
+                }
+            }
+            "int" | "float" => {
                 Err(InterpError::new(format!(
                     "bytecode builtin '{}' not yet implemented",
                     name
