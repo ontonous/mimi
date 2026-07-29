@@ -582,6 +582,56 @@ impl BytecodeCompiler {
                 Ok(rd)
             }
 
+            Expr::Turbofish(name, _type_args, args) => {
+                // Type arguments ignored at runtime — compile as regular call.
+                let callee = Expr::Ident(name.clone());
+                self.compile_call(fc, &callee, args)
+            }
+
+            Expr::Try(inner) => {
+                // ? operator: unwrap Ok/Some, or return Err/None early.
+                let r_inner = self.compile_expr(fc, inner)?;
+                let rd = fc.proto.alloc_reg();
+
+                // Check if it's Ok/Some (variant tag).
+                let r_is_ok = fc.proto.alloc_reg();
+                let ok_tag = fc.proto.add_const(ConstValue::Str("Ok".into()));
+                fc.emit(Op::IsVariant { rd: r_is_ok, ra: r_inner, tag: ok_tag });
+                let jmp_err = fc.emit(Op::JmpIfNot { offset: 0, ra: r_is_ok });
+
+                // Ok branch: unwrap.
+                fc.emit(Op::Unwrap { rd, ra: r_inner });
+                let jmp_end = fc.emit(Op::Jmp { offset: 0 });
+
+                // Err branch: return the error value.
+                fc.proto.patch_jump(jmp_err);
+                fc.emit(Op::Ret { ra: r_inner });
+
+                fc.proto.patch_jump(jmp_end);
+                Ok(rd)
+            }
+
+            Expr::Old(inner) => {
+                // old(expr) — in the interpreter, just evaluate the inner expression.
+                // Snapshot semantics are handled by the verifier.
+                self.compile_expr(fc, inner)
+            }
+
+            Expr::Spawn(inner) => {
+                // spawn(expr) — compile the inner expression as a closure and spawn.
+                // For now, compile as a regular call (concurrency runtime in Phase D).
+                let r = self.compile_expr(fc, inner)?;
+                let rd = fc.proto.alloc_reg();
+                fc.emit(Op::Mov { rd, rs: r });
+                Ok(rd)
+            }
+
+            Expr::Await(inner) => {
+                // await(expr) — for now, just evaluate the inner expression.
+                // Full async support in Phase D.
+                self.compile_expr(fc, inner)
+            }
+
             _ => Err(InterpError::new(format!(
                 "bytecode compiler: expression {:?} not yet supported",
                 std::mem::discriminant(expr.unlocated())
