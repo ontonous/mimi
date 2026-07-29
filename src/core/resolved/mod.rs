@@ -1058,8 +1058,42 @@ impl CheckedProgram {
         })
     }
 
-    /// Transitional body source for backends that do not yet consume typed body IR.
-    /// Declaration-only consumers must use the resolved catalogs instead.
+    /// Raw surface AST retained for backends that permanently require it.
+    ///
+    /// # Architecture (0.32.29, irreversible)
+    ///
+    /// This is NOT a transitional API. Three consumers permanently need the
+    /// surface AST because their architecture is defined over it:
+    ///
+    /// - **C1 codegen fifth pass** (`compile_file_inner`): compiles ineligible
+    ///   body classes (capturing lambdas, generics, async, extern ABI wrappers,
+    ///   view/mutate borrow params). The resolved native emitter handles the
+    ///   eligible subset; the fifth pass handles the permanent remainder.
+    ///   The skip guard (`count_basic_blocks != 0`) prevents double-emission.
+    ///
+    /// - **C2 interpreter** (`Interpreter::from_checked`): the surface-AST
+    ///   interpreter is the reference execution semantics for Flow, Actor,
+    ///   Session, and FFI programs. `ResolvedInterpreter` covers pure value
+    ///   programs; the surface AST interpreter covers the rest.
+    ///
+    /// - **C4 verifier Z3 path** (`flow_verify_file_with_hashes`): the Flow
+    ///   verifier encodes function bodies as Z3 constraints from the surface
+    ///   AST. The Resolved IR contract path (`verify_checked_contracts`) handles
+    ///   direct requires/ensures; the Z3 Flow path handles transition invariants.
+    ///
+    /// # Prohibition
+    ///
+    /// New code MUST NOT call this method. Declaration-level data (signatures,
+    /// Flow transitions, Actor/Session/Protocol catalogs, ownership, CFG) is
+    /// available through the typed accessor methods on `CheckedProgram`.
+    /// If you need body-level data, use `resolved_body()` / `callables()`.
+    pub(crate) fn raw_ast(&self) -> &File {
+        &self.legacy_file
+    }
+
+    /// Deprecated alias for `raw_ast()`. Will be removed in 0.33.
+    /// Use `raw_ast()` with an explicit comment explaining why the surface AST is needed.
+    #[deprecated(note = "use raw_ast() with an explicit justification comment")]
     pub(crate) fn legacy_body_file(&self) -> &File {
         &self.legacy_file
     }
