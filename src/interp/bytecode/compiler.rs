@@ -27,8 +27,20 @@ struct FuncCompiler {
     proto: FunctionProto,
     /// Variable name → register mapping (current scope chain).
     vars: Vec<HashMap<String, Reg>>,
+    /// Variable name → known type tag (for int/float dispatch without CheckedProgram).
+    var_types: HashMap<String, VarType>,
     /// Break jump sites for the current loop (patched on loop exit).
     break_jumps: Vec<Vec<usize>>,
+}
+
+/// Lightweight type tag for register dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VarType {
+    Int,
+    Float,
+    Bool,
+    String,
+    Unknown,
 }
 
 impl FuncCompiler {
@@ -36,6 +48,7 @@ impl FuncCompiler {
         FuncCompiler {
             proto: FunctionProto::new(name, param_count),
             vars: vec![HashMap::new()],
+            var_types: HashMap::new(),
             break_jumps: Vec::new(),
         }
     }
@@ -76,6 +89,16 @@ impl FuncCompiler {
 
     fn emit(&mut self, op: Op) -> usize {
         self.proto.emit(op)
+    }
+
+    /// Record the inferred type of a register for int/float dispatch.
+    fn set_reg_type(&mut self, name: &str, ty: VarType) {
+        self.var_types.insert(name.to_string(), ty);
+    }
+
+    /// Check if a register is known to hold a float.
+    fn reg_is_float(&self, name: &str) -> bool {
+        self.var_types.get(name) == Some(&VarType::Float)
     }
 }
 
@@ -186,7 +209,11 @@ impl BytecodeCompiler {
                 Stmt::Let { pat, init, .. } => {
                     if let Some(init_expr) = init {
                         let r = self.compile_expr(fc, init_expr)?;
-                        // Bind pattern variables to the result register.
+                        // Track variable type for int/float dispatch.
+                        if let PatternKind::Variable(name) = &pat.kind {
+                            let ty = self.infer_expr_type(fc, init_expr);
+                            fc.set_reg_type(name, ty);
+                        }
                         self.bind_pattern(fc, pat, r);
                     } else {
                         // let x; → Unit
@@ -373,7 +400,7 @@ impl BytecodeCompiler {
         // In the full compiler, we'd use CheckedProgram types. For now,
         // we emit a generic dispatch that checks at runtime.
         // OPTIMIZATION: with type info, emit AddInt vs AddFloat directly.
-        let is_float = self.expr_might_be_float(l) || self.expr_might_be_float(r);
+        let is_float = self.expr_is_float(fc, l) || self.expr_is_float(fc, r);
 
         if is_float {
             self.emit_float_binop(fc, op, rd, ra, rb)?;
@@ -498,7 +525,7 @@ impl BytecodeCompiler {
         match op {
             UnOp::Neg => {
                 // Determine int vs float.
-                if self.expr_might_be_float(e) {
+                if self.expr_is_float(fc, e) {
                     fc.emit(Op::NegFloat { rd, ra });
                 } else {
                     fc.emit(Op::NegInt { rd, ra });
@@ -744,6 +771,9 @@ impl BytecodeCompiler {
             Expr::Ident(name) => {
                 let r_val = self.compile_expr(fc, value)?;
                 let r_var = fc.get_or_bind(name);
+                // Track type for int/float dispatch.
+                let ty = self.infer_expr_type(fc, value);
+                fc.set_reg_type(name, ty);
                 if r_val != r_var {
                     fc.emit(Op::Mov { rd: r_var, rs: r_val });
                 }
@@ -834,16 +864,35 @@ impl BytecodeCompiler {
         }
     }
 
-    /// Heuristic: does this expression likely produce a float?
-    /// Used until CheckedProgram type info is integrated.
-    fn expr_might_be_float(&self, expr: &Expr) -> bool {
+    /// Determine if an expression produces a float value.
+    /// Uses literal detection + variable type tracking (until CheckedProgram integration).
+    fn expr_is_float(&self, fc: &FuncCompiler, expr: &Expr) -> bool {
         match expr.unlocated() {
             Expr::Literal(Lit::Float(_)) => true,
             Expr::Cast(_, ty) => matches!(ty.unlocated(), Type::Name(n, _) if n == "f64"),
+            Expr::Ident(name) => fc.reg_is_float(name),
             Expr::Binary(_, l, r) => {
-                self.expr_might_be_float(l) || self.expr_might_be_float(r)
+                self.expr_is_float(fc, l) || self.expr_is_float(fc, r)
             }
-            Expr::Unary(_, e) => self.expr_might_be_float(e),
+            Expr::Unary(_, e) => self.expr_is_float(fc, e),
+            Expr::If { then_, else_, .. } => {
+                // Check if the then block's last expr is float.
+                then_.last().map_or(false, |s| {
+                    if let Stmt::Expr(e) = s.unlocated() {
+                        self.expr_is_float(fc, e)
+                    } else {
+                        false
+                    }
+                }) || else_.as_ref().map_or(false, |b| {
+                    b.last().map_or(false, |s| {
+                        if let Stmt::Expr(e) = s.unlocated() {
+                            self.expr_is_float(fc, e)
+                        } else {
+                            false
+                        }
+                    })
+                })
+            }
             _ => false,
         }
     }
@@ -851,6 +900,40 @@ impl BytecodeCompiler {
     fn field_index(&self, _field: &str) -> u16 {
         // TODO: resolve from CheckedProgram type definitions.
         0
+    }
+
+    /// Infer the VarType of an expression (lightweight, for int/float dispatch).
+    fn infer_expr_type(&self, fc: &FuncCompiler, expr: &Expr) -> VarType {
+        match expr.unlocated() {
+            Expr::Literal(Lit::Int(_)) => VarType::Int,
+            Expr::Literal(Lit::Float(_)) => VarType::Float,
+            Expr::Literal(Lit::Bool(_)) => VarType::Bool,
+            Expr::Literal(Lit::String(_)) => VarType::String,
+            Expr::Cast(_, ty) => match ty.unlocated() {
+                Type::Name(n, _) if n == "f64" => VarType::Float,
+                Type::Name(n, _) if n == "i32" || n == "i64" => VarType::Int,
+                _ => VarType::Unknown,
+            },
+            Expr::Ident(name) => fc.var_types.get(name).copied().unwrap_or(VarType::Unknown),
+            Expr::Binary(op, l, r) => {
+                // Comparison operators produce Bool.
+                if matches!(op, BinOp::EqCmp | BinOp::NeCmp | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
+                    VarType::Bool
+                } else {
+                    let lt = self.infer_expr_type(fc, l);
+                    let rt = self.infer_expr_type(fc, r);
+                    if lt == VarType::Float || rt == VarType::Float {
+                        VarType::Float
+                    } else if lt == VarType::Int && rt == VarType::Int {
+                        VarType::Int
+                    } else {
+                        VarType::Unknown
+                    }
+                }
+            }
+            Expr::Unary(_, e) => self.infer_expr_type(fc, e),
+            _ => VarType::Unknown,
+        }
     }
 }
 
