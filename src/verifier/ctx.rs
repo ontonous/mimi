@@ -255,6 +255,59 @@ pub fn compute_resolved_ir_hash(program: &crate::core::CheckedProgram) -> String
     blake3::hash(repr.as_bytes()).to_hex().to_string()
 }
 
+/// Mock verification from CheckedProgram (Z3-unavailable fallback).
+/// Replaces the AST-based `mock_verify_file` with a CheckedProgram-based path.
+/// Used by verify_checked when Z3 is unavailable (C4 partial, 0.32.27+).
+pub(crate) fn mock_verify_checked(program: &crate::core::CheckedProgram) -> Vec<VerificationResult> {
+    let mut results = Vec::new();
+    // Functions and callables with contracts.
+    for (node_id, callable) in program.callables() {
+        let has_contracts = !callable.contracts.is_empty()
+            || callable.body.root.statements.iter().any(|s| {
+                matches!(s.kind, crate::core::ir::ResolvedStmtKind::Math(_))
+            });
+        let func_name = program
+            .functions()
+            .values()
+            .find(|f| f.node_id == *node_id)
+            .map(|f| f.qualified_name.clone())
+            .unwrap_or_else(|| format!("{:?}", node_id));
+        results.push(VerificationResult {
+            func_name,
+            status: VerifStatus::InfrastructureError,
+            message: if has_contracts {
+                "Z3 solver not available"
+            } else {
+                "no contracts"
+            }
+            .into(),
+            diagnostic: None,
+            duration_us: 0,
+            constraint_count: 0,
+            artifact: None,
+            trusted_subset_domain: None,
+        });
+    }
+    // Extern blocks with contracts (not included in callables).
+    for block in program.extern_blocks().values() {
+        for signature in &block.signatures {
+            if signature.requires.is_some() || signature.ensures.is_some() {
+                results.push(VerificationResult {
+                    func_name: format!("extern {}", signature.name),
+                    status: VerifStatus::InfrastructureError,
+                    message: "Z3 solver not available".into(),
+                    diagnostic: None,
+                    duration_us: 0,
+                    constraint_count: 0,
+                    artifact: None,
+                    trusted_subset_domain: None,
+                });
+            }
+        }
+    }
+    results
+}
+
 /// Normalize a VIR string for semantic hashing:
 /// - Strip span annotations (line:col references)
 /// - Canonicalize variable names (%0, %1, %2, ...)
@@ -1351,7 +1404,8 @@ impl Verifier {
         self.ctx.checked_transitions_by_event = transitions_by_event;
         // P1-24: compute Resolved IR hash from CheckedProgram signatures.
         self.ctx.resolved_ir_hash = compute_resolved_ir_hash(program);
-        self.verify_file(program.legacy_body_file())
+        // v0.32.27: use Resolved IR path instead of AST-based verify_file.
+        self.verify_checked_contracts(program)
     }
 
     pub(crate) fn has_checked_function(&self, name: &str) -> bool {
@@ -1727,6 +1781,59 @@ impl Verifier {
     pub(crate) fn verify_file(&mut self, file: &File) -> Vec<VerificationResult> {
         let mut results = Vec::new();
         VerifierCtx::verify_items(&mut self.ctx, &mut self.session, &file.items, &mut results);
+        results
+    }
+
+    /// 0.32.27: Verify contracts from Resolved IR (CheckedProgram.callables).
+    ///
+    /// Replaces the AST-based `verify_file` path for function contracts.
+    /// Iterates `program.callables()` and uses `verify_contracts_from_resolved`
+    /// from `resolved_expr.rs` to encode requires/ensures/math as Z3 constraints.
+    ///
+    /// Does NOT handle extern block contracts (those still use the AST path
+    /// through `verify_ffi_checked` / `flow_verify_ffi_call_sites_with_externs`).
+    pub(crate) fn verify_checked_contracts(
+        &mut self,
+        program: &crate::core::CheckedProgram,
+    ) -> Vec<VerificationResult> {
+        let mut results = Vec::new();
+        for (node_id, callable) in program.callables() {
+            if callable.contracts.is_empty() && !crate::verifier::resolved_expr::has_math_obligations(callable)
+            {
+                continue;
+            }
+            let func_name = program
+                .functions()
+                .values()
+                .find(|f| f.node_id == *node_id)
+                .map(|f| f.qualified_name.clone())
+                .unwrap_or_else(|| format!("{:?}", node_id));
+
+            let start = std::time::Instant::now();
+            let status = crate::verifier::resolved_expr::verify_contracts_from_resolved(
+                callable,
+                program.resolved_types(),
+                &mut self.session,
+            );
+            let duration_us = start.elapsed().as_micros() as u64;
+
+            let message = match &status {
+                Some(s) => format!("resolved IR verification: {:?}", s),
+                None => continue,
+            };
+            let constraint_count = if status.is_some() { 1 } else { 0 };
+
+            results.push(VerificationResult {
+                func_name,
+                status: status.unwrap_or(VerifStatus::NoObligations),
+                message,
+                diagnostic: None,
+                duration_us,
+                constraint_count,
+                artifact: None,
+                trusted_subset_domain: None,
+            });
+        }
         results
     }
 

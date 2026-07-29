@@ -23,6 +23,7 @@ use crate::core::ir::{
     ResolvedBinaryOp, ResolvedBlock, ResolvedBody, ResolvedExpr, ResolvedExprKind, ResolvedLiteral,
     ResolvedPlace, ResolvedUnaryOp, ResolvedValueProjection,
 };
+use crate::ast::{Lit, BinOp, UnOp};
 use crate::verifier::ctx::Z3VarMap;
 use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 
@@ -397,22 +398,31 @@ fn create_parameter_vars(
     }
 }
 
+/// Check if a callable has math obligations in its body statements.
+pub(crate) fn has_math_obligations(callable: &crate::core::ir::ResolvedCallable) -> bool {
+    callable
+        .body
+        .root
+        .statements
+        .iter()
+        .any(|stmt| matches!(stmt.kind, crate::core::ir::ResolvedStmtKind::Math(_)))
+}
+
 /// Verify contracts from Resolved IR (ResolvedCallable).
 ///
 /// This is the Resolved IR parallel of `verify_func()` (func.rs).
 /// It extracts contracts from `ResolvedCallable.contracts`, creates Z3
 /// variables from `ResolvedBody.parameters`, and checks validity.
 ///
-/// # Limitations (vs AST path)
-/// - No let-substitution (body return encoding deferred)
-/// - No call-site requires checking (deferred)
-/// - No math obligation checking (deferred)
-/// - No invariant checking (deferred)
-/// - No callee ensures propagation (deferred)
-///
-/// These limitations mean the Resolved IR path currently handles
-/// simple requires/ensures contracts on pure functions. Complex
-/// contracts still use the AST path.
+/// # Current coverage (vs AST path)
+/// - Requires/ensures: ✅ (int/bool/real)
+/// - Math obligations: ✅ (proven from preconditions before ensures)
+/// - old() expressions: ✅
+/// - Field projections: ✅
+/// - Let-substitution: ❌ (deferred)
+/// - Call-site requires checking: ❌ (deferred)
+/// - Invariant checking: ❌ (deferred)
+/// - Callee ensures propagation: ❌ (deferred)
 ///
 /// # Soundness
 /// If the body return expression cannot be encoded, `result` is left
@@ -422,8 +432,6 @@ fn create_parameter_vars(
 /// Similarly, any contract encoding failure causes an immediate
 /// `NotInTrustedSubset` return, regardless of whether a violation
 /// was found (the violation could be an artifact of missing constraints).
-// Integration into verify_func() is pending; currently used by tests only.
-#[allow(dead_code)]
 pub(crate) fn verify_contracts_from_resolved(
     callable: &crate::core::ir::ResolvedCallable,
     types: &crate::core::ir::ResolvedTypeTable,
@@ -510,7 +518,10 @@ pub(crate) fn verify_contracts_from_resolved(
         }
     }
 
-    if requires.is_empty() && ensures.is_empty() {
+    let has_math = body.root.statements.iter().any(|stmt| {
+        matches!(stmt.kind, crate::core::ir::ResolvedStmtKind::Math(_))
+    });
+    if requires.is_empty() && ensures.is_empty() && !has_math {
         return None; // No contracts to verify
     }
 
@@ -521,6 +532,35 @@ pub(crate) fn verify_contracts_from_resolved(
             session.solver.assert(z3_bool);
         } else {
             encoding_failures += 1;
+        }
+    }
+
+    // 5b. Check math obligations (proven from preconditions before body encoding).
+    for stmt in &body.root.statements {
+        if let crate::core::ir::ResolvedStmtKind::Math(exprs) = &stmt.kind {
+            for math_expr in exprs {
+                match resolved_to_z3_bool(math_expr, body, &mut vars) {
+                    Some(z3_bool) => {
+                        let (result, _model) = session.check_scope(z3_bool.not());
+                        match result {
+                            SatResult::Unsat => {
+                                // Math is implied by preconditions — assert it for ensures.
+                                session.solver.assert(z3_bool);
+                            }
+                            SatResult::Sat => {
+                                // Math NOT implied by preconditions → Disproven.
+                                return Some(crate::verifier::ctx::VerifStatus::Disproven);
+                            }
+                            SatResult::Unknown => {
+                                return Some(crate::verifier::ctx::VerifStatus::SolverUnknown);
+                            }
+                        }
+                    }
+                    None => {
+                        encoding_failures += 1;
+                    }
+                }
+            }
         }
     }
 
@@ -557,6 +597,14 @@ pub(crate) fn verify_contracts_from_resolved(
 
     // 7. Check each ensures independently
     if ensures.is_empty() {
+        // If we had math obligations that were all proven, this is a success,
+        // not NoObligations — the math was a verification condition.
+        if encoding_failures > 0 {
+            return Some(crate::verifier::ctx::VerifStatus::NotInTrustedSubset);
+        }
+        if has_math {
+            return Some(crate::verifier::ctx::VerifStatus::Proven);
+        }
         return Some(crate::verifier::ctx::VerifStatus::NoObligations);
     }
 
@@ -598,6 +646,142 @@ pub(crate) fn verify_contracts_from_resolved(
         Some(crate::verifier::ctx::VerifStatus::SolverUnknown)
     } else {
         Some(crate::verifier::ctx::VerifStatus::Proven)
+    }
+}
+
+/// Convert a ResolvedExpr to AST Expr for a limited subset used by FFI call
+/// site argument substitution. Returns None for unsupported expression kinds.
+///
+/// Supported: Int/Float/Bool/String literals, Load (identifier), Binary, Unary,
+/// Call (nested), Tuple, Old, Project (field/index/tuple/deref access), Cast.
+/// Used by the CheckedProgram-based FFI call site verification (C4 migration).
+#[allow(dead_code)]
+pub(crate) fn resolved_expr_to_ast_ffi_arg(
+    expr: &ResolvedExpr,
+    body: &ResolvedBody,
+) -> Option<crate::ast::Expr> {
+    use crate::ast::Expr;
+    let span = crate::span::Span::UNKNOWN;
+    let meta = crate::ast::AstNodeMeta::inherited(
+        span,
+        crate::ast::AstOrigin::Desugared("resolved_expr_to_ast"),
+    );
+    match &expr.kind {
+        ResolvedExprKind::Literal(lit) => {
+            let ast_lit = match lit {
+                ResolvedLiteral::Int(n) => Lit::Int(*n),
+                ResolvedLiteral::FloatBits(bits) => Lit::Float(f64::from_bits(*bits)),
+                ResolvedLiteral::Bool(b) => Lit::Bool(*b),
+                ResolvedLiteral::String(s) => Lit::String(s.clone()),
+                ResolvedLiteral::Unit => return None,
+            };
+            Some(Expr::Literal(ast_lit).with_meta(meta))
+        }
+        ResolvedExprKind::Load(place) => {
+            let name = place_name(place, body)?;
+            Some(Expr::Ident(name).with_meta(meta))
+        }
+        ResolvedExprKind::Binary { op, left, right } => {
+            let l = resolved_expr_to_ast_ffi_arg(left, body)?;
+            let r = resolved_expr_to_ast_ffi_arg(right, body)?;
+            let bin_op = match op {
+                ResolvedBinaryOp::Add => BinOp::Add,
+                ResolvedBinaryOp::Subtract => BinOp::Sub,
+                ResolvedBinaryOp::Multiply => BinOp::Mul,
+                ResolvedBinaryOp::Divide => BinOp::Div,
+                ResolvedBinaryOp::Remainder => BinOp::Mod,
+                ResolvedBinaryOp::Power => BinOp::Pow,
+                ResolvedBinaryOp::Equal => BinOp::EqCmp,
+                ResolvedBinaryOp::NotEqual => BinOp::NeCmp,
+                ResolvedBinaryOp::Less => BinOp::Lt,
+                ResolvedBinaryOp::Greater => BinOp::Gt,
+                ResolvedBinaryOp::LessEqual => BinOp::Le,
+                ResolvedBinaryOp::GreaterEqual => BinOp::Ge,
+                ResolvedBinaryOp::LogicalAnd => BinOp::And,
+                ResolvedBinaryOp::LogicalOr => BinOp::Or,
+                ResolvedBinaryOp::BitAnd => BinOp::BitAnd,
+                ResolvedBinaryOp::BitOr => BinOp::BitOr,
+                ResolvedBinaryOp::BitXor => BinOp::BitXor,
+                ResolvedBinaryOp::ShiftLeft => BinOp::Shl,
+                ResolvedBinaryOp::ShiftRight => BinOp::Shr,
+            };
+            Some(Expr::Binary(bin_op, Box::new(l), Box::new(r)).with_meta(meta))
+        }
+        ResolvedExprKind::Unary { op, operand } => {
+            let inner = resolved_expr_to_ast_ffi_arg(operand, body)?;
+            let un_op = match op {
+                ResolvedUnaryOp::Negate => UnOp::Neg,
+                ResolvedUnaryOp::Not => UnOp::Not,
+                ResolvedUnaryOp::BorrowShared => UnOp::Ref,
+                ResolvedUnaryOp::BorrowMutable => UnOp::RefMut,
+                ResolvedUnaryOp::Dereference => UnOp::Deref,
+            };
+            Some(Expr::Unary(un_op, Box::new(inner)).with_meta(meta))
+        }
+        ResolvedExprKind::Call(call) => {
+            // ResolvedCall stores callee as ResolvedCallee (not Expr).
+            // For AST conversion, represent the callee as an identifier string.
+            use crate::core::ir::ResolvedCallee;
+            let callee_name = match &call.callee {
+                ResolvedCallee::Function(id)
+                | ResolvedCallee::Constructor(id)
+                | ResolvedCallee::Extern(id) => id.0.clone(),
+                ResolvedCallee::Builtin(id) => id.as_str().to_string(),
+                ResolvedCallee::LocalClosure(id) => id.0 .0.clone(),
+                ResolvedCallee::ProtocolMethod { method, .. }
+                | ResolvedCallee::ActorMethod { method, .. } => method.as_str().to_string(),
+                ResolvedCallee::Transition(id) => {
+                    format!("{}::{}::{}", id.flow.0, id.event, id.source.name)
+                }
+            };
+            let callee = Expr::Ident(callee_name).with_meta(meta);
+            let args: Vec<_> = call
+                .arguments
+                .iter()
+                .filter_map(|a| resolved_expr_to_ast_ffi_arg(&a.value, body))
+                .collect();
+            if args.len() != call.arguments.len() {
+                return None;
+            }
+            Some(Expr::Call(Box::new(callee), args).with_meta(meta))
+        }
+        ResolvedExprKind::Tuple(items) => {
+            let args: Vec<_> = items
+                .iter()
+                .filter_map(|i| resolved_expr_to_ast_ffi_arg(i, body))
+                .collect();
+            if args.len() != items.len() {
+                return None;
+            }
+            Some(Expr::Tuple(args).with_meta(meta))
+        }
+        ResolvedExprKind::Old(inner) => {
+            let inner = resolved_expr_to_ast_ffi_arg(inner, body)?;
+            Some(Expr::Old(Box::new(inner)).with_meta(meta))
+        }
+        ResolvedExprKind::Project { value, projection } => {
+            let obj = resolved_expr_to_ast_ffi_arg(value, body)?;
+            match projection {
+                ResolvedValueProjection::Field(name) => {
+                    Some(Expr::Field(Box::new(obj), name.0.clone()).with_meta(meta))
+                }
+                ResolvedValueProjection::Index(idx) => {
+                    let idx_expr = resolved_expr_to_ast_ffi_arg(idx, body)?;
+                    Some(Expr::Index(Box::new(obj), Box::new(idx_expr)).with_meta(meta))
+                }
+                ResolvedValueProjection::Tuple(idx) => {
+                    let idx_lit = Expr::Literal(Lit::Int(*idx as i64)).with_meta(meta);
+                    Some(Expr::Index(Box::new(obj), Box::new(idx_lit)).with_meta(meta))
+                }
+                ResolvedValueProjection::Dereference => {
+                    Some(Expr::Unary(UnOp::Deref, Box::new(obj)).with_meta(meta))
+                }
+            }
+        }
+        ResolvedExprKind::Cast { value, conversion: _ } => {
+            resolved_expr_to_ast_ffi_arg(value, body)
+        }
+        _ => None,
     }
 }
 
