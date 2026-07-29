@@ -135,6 +135,7 @@ impl BytecodeCompiler {
         // Register builtins.
         self.register_builtin("println");
         self.register_builtin("print");
+        self.register_builtin("print_err");
         self.register_builtin("len");
         self.register_builtin("push");
         self.register_builtin("pop");
@@ -148,8 +149,16 @@ impl BytecodeCompiler {
         self.register_builtin("str_split");
         self.register_builtin("str_join");
         self.register_builtin("str_contains");
+        self.register_builtin("str_parse_int");
+        self.register_builtin("str_parse_float");
         self.register_builtin("int");
         self.register_builtin("float");
+        self.register_builtin("exit");
+        self.register_builtin("input_line");
+        self.register_builtin("input_int");
+        self.register_builtin("map_list");
+        self.register_builtin("filter_list");
+        self.register_builtin("reduce_list");
 
         // Pass 2: compile each function body.
         for item in &file.items {

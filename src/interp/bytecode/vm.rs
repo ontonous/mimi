@@ -809,6 +809,169 @@ impl<'a> BytecodeVM<'a> {
         }
     }
 
+    // ── Closure call helper ──────────────────────────────────
+
+    /// Call a closure synchronously and return the result.
+    /// This is used by higher-order builtins like map_list/filter_list/reduce_list.
+    fn call_closure(&mut self, closure: &Value, args: &[Value]) -> Result<Value, InterpError> {
+        match closure {
+            Value::BytecodeClosure { proto: proto_idx, captured } => {
+                // Push a new frame for the closure.
+                self.push_frame(*proto_idx, args, None)?;
+
+                // Bind captured variables in the new frame.
+                let target_proto = &self.program.functions[*proto_idx as usize];
+                let param_count = target_proto.param_count as usize;
+                for (i, name) in target_proto.capture_names.iter().enumerate() {
+                    if let Some(value) = captured.get(name) {
+                        let reg = param_count + i;
+                        if let Some(frame) = self.stack.last_mut() {
+                            if reg < frame.regs.len() {
+                                frame.regs[reg] = value.clone();
+                            }
+                        }
+                    }
+                }
+
+                // Execute until the frame returns.
+                // We need to run the exec_loop but stop when our frame pops.
+                let target_depth = self.depth;
+                loop {
+                    let frame = self.stack.last().unwrap();
+                    let proto = &self.program.functions[frame.proto_idx as usize];
+                    if frame.pc >= proto.code.len() {
+                        // Implicit return Unit.
+                        self.stack.pop();
+                        self.depth -= 1;
+                        return Ok(Value::Unit);
+                    }
+                    let op = proto.code[frame.pc].clone();
+                    self.stack.last_mut().unwrap().pc += 1;
+
+                    match op {
+                        Op::Ret { ra } => {
+                            let v = self.get_reg(ra).clone();
+                            self.stack.pop();
+                            self.depth -= 1;
+                            if self.depth < target_depth {
+                                return Ok(v);
+                            }
+                            // Continue executing outer frames.
+                        }
+                        Op::RetUnit => {
+                            self.stack.pop();
+                            self.depth -= 1;
+                            if self.depth < target_depth {
+                                return Ok(Value::Unit);
+                            }
+                        }
+                        _ => {
+                            // Execute the opcode normally.
+                            // We need to handle this recursively or use a different approach.
+                            // For simplicity, let's just execute the opcode inline.
+                            self.exec_op(&op, proto)?;
+                        }
+                    }
+                }
+            }
+            _ => Err(InterpError::new("call_closure: expected BytecodeClosure")),
+        }
+    }
+
+    /// Execute a single opcode (used by call_closure).
+    fn exec_op(&mut self, op: &Op, proto: &FunctionProto) -> Result<(), InterpError> {
+        // This is a simplified version that handles the most common opcodes.
+        // For a full implementation, we'd refactor exec_loop to use this.
+        match op {
+            Op::Mov { rd, rs } => {
+                let v = self.get_reg(*rs).clone();
+                self.set_reg(*rd, v);
+            }
+            Op::LoadConst { rd, idx } => {
+                let v = self.load_const(proto, *idx);
+                self.set_reg(*rd, v);
+            }
+            Op::LoadUnit { rd } => {
+                self.set_reg(*rd, Value::Unit);
+            }
+            Op::AddInt { rd, ra, rb } => {
+                let (a, b) = self.get_int2(*ra, *rb)?;
+                let result = a.checked_add(b).ok_or_else(|| {
+                    InterpError::new("integer overflow in addition")
+                })?;
+                self.set_reg(*rd, Value::Int(result));
+            }
+            Op::SubInt { rd, ra, rb } => {
+                let (a, b) = self.get_int2(*ra, *rb)?;
+                let result = a.checked_sub(b).ok_or_else(|| {
+                    InterpError::new("integer overflow in subtraction")
+                })?;
+                self.set_reg(*rd, Value::Int(result));
+            }
+            Op::MulInt { rd, ra, rb } => {
+                let (a, b) = self.get_int2(*ra, *rb)?;
+                let result = a.checked_mul(b).ok_or_else(|| {
+                    InterpError::new("integer overflow in multiplication")
+                })?;
+                self.set_reg(*rd, Value::Int(result));
+            }
+            Op::DivInt { rd, ra, rb } => {
+                let (a, b) = self.get_int2(*ra, *rb)?;
+                if b == 0 {
+                    return Err(InterpError::new("division by zero"));
+                }
+                let result = a.checked_div(b).ok_or_else(|| {
+                    InterpError::new("integer overflow in division")
+                })?;
+                self.set_reg(*rd, Value::Int(result));
+            }
+            Op::LtInt { rd, ra, rb } => {
+                let (a, b) = self.get_int2(*ra, *rb)?;
+                self.set_reg(*rd, Value::Bool(a < b));
+            }
+            Op::GtInt { rd, ra, rb } => {
+                let (a, b) = self.get_int2(*ra, *rb)?;
+                self.set_reg(*rd, Value::Bool(a > b));
+            }
+            Op::EqInt { rd, ra, rb } => {
+                let (a, b) = self.get_int2(*ra, *rb)?;
+                self.set_reg(*rd, Value::Bool(a == b));
+            }
+            Op::Jmp { offset } => {
+                let frame = self.stack.last_mut().unwrap();
+                frame.pc = (frame.pc as i32 + *offset) as usize;
+            }
+            Op::JmpIf { offset, ra } => {
+                let v = self.get_reg(*ra).clone();
+                if crate::interp::is_truthy(&v) {
+                    let frame = self.stack.last_mut().unwrap();
+                    frame.pc = (frame.pc as i32 + *offset) as usize;
+                }
+            }
+            Op::JmpIfNot { offset, ra } => {
+                let v = self.get_reg(*ra).clone();
+                if !crate::interp::is_truthy(&v) {
+                    let frame = self.stack.last_mut().unwrap();
+                    frame.pc = (frame.pc as i32 + *offset) as usize;
+                }
+            }
+            Op::CallBuiltin { rd, builtin, args_base, argc } => {
+                let args: Vec<Value> = (0..*argc)
+                    .map(|i| self.get_reg(*args_base + i).clone())
+                    .collect();
+                let result = self.call_builtin(*builtin, &args)?;
+                self.set_reg(*rd, result);
+            }
+            _ => {
+                return Err(InterpError::new(format!(
+                    "call_closure: opcode {:?} not supported in nested execution",
+                    op
+                )));
+            }
+        }
+        Ok(())
+    }
+
     // ── Builtin dispatch ─────────────────────────────────────
 
     fn call_builtin(
@@ -960,6 +1123,124 @@ impl<'a> BytecodeVM<'a> {
                     return Err(InterpError::new("str expects 1 argument"));
                 }
                 Ok(Value::String(args[0].to_string()))
+            }
+            "exit" => {
+                let code = if args.is_empty() {
+                    0
+                } else {
+                    match &args[0] {
+                        Value::Int(n) => *n as i32,
+                        _ => 1,
+                    }
+                };
+                std::process::exit(code);
+            }
+            "print_err" => {
+                for arg in args.iter() {
+                    eprint!("{}", arg);
+                }
+                eprintln!();
+                Ok(Value::Unit)
+            }
+            "str_parse_int" => {
+                if args.len() != 1 {
+                    return Err(InterpError::new("str_parse_int expects 1 argument"));
+                }
+                match &args[0] {
+                    Value::String(s) => match s.parse::<i64>() {
+                        Ok(n) => Ok(Value::Int(n)),
+                        Err(_) => Ok(Value::Int(0)),
+                    },
+                    _ => Err(InterpError::new("str_parse_int expects a string")),
+                }
+            }
+            "str_parse_float" => {
+                if args.len() != 1 {
+                    return Err(InterpError::new("str_parse_float expects 1 argument"));
+                }
+                match &args[0] {
+                    Value::String(s) => match s.parse::<f64>() {
+                        Ok(n) => Ok(Value::Float(n)),
+                        Err(_) => Ok(Value::Float(0.0)),
+                    },
+                    _ => Err(InterpError::new("str_parse_float expects a string")),
+                }
+            }
+            "input_line" => {
+                let mut input = String::new();
+                std::io::stdin()
+                    .read_line(&mut input)
+                    .map_err(|e| InterpError::new(format!("input_line error: {}", e)))?;
+                Ok(Value::String(input.trim_end().to_string()))
+            }
+            "input_int" => {
+                let mut input = String::new();
+                std::io::stdin()
+                    .read_line(&mut input)
+                    .map_err(|e| InterpError::new(format!("input_int error: {}", e)))?;
+                match input.trim().parse::<i64>() {
+                    Ok(n) => Ok(Value::Int(n)),
+                    Err(_) => Ok(Value::Int(0)),
+                }
+            }
+            "map_list" => {
+                if args.len() != 2 {
+                    return Err(InterpError::new("map_list expects 2 arguments (list, fn)"));
+                }
+                let list = match &args[0] {
+                    Value::List(l) => l.clone(),
+                    _ => return Err(InterpError::new("map_list: first argument must be a list")),
+                };
+                let closure = match &args[1] {
+                    Value::BytecodeClosure { .. } => args[1].clone(),
+                    _ => return Err(InterpError::new("map_list: second argument must be a closure")),
+                };
+                let mut result = Vec::with_capacity(list.len());
+                for elem in list {
+                    // Call the closure with the element.
+                    let ret = self.call_closure(&closure, &[elem])?;
+                    result.push(ret);
+                }
+                Ok(Value::List(result))
+            }
+            "filter_list" => {
+                if args.len() != 2 {
+                    return Err(InterpError::new("filter_list expects 2 arguments (list, pred)"));
+                }
+                let list = match &args[0] {
+                    Value::List(l) => l.clone(),
+                    _ => return Err(InterpError::new("filter_list: first argument must be a list")),
+                };
+                let closure = match &args[1] {
+                    Value::BytecodeClosure { .. } => args[1].clone(),
+                    _ => return Err(InterpError::new("filter_list: second argument must be a closure")),
+                };
+                let mut result = Vec::new();
+                for elem in list {
+                    let ret = self.call_closure(&closure, &[elem.clone()])?;
+                    if crate::interp::is_truthy(&ret) {
+                        result.push(elem);
+                    }
+                }
+                Ok(Value::List(result))
+            }
+            "reduce_list" => {
+                if args.len() != 3 {
+                    return Err(InterpError::new("reduce_list expects 3 arguments (list, fn, init)"));
+                }
+                let list = match &args[0] {
+                    Value::List(l) => l.clone(),
+                    _ => return Err(InterpError::new("reduce_list: first argument must be a list")),
+                };
+                let closure = match &args[1] {
+                    Value::BytecodeClosure { .. } => args[1].clone(),
+                    _ => return Err(InterpError::new("reduce_list: second argument must be a closure")),
+                };
+                let mut acc = args[2].clone();
+                for elem in list {
+                    acc = self.call_closure(&closure, &[acc, elem])?;
+                }
+                Ok(acc)
             }
             "str_substring" => {
                 if args.len() != 3 {

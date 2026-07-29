@@ -119,8 +119,9 @@ fn run_once(
     };
 
     // Auto-merge standard library prelude (identity, clamp, is_even, etc.)
-    // Skip for bytecode mode (experimental) — prelude uses closures with captures
-    // which the bytecode VM doesn't support yet.
+    // Skip for bytecode mode — stdlib uses features not yet supported
+    // (method calls, generics, traits). Higher-order functions are
+    // implemented as VM builtins instead.
     if !bytecode {
         loader::merge_prelude_into(&mut merged_file);
     }
