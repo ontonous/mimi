@@ -715,6 +715,20 @@ mod tests {
             Ok(30)
         );
     }
+
+    // ═══ Phase 2c: Closures ═══════════════════════════════════
+
+    /// Lambda without captures.
+    #[test]
+    fn e2e_lambda_simple() {
+        assert_eq!(
+            e2e("func main() -> i32 {
+                     let f = fn(x: i32) -> i32 { x + 1 }
+                     f(41)
+                 }"),
+            Ok(42)
+        );
+    }
 }
 
 #[cfg(test)]

@@ -276,6 +276,11 @@ pub enum Value {
         body: Block,
         captured: HashMap<String, Value>,
     },
+    /// Bytecode closure: stores function proto index + captured environment.
+    BytecodeClosure {
+        proto: u32,
+        captured: HashMap<String, Value>,
+    },
     Shared(Arc<RwLock<Value>>),
     LocalShared(LocalSharedInner),
     WeakShared(ArcWeak<RwLock<Value>>),
@@ -373,6 +378,10 @@ impl Clone for Value {
                 params: params.clone(),
                 ret: ret.clone(),
                 body: body.clone(),
+                captured: captured.clone(),
+            },
+            Value::BytecodeClosure { proto, captured } => Value::BytecodeClosure {
+                proto: *proto,
                 captured: captured.clone(),
             },
             Value::Shared(v) => Value::Shared(Arc::clone(v)),
@@ -1835,6 +1844,7 @@ impl std::fmt::Display for Value {
             Value::Newtype(name, v) => write!(f, "{}({})", name, v),
             Value::Actor(_) => write!(f, "Actor(...)"),
             Value::Closure { .. } => write!(f, "Closure(...)"),
+            Value::BytecodeClosure { proto, .. } => write!(f, "BytecodeClosure(proto={})", proto),
             Value::Shared(arc) => {
                 let v = arc.read().map_err(|_| std::fmt::Error)?;
                 write!(f, "shared({})", v)
@@ -2229,6 +2239,7 @@ pub(crate) fn type_name(val: &Value) -> &'static str {
         Value::Newtype(_, _) => "newtype",
         Value::Type(_) => "type",
         Value::Closure { .. } => "closure",
+        Value::BytecodeClosure { .. } => "closure",
         Value::QuoteAst(_) => "AST",
         Value::Shared(_) => "shared",
         Value::LocalShared(_) => "local_shared",
