@@ -339,8 +339,7 @@ mod tests {
     #[test]
     fn e2e_mandelbrot_inner() {
         // Simplified mandelbrot: test float arithmetic + nested loops + function calls.
-        assert_eq!(
-            e2e("func iterations(cx: f64, cy: f64) -> i32 {
+        let result = e2e("func iterations(cx: f64, cy: f64) -> i32 {
                      let mut zx = 0.0
                      let mut zy = 0.0
                      let mut i = 0
@@ -368,37 +367,45 @@ mod tests {
                          y = y + 1
                      }
                      total
-                 }"),
-            // Just verify it runs without error; exact value depends on float precision.
-            e2e("func iterations(cx: f64, cy: f64) -> i32 {
-                     let mut zx = 0.0
-                     let mut zy = 0.0
-                     let mut i = 0
-                     while i < 100 {
-                         let zx2 = zx * zx
-                         let zy2 = zy * zy
-                         if zx2 + zy2 > 4.0 { return i }
-                         zy = 2.0 * zx * zy + cy
-                         zx = zx2 - zy2 + cx
-                         i = i + 1
-                     }
-                     i
-                 }
-                 func main() -> i32 {
-                     let mut total = 0
-                     let mut y = 0
-                     while y < 10 {
-                         let cy = y as f64 / 5.0 - 1.0
-                         let mut x = 0
-                         while x < 10 {
-                             let cx = x as f64 / 5.0 - 1.5
-                             total = total + iterations(cx, cy)
-                             x = x + 1
-                         }
-                         y = y + 1
-                     }
-                     total
-                 }")
-        );
+                 }");
+        assert!(result.is_ok(), "mandelbrot should run: {:?}", result);
+    }
+
+    #[test]
+    fn e2e_println() {
+        let tokens = crate::lexer::Lexer::new(
+            "func main() -> i32 { println(42); 0 }",
+        )
+        .tokenize()
+        .unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let prog = compiler.compile_file(&file).unwrap();
+        let mut vm = BytecodeVM::new(&prog);
+        let code = vm.run().unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(vm.stdout().trim(), "42");
+    }
+
+    #[test]
+    fn e2e_fib_with_print() {
+        let tokens = crate::lexer::Lexer::new(
+            "func fib(n: i32) -> i32 {
+                 if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
+             }
+             func main() -> i32 {
+                 println(fib(15))
+                 0
+             }",
+        )
+        .tokenize()
+        .unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let prog = compiler.compile_file(&file).unwrap();
+        let mut vm = BytecodeVM::new(&prog);
+        let code = vm.run().unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(vm.stdout().trim(), "610"); // fib(15) = 610
     }
 }

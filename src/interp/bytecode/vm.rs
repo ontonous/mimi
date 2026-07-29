@@ -349,10 +349,17 @@ impl<'a> BytecodeVM<'a> {
                     let result = self.call_function(func, &args)?;
                     self.set_reg(rd, result);
                 }
-                Op::CallBuiltin { .. } => {
-                    return Err(InterpError::new(
-                        "bytecode VM: CallBuiltin not yet implemented",
-                    ));
+                Op::CallBuiltin {
+                    rd,
+                    builtin,
+                    args_base,
+                    argc,
+                } => {
+                    let args: Vec<Value> = (0..argc)
+                        .map(|i| self.get_reg(args_base + i).clone())
+                        .collect();
+                    let result = self.call_builtin(builtin, &args)?;
+                    self.set_reg(rd, result);
                 }
                 Op::CallIndirect { .. } => {
                     return Err(InterpError::new(
@@ -538,6 +545,95 @@ impl<'a> BytecodeVM<'a> {
                 }
             }
         }
+    }
+
+    // ── Builtin dispatch ─────────────────────────────────────
+
+    fn call_builtin(
+        &mut self,
+        idx: BuiltinIdx,
+        args: &[Value],
+    ) -> Result<Value, InterpError> {
+        let name = &self.program.builtin_names[idx as usize];
+        match name.as_str() {
+            "println" => {
+                let s = args
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                self.stdout.push_str(&s);
+                self.stdout.push('\n');
+                eprintln!("{}", s);
+                Ok(Value::Unit)
+            }
+            "print" => {
+                let s = args
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                self.stdout.push_str(&s);
+                eprint!("{}", s);
+                Ok(Value::Unit)
+            }
+            "len" => {
+                if args.len() != 1 {
+                    return Err(InterpError::new("len expects 1 argument"));
+                }
+                let len = match &args[0] {
+                    Value::List(l) => l.len(),
+                    Value::String(s) => s.len(),
+                    Value::Tuple(t) => t.len(),
+                    Value::Set(s) => s.len(),
+                    other => {
+                        return Err(InterpError::new(format!(
+                            "len: unsupported type {}",
+                            other
+                        )))
+                    }
+                };
+                Ok(Value::Int(len as i64))
+            }
+            "push" => {
+                if args.len() != 2 {
+                    return Err(InterpError::new("push expects 2 arguments"));
+                }
+                // push modifies the list in place — but our args are clones.
+                // For bytecode, we handle push via ListPush opcode instead.
+                // This fallback is for direct builtin calls.
+                Err(InterpError::new(
+                    "push: use ListPush opcode in bytecode (direct builtin call not supported)",
+                ))
+            }
+            "to_string" => {
+                if args.len() != 1 {
+                    return Err(InterpError::new("to_string expects 1 argument"));
+                }
+                Ok(Value::String(args[0].to_string()))
+            }
+            "str" => {
+                if args.len() != 1 {
+                    return Err(InterpError::new("str expects 1 argument"));
+                }
+                Ok(Value::String(args[0].to_string()))
+            }
+            "int" | "float" | "abs" => {
+                Err(InterpError::new(format!(
+                    "bytecode builtin '{}' not yet implemented",
+                    name
+                )))
+            }
+            _ => Err(InterpError::new(format!(
+                "bytecode: unknown builtin '{}'",
+                name
+            ))),
+        }
+    }
+
+    /// Get captured stdout (for testing).
+    pub fn stdout(&self) -> &str {
+        &self.stdout
     }
 
     // ── Register access helpers ──────────────────────────────
