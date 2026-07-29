@@ -301,6 +301,35 @@ pub enum Op {
     TypeOf { rd: Reg, ra: Reg },
     /// Trap with message from constant pool
     Trap { msg: ConstIdx },
+
+    // ═══════════════════════════════════════════════════════════
+    // Actor / Flow / Session (Phase D)
+    // ═══════════════════════════════════════════════════════════
+
+    /// rd = spawn actor by name (constant pool string).
+    ActorSpawn { rd: Reg, actor: ConstIdx },
+    /// rd = flow transition dispatch: flow.method(args[0..argc]).
+    /// args[0] is the from-state value; runtime extracts state name
+    /// and looks up the compiled transition function.
+    FlowTransition {
+        rd: Reg,
+        flow: ConstIdx,
+        method: ConstIdx,
+        args_base: Reg,
+        argc: u16,
+    },
+    /// rd = dynamic method call: receiver.method(args[1..argc]).
+    /// args[0] is the receiver. Runtime dispatch:
+    /// - Value::Actor → try_enqueue
+    /// - Value::Record → look up function
+    /// - otherwise → error
+    DynMethodCall {
+        rd: Reg,
+        method: ConstIdx,
+        args_base: Reg,
+        argc: u16,
+    },
+
     /// No operation
     Nop,
 }
@@ -379,6 +408,13 @@ impl FunctionProto {
         (self.constants.len() - 1) as ConstIdx
     }
 
+    /// Add a constant WITHOUT deduplication. Used for record field names
+    /// which must be contiguous after the type name in the constant pool.
+    pub fn add_const_raw(&mut self, val: ConstValue) -> ConstIdx {
+        self.constants.push(val);
+        (self.constants.len() - 1) as ConstIdx
+    }
+
     /// Emit an instruction and return its index.
     pub fn emit(&mut self, op: Op) -> usize {
         self.code.push(op);
@@ -414,4 +450,12 @@ pub struct BytecodeProgram {
     pub entry: FuncIdx,
     /// Builtin function name → BuiltinIdx mapping.
     pub builtin_names: Vec<String>,
+    /// Actor definitions (for spawn at runtime).
+    pub actor_defs: std::collections::HashMap<String, crate::ast::ActorDef>,
+    /// Flow definitions (for transition dispatch).
+    pub flow_defs: std::collections::HashMap<String, crate::ast::FlowDef>,
+    /// Flow transition function indices: (flow_name, transition_name, from_state) → FuncIdx.
+    pub flow_transition_funcs: std::collections::HashMap<(String, String, String), FuncIdx>,
+    /// The original AST (for actor worker threads that use tree-walker internally).
+    pub ast: Option<std::sync::Arc<crate::ast::File>>,
 }
