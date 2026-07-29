@@ -1129,7 +1129,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let saved_var_types = std::mem::take(&mut self.var_types);
                     let saved_var_type_names = std::mem::take(&mut self.var_type_names);
                     let saved_list_elem = std::mem::take(&mut self.list_elem_llvm_types);
-                    self.compile_func(f)?;
+                    self.compile_func_legacy(f)?;
                     self.var_types = saved_var_types;
                     self.var_type_names = saved_var_type_names;
                     self.list_elem_llvm_types = saved_list_elem;

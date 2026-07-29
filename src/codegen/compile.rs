@@ -619,14 +619,18 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// vtables) but before the legacy body compilation pass. This ensures all
     /// symbols are declared before the resolved emitter compiles eligible bodies.
     ///
-    /// 0.32.27+: `file` extracted from `program.legacy_file` internally,
-    /// eliminating the `legacy_body_file()` call at the caller site (C1 migration).
+    /// 0.32.27+: `file` extracted from `program.raw_ast()` internally,
+    /// eliminating the raw AST parameter at the caller site (C1 migration).
     pub(crate) fn compile_file_with_resolved(
         &mut self,
         program: &crate::core::CheckedProgram,
         eligible: Option<&std::collections::BTreeSet<crate::core::NodeId>>,
     ) -> MimiResult<()> {
-        self.compile_file_inner(program.legacy_body_file(), Some((program, eligible)))
+        // C1 (permanent): the fifth pass compiles ineligible body classes
+        // (capturing lambdas, generics, async, extern ABI wrappers) from the
+        // surface AST. The resolved native emitter handles the eligible subset;
+        // raw_ast() provides the permanent remainder to the legacy emitter.
+        self.compile_file_inner(program.raw_ast(), Some((program, eligible)))
     }
 
     fn compile_file_inner(
@@ -797,7 +801,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.compile_vtables()?;
         // S12: Per-function resolved dispatch — compile eligible function bodies
         // through the resolved native emitter AFTER all declarations, impl methods,
-        // and vtables are set up. The legacy compile_func skip guard
+        // and vtables are set up. The compile_func_legacy skip guard
         // (count_basic_blocks != 0) prevents double-emission in the fifth pass.
         if let Some((program, Some(eligible))) = resolved_ctx {
             if let Err(diagnostics) = self.compile_resolved_subset(program, eligible) {
@@ -808,7 +812,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
-        // Fifth pass: compile user functions, actors, and flow transitions.
+        // Fifth pass (legacy emitter): compile user functions, actors, and flow
+        // transitions from the surface AST. Functions already compiled by the
+        // resolved native emitter (fourth pass) are skipped via the
+        // count_basic_blocks != 0 guard in compile_func_legacy.
+        // Permanent ineligible body classes: capturing lambdas, generics,
+        // async, extern ABI wrappers, view/mutate borrow params (non-self).
         // v0.28.21 — `comptime func` items are folded at codegen-start by
         // `fold_comptime_items` and intentionally NOT compiled to LLVM IR
         // (the caller resolves them via the cached `comptime_values` map,
@@ -819,7 +828,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if f.is_comptime {
                         // Skip — folded value lives in self.comptime_values.
                     } else {
-                        self.compile_func(f).map_err(|e| e.at(f.meta.span))?;
+                        self.compile_func_legacy(f).map_err(|e| e.at(f.meta.span))?;
                     }
                 }
                 Item::Actor(actor) => {
@@ -990,7 +999,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             // compile_try_expr can emit a fail-closed error (Rejected
             // codegen not yet implemented) instead of mimi_try_exit.
             self.in_fails_transition = t.fails.is_some();
-            let result = self.compile_func(&func).map_err(|e| e.at(t.meta.span));
+            let result = self.compile_func_legacy(&func).map_err(|e| e.at(t.meta.span));
             self.in_fails_transition = false;
             result?;
         }

@@ -410,7 +410,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Compile args by value (self payload + event params).
         // Record construction yields an alloca pointer; ordinary Ident loads
         // yield StructValue. The synthetic transition function takes structs
-        // by value (same as declare_func/compile_func), so load any pointer
+        // by value (same as declare_func/compile_func_legacy), so load any pointer
         // args that correspond to struct parameters.
         let mut compiled_args = Vec::with_capacity(args.len());
         for (i, arg) in args.iter().enumerate() {

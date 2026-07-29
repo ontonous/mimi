@@ -379,7 +379,7 @@ fn collect_all_idents_in_stmt_depth(stmt: &crate::ast::Stmt, out: &mut Vec<Strin
 // Submodules for clearly independent method groups. The originally suggested
 // groups (params, actor, shared) do not map to standalone methods in this file:
 //
-// - Parameter handling and ABI layout are inlined in `compile_func` / `compile_generic_func`;
+// - Parameter handling and ABI layout are inlined in `compile_func_legacy` / `compile_generic_func`;
 //   there is no `compile_param` helper to extract without restructuring logic.
 // - Actor constructor / method compilation already lives in `codegen/actors.rs`.
 // - Shared / RC scope cleanup helpers already live in `codegen/scope.rs` and `codegen/mod.rs`.
@@ -415,7 +415,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             has_ensures: func.has_ensures,
             has_mutate_params: func.has_mutate_params,
         };
-        self.compile_func(&body_func)?;
+        self.compile_func_legacy(&body_func)?;
 
         let result_ty = func
             .ret
@@ -2845,7 +2845,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok((function, ret_type))
     }
 
-    pub(super) fn compile_func(&mut self, func: &FuncDef) -> MimiResult<()> {
+    /// Legacy surface-AST function body compiler (fifth pass).
+    ///
+    /// Called by `compile_file_inner` for functions NOT compiled by the resolved
+    /// native emitter. The skip guard (`count_basic_blocks != 0`) prevents
+    /// double-emission of functions already handled by the resolved emitter.
+    ///
+    /// Permanent ineligible body classes: capturing lambdas, generics,
+    /// async, extern ABI wrappers, view/mutate borrow params (non-self).
+    pub(super) fn compile_func_legacy(&mut self, func: &FuncDef) -> MimiResult<()> {
         // Per-function variable type tracking must start fresh so that parameters
         // with common names (e.g. `xs`) don't inherit types from other functions.
         // Also clear the generic substitution map: non-generic functions must not
@@ -2867,7 +2875,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let mut body_func = func.clone();
                 body_func.name = body_name.clone();
                 body_func.extern_abi = None;
-                self.compile_func(&body_func)?;
+                self.compile_func_legacy(&body_func)?;
             }
             return self.compile_export_wrapper(func, &body_name);
         }

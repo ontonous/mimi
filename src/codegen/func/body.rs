@@ -9,7 +9,7 @@ use super::CodeGenerator;
 use super::VarEntry;
 
 impl<'ctx> CodeGenerator<'ctx> {
-    /// Shared implementation for Stmt::While — used by compile_func and compile_block
+    /// Shared implementation for Stmt::While — used by compile_func_legacy and compile_block
     pub(in crate::codegen) fn compile_while_stmt(
         &mut self,
         cond: &Expr,
@@ -113,7 +113,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    /// Shared implementation for Stmt::For — used by compile_func and compile_block
+    /// Shared implementation for Stmt::For — used by compile_func_legacy and compile_block
     pub(in crate::codegen) fn compile_for_stmt(
         &mut self,
         var: &str,

@@ -222,7 +222,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         }
         // Emit eligible functions. If a function fails (e.g., calls an
         // unimplemented builtin), skip it — the legacy emitter will handle it.
-        // The compile_func skip guard (count_basic_blocks != 0) ensures the
+        // The compile_func_legacy skip guard (count_basic_blocks != 0) ensures the
         // legacy emitter won't re-emit successfully compiled functions.
         // Set MIMI_VERBOSE=1 to see per-function fallback details.
         let mut count = 0;

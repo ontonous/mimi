@@ -100,7 +100,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             borrow: None,
                         }
                     });
-                    // Set type_map to identity so compile_func can resolve type params
+                    // Set type_map to identity so compile_func_legacy can resolve type params
                     // in self (e.g., &List<T> → T resolves to T in type_map).
                     // This is later overridden by compile_generic_func for monomorphization.
                     let saved_type_map = self.type_map.clone();
@@ -116,7 +116,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.type_map.extend(identity_map);
                         }
                     }
-                    self.compile_func(&impl_method)?;
+                    self.compile_func_legacy(&impl_method)?;
                     self.type_map = saved_type_map;
                 }
             }

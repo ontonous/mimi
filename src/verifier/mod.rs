@@ -73,15 +73,17 @@ pub fn verify_checked(
     // P1-24: compute Resolved IR hash from CheckedProgram signatures.
     let resolved_ir_hash = ctx::compute_resolved_ir_hash(program);
     if is_z3_available() {
-        // C4 Z3 path: still uses AST body encoding via flow verifier.
+        // C4 Z3 path (permanent): the Flow verifier encodes transition invariants
+        // from surface AST body expressions. raw_ast() is required here because
+        // the Z3 encoding is defined over AST Expr nodes, not ResolvedExpr.
         // The resolved_ir_hash is embedded in ProofArtifact by the flow verifier.
         flow::flow_verify_file_with_hashes(
-            program.legacy_body_file(),
+            program.raw_ast(),
             source_hash,
             resolved_ir_hash,
         )
     } else {
-        // C4 mock path: from CheckedProgram, no legacy_body_file needed.
+        // C4 mock path: from CheckedProgram, no raw_ast needed.
         Ok(ctx::mock_verify_checked(program))
     }
 }
@@ -161,14 +163,15 @@ pub fn verify_ffi_checked(
         }
     }
     if is_z3_available() {
-        // C4 Z3 path: still uses AST body encoding via flow verifier.
-        // The _or_mock variant uses the Z3 path internally since we checked availability.
+        // C4 Z3 path (permanent): FFI call-site verification encodes extern
+        // contract expressions from surface AST. raw_ast() is required because
+        // the Z3 encoding is defined over AST Expr nodes.
         flow::flow_verify_ffi_call_sites_with_externs_or_mock(
-            program.legacy_body_file(),
+            program.raw_ast(),
             &externs,
         )
     } else {
-        // C4 mock path: from CheckedProgram's extern signatures, no legacy_body_file.
+        // C4 mock path: from CheckedProgram's extern signatures, no raw_ast needed.
         let mut results: Vec<VerificationResult> = Vec::new();
         for block in program.extern_blocks().values() {
             for signature in &block.signatures {
