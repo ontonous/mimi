@@ -318,6 +318,16 @@ impl<'a> BytecodeVM<'a> {
                     let v = self.get_reg(ra);
                     self.set_reg(rd, Value::Bool(!crate::interp::is_truthy(v)));
                 }
+                Op::And { rd, ra, rb } => {
+                    let a = crate::interp::is_truthy(self.get_reg(ra));
+                    let b = crate::interp::is_truthy(self.get_reg(rb));
+                    self.set_reg(rd, Value::Bool(a && b));
+                }
+                Op::Or { rd, ra, rb } => {
+                    let a = crate::interp::is_truthy(self.get_reg(ra));
+                    let b = crate::interp::is_truthy(self.get_reg(rb));
+                    self.set_reg(rd, Value::Bool(a || b));
+                }
 
                 // ── String ─────────────────────────────────────
                 Op::ConcatStr { rd, ra, rb } => {
@@ -517,6 +527,79 @@ impl<'a> BytecodeVM<'a> {
                         other => {
                             return Err(InterpError::new(format!(
                                 "tuple get: expected Tuple, got {}",
+                                other
+                            )))
+                        }
+                    }
+                }
+
+                // ── Variant (enum) ─────────────────────────────
+                Op::IsVariant { rd, ra, tag } => {
+                    let v = self.get_reg(ra);
+                    let expected_tag = match &proto.constants[tag as usize] {
+                        ConstValue::Str(s) => s.clone(),
+                        _ => String::new(),
+                    };
+                    let matches = match v {
+                        Value::Variant(name, _) => name == &expected_tag,
+                        _ => false,
+                    };
+                    self.set_reg(rd, Value::Bool(matches));
+                }
+                Op::VariantGet { rd, ra, idx } => {
+                    let v = self.get_reg(ra).clone();
+                    match v {
+                        Value::Variant(_, fields) => {
+                            if (idx as usize) >= fields.len() {
+                                return Err(InterpError::new(format!(
+                                    "variant field index {} out of bounds (arity {})",
+                                    idx,
+                                    fields.len()
+                                )));
+                            }
+                            let elem = fields[idx as usize].clone();
+                            self.set_reg(rd, elem);
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "variant get: expected Variant, got {}",
+                                other
+                            )))
+                        }
+                    }
+                }
+                Op::VariantTag { rd, ra } => {
+                    let v = self.get_reg(ra);
+                    match v {
+                        Value::Variant(name, _) => {
+                            // Return tag as a string (for comparison).
+                            self.set_reg(rd, Value::String(name.clone()));
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "variant tag: expected Variant, got {}",
+                                other
+                            )))
+                        }
+                    }
+                }
+                Op::VariantPayload { rd, ra, idx } => {
+                    let v = self.get_reg(ra).clone();
+                    match v {
+                        Value::Variant(_, fields) => {
+                            if (idx as usize) >= fields.len() {
+                                return Err(InterpError::new(format!(
+                                    "variant payload index {} out of bounds (arity {})",
+                                    idx,
+                                    fields.len()
+                                )));
+                            }
+                            let elem = fields[idx as usize].clone();
+                            self.set_reg(rd, elem);
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "variant payload: expected Variant, got {}",
                                 other
                             )))
                         }

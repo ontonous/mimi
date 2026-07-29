@@ -122,6 +122,10 @@ pub enum Op {
     // ═══════════════════════════════════════════════════════════
 
     Not { rd: Reg, ra: Reg },
+    /// rd = ra && rb (logical AND, short-circuit not needed at bytecode level)
+    And { rd: Reg, ra: Reg, rb: Reg },
+    /// rd = ra || rb (logical OR)
+    Or { rd: Reg, ra: Reg, rb: Reg },
 
     // ═══════════════════════════════════════════════════════════
     // String
@@ -226,6 +230,10 @@ pub enum Op {
     VariantTag { rd: Reg, ra: Reg },
     /// rd = variant_payload(ra, idx) — extract payload field
     VariantPayload { rd: Reg, ra: Reg, idx: FieldIdx },
+    /// rd = is_variant(ra, tag) — check if ra is a Variant with the given tag
+    IsVariant { rd: Reg, ra: Reg, tag: ConstIdx },
+    /// rd = variant_get(ra, idx) — extract payload field (alias for VariantPayload)
+    VariantGet { rd: Reg, ra: Reg, idx: u16 },
 
     // ═══════════════════════════════════════════════════════════
     // Option / Result
