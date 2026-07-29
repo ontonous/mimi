@@ -578,11 +578,14 @@ impl BytecodeCompiler {
             }
             Expr::Cast(inner, ty) => {
                 let r = self.compile_expr(fc, inner)?;
-                // For now, handle `as f64` and `as i32`.
                 let rd = fc.proto.alloc_reg();
                 match ty.unlocated() {
-                    Type::Name(n, _) if n == "f64" => {
+                    Type::Name(n, _) if n == "f64" || n == "f32" => {
                         fc.emit(Op::IntToFloat { rd, ra: r });
+                    }
+                    Type::Name(n, _) if n == "i64" || n == "i32" || n == "int" => {
+                        // Cast to int: truncate Float → Int.
+                        fc.emit(Op::Cast { rd, ra: r, target: 0 });
                     }
                     _ => {
                         fc.emit(Op::Mov { rd, rs: r });
