@@ -19,11 +19,11 @@
 //! | `Match(expr, arms)`       | `Match { scrutinee, arms }`            |
 //! | `Call(callee, args)`      | `Call(ResolvedCall)`                   |
 
+use crate::ast::{BinOp, Lit, UnOp};
 use crate::core::ir::{
     ResolvedBinaryOp, ResolvedBlock, ResolvedBody, ResolvedExpr, ResolvedExprKind, ResolvedLiteral,
     ResolvedPlace, ResolvedUnaryOp, ResolvedValueProjection,
 };
-use crate::ast::{Lit, BinOp, UnOp};
 use crate::verifier::ctx::Z3VarMap;
 use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 
@@ -518,9 +518,11 @@ pub(crate) fn verify_contracts_from_resolved(
         }
     }
 
-    let has_math = body.root.statements.iter().any(|stmt| {
-        matches!(stmt.kind, crate::core::ir::ResolvedStmtKind::Math(_))
-    });
+    let has_math = body
+        .root
+        .statements
+        .iter()
+        .any(|stmt| matches!(stmt.kind, crate::core::ir::ResolvedStmtKind::Math(_)));
     if requires.is_empty() && ensures.is_empty() && !has_math {
         return None; // No contracts to verify
     }
@@ -778,9 +780,10 @@ pub(crate) fn resolved_expr_to_ast_ffi_arg(
                 }
             }
         }
-        ResolvedExprKind::Cast { value, conversion: _ } => {
-            resolved_expr_to_ast_ffi_arg(value, body)
-        }
+        ResolvedExprKind::Cast {
+            value,
+            conversion: _,
+        } => resolved_expr_to_ast_ffi_arg(value, body),
         _ => None,
     }
 }

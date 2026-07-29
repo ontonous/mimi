@@ -258,14 +258,19 @@ pub fn compute_resolved_ir_hash(program: &crate::core::CheckedProgram) -> String
 /// Mock verification from CheckedProgram (Z3-unavailable fallback).
 /// Replaces the AST-based `mock_verify_file` with a CheckedProgram-based path.
 /// Used by verify_checked when Z3 is unavailable (C4 partial, 0.32.27+).
-pub(crate) fn mock_verify_checked(program: &crate::core::CheckedProgram) -> Vec<VerificationResult> {
+pub(crate) fn mock_verify_checked(
+    program: &crate::core::CheckedProgram,
+) -> Vec<VerificationResult> {
     let mut results = Vec::new();
     // Functions and callables with contracts.
     for (node_id, callable) in program.callables() {
         let has_contracts = !callable.contracts.is_empty()
-            || callable.body.root.statements.iter().any(|s| {
-                matches!(s.kind, crate::core::ir::ResolvedStmtKind::Math(_))
-            });
+            || callable
+                .body
+                .root
+                .statements
+                .iter()
+                .any(|s| matches!(s.kind, crate::core::ir::ResolvedStmtKind::Math(_)));
         let func_name = program
             .functions()
             .values()
@@ -1798,7 +1803,8 @@ impl Verifier {
     ) -> Vec<VerificationResult> {
         let mut results = Vec::new();
         for (node_id, callable) in program.callables() {
-            if callable.contracts.is_empty() && !crate::verifier::resolved_expr::has_math_obligations(callable)
+            if callable.contracts.is_empty()
+                && !crate::verifier::resolved_expr::has_math_obligations(callable)
             {
                 continue;
             }

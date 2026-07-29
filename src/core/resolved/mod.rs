@@ -1091,13 +1091,6 @@ impl CheckedProgram {
         &self.legacy_file
     }
 
-    /// Deprecated alias for `raw_ast()`. Will be removed in 0.33.
-    /// Use `raw_ast()` with an explicit comment explaining why the surface AST is needed.
-    #[deprecated(note = "use raw_ast() with an explicit justification comment")]
-    pub(crate) fn legacy_body_file(&self) -> &File {
-        &self.legacy_file
-    }
-
     pub fn transitions(&self) -> &HashMap<TransitionId, ResolvedTransition> {
         &self.transitions
     }

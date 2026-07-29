@@ -437,7 +437,10 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    pub(crate) fn builtin_str_count_substring(&self, args: Vec<Value>) -> Result<Value, InterpError> {
+    pub(crate) fn builtin_str_count_substring(
+        &self,
+        args: Vec<Value>,
+    ) -> Result<Value, InterpError> {
         if args.len() != 2 {
             return Err(InterpError::new("str_count_substring expects 2 arguments"));
         }
@@ -460,7 +463,9 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(Value::Int(count))
             }
-            _ => Err(InterpError::new("str_count_substring expects (string, string)")),
+            _ => Err(InterpError::new(
+                "str_count_substring expects (string, string)",
+            )),
         }
     }
 

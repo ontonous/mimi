@@ -62,9 +62,9 @@ impl<'a> Interpreter<'a> {
         // The list is value-copied in the interpreter (no write-back for pop);
         // the clone was wasted work since the clone is discarded immediately.
         match std::mem::replace(&mut args[0], Value::Unit) {
-            Value::List(mut l) => {
-                l.pop().ok_or_else(|| InterpError::new("pop from empty list"))
-            }
+            Value::List(mut l) => l
+                .pop()
+                .ok_or_else(|| InterpError::new("pop from empty list")),
             other => Err(InterpError::new(format!(
                 "pop: argument must be a list, found {}",
                 super::value::type_name(&other)
