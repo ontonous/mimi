@@ -1832,6 +1832,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             Type::Name(n, args) if n == "Result" && args.len() == 2 => self.llvm_type_for(
                 &Type::Result(Box::new(args[0].clone()), Box::new(args[1].clone())),
             ),
+            // Generic instantiation of a user-defined type (e.g. `Box<i32>`,
+            // `Pair<i32>`). The LLVM struct layout is registered under the base
+            // name without type parameters. Strip args and look up the base.
+            Type::Name(name, args) if !args.is_empty() => {
+                if let Some(llvm) = self.type_llvm.get(name) {
+                    return Some(*llvm);
+                }
+                crate::codegen::types::mimi_type_to_llvm(self.context, ty)
+            }
             _ => crate::codegen::types::mimi_type_to_llvm(self.context, ty),
         }
     }
