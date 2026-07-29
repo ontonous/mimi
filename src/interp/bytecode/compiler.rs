@@ -163,6 +163,20 @@ impl BytecodeCompiler {
             }
         }
 
+        // Pass 1.5: register impl method names (must precede body compilation
+        // so that method calls in function bodies can resolve mangled names).
+        for item in &file.items {
+            if let Item::Impl(impl_def) = item {
+                for method in &impl_def.methods {
+                    let mangled_name = format!("{}_{}", impl_def.type_name, method.name);
+                    let idx = self.functions.len() as FuncIdx;
+                    self.func_table.insert(mangled_name.clone(), idx);
+                    // +1 for implicit `self` parameter.
+                    self.functions.push(FunctionProto::new(mangled_name, method.params.len() as u16 + 1));
+                }
+            }
+        }
+
         // Register builtins from the canonical registry (D1: single source of truth).
         let reg = registry::create_registry();
         for name in reg.names() {
@@ -178,27 +192,13 @@ impl BytecodeCompiler {
             }
         }
 
-        // Pass 3: compile impl methods as mangled functions.
-        // Method `foo` on type `Bar` becomes `Bar_foo`.
-        for item in &file.items {
-            if let Item::Impl(impl_def) = item {
-                for method in &impl_def.methods {
-                    let mangled_name = format!("{}_{}", impl_def.type_name, method.name);
-                    // Register the mangled function name.
-                    let idx = self.functions.len() as FuncIdx;
-                    self.func_table.insert(mangled_name.clone(), idx);
-                    self.functions.push(FunctionProto::new(mangled_name, method.params.len() as u16));
-                }
-            }
-        }
-
-        // Pass 4: compile impl method bodies.
+        // Pass 3: compile impl method bodies.
         for item in &file.items {
             if let Item::Impl(impl_def) = item {
                 for method in &impl_def.methods {
                     let mangled_name = format!("{}_{}", impl_def.type_name, method.name);
                     if let Some(&idx) = self.func_table.get(&mangled_name) {
-                        let proto = self.compile_func(method)?;
+                        let proto = self.compile_func_impl(method)?;
                         self.functions[idx as usize] = proto;
                     }
                 }
@@ -250,6 +250,46 @@ impl BytecodeCompiler {
         let last_reg = self.compile_block(&mut fc, &f.body)?;
 
         // Return the last expression's value, or Unit if none.
+        if let Some(r) = last_reg {
+            fc.emit(Op::Ret { ra: r });
+        } else {
+            fc.emit(Op::RetUnit);
+        }
+
+        Ok(fc.proto)
+    }
+
+    /// Compile an impl method (has implicit `self` at register 0).
+    fn compile_func_impl(&mut self, f: &FuncDef) -> Result<FunctionProto, InterpError> {
+        // param_count = explicit params + 1 (self).
+        let total_params = f.params.len() as u16 + 1;
+        let mut fc = FuncCompiler::new(f.name.clone(), total_params);
+
+        // Bind `self` to register 0.
+        fc.vars[0].insert("self".to_string(), 0);
+
+        // Bind explicit parameters to registers 1..param_count+1.
+        for (i, param) in f.params.iter().enumerate() {
+            fc.vars[0].insert(param.name.clone(), (i + 1) as Reg);
+            let ty = match param.ty.unlocated() {
+                Type::Name(n, _) if n == "f64" || n == "f32" => VarType::Float,
+                Type::Name(n, _) if n == "i32" || n == "i64" => VarType::Int,
+                Type::Name(n, _) if n == "bool" => VarType::Bool,
+                Type::Name(n, _) if n == "string" => VarType::String,
+                _ => VarType::Unknown,
+            };
+            fc.set_reg_type(&param.name, ty);
+        }
+        // Ensure register_count accounts for self + params.
+        while fc.proto.register_count < total_params {
+            fc.proto.alloc_reg();
+        }
+
+        fc.has_mut_params(f);
+
+        // Compile body statements.
+        let last_reg = self.compile_block(&mut fc, &f.body)?;
+
         if let Some(r) = last_reg {
             fc.emit(Op::Ret { ra: r });
         } else {
@@ -463,6 +503,12 @@ impl BytecodeCompiler {
         match expr.unlocated() {
             Expr::Literal(lit) => self.compile_literal(fc, lit),
             Expr::Ident(name) => {
+                // Nullary variant constructors used as identifiers.
+                if name == "None" {
+                    let rd = fc.proto.alloc_reg();
+                    fc.emit(Op::None { rd });
+                    return Ok(rd);
+                }
                 fc.lookup_var(name).ok_or_else(|| {
                     InterpError::new(format!("undefined variable '{}' in bytecode", name))
                 })
@@ -1112,6 +1158,29 @@ impl BytecodeCompiler {
                     argc: args.len() as u16,
                 });
                 return Ok(rd);
+            }
+            // Variant constructors: Ok(v), Err(v), Some(v), None.
+            match name.as_str() {
+                "Ok" => {
+                    let r_arg = self.compile_expr(fc, &args[0])?;
+                    fc.emit(Op::Ok { rd, ra: r_arg });
+                    return Ok(rd);
+                }
+                "Err" => {
+                    let r_arg = self.compile_expr(fc, &args[0])?;
+                    fc.emit(Op::Err { rd, ra: r_arg });
+                    return Ok(rd);
+                }
+                "Some" => {
+                    let r_arg = self.compile_expr(fc, &args[0])?;
+                    fc.emit(Op::Some { rd, ra: r_arg });
+                    return Ok(rd);
+                }
+                "None" => {
+                    fc.emit(Op::None { rd });
+                    return Ok(rd);
+                }
+                _ => {}
             }
             // Might be a closure variable.
             if let Some(callee_reg) = fc.lookup_var(name) {
