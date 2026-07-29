@@ -4,6 +4,7 @@
 //! and a `register(reg: &mut BuiltinRegistry)` function.
 
 pub mod convert;
+pub mod fs;
 pub mod hof;
 pub mod io;
 pub mod list;
@@ -21,5 +22,6 @@ pub fn register_all(reg: &mut BuiltinRegistry) {
     math::register(reg);
     list::register(reg);
     hof::register(reg);
+    fs::register(reg);
     system::register(reg);
 }
