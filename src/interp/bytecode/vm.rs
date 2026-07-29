@@ -25,6 +25,9 @@ struct Frame {
     /// When true, wrap the return value in Ok(...) on Ret.
     /// Used by FlowTransition for transitions with `fails` clause.
     wrap_ok: bool,
+    /// Source state value for `fails` transitions.
+    /// Used to construct Err((source, error)) on failure.
+    flow_source_state: Option<Value>,
 }
 
 /// The bytecode VM.
@@ -131,6 +134,7 @@ impl<'a> BytecodeVM<'a> {
             proto_idx: func_idx,
             return_reg,
             wrap_ok: false,
+            flow_source_state: None,
         });
         Ok(())
     }
@@ -141,9 +145,12 @@ impl<'a> BytecodeVM<'a> {
         func_idx: FuncIdx,
         args: &[Value],
         return_reg: Option<Reg>,
+        source_state: Value,
     ) -> Result<(), InterpError> {
         self.push_frame(func_idx, args, return_reg)?;
-        self.stack.last_mut().unwrap().wrap_ok = true;
+        let frame = self.stack.last_mut().unwrap();
+        frame.wrap_ok = true;
+        frame.flow_source_state = Some(source_state);
         Ok(())
     }
 
@@ -531,8 +538,23 @@ impl<'a> BytecodeVM<'a> {
                     let frame = self.stack.last().unwrap();
                     let return_reg = frame.return_reg;
                     let wrap_ok = frame.wrap_ok;
+                    let source_state = frame.flow_source_state.clone();
                     if wrap_ok {
-                        v = Value::Variant("Ok".to_string(), vec![v]);
+                        // For `fails` transitions:
+                        // - If the return value is already Err(error), wrap as Err((source, error))
+                        // - Otherwise, wrap as Ok(result)
+                        match &v {
+                            Value::Variant(tag, payload) if tag == "Err" => {
+                                let error = payload.first().cloned().unwrap_or(Value::Unit);
+                                let src = source_state.unwrap_or(Value::Unit);
+                                v = Value::Variant("Err".to_string(), vec![
+                                    Value::Tuple(vec![src, error]),
+                                ]);
+                            }
+                            _ => {
+                                v = Value::Variant("Ok".to_string(), vec![v]);
+                            }
+                        }
                     }
                     self.stack.pop();
                     self.depth -= 1;
@@ -1129,9 +1151,10 @@ impl<'a> BytecodeVM<'a> {
                         .map(|i| self.get_reg(args_base + i).clone())
                         .collect();
                     // Call the transition function.
-                    // If the transition has a `fails` clause, wrap the result in Ok(...).
+                    // If the transition has a `fails` clause, wrap the result:
+                    // success → Ok(result), failure → Err((source, error)).
                     if self.program.flow_fails_transitions.contains(&key) {
-                        self.push_frame_wrap_ok(func_idx, &args, Some(rd))?;
+                        self.push_frame_wrap_ok(func_idx, &args, Some(rd), state_val)?;
                     } else {
                         self.push_frame(func_idx, &args, Some(rd))?;
                     }
@@ -1157,6 +1180,18 @@ impl<'a> BytecodeVM<'a> {
                             })??;
                             self.set_reg(rd, result);
                         }
+                        Value::WeakShared(weak) if method_name == "upgrade" => {
+                            match weak.upgrade() {
+                                Some(arc) => self.set_reg(rd, Value::Shared(arc)),
+                                None => self.set_reg(rd, Value::Variant("None".to_string(), vec![])),
+                            }
+                        }
+                        Value::Shared(arc) if method_name == "deref" => {
+                            let inner = arc.read().map_err(|e| {
+                                InterpError::new(format!("shared read lock failed: {}", e))
+                            })?;
+                            self.set_reg(rd, inner.clone());
+                        }
                         _ => {
                             return Err(InterpError::new(format!(
                                 "cannot call method '{}' on {}",
@@ -1164,6 +1199,26 @@ impl<'a> BytecodeVM<'a> {
                             )));
                         }
                     }
+                }
+
+                Op::SharedNew { rd, ra } => {
+                    let v = self.get_reg(ra).clone();
+                    let shared = match v {
+                        Value::Shared(arc) => Value::Shared(std::sync::Arc::clone(&arc)),
+                        other => Value::Shared(std::sync::Arc::new(std::sync::RwLock::new(other))),
+                    };
+                    self.set_reg(rd, shared);
+                }
+
+                Op::WeakNew { rd, ra } => {
+                    let v = self.get_reg(ra).clone();
+                    let weak = match v {
+                        Value::Shared(arc) => Value::WeakShared(std::sync::Arc::downgrade(&arc)),
+                        _ => return Err(InterpError::new(format!(
+                            "weak requires a shared value, got {}", v
+                        ))),
+                    };
+                    self.set_reg(rd, weak);
                 }
 
                 // ── Not yet implemented ────────────────────────

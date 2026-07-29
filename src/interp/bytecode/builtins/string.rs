@@ -145,8 +145,11 @@ fn builtin_str_index_of(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     match (&args[0], &args[1]) {
         (Value::String(s), Value::String(sub)) => {
             match s.find(sub.as_str()) {
-                Some(i) => Ok(Value::Int(i as i64)),
-                None => Ok(Value::Int(-1)),
+                Some(byte_idx) => {
+                    let char_idx = s[..byte_idx].chars().count() as i64;
+                    Ok(Value::Variant("Some".into(), vec![Value::Int(char_idx)]))
+                }
+                None => Ok(Value::Variant("None".into(), vec![])),
             }
         }
         _ => Err(InterpError::new("index_of expects (string, string)")),

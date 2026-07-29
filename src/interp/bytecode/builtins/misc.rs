@@ -380,6 +380,16 @@ fn builtin_inner(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
     match &args[0] {
         Value::Variant(_, payload) => Ok(payload.first().cloned().unwrap_or(Value::Unit)),
         Value::Newtype(_, inner) => Ok(*inner.clone()),
+        Value::Shared(arc) => {
+            let inner = arc.read().map_err(|e| {
+                InterpError::new(format!("shared read lock failed: {}", e))
+            })?;
+            Ok(inner.clone())
+        }
+        Value::LocalShared(rc) => {
+            let inner = rc.lock().unwrap_or_else(|e| e.into_inner());
+            Ok(inner.clone())
+        }
         other => Ok(other.clone()),
     }
 }
