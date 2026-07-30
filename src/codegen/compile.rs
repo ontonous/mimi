@@ -1300,7 +1300,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &triple,
                 &cpu,
                 &features,
-                OptimizationLevel::Aggressive,
+                OptimizationLevel::Default,
                 inkwell::targets::RelocMode::Default,
                 inkwell::targets::CodeModel::Default,
             )
@@ -1309,7 +1309,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             })?;
         let options = PassBuilderOptions::create();
         self.module
-            .run_passes("default<O2>", &tm, options)
+            .run_passes("internalize,default<O2>,globaldce", &tm, options)
             .map_err(|e| CompileError::LlvmError(format!("optimization failed: {}", e)))
     }
 
