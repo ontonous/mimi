@@ -100,7 +100,7 @@ impl<'a> BytecodeVM<'a> {
     /// Run the program from the entry point. Returns the exit code.
     pub fn run(&mut self) -> Result<i64, InterpError> {
         let entry = self.program.entry;
-        self.push_frame(entry, &[], None)?;
+        self.push_frame(entry, Vec::new(), None)?;
         let result = self.exec_loop();
         // Enrich errors with function name + line (D5/D12).
         let result = result.map_err(|e| self.enrich_error(e));
@@ -119,7 +119,7 @@ impl<'a> BytecodeVM<'a> {
     /// Used by test infrastructure that needs the actual return value.
     pub fn run_value(&mut self) -> Result<Value, InterpError> {
         let entry = self.program.entry;
-        self.push_frame(entry, &[], None)?;
+        self.push_frame(entry, Vec::new(), None)?;
         let result = self.exec_loop();
         result.map_err(|e| self.enrich_error(e))
     }
@@ -150,7 +150,7 @@ impl<'a> BytecodeVM<'a> {
     fn push_frame(
         &mut self,
         func_idx: FuncIdx,
-        args: &[Value],
+        args: Vec<Value>,
         return_reg: Option<Reg>,
     ) -> Result<(), InterpError> {
         if self.depth >= MAX_DEPTH {
@@ -170,10 +170,7 @@ impl<'a> BytecodeVM<'a> {
             )));
         }
 
-        let mut regs = Vec::with_capacity(reg_count);
-        for arg in args.iter() {
-            regs.push(arg.clone());
-        }
+        let mut regs = args;
         regs.resize(reg_count, Value::Unit);
 
         self.stack.push(Frame {
@@ -194,7 +191,7 @@ impl<'a> BytecodeVM<'a> {
     fn push_frame_wrap_ok(
         &mut self,
         func_idx: FuncIdx,
-        args: &[Value],
+        args: Vec<Value>,
         return_reg: Option<Reg>,
         source_state: Value,
     ) -> Result<(), InterpError> {
@@ -599,7 +596,7 @@ impl<'a> BytecodeVM<'a> {
                     let args: Vec<Value> = (0..argc)
                         .map(|i| self.get_reg(args_base + i).clone())
                         .collect();
-                    self.push_frame(func, &args, Some(rd))?;
+                    self.push_frame(func, args, Some(rd))?;
                     // Continue loop — new frame is now active.
                 }
                 Op::CallBuiltin {
@@ -1027,7 +1024,7 @@ impl<'a> BytecodeVM<'a> {
                                 .collect();
 
                             // Push a new frame for the closure.
-                            self.push_frame(proto_idx, &args, Some(rd))?;
+                            self.push_frame(proto_idx, args, Some(rd))?;
 
                             // Bind captured variables in the new frame.
                             // Captures go into registers param_count..param_count+capture_count.
@@ -1294,9 +1291,9 @@ impl<'a> BytecodeVM<'a> {
                     // success → Ok(result), failure → Err((source, error)).
                     if self.program.flow_fails_transitions.contains(&key) {
                         let state_val = self.get_reg(args_base).clone();
-                        self.push_frame_wrap_ok(func_idx, &args, Some(rd), state_val)?;
+                        self.push_frame_wrap_ok(func_idx, args, Some(rd), state_val)?;
                     } else {
-                        self.push_frame(func_idx, &args, Some(rd))?;
+                        self.push_frame(func_idx, args, Some(rd))?;
                     }
                 }
 
@@ -1335,7 +1332,7 @@ impl<'a> BytecodeVM<'a> {
                                 let direct_args: Vec<Value> = (0..argc)
                                     .map(|i| self.get_reg(args_base + i).clone())
                                     .collect();
-                                self.push_frame(func_idx, &direct_args, Some(rd))
+                                self.push_frame(func_idx, direct_args, Some(rd))
                                     .map_err(|e| self.enrich_error(e))?;
                                 // Continue loop — new frame is now active.
                             } else {
@@ -1445,7 +1442,7 @@ impl<'a> BytecodeVM<'a> {
                 captured,
             } => {
                 // Push a new frame for the closure.
-                self.push_frame(*proto_idx, args, None)?;
+                self.push_frame(*proto_idx, args.to_vec(), None)?;
 
                 // Bind captured variables in the new frame.
                 let target_proto = &self.program.functions[*proto_idx as usize];
@@ -1477,7 +1474,7 @@ impl<'a> BytecodeVM<'a> {
     /// Call a function by index with the given arguments.
     /// Used by actor worker threads to execute actor methods.
     pub fn call_function(&mut self, func_idx: FuncIdx, args: &[Value]) -> Result<Value, InterpError> {
-        self.push_frame(func_idx, args, None)?;
+        self.push_frame(func_idx, args.to_vec(), None)?;
         let prev_stop = self.stop_depth;
         self.stop_depth = self.depth;
         let result = self.exec_loop();
@@ -1494,7 +1491,7 @@ impl<'a> BytecodeVM<'a> {
         args: &[Value],
         source_state: Value,
     ) -> Result<Value, InterpError> {
-        self.push_frame_wrap_ok(func_idx, args, None, source_state)?;
+        self.push_frame_wrap_ok(func_idx, args.to_vec(), None, source_state)?;
         let prev_stop = self.stop_depth;
         self.stop_depth = self.depth;
         let result = self.exec_loop();
