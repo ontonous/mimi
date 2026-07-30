@@ -1601,7 +1601,7 @@ impl<'a> BytecodeVM<'a> {
     /// The actor's worker thread uses the tree-walker internally (it creates a fresh
     /// Interpreter for each message). This is a pragmatic hybrid: main program runs
     /// on bytecode, actor workers use tree-walker.
-    fn spawn_actor(&mut self, actor_name: &str) -> Result<Value, InterpError> {
+    pub(crate) fn spawn_actor(&mut self, actor_name: &str) -> Result<Value, InterpError> {
         use crate::interp::value::{ActorInstance, ActorHandle};
         use std::collections::HashMap;
 

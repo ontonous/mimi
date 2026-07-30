@@ -56,6 +56,9 @@ pub fn register(reg: &mut BuiltinRegistry) {
     // Flow test utilities
     reg.register(BuiltinDesc { name: "assert_state", arity: 2, category: BuiltinCategory::System, func: builtin_assert_state });
     reg.register(BuiltinDesc { name: "inject_fault", arity: 1, category: BuiltinCategory::System, func: builtin_inject_fault });
+    // Spawn / testing
+    reg.register(BuiltinDesc { name: "spawn_detached", arity: 1, category: BuiltinCategory::System, func: builtin_spawn_detached });
+    reg.register(BuiltinDesc { name: "test_sandbox", arity: 1, category: BuiltinCategory::System, func: builtin_test_sandbox });
 }
 
 fn handle(args: &[Value], idx: usize) -> Result<i64, InterpError> {
@@ -394,4 +397,47 @@ fn builtin_inject_fault(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
 
     fault_fields.insert("trace".to_string(), Value::Record(Some("SystemTrace".to_string()), trace_fields));
     Ok(Value::Record(Some("Fault".to_string()), fault_fields))
+}
+
+fn builtin_spawn_detached(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    let name = args[0].as_string().ok_or_else(|| InterpError::new("spawn_detached expects a string"))?;
+    vm.spawn_actor(name)
+}
+
+fn builtin_test_sandbox(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    let config = &args[0];
+    let mut results = Vec::new();
+    if let Value::Record(_, fields) = config {
+        if let Some(Value::List(actor_names)) = fields.get("actors") {
+            for actor_val in actor_names {
+                if let Value::String(name) = actor_val {
+                    match vm.spawn_actor(name) {
+                        Ok(_) => results.push(Value::String(format!("spawned:{}", name))),
+                        Err(e) => results.push(Value::String(format!("failed:{}:{}", name, e))),
+                    }
+                }
+            }
+        }
+        if let Some(Value::List(calls)) = fields.get("calls") {
+            for call in calls {
+                if let Value::Record(_, cf) = call {
+                    let method = cf.get("method")
+                        .and_then(|v| if let Value::String(s) = v { Some(s.clone()) } else { None })
+                        .unwrap_or_default();
+                    results.push(Value::String(format!("called:{}", method)));
+                }
+            }
+        }
+        if let Some(Value::List(faults)) = fields.get("faults") {
+            for fault in faults {
+                if let Value::Record(_, ff) = fault {
+                    let ftype = ff.get("fault_type")
+                        .and_then(|v| if let Value::String(s) = v { Some(s.clone()) } else { None })
+                        .unwrap_or_default();
+                    results.push(Value::String(format!("injected:{}", ftype)));
+                }
+            }
+        }
+    }
+    Ok(Value::List(results))
 }
