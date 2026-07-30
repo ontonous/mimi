@@ -66,6 +66,10 @@ struct FuncCompiler {
     scope_regs: Vec<Vec<Reg>>,
     /// Deferred blocks per scope (LIFO execution at scope exit).
     defer_scopes: Vec<Vec<Block>>,
+    /// OnFailure blocks per scope (LIFO execution on fault at scope exit).
+    on_failure_scopes: Vec<Vec<Block>>,
+    /// Instruction index of SetFaultPc for the current scope (for patching).
+    set_fault_pc_idx: Option<usize>,
 }
 
 /// Lightweight type tag for register dispatch.
@@ -92,6 +96,8 @@ impl FuncCompiler {
             free_regs: Vec::new(),
             scope_regs: vec![Vec::new()],
             defer_scopes: vec![Vec::new()],
+            on_failure_scopes: vec![Vec::new()],
+            set_fault_pc_idx: None,
         }
     }
 
@@ -99,6 +105,7 @@ impl FuncCompiler {
         self.vars.push(HashMap::new());
         self.scope_regs.push(Vec::new());
         self.defer_scopes.push(Vec::new());
+        self.on_failure_scopes.push(Vec::new());
     }
 
     fn pop_scope(&mut self) {
@@ -107,6 +114,7 @@ impl FuncCompiler {
             self.free_regs.extend(regs);
         }
         self.defer_scopes.pop();
+        self.on_failure_scopes.pop();
     }
 
     /// Look up a variable's register, searching innermost → outermost.
@@ -491,6 +499,16 @@ impl BytecodeCompiler {
         fc: &mut FuncCompiler,
         block: &Block,
     ) -> Result<Option<Reg>, InterpError> {
+        // Pre-scan for OnFailure blocks in this block to decide whether
+        // to emit a fault handler wrapper. We only care about direct
+        // children (Stmt::OnFailure), not nested ones in sub-blocks.
+        let has_on_failure = block.iter().any(|s| matches!(s.unlocated(), Stmt::OnFailure(_)));
+
+        let mut set_fault_idx = None;
+        if has_on_failure {
+            set_fault_idx = Some(fc.emit(Op::SetFaultPc { handler_pc: 0 }));
+        }
+
         let mut last_reg = None;
         for (i, stmt) in block.iter().enumerate() {
             // Track source line for error context (D12).
@@ -642,10 +660,9 @@ impl BytecodeCompiler {
                     }
                 }
 
-                Stmt::OnFailure(_block) => {
-                    // OnFailure — deferred fault compensation.
-                    // Skipped: compiling here would execute unconditionally,
-                    // not only on fault. Needs runtime fault binding in the VM.
+                Stmt::OnFailure(block) => {
+                    // Register compensation block for fault-triggered execution at scope exit.
+                    fc.on_failure_scopes.last_mut().unwrap().push(block.clone());
                 }
 
                 Stmt::Do(block) => {
@@ -689,6 +706,38 @@ impl BytecodeCompiler {
         fc.defer_scopes.last_mut().map(|s| s.clear());
         for d in defers.into_iter().rev() {
             self.compile_block(fc, &d)?;
+        }
+
+        // Emit OnFailure fault handler at scope exit (if any OnFailure blocks were registered).
+        let on_failure_blocks: Vec<Block> = fc.on_failure_scopes.last().map_or(Vec::new(), |s| s.clone());
+        fc.on_failure_scopes.last_mut().map(|s| s.clear());
+        if !on_failure_blocks.is_empty() {
+            if let Some(idx) = set_fault_idx {
+                // Emit ClearFaultPc for the normal (success) path.
+                fc.emit(Op::ClearFaultPc);
+                // Jump past the fault handler on normal exit.
+                let jmp_past = fc.emit(Op::Jmp { offset: 0 });
+
+                // Patch SetFaultPc to point to the handler start.
+                let handler_pc = fc.proto.code.len() as u32;
+                if let Op::SetFaultPc { handler_pc: ref mut pc } = fc.proto.code[idx] {
+                    *pc = handler_pc;
+                }
+
+                // Emit OnFailure blocks in LIFO order (last registered runs first).
+                for b in on_failure_blocks.into_iter().rev() {
+                    self.compile_block(fc, &b)?;
+                }
+
+                // After compensations, return with the original error.
+                fc.emit(Op::FaultRetEarly);
+
+                // Patch the jump to skip past the handler.
+                fc.proto.patch_jump(jmp_past);
+            }
+        } else if let Some(idx) = set_fault_idx {
+            // No OnFailure blocks but SetFaultPc was emitted — patch to Nop.
+            fc.proto.code[idx] = Op::Nop;
         }
 
         Ok(last_reg)

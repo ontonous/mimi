@@ -126,6 +126,9 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::TypeOf { .. } => "TYPE_OF",
         Op::Trap { .. } => "TRAP",
         Op::Nop => "NOP",
+        Op::SetFaultPc { .. } => "SET_FAULT_PC",
+        Op::ClearFaultPc => "CLEAR_FAULT_PC",
+        Op::FaultRetEarly => "FAULT_RET_EARLY",
         Op::ActorSpawn { .. } => "ACTOR_SPAWN",
         Op::FlowTransition { .. } => "FLOW_TRANSITION",
         Op::DynMethodCall { .. } => "DYN_METHOD_CALL",
@@ -288,6 +291,9 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         }
         Op::SharedNew { rd, ra } => format!("{:04}  {:<16} r{} = shared(r{})", pc, name, rd, ra),
         Op::WeakNew { rd, ra } => format!("{:04}  {:<16} r{} = weak(r{})", pc, name, rd, ra),
+        Op::SetFaultPc { handler_pc } => format!("{:04}  {:<16} handler_pc={}", pc, name, handler_pc),
+        Op::ClearFaultPc => format!("{:04}  {:<16}", pc, name),
+        Op::FaultRetEarly => format!("{:04}  {:<16}  ; re-emit early return after compensations", pc, name),
     }
 }
 
