@@ -258,16 +258,11 @@ impl<'a> BytecodeVM<'a> {
 
                 // ── Integer arithmetic ─────────────────────────
                 Op::AddInt { rd, ra, rb } => {
-                    // Runtime fallback: if either operand is Float, use float arithmetic.
-                    // If both are String, use string concatenation.
                     if matches!(self.get_reg(ra), Value::String(_)) && matches!(self.get_reg(rb), Value::String(_)) {
-                        let a = self.get_reg(ra).to_string();
-                        let b = self.get_reg(rb).to_string();
-                        self.set_reg(rd, Value::String(format!("{}{}", a, b)));
+                        let result = format!("{}{}", self.get_reg(ra), self.get_reg(rb));
+                        self.set_reg(rd, Value::String(result));
                     } else if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
-                        let a = self.get_reg(ra).clone();
-                        let b = self.get_reg(rb).clone();
-                        let (af, bf) = (value_to_f64(&a)?, value_to_f64(&b)?);
+                        let (af, bf) = (value_to_f64(self.get_reg(ra))?, value_to_f64(self.get_reg(rb))?);
                         let r = af + bf;
                         self.check_float(r, "+")?;
                         self.set_reg(rd, Value::Float(r));
@@ -281,9 +276,7 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::SubInt { rd, ra, rb } => {
                     if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
-                        let a = self.get_reg(ra).clone();
-                        let b = self.get_reg(rb).clone();
-                        let (af, bf) = (value_to_f64(&a)?, value_to_f64(&b)?);
+                        let (af, bf) = (value_to_f64(self.get_reg(ra))?, value_to_f64(self.get_reg(rb))?);
                         let r = af - bf;
                         self.check_float(r, "-")?;
                         self.set_reg(rd, Value::Float(r));
@@ -297,9 +290,7 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::MulInt { rd, ra, rb } => {
                     if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
-                        let a = self.get_reg(ra).clone();
-                        let b = self.get_reg(rb).clone();
-                        let (af, bf) = (value_to_f64(&a)?, value_to_f64(&b)?);
+                        let (af, bf) = (value_to_f64(self.get_reg(ra))?, value_to_f64(self.get_reg(rb))?);
                         let r = af * bf;
                         self.check_float(r, "*")?;
                         self.set_reg(rd, Value::Float(r));
@@ -313,9 +304,7 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::DivInt { rd, ra, rb } => {
                     if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
-                        let a = self.get_reg(ra).clone();
-                        let b = self.get_reg(rb).clone();
-                        let (af, bf) = (value_to_f64(&a)?, value_to_f64(&b)?);
+                        let (af, bf) = (value_to_f64(self.get_reg(ra))?, value_to_f64(self.get_reg(rb))?);
                         if bf == 0.0 {
                             return Err(InterpError::div_by_zero());
                         }
@@ -406,11 +395,9 @@ impl<'a> BytecodeVM<'a> {
 
                 // ── Comparison ─────────────────────────────────
                 Op::EqInt { rd, ra, rb } => {
-                    // Runtime fallback: use generic equality for non-Int values.
                     if !matches!(self.get_reg(ra), Value::Int(_)) || !matches!(self.get_reg(rb), Value::Int(_)) {
-                        let a = self.get_reg(ra).clone();
-                        let b = self.get_reg(rb).clone();
-                        self.set_reg(rd, Value::Bool(crate::interp::values_equal(&a, &b)));
+                        let result = crate::interp::values_equal(self.get_reg(ra), self.get_reg(rb));
+                        self.set_reg(rd, Value::Bool(result));
                     } else {
                         let (a, b) = self.get_int2(ra, rb)?;
                         self.set_reg(rd, Value::Bool(a == b));
@@ -418,9 +405,8 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::NeInt { rd, ra, rb } => {
                     if !matches!(self.get_reg(ra), Value::Int(_)) || !matches!(self.get_reg(rb), Value::Int(_)) {
-                        let a = self.get_reg(ra).clone();
-                        let b = self.get_reg(rb).clone();
-                        self.set_reg(rd, Value::Bool(!crate::interp::values_equal(&a, &b)));
+                        let result = !crate::interp::values_equal(self.get_reg(ra), self.get_reg(rb));
+                        self.set_reg(rd, Value::Bool(result));
                     } else {
                         let (a, b) = self.get_int2(ra, rb)?;
                         self.set_reg(rd, Value::Bool(a != b));
@@ -428,9 +414,11 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::LtInt { rd, ra, rb } => {
                     if matches!(self.get_reg(ra), Value::String(_)) || matches!(self.get_reg(rb), Value::String(_)) {
-                        let a = self.get_reg(ra).to_string();
-                        let b = self.get_reg(rb).to_string();
-                        self.set_reg(rd, Value::Bool(a < b));
+                        let result = match (self.get_reg(ra), self.get_reg(rb)) {
+                            (Value::String(a), Value::String(b)) => a < b,
+                            (a, b) => a.to_string() < b.to_string(),
+                        };
+                        self.set_reg(rd, Value::Bool(result));
                     } else {
                         let (a, b) = self.get_int2(ra, rb)?;
                         self.set_reg(rd, Value::Bool(a < b));
@@ -438,9 +426,11 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::GtInt { rd, ra, rb } => {
                     if matches!(self.get_reg(ra), Value::String(_)) || matches!(self.get_reg(rb), Value::String(_)) {
-                        let a = self.get_reg(ra).to_string();
-                        let b = self.get_reg(rb).to_string();
-                        self.set_reg(rd, Value::Bool(a > b));
+                        let result = match (self.get_reg(ra), self.get_reg(rb)) {
+                            (Value::String(a), Value::String(b)) => a > b,
+                            (a, b) => a.to_string() > b.to_string(),
+                        };
+                        self.set_reg(rd, Value::Bool(result));
                     } else {
                         let (a, b) = self.get_int2(ra, rb)?;
                         self.set_reg(rd, Value::Bool(a > b));
@@ -448,9 +438,11 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::LeInt { rd, ra, rb } => {
                     if matches!(self.get_reg(ra), Value::String(_)) || matches!(self.get_reg(rb), Value::String(_)) {
-                        let a = self.get_reg(ra).to_string();
-                        let b = self.get_reg(rb).to_string();
-                        self.set_reg(rd, Value::Bool(a <= b));
+                        let result = match (self.get_reg(ra), self.get_reg(rb)) {
+                            (Value::String(a), Value::String(b)) => a <= b,
+                            (a, b) => a.to_string() <= b.to_string(),
+                        };
+                        self.set_reg(rd, Value::Bool(result));
                     } else {
                         let (a, b) = self.get_int2(ra, rb)?;
                         self.set_reg(rd, Value::Bool(a <= b));
@@ -458,9 +450,11 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::GeInt { rd, ra, rb } => {
                     if matches!(self.get_reg(ra), Value::String(_)) || matches!(self.get_reg(rb), Value::String(_)) {
-                        let a = self.get_reg(ra).to_string();
-                        let b = self.get_reg(rb).to_string();
-                        self.set_reg(rd, Value::Bool(a >= b));
+                        let result = match (self.get_reg(ra), self.get_reg(rb)) {
+                            (Value::String(a), Value::String(b)) => a >= b,
+                            (a, b) => a.to_string() >= b.to_string(),
+                        };
+                        self.set_reg(rd, Value::Bool(result));
                     } else {
                         let (a, b) = self.get_int2(ra, rb)?;
                         self.set_reg(rd, Value::Bool(a >= b));
@@ -487,14 +481,12 @@ impl<'a> BytecodeVM<'a> {
                     self.set_reg(rd, Value::Bool(a >= b));
                 }
                 Op::Eq { rd, ra, rb } => {
-                    let a = self.get_reg(ra).clone();
-                    let b = self.get_reg(rb).clone();
-                    self.set_reg(rd, Value::Bool(crate::interp::values_equal(&a, &b)));
+                    let result = crate::interp::values_equal(self.get_reg(ra), self.get_reg(rb));
+                    self.set_reg(rd, Value::Bool(result));
                 }
                 Op::Ne { rd, ra, rb } => {
-                    let a = self.get_reg(ra).clone();
-                    let b = self.get_reg(rb).clone();
-                    self.set_reg(rd, Value::Bool(!crate::interp::values_equal(&a, &b)));
+                    let result = !crate::interp::values_equal(self.get_reg(ra), self.get_reg(rb));
+                    self.set_reg(rd, Value::Bool(result));
                 }
 
                 // ── Bitwise ────────────────────────────────────
@@ -557,9 +549,7 @@ impl<'a> BytecodeVM<'a> {
 
                 // ── String ─────────────────────────────────────
                 Op::ConcatStr { rd, ra, rb } => {
-                    let a = self.get_reg(ra).clone();
-                    let b = self.get_reg(rb).clone();
-                    let result = format!("{}{}", a, b);
+                    let result = format!("{}{}", self.get_reg(ra), self.get_reg(rb));
                     self.set_reg(rd, Value::String(result));
                 }
 
@@ -575,8 +565,7 @@ impl<'a> BytecodeVM<'a> {
                     self.stack.last_mut().unwrap().pc = new_pc as usize;
                 }
                 Op::JmpIf { offset, ra } => {
-                    let v = self.get_reg(ra).clone();
-                    if crate::interp::is_truthy(&v) {
+                    if crate::interp::is_truthy(self.get_reg(ra)) {
                         let pc = self.stack.last().unwrap().pc as i32;
                         let new_pc = pc + offset;
                         if new_pc < 0 {
@@ -588,8 +577,7 @@ impl<'a> BytecodeVM<'a> {
                     }
                 }
                 Op::JmpIfNot { offset, ra } => {
-                    let v = self.get_reg(ra).clone();
-                    if !crate::interp::is_truthy(&v) {
+                    if !crate::interp::is_truthy(self.get_reg(ra)) {
                         let pc = self.stack.last().unwrap().pc as i32;
                         let new_pc = pc + offset;
                         if new_pc < 0 {
@@ -698,10 +686,9 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::ListGet { rd, ra, rb } => {
                     let idx_raw = self.get_int(rb)?;
-                    let list = self.get_reg(ra).clone();
-                    match list {
+                    // Borrow the collection, extract only the element (avoid cloning entire list).
+                    let v = match self.get_reg(ra) {
                         Value::List(l) => {
-                            // Support negative indexing (Python-style: -1 = last).
                             let idx = if idx_raw < 0 {
                                 let wrapped = l.len() as i64 + idx_raw;
                                 if wrapped < 0 {
@@ -721,12 +708,10 @@ impl<'a> BytecodeVM<'a> {
                                     l.len()
                                 )));
                             }
-                            let v = l[idx].clone();
-                            self.set_reg(rd, v);
+                            l[idx].clone()
                         }
                         Value::String(s) => {
                             let bytes = s.as_bytes();
-                            // Support negative indexing for strings too.
                             let idx = if idx_raw < 0 {
                                 let wrapped = bytes.len() as i64 + idx_raw;
                                 if wrapped < 0 {
@@ -746,7 +731,7 @@ impl<'a> BytecodeVM<'a> {
                                     bytes.len()
                                 )));
                             }
-                            self.set_reg(rd, Value::Int(bytes[idx] as i64));
+                            Value::Int(bytes[idx] as i64)
                         }
                         other => {
                             return Err(InterpError::new(format!(
@@ -754,7 +739,8 @@ impl<'a> BytecodeVM<'a> {
                                 other
                             )))
                         }
-                    }
+                    };
+                    self.set_reg(rd, v);
                 }
                 Op::ListSet { ra, rb, rc } => {
                     let idx_raw = self.get_int(rb)?;
@@ -866,26 +852,24 @@ impl<'a> BytecodeVM<'a> {
                     self.set_reg(rd, Value::Record(type_name_str, fields));
                 }
                 Op::RecordGet { rd, ra, field } => {
-                    let v = self.get_reg(ra).clone();
                     let field_name = match &proto.constants[field as usize] {
                         ConstValue::Str(s) => s.clone(),
                         _ => String::new(),
                     };
-                    match v {
+                    // Borrow record, extract only the field value (avoid cloning entire record).
+                    let v = match self.get_reg(ra) {
                         Value::Record(_, fields) => {
-                            let value = fields.get(&field_name).cloned().ok_or_else(|| {
+                            fields.get(&field_name).cloned().ok_or_else(|| {
                                 InterpError::new(format!("record has no field '{}'", field_name))
-                            })?;
-                            self.set_reg(rd, value);
+                            })?
                         }
                         Value::Actor(handle) => {
                             let actor = handle.inner.read().map_err(|e| {
                                 InterpError::new(format!("actor lock failed: {}", e))
                             })?;
-                            let value = actor.fields.get(&field_name).cloned().ok_or_else(|| {
+                            actor.fields.get(&field_name).cloned().ok_or_else(|| {
                                 InterpError::new(format!("actor has no field '{}'", field_name))
-                            })?;
-                            self.set_reg(rd, value);
+                            })?
                         }
                         other => {
                             return Err(InterpError::new(format!(
@@ -893,7 +877,8 @@ impl<'a> BytecodeVM<'a> {
                                 other
                             )))
                         }
-                    }
+                    };
+                    self.set_reg(rd, v);
                 }
                 Op::RecordSet { ra, field, rb } => {
                     let field_name = match &proto.constants[field as usize] {
@@ -928,21 +913,19 @@ impl<'a> BytecodeVM<'a> {
                     self.set_reg(rd, Value::Set(Vec::new()));
                 }
                 Op::MapGet { rd, ra, rb } => {
-                    let map = self.get_reg(ra).clone();
                     let key = self.get_reg(rb).clone();
-                    match (&map, &key) {
+                    // Borrow map, extract only the value (avoid cloning entire map).
+                    let v = match (self.get_reg(ra), &key) {
                         (Value::Record(_, fields), Value::String(k)) => {
-                            match fields.get(k) {
-                                Some(v) => self.set_reg(rd, v.clone()),
-                                None => self.set_reg(rd, Value::Unit),
-                            }
+                            fields.get(k).cloned().unwrap_or(Value::Unit)
                         }
                         _ => {
                             return Err(InterpError::new(
                                 "map_get: expected (Map, String key)",
                             ))
                         }
-                    }
+                    };
+                    self.set_reg(rd, v);
                 }
                 Op::MapSet { ra, rb, rc } => {
                     let key = self.get_reg(rb).clone();
@@ -960,18 +943,18 @@ impl<'a> BytecodeVM<'a> {
                     }
                 }
                 Op::MapContains { rd, ra, rb } => {
-                    let map = self.get_reg(ra).clone();
                     let key = self.get_reg(rb).clone();
-                    match (&map, &key) {
+                    let contains = match (self.get_reg(ra), &key) {
                         (Value::Record(_, fields), Value::String(k)) => {
-                            self.set_reg(rd, Value::Bool(fields.contains_key(k)));
+                            fields.contains_key(k)
                         }
                         _ => {
                             return Err(InterpError::new(
                                 "map_contains: expected (Map, String key)",
                             ))
                         }
-                    }
+                    };
+                    self.set_reg(rd, Value::Bool(contains));
                 }
                 Op::SetAdd { ra, rb } => {
                     let val = self.get_reg(rb).clone();
