@@ -89,6 +89,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::CallIndirect { .. } => "CALL_INDIRECT",
         Op::Ret { .. } => "RET",
         Op::RetUnit => "RET_UNIT",
+        Op::RetEarly { .. } => "RET_EARLY",
         Op::NewList { .. } => "NEW_LIST",
         Op::ListPush { .. } => "LIST_PUSH",
         Op::ListGet { .. } => "LIST_GET",
@@ -194,6 +195,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             format!("{:04}  {:<16} r{} = r{}(r{}..r{})", pc, name, rd, callee, args_base, *args_base as u16 + argc.saturating_sub(1))
         }
         Op::Ret { ra } => format!("{:04}  {:<16} return r{}", pc, name, ra),
+        Op::RetEarly { ra } => format!("{:04}  {:<16} ret_early r{}", pc, name, ra),
         Op::RetUnit => format!("{:04}  {:<16} return unit", pc, name),
         Op::NewList { rd, capacity } => format!("{:04}  {:<16} r{} = list(cap={})", pc, name, rd, capacity),
         Op::ListPush { ra, rb } => format!("{:04}  {:<16} r{}.push(r{})", pc, name, ra, rb),

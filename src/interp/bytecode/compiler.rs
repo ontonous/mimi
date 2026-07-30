@@ -311,12 +311,17 @@ impl BytecodeCompiler {
                         for (i, p) in t.params.iter().enumerate() {
                             fc.vars[0].insert(p.name.clone(), (i + 1) as Reg);
                         }
-                        self.compile_block(&mut fc, body)?;
-                        // Ensure the function returns Unit if no explicit return.
-                        let r_unit = fc.proto.alloc_reg();
-                        let unit_idx = fc.proto.add_const(ConstValue::Unit);
-                        fc.emit(Op::LoadConst { rd: r_unit, idx: unit_idx });
-                        fc.emit(Op::Ret { ra: r_unit });
+                        let last_reg = self.compile_block(&mut fc, body)?;
+                        // Return the last expression's value, or Unit if none
+                        // (mirrors Pass-5 actor method pattern at lines 351-360).
+                        if let Some(r) = last_reg {
+                            fc.emit(Op::Ret { ra: r });
+                        } else {
+                            let r_unit = fc.proto.alloc_reg();
+                            let unit_idx = fc.proto.add_const(ConstValue::Unit);
+                            fc.emit(Op::LoadConst { rd: r_unit, idx: unit_idx });
+                            fc.emit(Op::Ret { ra: r_unit });
+                        }
                         let proto = fc.proto;
                         self.functions[idx as usize] = proto;
                     }
@@ -941,9 +946,10 @@ impl BytecodeCompiler {
                 fc.emit(Op::Unwrap { rd, ra: r_inner });
                 let jmp_end = fc.emit(Op::Jmp { offset: 0 });
 
-                // Err branch: return the error value.
+                // Err branch: return the error value (via RetEarly so
+                // wrap_ok can distinguish `?` from final-expression Err).
                 fc.proto.patch_jump(jmp_err);
-                fc.emit(Op::Ret { ra: r_inner });
+                fc.emit(Op::RetEarly { ra: r_inner });
 
                 fc.proto.patch_jump(jmp_end);
                 Ok(rd)
@@ -1664,14 +1670,19 @@ impl BytecodeCompiler {
             }
 
             PatternKind::Constructor(name, pats) => {
-                // Check variant tag, then match fields.
+                // Check variant tag.
                 let r_test = fc.proto.alloc_reg();
                 let tag_idx = fc.proto.add_const(ConstValue::Str(name.clone()));
                 fc.emit(Op::IsVariant { rd: r_test, ra: r_subject, tag: tag_idx });
 
+                // Emit JmpIfNot to skip field extraction if variant doesn't match.
+                // This prevents VariantGet from crashing on non-matching variants
+                // (e.g., extracting field 0 from a zero-arity variant like None).
+                let skip_extraction = fc.emit(Op::JmpIfNot { offset: 0, ra: r_test });
+
                 let mut bindings = Vec::new();
                 for (i, (field_name, sub_pat)) in pats.iter().enumerate() {
-                    // Extract field i from the variant.
+                    // Extract field i from the variant (safe: variant was checked above).
                     let r_field = fc.proto.alloc_reg();
                     fc.emit(Op::VariantGet {
                         rd: r_field,
@@ -1691,6 +1702,9 @@ impl BytecodeCompiler {
                         bindings.push((field_name.clone(), r_field));
                     }
                 }
+
+                // Patch skip_extraction to jump past field extraction.
+                fc.proto.patch_jump(skip_extraction);
 
                 Ok((Some(r_test), bindings))
             }

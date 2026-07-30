@@ -111,7 +111,13 @@ fn builtin_str_split(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
 fn builtin_str_join(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::List(parts), Value::String(sep)) => {
-            let strings: Vec<String> = parts.iter().map(|p| p.to_string()).collect();
+            let mut strings = Vec::with_capacity(parts.len());
+            for p in parts {
+                match p {
+                    Value::String(s) => strings.push(s.clone()),
+                    _ => return Err(InterpError::new("str_join: list must contain only strings")),
+                }
+            }
             Ok(Value::String(strings.join(sep)))
         }
         _ => Err(InterpError::new("str_join expects (list, string)")),
@@ -217,7 +223,6 @@ fn builtin_str_repeat(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value,
 fn builtin_str_char_at(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let idx = match &args[1] {
         Value::Int(i) => *i as usize,
-        Value::Float(f) => *f as usize,
         _ => return Err(InterpError::new("char_at expects (string, int)")),
     };
     match &args[0] {
@@ -246,6 +251,9 @@ fn builtin_char_code(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
 fn builtin_chr(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Int(code) => {
+            if *code < 0 || *code > 0x10FFFF {
+                return Err(InterpError::new(format!("chr: code point out of range: {}", code)));
+            }
             char::from_u32(*code as u32)
                 .map(|c| Value::String(c.to_string()))
                 .ok_or_else(|| InterpError::new(format!("chr: invalid code point {}", code)))
@@ -269,7 +277,8 @@ fn builtin_str_parse_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
 fn builtin_str_parse_float(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(s) => match s.trim().parse::<f64>() {
-            Ok(n) => Ok(Value::Tuple(vec![Value::Bool(true), Value::Float(n)])),
+            Ok(n) if n.is_finite() => Ok(Value::Tuple(vec![Value::Bool(true), Value::Float(n)])),
+            Ok(_) => Ok(Value::Tuple(vec![Value::Bool(false), Value::Float(0.0)])),
             Err(_) => Ok(Value::Tuple(vec![Value::Bool(false), Value::Float(0.0)])),
         },
         _ => Err(InterpError::new("parse_float expects a string")),

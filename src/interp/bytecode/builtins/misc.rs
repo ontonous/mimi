@@ -42,23 +42,22 @@ pub fn register(reg: &mut BuiltinRegistry) {
     reg.register(BuiltinDesc { name: "fields", arity: 1, category: BuiltinCategory::System, func: builtin_fields });
     reg.register(BuiltinDesc { name: "type_fields", arity: 1, category: BuiltinCategory::System, func: builtin_fields });
     reg.register(BuiltinDesc { name: "type_variants", arity: 1, category: BuiltinCategory::System, func: builtin_type_variants });
-    reg.register(BuiltinDesc { name: "assert_state", arity: 2, category: BuiltinCategory::System, func: builtin_assert_state });
     // C string
     reg.register(BuiltinDesc { name: "str_to_c_str", arity: 1, category: BuiltinCategory::String, func: builtin_str_to_c_str });
     reg.register(BuiltinDesc { name: "c_str_to_string", arity: 1, category: BuiltinCategory::String, func: builtin_c_str_to_string });
     // Process
-    reg.register(BuiltinDesc { name: "exec", arity: usize::MAX, category: BuiltinCategory::System, func: builtin_exec });
-    reg.register(BuiltinDesc { name: "exec_pipe", arity: usize::MAX, category: BuiltinCategory::System, func: builtin_exec });
-    reg.register(BuiltinDesc { name: "exec_safe", arity: usize::MAX, category: BuiltinCategory::System, func: builtin_exec });
+    reg.register(BuiltinDesc { name: "exec", arity: 1, category: BuiltinCategory::System, func: builtin_exec });
+    reg.register(BuiltinDesc { name: "exec_pipe", arity: 1, category: BuiltinCategory::System, func: builtin_exec_pipe });
+    reg.register(BuiltinDesc { name: "exec_safe", arity: usize::MAX, category: BuiltinCategory::System, func: builtin_exec_safe });
     // FS extended
     reg.register(BuiltinDesc { name: "file_stat", arity: 1, category: BuiltinCategory::System, func: builtin_file_stat });
     reg.register(BuiltinDesc { name: "read_file_bytes", arity: 1, category: BuiltinCategory::System, func: builtin_read_file_bytes });
     reg.register(BuiltinDesc { name: "write_file_bytes", arity: 2, category: BuiltinCategory::System, func: builtin_write_file_bytes });
     reg.register(BuiltinDesc { name: "close_fd", arity: 1, category: BuiltinCategory::System, func: builtin_close_fd });
     reg.register(BuiltinDesc { name: "read_file_partial", arity: 3, category: BuiltinCategory::System, func: builtin_read_file_partial });
-    reg.register(BuiltinDesc { name: "read_lines_each", arity: 1, category: BuiltinCategory::System, func: builtin_read_lines_each });
-    reg.register(BuiltinDesc { name: "read_lines_json", arity: 1, category: BuiltinCategory::System, func: builtin_read_lines_each });
-    reg.register(BuiltinDesc { name: "read_lines_json_builtin", arity: 1, category: BuiltinCategory::System, func: builtin_read_lines_each });
+    reg.register(BuiltinDesc { name: "read_lines_each", arity: 2, category: BuiltinCategory::System, func: builtin_read_lines_each });
+    reg.register(BuiltinDesc { name: "read_lines_json", arity: 1, category: BuiltinCategory::System, func: builtin_read_lines_json });
+    reg.register(BuiltinDesc { name: "read_lines_json_builtin", arity: 1, category: BuiltinCategory::System, func: builtin_read_lines_json });
     // Regex extended
     reg.register(BuiltinDesc { name: "regex_capture_groups", arity: 2, category: BuiltinCategory::String, func: builtin_regex_capture_groups });
     // Shadow memory
@@ -266,9 +265,10 @@ fn builtin_eprintln(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
 
 fn builtin_input(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
     let mut input = String::new();
-    std::io::stdin().read_line(&mut input)
-        .map_err(|e| InterpError::new(format!("input error: {}", e)))?;
-    Ok(Value::String(input.trim_end().to_string()))
+    match std::io::stdin().read_line(&mut input) {
+        Ok(_) => Ok(Value::Variant("Ok".into(), vec![Value::String(input.trim_end().to_string())])),
+        Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
+    }
 }
 
 fn builtin_input_float(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
@@ -354,10 +354,15 @@ fn builtin_regex_find_all(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Va
         (Value::String(text), Value::String(pattern)) => {
             let re = regex::Regex::new(pattern)
                 .map_err(|e| InterpError::new(format!("regex error: {}", e)))?;
-            let matches: Vec<Value> = re.find_iter(text)
-                .map(|m| Value::String(m.as_str().to_string()))
-                .collect();
-            Ok(Value::List(matches))
+            let matches: Vec<String> = re.find_iter(text)
+                .map(|m| m.as_str().to_string()).collect();
+            let json = matches.iter().enumerate()
+                .map(|(i, m)| {
+                    if i > 0 { "," } else { "" }.to_string()
+                        + &format!("\"{}\"", m.replace('\\', "\\\\").replace('"', "\\\""))
+                })
+                .collect::<String>();
+            Ok(Value::String(format!("[{}]", json)))
         }
         _ => Err(InterpError::new("regex_find_all expects (string, string)")),
     }
@@ -411,17 +416,6 @@ fn builtin_type_variants(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
     }
 }
 
-fn builtin_assert_state(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    // assert_state(actual, expected) — assert that actual matches expected state.
-    if !crate::interp::values_equal(&args[0], &args[1]) {
-        return Err(InterpError::new(format!(
-            "state assertion failed: expected {}, got {}",
-            args[1], args[0]
-        )));
-    }
-    Ok(Value::Unit)
-}
-
 // ── C string ────────────────────────────────────────────
 
 fn builtin_str_to_c_str(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
@@ -436,24 +430,103 @@ fn builtin_c_str_to_string(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
 // ── Process ─────────────────────────────────────────────
 
 fn builtin_exec(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    if args.is_empty() {
-        return Err(InterpError::new("exec expects at least 1 argument (command)"));
+    if args.len() != 1 {
+        return Err(InterpError::new("exec expects 1 argument (command)"));
     }
-    let cmd = args[0].to_string();
-    let cmd_args: Vec<String> = args[1..].iter().map(|a| a.to_string()).collect();
-    match std::process::Command::new(&cmd).args(&cmd_args).output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let status = output.status.code().unwrap_or(-1);
-            Ok(Value::Tuple(vec![
-                Value::Int(status as i64),
-                Value::String(stdout),
-            ]))
+    match &args[0] {
+        Value::String(cmd) => {
+            if cmd.contains('\0') {
+                return Err(InterpError::new("exec: command contains null byte"));
+            }
+            match std::process::Command::new("sh").arg("-c").arg(cmd).output() {
+                Ok(out) => {
+                    const MAX_EXEC_OUTPUT: usize = 10 * 1024 * 1024;
+                    let stdout_bytes = if out.stdout.len() > MAX_EXEC_OUTPUT {
+                        &out.stdout[..MAX_EXEC_OUTPUT]
+                    } else {
+                        &out.stdout
+                    };
+                    let stderr_bytes = if out.stderr.len() > MAX_EXEC_OUTPUT {
+                        &out.stderr[..MAX_EXEC_OUTPUT]
+                    } else {
+                        &out.stderr
+                    };
+                    let stdout = String::from_utf8_lossy(stdout_bytes).to_string();
+                    let stderr = String::from_utf8_lossy(stderr_bytes).to_string();
+                    let exit_code = out.status.code().unwrap_or(-1);
+                    let mut fields = std::collections::HashMap::new();
+                    fields.insert("exit_code".to_string(), Value::Int(exit_code as i64));
+                    fields.insert("stdout".to_string(), Value::String(stdout));
+                    fields.insert("stderr".to_string(), Value::String(stderr));
+                    Ok(Value::Record(Some("ExecResult".to_string()), fields))
+                }
+                Err(e) => {
+                    let mut fields = std::collections::HashMap::new();
+                    fields.insert("exit_code".to_string(), Value::Int(-1));
+                    fields.insert("stdout".to_string(), Value::String(String::new()));
+                    fields.insert("stderr".to_string(), Value::String(format!("exec error: {}", e)));
+                    Ok(Value::Record(Some("ExecResult".to_string()), fields))
+                }
+            }
         }
-        Err(e) => Ok(Value::Tuple(vec![
-            Value::Int(-1),
-            Value::String(e.to_string()),
-        ])),
+        _ => Err(InterpError::new("exec expects a string command")),
+    }
+}
+
+fn builtin_exec_pipe(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    if args.len() != 1 {
+        return Err(InterpError::new("exec_pipe expects 1 argument (command)"));
+    }
+    match &args[0] {
+        Value::String(cmd) => {
+            if cmd.contains('\0') {
+                return Err(InterpError::new("exec_pipe: command contains null byte"));
+            }
+            match std::process::Command::new("sh").arg("-c").arg(cmd).output() {
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                    Ok(Value::String(stdout))
+                }
+                Err(e) => Err(InterpError::new(format!("exec_pipe error: {}", e))),
+            }
+        }
+        _ => Err(InterpError::new("exec_pipe expects a string command")),
+    }
+}
+
+fn builtin_exec_safe(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    if args.is_empty() {
+        return Err(InterpError::new("exec_safe expects at least 1 argument (program)"));
+    }
+    let prog = match &args[0] {
+        Value::String(s) => s.clone(),
+        _ => return Err(InterpError::new("exec_safe: first argument must be a string (program)")),
+    };
+    let mut cmd = std::process::Command::new(&prog);
+    for arg in args.iter().skip(1) {
+        match arg {
+            Value::String(s) => { cmd.arg(s); }
+            _ => return Err(InterpError::new("exec_safe: all arguments must be strings")),
+        }
+    }
+    match cmd.output() {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let exit_code = out.status.code().unwrap_or(-1);
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("exit_code".to_string(), Value::Int(exit_code as i64));
+            fields.insert("stdout".to_string(), Value::String(stdout));
+            fields.insert("stderr".to_string(), Value::String(stderr));
+            Ok(Value::Record(Some("ExecResult".to_string()), fields))
+        }
+        Err(e) => {
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("exit_code".to_string(), Value::Int(-1));
+            fields.insert("stdout".to_string(), Value::String(String::new()));
+            fields.insert("stderr".to_string(), Value::String(format!("exec error: {}", e)));
+            Ok(Value::Record(Some("ExecResult".to_string()), fields))
+        }
     }
 }
 
@@ -462,16 +535,27 @@ fn builtin_exec(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
 fn builtin_file_stat(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(path) => {
+            let mut fields = std::collections::HashMap::new();
             match std::fs::metadata(path) {
                 Ok(meta) => {
-                    let mut fields = std::collections::HashMap::new();
                     fields.insert("size".to_string(), Value::Int(meta.len() as i64));
-                    fields.insert("is_dir".to_string(), Value::Bool(meta.is_dir()));
+                    let modified = meta.modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    fields.insert("modified".to_string(), Value::Int(modified));
                     fields.insert("is_file".to_string(), Value::Bool(meta.is_file()));
-                    Ok(Value::Record(None, fields))
+                    fields.insert("is_dir".to_string(), Value::Bool(meta.is_dir()));
                 }
-                Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
+                Err(_) => {
+                    fields.insert("size".to_string(), Value::Int(-1));
+                    fields.insert("modified".to_string(), Value::Int(0));
+                    fields.insert("is_file".to_string(), Value::Bool(false));
+                    fields.insert("is_dir".to_string(), Value::Bool(false));
+                }
             }
+            Ok(Value::Record(Some("StatResult".to_string()), fields))
         }
         _ => Err(InterpError::new("file_stat expects a string path")),
     }
@@ -482,8 +566,8 @@ fn builtin_read_file_bytes(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
         Value::String(path) => {
             match std::fs::read(path) {
                 Ok(bytes) => {
-                    let list: Vec<Value> = bytes.iter().map(|b| Value::Int(*b as i64)).collect();
-                    Ok(Value::Variant("Ok".into(), vec![Value::List(list)]))
+                    let s = String::from_utf8_lossy(&bytes).to_string();
+                    Ok(Value::Variant("Ok".into(), vec![Value::String(s)]))
                 }
                 Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
             }
@@ -494,17 +578,13 @@ fn builtin_read_file_bytes(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
 
 fn builtin_write_file_bytes(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
-        (Value::String(path), Value::List(bytes)) => {
-            let data: Vec<u8> = bytes.iter().filter_map(|b| match b {
-                Value::Int(i) => Some(*i as u8),
-                _ => None,
-            }).collect();
-            match std::fs::write(path, &data) {
+        (Value::String(path), Value::String(data)) => {
+            match std::fs::write(path, data.as_bytes()) {
                 Ok(()) => Ok(Value::Variant("Ok".into(), vec![Value::Unit])),
                 Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
             }
         }
-        _ => Err(InterpError::new("write_file_bytes expects (string, list of ints)")),
+        _ => Err(InterpError::new("write_file_bytes expects (string, string)")),
     }
 }
 
@@ -531,19 +611,58 @@ fn builtin_read_file_partial(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result
     }
 }
 
-fn builtin_read_lines_each(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    match &args[0] {
-        Value::String(path) => {
-            match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    let lines: Vec<Value> = content.lines().map(|l| Value::String(l.to_string())).collect();
-                    Ok(Value::List(lines))
-                }
-                Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
+fn builtin_read_lines_each(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    // read_lines_each(path, callback) — iterate lines calling closure, return count.
+    let path = match &args[0] {
+        Value::String(s) => s.clone(),
+        _ => return Err(InterpError::new("read_lines_each expects (string, closure)")),
+    };
+    let callback = &args[1];
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)
+        .map_err(|e| InterpError::new(format!("read_lines_each: {}", e)))?;
+    let reader = std::io::BufReader::new(file);
+    let mut count: i64 = 0;
+    for line_result in reader.lines() {
+        let line = line_result.map_err(|e| {
+            InterpError::new(format!("read_lines_each: failed to read line: {}", e))
+        })?;
+        vm.call_closure(callback, &[Value::String(line)])?;
+        count += 1;
+    }
+    Ok(Value::Int(count))
+}
+
+fn builtin_read_lines_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    let path = match &args[0] {
+        Value::String(s) => s.clone(),
+        _ => return Err(InterpError::new("read_lines_json expects a string path")),
+    };
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)
+        .map_err(|e| InterpError::new(format!("read_lines_json: {}", e)))?;
+    let reader = std::io::BufReader::new(file);
+    let mut result = String::from("[");
+    let mut first = true;
+    for line in reader.lines().map_while(Result::ok) {
+        if !first { result.push(','); }
+        first = false;
+        result.push('"');
+        for ch in line.chars() {
+            match ch {
+                '"' => result.push_str("\\\""),
+                '\\' => result.push_str("\\\\"),
+                '\n' => result.push_str("\\n"),
+                '\r' => result.push_str("\\r"),
+                '\t' => result.push_str("\\t"),
+                c if c < '\x20' => result.push_str(&format!("\\u{:04x}", c as u32)),
+                c => result.push(c),
             }
         }
-        _ => Err(InterpError::new("read_lines_each expects a string path")),
+        result.push('"');
     }
+    result.push(']');
+    Ok(Value::String(result))
 }
 
 fn builtin_regex_capture_groups(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
@@ -553,12 +672,19 @@ fn builtin_regex_capture_groups(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Res
                 .map_err(|e| InterpError::new(format!("regex error: {}", e)))?;
             match re.captures(text) {
                 Some(caps) => {
-                    let groups: Vec<Value> = caps.iter()
-                        .map(|m| Value::String(m.map(|m| m.as_str().to_string()).unwrap_or_default()))
+                    // Skip group 0 (full match), start from index 1 (tree-walker semantics).
+                    let groups: Vec<String> = caps.iter().skip(1)
+                        .map(|m| m.map(|m| m.as_str().to_string()).unwrap_or_default())
                         .collect();
-                    Ok(Value::List(groups))
+                    let json = groups.iter().enumerate()
+                        .map(|(i, g)| {
+                            if i > 0 { "," } else { "" }.to_string()
+                                + &format!("\"{}\"", g.replace('\\', "\\\\").replace('"', "\\\""))
+                        })
+                        .collect::<String>();
+                    Ok(Value::String(format!("[{}]", json)))
                 }
-                None => Ok(Value::List(vec![])),
+                None => Ok(Value::String("[]".to_string())),
             }
         }
         _ => Err(InterpError::new("regex_capture_groups expects (string, string)")),

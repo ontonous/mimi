@@ -28,6 +28,10 @@ struct Frame {
     /// Source state value for `fails` transitions.
     /// Used to construct Err((source, error)) on failure.
     flow_source_state: Option<Value>,
+    /// True when this frame is returning from a `?` operator.
+    /// Used by wrap_ok to distinguish `?` Err (rejection) from a
+    /// final-expression Err (success producing an Err value).
+    early_return: bool,
 }
 
 /// The bytecode VM.
@@ -135,6 +139,7 @@ impl<'a> BytecodeVM<'a> {
             return_reg,
             wrap_ok: false,
             flow_source_state: None,
+            early_return: false,
         });
         Ok(())
     }
@@ -534,35 +539,20 @@ impl<'a> BytecodeVM<'a> {
                     self.set_reg(rd, result);
                 }
                 Op::Ret { ra } => {
-                    let mut v = self.get_reg(ra).clone();
-                    let frame = self.stack.last().unwrap();
-                    let return_reg = frame.return_reg;
-                    let wrap_ok = frame.wrap_ok;
-                    let source_state = frame.flow_source_state.clone();
-                    if wrap_ok {
-                        // For `fails` transitions:
-                        // - If the return value is already Err(error), wrap as Err((source, error))
-                        // - Otherwise, wrap as Ok(result)
-                        match &v {
-                            Value::Variant(tag, payload) if tag == "Err" => {
-                                let error = payload.first().cloned().unwrap_or(Value::Unit);
-                                let src = source_state.unwrap_or(Value::Unit);
-                                v = Value::Variant("Err".to_string(), vec![
-                                    Value::Tuple(vec![src, error]),
-                                ]);
-                            }
-                            _ => {
-                                v = Value::Variant("Ok".to_string(), vec![v]);
-                            }
-                        }
-                    }
-                    self.stack.pop();
-                    self.depth -= 1;
-                    if self.stack.is_empty() || (stop > 0 && self.depth < stop) {
+                    let v = self.do_return(ra, false, stop)?;
+                    if let Some(v) = v {
                         return Ok(v);
                     }
-                    if let Some(rd) = return_reg {
-                        self.set_reg(rd, v);
+                }
+                Op::RetEarly { ra } => {
+                    // Set early_return flag so wrap_ok treats this as a
+                    // `?` rejection (not a final-expression Err value).
+                    if let Some(frame) = self.stack.last_mut() {
+                        frame.early_return = true;
+                    }
+                    let v = self.do_return(ra, true, stop)?;
+                    if let Some(v) = v {
+                        return Ok(v);
                     }
                 }
                 Op::RetUnit => {
@@ -666,7 +656,7 @@ impl<'a> BytecodeVM<'a> {
                     let v = self.get_reg(ra);
                     let len = match v {
                         Value::List(l) => l.len(),
-                        Value::String(s) => s.len(),
+                        Value::String(s) => s.chars().count(),
                         Value::Tuple(t) => t.len(),
                         other => {
                             return Err(InterpError::new(format!(
@@ -1184,15 +1174,44 @@ impl<'a> BytecodeVM<'a> {
                     let receiver = self.get_reg(args_base).clone();
                     match &receiver {
                         Value::Actor(handle) => {
-                            // Actor method call: enqueue and wait for result.
-                            let args: Vec<Value> = (1..argc)
-                                .map(|i| self.get_reg(args_base + i).clone())
-                                .collect();
-                            let rx = handle.try_enqueue(method_name, args)?;
-                            let result = rx.recv().map_err(|_| {
-                                InterpError::new("actor worker thread died")
-                            })??;
-                            self.set_reg(rd, result);
+                            // Self-call detection: if the current thread is this
+                            // actor's worker, call directly to avoid mailbox
+                            // deadlock (same pattern as tree-walker call.rs:775).
+                            let is_self_call =
+                                crate::interp::value::ActorHandle::current_worker_id() == handle.id;
+
+                            if is_self_call {
+                                // Direct synchronous call.
+                                let actor_name = {
+                                    let actor = handle.inner.read().map_err(|e| {
+                                        InterpError::new(format!("actor lock failed: {}", e))
+                                    })?;
+                                    actor.actor_name.clone()
+                                };
+                                let key = (actor_name, method_name.clone());
+                                let func_idx = self.program.actor_method_funcs.get(&key)
+                                    .copied()
+                                    .ok_or_else(|| InterpError::new(format!(
+                                        "self-call: actor method '{}' not found", method_name
+                                    )))?;
+                                let mut direct_args = Vec::with_capacity(argc as usize);
+                                direct_args.push(receiver);
+                                for i in 1..argc {
+                                    direct_args.push(self.get_reg(args_base + i).clone());
+                                }
+                                let result = self.call_function(func_idx, &direct_args)?;
+                                self.set_reg(rd, result);
+                            } else {
+                                // Cross-actor call: enqueue and wait for result.
+                                let args: Vec<Value> = (1..argc)
+                                    .map(|i| self.get_reg(args_base + i).clone())
+                                    .collect();
+                                let rx = handle.try_enqueue(method_name, args)?;
+                                let result = rx.recv().map_err(|_| {
+                                    InterpError::new("actor worker thread died")
+                                })??;
+                                self.set_reg(rd, result);
+                            }
                         }
                         Value::WeakShared(weak) if method_name == "upgrade" => {
                             match weak.upgrade() {
@@ -1301,6 +1320,63 @@ impl<'a> BytecodeVM<'a> {
         result
     }
 
+    /// Call a function with wrap_ok semantics (for `fails` transitions).
+    /// On return, Op::Ret wraps the value in Ok/Err Variant matching
+    /// the tree-walker's eval_flow_transition return convention.
+    pub fn call_function_wrap_ok(
+        &mut self,
+        func_idx: FuncIdx,
+        args: &[Value],
+        source_state: Value,
+    ) -> Result<Value, InterpError> {
+        self.push_frame_wrap_ok(func_idx, args, None, source_state)?;
+        let prev_stop = self.stop_depth;
+        self.stop_depth = self.depth;
+        let result = self.exec_loop();
+        self.stop_depth = prev_stop;
+        result
+    }
+
+    /// Shared return path for Op::Ret and Op::RetEarly.
+    /// Returns Ok(Some(v)) if execution should stop (empty stack or stop_depth),
+    /// Ok(None) if execution should continue (caller frame can receive the value).
+    fn do_return(
+        &mut self,
+        ra: Reg,
+        is_early_return: bool,
+        stop: usize,
+    ) -> Result<Option<Value>, InterpError> {
+        let mut v = self.get_reg(ra).clone();
+        let frame = self.stack.last().unwrap();
+        let return_reg = frame.return_reg;
+        let wrap_ok = frame.wrap_ok;
+        let source_state = frame.flow_source_state.clone();
+        if wrap_ok {
+            if is_early_return {
+                // `?` triggered rejection: unwrap Err(x) → Err((source, x))
+                let error = match &v {
+                    Value::Variant(_, payload) => payload.first().cloned().unwrap_or(Value::Unit),
+                    other => other.clone(),
+                };
+                let src = source_state.unwrap_or(Value::Unit);
+                v = Value::Variant("Err".to_string(), vec![
+                    Value::Tuple(vec![src, error]),
+                ]);
+            } else {
+                v = Value::Variant("Ok".to_string(), vec![v]);
+            }
+        }
+        self.stack.pop();
+        self.depth -= 1;
+        if self.stack.is_empty() || (stop > 0 && self.depth < stop) {
+            return Ok(Some(v));
+        }
+        if let Some(rd) = return_reg {
+            self.set_reg(rd, v);
+        }
+        Ok(None)
+    }
+
     // ── Builtin dispatch (D1: registry, not giant match) ─────
 
     fn call_builtin(
@@ -1333,15 +1409,30 @@ impl<'a> BytecodeVM<'a> {
     // ── Register access helpers (D8: centralized Value conversion) ──
 
     pub(crate) fn get_reg(&self, r: Reg) -> &Value {
-        &self.stack.last().unwrap().regs[r as usize]
+        let frame = self.stack.last().unwrap();
+        let idx = r as usize;
+        if idx >= frame.regs.len() {
+            panic!("bytecode: register {} out of bounds (len {})", idx, frame.regs.len());
+        }
+        &frame.regs[idx]
     }
 
     pub(crate) fn get_reg_mut(&mut self, r: Reg) -> &mut Value {
-        &mut self.stack.last_mut().unwrap().regs[r as usize]
+        let len = self.stack.last().unwrap().regs.len();
+        let idx = r as usize;
+        if idx >= len {
+            panic!("bytecode: register {} out of bounds (len {})", idx, len);
+        }
+        &mut self.stack.last_mut().unwrap().regs[idx]
     }
 
     pub(crate) fn set_reg(&mut self, r: Reg, v: Value) {
-        self.stack.last_mut().unwrap().regs[r as usize] = v;
+        let idx = r as usize;
+        let len = self.stack.last().unwrap().regs.len();
+        if idx >= len {
+            panic!("bytecode: register {} out of bounds (len {})", idx, len);
+        }
+        self.stack.last_mut().unwrap().regs[idx] = v;
     }
 
     pub(crate) fn get_int(&self, r: Reg) -> Result<i64, InterpError> {
@@ -1402,7 +1493,7 @@ impl<'a> BytecodeVM<'a> {
         }
     }
 
-    fn check_float(&self, v: f64, op: &str) -> Result<(), InterpError> {
+    pub(crate) fn check_float(&self, v: f64, op: &str) -> Result<(), InterpError> {
         if v.is_nan() || v.is_infinite() {
             return Err(InterpError::float_error(format!(
                 "invalid floating-point result from {}",

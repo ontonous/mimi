@@ -1432,14 +1432,53 @@ impl ActorHandle {
                         let key = (flow_name, msg.method.clone(), from_state);
                         match worker_bc.flow_transition_funcs.get(&key) {
                             Some(&func_idx) => {
-                                let mut args = vec![flow_state.unwrap_or(Value::Unit)];
+                                let current_state = flow_state.unwrap_or(Value::Unit);
+                                // Arity check: transition func takes (self/state + params).
+                                let expected = worker_bc.functions[func_idx as usize].param_count as usize;
+                                if 1 + msg.args.len() != expected {
+                                    let err = InterpError::new(format!(
+                                        "wrong arg count for transition '{}' from state '{}': expected {}, got {}",
+                                        msg.method, key.2, expected - 1, msg.args.len()
+                                    ));
+                                    let _ = msg.response.send(Err(err));
+                                    continue;
+                                }
+                                let mut args = vec![current_state.clone()];
                                 args.extend(msg.args);
                                 let mut vm = crate::interp::bytecode::BytecodeVM::new(&worker_bc);
-                                let r = vm.call_function(func_idx, &args);
+                                // Use wrap_ok for fails transitions so Op::Ret
+                                // wraps the body value in Ok/Err Variant matching
+                                // tree-walker's eval_flow_transition convention.
+                                let r = if worker_bc.flow_fails_transitions.contains(&key) {
+                                    vm.call_function_wrap_ok(func_idx, &args, current_state)
+                                } else {
+                                    vm.call_function(func_idx, &args)
+                                };
                                 // Update flow_state on success.
                                 if let Ok(ref new_state) = r {
                                     if let Ok(mut actor) = worker_inner.write() {
-                                        actor.flow_state = Some(new_state.clone());
+                                        // For fails transitions, unwrap the Ok/Err
+                                        // wrapper to get the actual state value
+                                        // (mirrors tree-walker value.rs:1164-1184).
+                                        let actual_state = if worker_bc.flow_fails_transitions.contains(&key) {
+                                            match new_state {
+                                                Value::Variant(tag, inner) if tag == "Ok" => {
+                                                    inner.first().cloned().unwrap_or(Value::Unit)
+                                                }
+                                                Value::Variant(tag, inner) if tag == "Err" => {
+                                                    match inner.first() {
+                                                        Some(Value::Tuple(elems)) => {
+                                                            elems.first().cloned().unwrap_or(Value::Unit)
+                                                        }
+                                                        other => other.cloned().unwrap_or(Value::Unit),
+                                                    }
+                                                }
+                                                other => other.clone(),
+                                            }
+                                        } else {
+                                            new_state.clone()
+                                        };
+                                        actor.flow_state = Some(actual_state);
                                     }
                                 }
                                 r
@@ -1458,6 +1497,16 @@ impl ActorHandle {
                         let key = (actor_name, msg.method.clone());
                         match worker_bc.actor_method_funcs.get(&key) {
                             Some(&func_idx) => {
+                                // Arity check: method func takes (self + params).
+                                let expected = worker_bc.functions[func_idx as usize].param_count as usize;
+                                if 1 + msg.args.len() != expected {
+                                    let err = InterpError::new(format!(
+                                        "wrong arg count for method '{}': expected {}, got {}",
+                                        msg.method, expected - 1, msg.args.len()
+                                    ));
+                                    let _ = msg.response.send(Err(err));
+                                    continue;
+                                }
                                 // Build self handle for the method.
                                 let self_val = Value::Actor(ActorHandle {
                                     inner: worker_inner.clone(),

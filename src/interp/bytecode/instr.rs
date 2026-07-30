@@ -176,6 +176,9 @@ pub enum Op {
     Ret { ra: Reg },
     /// Return Unit
     RetUnit,
+    /// Early return from `?` operator: return ra, marking it as a rejection
+    /// for `fails` transitions (distinguishes `?` Err from final-expression Err).
+    RetEarly { ra: Reg },
 
     // ═══════════════════════════════════════════════════════════
     // Data structures

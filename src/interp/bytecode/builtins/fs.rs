@@ -33,9 +33,10 @@ pub fn register(reg: &mut BuiltinRegistry) {
 }
 
 fn expect_str(args: &[Value], idx: usize) -> Result<String, InterpError> {
-    match &args[idx] {
-        Value::String(s) => Ok(s.clone()),
-        _ => Err(InterpError::new("expected a string argument")),
+    match args.get(idx) {
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(_) => Err(InterpError::new("expected a string argument")),
+        None => Err(InterpError::new(format!("missing argument at index {}", idx))),
     }
 }
 
@@ -43,6 +44,14 @@ fn expect_str(args: &[Value], idx: usize) -> Result<String, InterpError> {
 
 fn builtin_read_file(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
+    // Guard against oversized files (matches tree-walker CL-H1).
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > crate::path_safety::MAX_SOURCE_BYTES {
+            return Ok(Value::Variant("Err".into(), vec![
+                Value::String("read_file: file too large".to_string()),
+            ]));
+        }
+    }
     match std::fs::read_to_string(&path) {
         Ok(content) => Ok(Value::Variant("Ok".into(), vec![Value::String(content)])),
         Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
@@ -62,15 +71,10 @@ fn builtin_append_file(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value
     let path = expect_str(args, 0)?;
     let content = expect_str(args, 1)?;
     use std::io::Write;
-    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(mut file) => {
-            match file.write_all(content.as_bytes()) {
-                Ok(()) => Ok(Value::Variant("Ok".into(), vec![Value::Unit])),
-                Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
-            }
-        }
-        Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
-    }
+    let ok = std::fs::OpenOptions::new().create(true).append(true).open(&path)
+        .and_then(|mut file| file.write_all(content.as_bytes()))
+        .is_ok();
+    Ok(Value::Bool(ok))
 }
 
 fn builtin_file_exists(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
@@ -80,10 +84,7 @@ fn builtin_file_exists(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value
 
 fn builtin_remove_file(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(Value::Variant("Ok".into(), vec![Value::Unit])),
-        Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
-    }
+    Ok(Value::Bool(std::fs::remove_file(&path).is_ok()))
 }
 
 fn builtin_is_dir(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
@@ -98,10 +99,7 @@ fn builtin_is_file(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
 
 fn builtin_mkdir_p(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let path = expect_str(args, 0)?;
-    match std::fs::create_dir_all(&path) {
-        Ok(()) => Ok(Value::Variant("Ok".into(), vec![Value::Unit])),
-        Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
-    }
+    Ok(Value::Bool(std::fs::create_dir_all(&path).is_ok()))
 }
 
 fn builtin_listdir(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
@@ -114,7 +112,7 @@ fn builtin_listdir(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
             }
             Ok(Value::List(result))
         }
-        Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
+        Err(_) => Ok(Value::List(vec![])),
     }
 }
 
@@ -133,8 +131,9 @@ fn builtin_path_dirname(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     let path = expect_str(args, 0)?;
     let dirname = std::path::Path::new(&path)
         .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| ".".to_string());
+        .and_then(|p| p.to_str())
+        .unwrap_or("")
+        .to_string();
     Ok(Value::String(dirname))
 }
 
@@ -173,7 +172,7 @@ fn builtin_set_env(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
     let key = expect_str(args, 0)?;
     let val = expect_str(args, 1)?;
     std::env::set_var(&key, &val);
-    Ok(Value::Unit)
+    Ok(Value::Bool(true))
 }
 
 // ── Time ────────────────────────────────────────────────
