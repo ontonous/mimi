@@ -158,6 +158,47 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(());
         }
 
+        // Optimization: detect `for i in range(start, end)` call → counter loop (no list alloc).
+        if let Expr::Call(callee, args) = iterable.unlocated() {
+            if let Expr::Ident(name) = callee.unlocated() {
+                if name == "range" && args.len() == 2 {
+                    let start_val = self.compile_expr(&args[0], vars)?;
+                    let end_val = self.compile_expr(&args[1], vars)?;
+                    let start_iv = Self::expect_int_value(start_val, "range start must be i64")?;
+                    let end_iv = Self::expect_int_value(end_val, "range end must be i64")?;
+
+                    let (idx_alloca, loop_bb, body_bb, merge_bb) =
+                        self.build_for_index_header(start_iv)?;
+
+                    self.builder.position_at_end(loop_bb);
+                    self.build_for_index_condition(idx_alloca, end_iv, body_bb, merge_bb)?;
+
+                    self.builder.position_at_end(body_bb);
+                    self.emit_loop_body_block(
+                        body,
+                        vars,
+                        loop_bb,
+                        merge_bb,
+                        |slf, vs| {
+                            let idx_val = slf.build_load(i64_ty, idx_alloca, "idx")?;
+                            let idx_iv = Self::expect_int_value(idx_val, "index must be i64")?;
+                            let elem_alloca = slf.build_alloca(i64_ty, var)?;
+                            slf.build_store(elem_alloca, idx_iv)?;
+                            vs.insert(var.to_string(), (elem_alloca, i64_ty));
+                            Ok(())
+                        },
+                        |slf, vs| {
+                            vs.remove(var);
+                            slf.build_for_index_increment(idx_alloca)
+                        },
+                    )?;
+
+                    self.builder.position_at_end(merge_bb);
+                    return Ok(());
+                }
+            }
+        }
+
         let iterable_val = self.compile_expr(iterable, vars)?;
         let list_ptr = self.coerce_iterable_to_list_ptr(iterable_val)?;
 
