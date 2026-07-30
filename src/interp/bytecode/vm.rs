@@ -1509,7 +1509,8 @@ impl<'a> BytecodeVM<'a> {
         is_early_return: bool,
         stop: usize,
     ) -> Result<Option<Value>, InterpError> {
-        let mut v = self.get_reg(ra).clone();
+        // Move value out of register (frame is about to be popped — no clone needed).
+        let mut v = std::mem::replace(self.get_reg_mut(ra), Value::Unit);
         let frame = self.stack.last().unwrap();
         let return_reg = frame.return_reg;
         let wrap_ok = frame.wrap_ok;
