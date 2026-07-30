@@ -81,6 +81,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::And { .. } => "AND",
         Op::Or { .. } => "OR",
         Op::ConcatStr { .. } => "CONCAT_STR",
+        Op::StrAppend { .. } => "STR_APPEND",
         Op::Jmp { .. } => "JMP",
         Op::JmpIf { .. } => "JMP_IF",
         Op::JmpIfNot { .. } => "JMP_IF_NOT",
@@ -171,6 +172,9 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         | Op::And { rd, ra, rb } | Op::Or { rd, ra, rb }
         | Op::ConcatStr { rd, ra, rb } => {
             format!("{:04}  {:<16} r{} = r{} op r{}", pc, name, rd, ra, rb)
+        }
+        Op::StrAppend { ra, rb } => {
+            format!("{:04}  {:<16} r{} += r{}", pc, name, ra, rb)
         }
         Op::NegInt { rd, ra } | Op::NegFloat { rd, ra } | Op::IntToFloat { rd, ra }
         | Op::BitNot { rd, ra } | Op::Not { rd, ra } | Op::ToString { rd, ra }

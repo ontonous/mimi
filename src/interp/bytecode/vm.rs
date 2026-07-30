@@ -539,6 +539,17 @@ impl<'a> BytecodeVM<'a> {
                     let result = format!("{}{}", self.get_reg(ra), self.get_reg(rb));
                     self.set_reg(rd, Value::String(result));
                 }
+                Op::StrAppend { ra, rb } => {
+                    let suffix = self.get_reg(rb).to_string();
+                    let target = self.get_reg_mut(ra);
+                    match target {
+                        Value::String(s) => s.push_str(&suffix),
+                        other => {
+                            let base = other.to_string();
+                            *other = Value::String(format!("{}{}", base, suffix));
+                        }
+                    }
+                }
 
                 // ── Control flow ───────────────────────────────
                 Op::Jmp { offset } => {

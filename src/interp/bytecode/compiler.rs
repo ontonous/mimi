@@ -2683,6 +2683,20 @@ impl BytecodeCompiler {
     ) -> Result<(), InterpError> {
         match target.unlocated() {
             Expr::Ident(name) => {
+                // Optimization: detect `s = s + expr` → StrAppend (in-place, avoids O(n²)).
+                // SAFETY: only when variable is known String type (prevents Int += Int miscompile).
+                if fc.reg_is_string(name) {
+                    if let Expr::Binary(BinOp::Add, lhs, rhs) = value.unlocated() {
+                        if let Expr::Ident(lhs_name) = lhs.unlocated() {
+                            if lhs_name == name {
+                                let r_var = fc.get_or_bind(name);
+                                let r_rhs = self.compile_expr(fc, rhs)?;
+                                fc.emit(Op::StrAppend { ra: r_var, rb: r_rhs });
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
                 let r_val = self.compile_expr(fc, value)?;
                 let r_var = fc.get_or_bind(name);
                 // Track type for int/float dispatch.
