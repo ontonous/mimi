@@ -54,7 +54,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
 fn builtin_len(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let len = match &args[0] {
         Value::List(l) => l.len(),
-        Value::String(s) => s.len(),
+        Value::String(s) => s.chars().count(),
         Value::Tuple(t) => t.len(),
         Value::Set(s) => s.len(),
         Value::Record(_, fields) => fields.len(),
@@ -116,7 +116,15 @@ fn builtin_sort_list(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     let mut list = match &args[0] { Value::List(l) => l.clone(), _ => return Err(InterpError::new("sort: expected list")) };
     list.sort_by(|a, b| match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
-        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+        (Value::Float(x), Value::Float(y)) => {
+            // NaN sorts as Greater (matches tree-walker semantics).
+            match (x.is_nan(), y.is_nan()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+            }
+        }
         (Value::String(x), Value::String(y)) => x.cmp(y),
         _ => std::cmp::Ordering::Equal,
     });
@@ -185,7 +193,11 @@ fn builtin_sum(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Interp
             let mut has_float = false;
             for elem in l {
                 match elem {
-                    Value::Int(v) => int_sum += v,
+                    Value::Int(v) => {
+                        int_sum = int_sum.checked_add(*v).ok_or_else(|| {
+                            InterpError::new("sum overflow")
+                        })?;
+                    }
                     Value::Float(v) => { float_sum += v; has_float = true; }
                     _ => return Err(InterpError::new("sum: list must contain only numbers")),
                 }

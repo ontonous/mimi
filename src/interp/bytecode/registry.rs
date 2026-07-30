@@ -59,7 +59,13 @@ impl BuiltinRegistry {
     }
 
     /// Register a builtin. Returns its index (BuiltinIdx).
+    /// Panics if a builtin with the same name is already registered.
     pub fn register(&mut self, desc: BuiltinDesc) -> u32 {
+        assert!(
+            !self.name_to_idx.contains_key(desc.name),
+            "duplicate builtin registration: '{}'",
+            desc.name,
+        );
         let idx = self.descs.len() as u32;
         self.name_to_idx.insert(desc.name, idx);
         self.descs.push(desc);

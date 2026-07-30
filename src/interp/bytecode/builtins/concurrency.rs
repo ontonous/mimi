@@ -366,10 +366,32 @@ fn builtin_inject_fault(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
         Value::Record(Some(name), _) => name.clone(),
         _ => "unknown".to_string(),
     };
+    // Construct a Fault record matching tree-walker semantics.
     let mut fault_fields = std::collections::HashMap::new();
-    fault_fields.insert("last_state".to_string(), Value::String(state_name));
+    fault_fields.insert("last_state".to_string(), Value::String(state_name.clone()));
     fault_fields.insert("unexpected_event".to_string(), Value::String("inject_fault".to_string()));
     fault_fields.insert("snapshot".to_string(), args[0].clone());
-    fault_fields.insert("trace".to_string(), Value::Unit);
+
+    // SystemTrace sub-record (v0.29.39 expanded).
+    let mut trace_fields = std::collections::HashMap::new();
+    trace_fields.insert("last_state_name".to_string(), Value::String(state_name));
+    trace_fields.insert("unexpected_event".to_string(), Value::String("inject_fault".to_string()));
+    trace_fields.insert("snapshot".to_string(), Value::String(String::new()));
+
+    // MemoryDump: empty dump.
+    let mut dump_fields = std::collections::HashMap::new();
+    dump_fields.insert("count".to_string(), Value::Int(0));
+    dump_fields.insert("regions".to_string(), Value::List(Vec::new()));
+    trace_fields.insert("memory_dump".to_string(), Value::Record(Some("MemoryDump".to_string()), dump_fields));
+
+    // PanicPayload: synthetic injection info.
+    let mut panic_fields = std::collections::HashMap::new();
+    panic_fields.insert("error_type".to_string(), Value::String("InjectFault".to_string()));
+    panic_fields.insert("file".to_string(), Value::String(String::new()));
+    panic_fields.insert("line".to_string(), Value::Int(0));
+    panic_fields.insert("stack_snapshot".to_string(), Value::String(String::new()));
+    trace_fields.insert("panic_payload".to_string(), Value::Record(Some("PanicPayload".to_string()), panic_fields));
+
+    fault_fields.insert("trace".to_string(), Value::Record(Some("SystemTrace".to_string()), trace_fields));
     Ok(Value::Record(Some("Fault".to_string()), fault_fields))
 }
