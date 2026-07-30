@@ -2793,9 +2793,18 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")?;
                 Ok(BasicValueEnum::PointerValue(ptr))
             }
-            BasicTypeEnum::IntType(_) => {
-                // Native int — use as-is.
-                Ok(BasicValueEnum::IntValue(elem_int))
+            BasicTypeEnum::IntType(target_ty) => {
+                // Truncate i64 → target width if needed (e.g. List<i32> elements).
+                if target_ty.get_bit_width() < 64 {
+                    let truncated = self
+                        .generator
+                        .builder
+                        .build_int_truncate(elem_int, target_ty, "elem_trunc")
+                        .map_err(|e| CompileError::LlvmError(format!("elem truncate: {e}")))?;
+                    Ok(BasicValueEnum::IntValue(truncated))
+                } else {
+                    Ok(BasicValueEnum::IntValue(elem_int))
+                }
             }
             BasicTypeEnum::FloatType(_) => {
                 // Float — bitcast i64 to float.
