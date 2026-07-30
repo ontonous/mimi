@@ -155,8 +155,8 @@ fn builtin_path_join(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
 
 // ── Env ─────────────────────────────────────────────────
 
-fn builtin_args(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
-    let args: Vec<Value> = std::env::args().map(Value::String).collect();
+fn builtin_args(vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+    let args: Vec<Value> = vm.cli_args.iter().map(|s| Value::String(s.clone())).collect();
     Ok(Value::List(args))
 }
 

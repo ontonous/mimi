@@ -131,10 +131,10 @@ fn builtin_to_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
 fn builtin_from_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(s) => {
-            match serde_json::from_str::<serde_json::Value>(s) {
-                Ok(json) => Ok(json_to_value(&json)),
-                Err(e) => Err(InterpError::new(format!("from_json parse error: {}", e))),
-            }
+            // Validate JSON and return the string as-is (matches tree-walker + codegen).
+            let _: serde_json::Value = serde_json::from_str(s)
+                .map_err(|e| InterpError::new(format!("from_json parse error: {}", e)))?;
+            Ok(Value::String(s.clone()))
         }
         _ => Err(InterpError::new("from_json expects a string")),
     }
@@ -143,14 +143,15 @@ fn builtin_from_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
 fn builtin_json_get_string(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(json_str), Value::String(key)) => {
-            match serde_json::from_str::<serde_json::Value>(json_str) {
-                Ok(json) => {
-                    match json.get(key).and_then(|v| v.as_str()) {
-                        Some(s) => Ok(Value::Variant("Some".into(), vec![Value::String(s.to_string())])),
-                        None => Ok(Value::Variant("None".into(), vec![])),
-                    }
-                }
-                Err(_) => Ok(Value::Variant("None".into(), vec![])),
+            let jv: serde_json::Value = serde_json::from_str(json_str)
+                .map_err(|e| InterpError::new(format!("json_get_string parse error: {}", e)))?;
+            match jv.get(key) {
+                Some(serde_json::Value::String(s)) => Ok(Value::String(s.clone())),
+                Some(serde_json::Value::Bool(b)) => Ok(Value::String(if *b { "true".into() } else { "false".into() })),
+                Some(serde_json::Value::Number(n)) => Ok(Value::String(n.to_string())),
+                Some(serde_json::Value::Null) => Ok(Value::String("null".into())),
+                Some(val) => Ok(Value::String(val.to_string())),
+                None => Ok(Value::String(String::new())),
             }
         }
         _ => Err(InterpError::new("json_get_string expects (string, string)")),
@@ -160,14 +161,14 @@ fn builtin_json_get_string(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
 fn builtin_json_get_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(json_str), Value::String(key)) => {
-            match serde_json::from_str::<serde_json::Value>(json_str) {
-                Ok(json) => {
-                    match json.get(key).and_then(|v| v.as_i64()) {
-                        Some(i) => Ok(Value::Variant("Some".into(), vec![Value::Int(i)])),
-                        None => Ok(Value::Variant("None".into(), vec![])),
-                    }
-                }
-                Err(_) => Ok(Value::Variant("None".into(), vec![])),
+            let jv: serde_json::Value = serde_json::from_str(json_str)
+                .map_err(|e| InterpError::new(format!("json_get_int parse error: {}", e)))?;
+            match jv.get(key) {
+                Some(serde_json::Value::Number(n)) => n.as_i64().map(Value::Int).ok_or_else(|| {
+                    InterpError::new(format!("json_get_int: value for key '{}' is not an integer", key))
+                }),
+                Some(_) => Err(InterpError::new(format!("json_get_int: key '{}' is not a number", key))),
+                None => Err(InterpError::new(format!("json_get_int: key '{}' not found", key))),
             }
         }
         _ => Err(InterpError::new("json_get_int expects (string, string)")),
