@@ -1688,9 +1688,14 @@ impl<'a> BytecodeVM<'a> {
             producers: Vec::new(),
         };
 
-        let program = self.program.ast.clone().ok_or_else(|| {
-            InterpError::new("no AST available for actor worker thread")
-        })?;
+        let program = self.program.ast.clone().unwrap_or_else(|| {
+            std::sync::Arc::new(crate::ast::File {
+                sources: crate::span::SourceRegistry::default(),
+                imports: Vec::new(),
+                items: Vec::new(),
+                implicit_single: false,
+            })
+        });
         let bc_prog = std::sync::Arc::new(self.program.clone());
         let handle = ActorHandle::new_bytecode(instance, program, bc_prog);
         self.spawn_count += 1;
