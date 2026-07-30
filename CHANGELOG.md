@@ -1,6 +1,14 @@
 # Changelog
 
-## [Unreleased] — 0.1.3-dev
+## [Unreleased] — 0.1.4-dev
+
+### Phase A: 全方位查缺补漏
+
+### Phase B: CODEGEN 性能深度优化
+
+### Phase C: INTERP 性能深度优化
+
+## [0.1.3] — 2026-07-31
 
 ## [0.1.2] — 2026-07-29
 
