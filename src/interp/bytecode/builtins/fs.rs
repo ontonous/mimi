@@ -195,8 +195,18 @@ fn builtin_timestamp_ms(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Val
 
 fn builtin_sleep(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let ms = match &args[0] {
-        Value::Int(v) => *v as u64,
-        Value::Float(v) => *v as u64,
+        Value::Int(v) => {
+            if *v < 0 {
+                return Err(InterpError::new("sleep: duration must be non-negative"));
+            }
+            *v as u64
+        }
+        Value::Float(v) => {
+            if *v < 0.0 {
+                return Err(InterpError::new("sleep: duration must be non-negative"));
+            }
+            *v as u64
+        }
         _ => return Err(InterpError::new("sleep expects a number (milliseconds)")),
     };
     std::thread::sleep(std::time::Duration::from_millis(ms));

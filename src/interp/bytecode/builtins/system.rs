@@ -9,14 +9,16 @@ pub fn register(reg: &mut BuiltinRegistry) {
     reg.register(BuiltinDesc { name: "exit", arity: usize::MAX, category: BuiltinCategory::System, func: builtin_exit });
 }
 
-fn builtin_exit(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_exit(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let code = if args.is_empty() {
-        0
+        0i64
     } else {
         match &args[0] {
-            Value::Int(n) => *n as i32,
+            Value::Int(n) => *n,
             _ => 1,
         }
     };
-    std::process::exit(code);
+    // Signal the VM to terminate cleanly (avoids killing the test runner).
+    vm.request_exit(code);
+    Ok(Value::Int(code))
 }

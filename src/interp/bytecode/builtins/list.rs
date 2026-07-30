@@ -27,6 +27,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
     reg.register(BuiltinDesc { name: "sum", arity: 1, category: BuiltinCategory::List, func: builtin_sum });
     reg.register(BuiltinDesc { name: "to_list", arity: 1, category: BuiltinCategory::List, func: builtin_to_list });
     reg.register(BuiltinDesc { name: "clone", arity: 1, category: BuiltinCategory::List, func: builtin_clone });
+    reg.register(BuiltinDesc { name: "__slice", arity: 3, category: BuiltinCategory::List, func: builtin_slice });
     // Higher-order aliases
     reg.register(BuiltinDesc { name: "map", arity: 2, category: BuiltinCategory::List, func: super::hof::builtin_map_list });
     reg.register(BuiltinDesc { name: "filter", arity: 2, category: BuiltinCategory::List, func: super::hof::builtin_filter_list });
@@ -352,6 +353,49 @@ fn builtin_option_value_or(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
             Ok(payload.first().cloned().unwrap_or(Value::Unit))
         }
         _ => Ok(args[1].clone()),
+    }
+}
+
+// ── Slice ───────────────────────────────────────────────
+
+/// __slice(target, start, end) → sublist or substring.
+/// Supports negative indices (Python-style: -1 = last element).
+/// start/end are already resolved by the compiler (defaults: 0 / len).
+fn builtin_slice(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    let target = &args[0];
+    let start_raw = match &args[1] {
+        Value::Int(i) => *i,
+        _ => return Err(InterpError::new("__slice: start must be int")),
+    };
+    let end_raw = match &args[2] {
+        Value::Int(i) => *i,
+        _ => return Err(InterpError::new("__slice: end must be int")),
+    };
+
+    match target {
+        Value::List(l) => {
+            let len = l.len() as i64;
+            let start = if start_raw < 0 { (len + start_raw).max(0) } else { start_raw.min(len) } as usize;
+            let end = if end_raw < 0 { (len + end_raw).max(0) } else { end_raw.min(len) } as usize;
+            if start >= end {
+                return Ok(Value::List(Vec::new()));
+            }
+            Ok(Value::List(l[start..end].to_vec()))
+        }
+        Value::String(s) => {
+            let chars: Vec<char> = s.chars().collect();
+            let len = chars.len() as i64;
+            let start = if start_raw < 0 { (len + start_raw).max(0) } else { start_raw.min(len) } as usize;
+            let end = if end_raw < 0 { (len + end_raw).max(0) } else { end_raw.min(len) } as usize;
+            if start >= end {
+                return Ok(Value::String(String::new()));
+            }
+            Ok(Value::String(chars[start..end].iter().collect()))
+        }
+        other => Err(InterpError::new(format!(
+            "__slice: expected List or String, got {}",
+            other
+        ))),
     }
 }
 

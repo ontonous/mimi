@@ -9,6 +9,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
     // JSON
     reg.register(BuiltinDesc { name: "to_json", arity: 1, category: BuiltinCategory::System, func: builtin_to_json });
     reg.register(BuiltinDesc { name: "from_json", arity: 1, category: BuiltinCategory::System, func: builtin_from_json });
+    reg.register(BuiltinDesc { name: "from_json_typed", arity: 1, category: BuiltinCategory::System, func: builtin_from_json_typed });
     reg.register(BuiltinDesc { name: "json_get_string", arity: 2, category: BuiltinCategory::System, func: builtin_json_get_string });
     reg.register(BuiltinDesc { name: "json_get_int", arity: 2, category: BuiltinCategory::System, func: builtin_json_get_int });
     reg.register(BuiltinDesc { name: "json_is_valid", arity: 1, category: BuiltinCategory::System, func: builtin_json_is_valid });
@@ -134,12 +135,27 @@ fn builtin_to_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
 fn builtin_from_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::String(s) => {
-            // Validate JSON and return the string as-is (matches tree-walker + codegen).
+            // Without type parameter: validate and return string as-is.
+            // Typed deserialization (from_json::<T>) is handled by the compiler
+            // which emits a CallBuiltin to from_json_typed instead.
             let _: serde_json::Value = serde_json::from_str(s)
                 .map_err(|e| InterpError::new(format!("from_json parse error: {}", e)))?;
             Ok(Value::String(s.clone()))
         }
         _ => Err(InterpError::new("from_json expects a string")),
+    }
+}
+
+/// from_json_typed: parse JSON string into a Mimi Value (Record/List/Int/etc).
+/// Called by the compiler when `from_json::<T>(s)` is used with a type parameter.
+fn builtin_from_json_typed(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    match &args[0] {
+        Value::String(s) => {
+            let jv: serde_json::Value = serde_json::from_str(s)
+                .map_err(|e| InterpError::new(format!("from_json parse error: {}", e)))?;
+            Ok(json_to_value(&jv))
+        }
+        _ => Err(InterpError::new("from_json::<T> expects a string")),
     }
 }
 
@@ -757,6 +773,6 @@ fn builtin_mms_parse(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     Ok(Value::String(result))
 }
 
-fn builtin_ast_eval(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_ast_eval(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
     Err(InterpError::new("ast_eval is not available in bytecode VM (use tree-walker interpreter)"))
 }
