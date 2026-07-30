@@ -2510,6 +2510,7 @@ impl BytecodeCompiler {
 
     /// Compile `for var in iter { body }`.
     /// Mimi semantic: non-Unit body value terminates the loop (loop-as-expression).
+    /// Optimization: `for i in range(a, b)` compiles as a counter loop (no list allocation).
     fn compile_for(
         &mut self,
         fc: &mut FuncCompiler,
@@ -2517,6 +2518,15 @@ impl BytecodeCompiler {
         iter: &Expr,
         body: &Block,
     ) -> Result<Reg, InterpError> {
+        // Detect `range(start, end)` pattern → compile as counter loop.
+        if let Expr::Call(callee, args) = iter {
+            if let Expr::Ident(name) = callee.as_ref() {
+                if name == "range" && args.len() == 2 {
+                    return self.compile_for_range(fc, var, &args[0], &args[1], body);
+                }
+            }
+        }
+
         let result_reg = fc.proto.alloc_reg();
         fc.emit(Op::LoadUnit { rd: result_reg });
         fc.loop_result_regs.push(result_reg);
@@ -2581,6 +2591,80 @@ impl BytecodeCompiler {
             }
         }
         // Continue jumps to increment step (skip body, go to idx++).
+        if let Some(continues) = fc.continue_jumps.pop() {
+            for c in continues {
+                fc.proto.patch_jump_to(c, increment_pos);
+            }
+        }
+
+        fc.loop_result_regs.pop();
+        Ok(result_reg)
+    }
+
+    /// Optimized `for var in range(start, end) { body }` — counter loop, no list allocation.
+    fn compile_for_range(
+        &mut self,
+        fc: &mut FuncCompiler,
+        var: &str,
+        start_expr: &Expr,
+        end_expr: &Expr,
+        body: &Block,
+    ) -> Result<Reg, InterpError> {
+        let result_reg = fc.proto.alloc_reg();
+        fc.emit(Op::LoadUnit { rd: result_reg });
+        fc.loop_result_regs.push(result_reg);
+
+        // Compile start and end bounds.
+        let r_idx = self.compile_expr(fc, start_expr)?;
+        let r_end = self.compile_expr(fc, end_expr)?;
+        let r_one = fc.proto.alloc_reg();
+        let c1 = fc.proto.add_const(ConstValue::Int(1));
+        fc.emit(Op::LoadConst { rd: r_one, idx: c1 });
+
+        fc.break_jumps.push(Vec::new());
+        fc.continue_jumps.push(Vec::new());
+
+        let loop_start = fc.proto.code.len();
+        // r_cmp = (idx < end)
+        let r_cmp = fc.proto.alloc_reg();
+        fc.emit(Op::LtInt { rd: r_cmp, ra: r_idx, rb: r_end });
+        let jmp_end = fc.emit(Op::JmpIfNot { offset: 0, ra: r_cmp });
+
+        // Bind loop variable directly to counter (no ListGet needed).
+        fc.push_scope();
+        let r_var = fc.bind_var(var);
+        fc.emit(Op::Mov { rd: r_var, rs: r_idx });
+
+        let body_result = self.compile_block(fc, body)?;
+        fc.pop_scope();
+
+        // Loop-as-expression: non-Unit body value → terminate.
+        if let Some(r_body) = body_result {
+            let r_is_unit = fc.proto.alloc_reg();
+            let r_unit = fc.proto.alloc_reg();
+            fc.emit(Op::LoadUnit { rd: r_unit });
+            fc.emit(Op::Eq { rd: r_is_unit, ra: r_body, rb: r_unit });
+            let jmp_continue = fc.emit(Op::JmpIf { offset: 0, ra: r_is_unit });
+            fc.emit(Op::Mov { rd: result_reg, rs: r_body });
+            let jmp_break = fc.emit(Op::Jmp { offset: 0 });
+            fc.break_jumps.last_mut().unwrap().push(jmp_break);
+            fc.proto.patch_jump(jmp_continue);
+        }
+
+        // Increment counter (continue jumps here).
+        let increment_pos = fc.proto.code.len();
+        fc.emit(Op::AddInt { rd: r_idx, ra: r_idx, rb: r_one });
+        fc.emit(Op::Jmp { offset: 0 });
+        let jmp_back = fc.proto.code.len() - 1;
+        fc.proto.patch_jump_to(jmp_back, loop_start);
+
+        let end = fc.proto.code.len();
+        fc.proto.patch_jump_to(jmp_end, end);
+        if let Some(breaks) = fc.break_jumps.pop() {
+            for b in breaks {
+                fc.proto.patch_jump_to(b, end);
+            }
+        }
         if let Some(continues) = fc.continue_jumps.pop() {
             for c in continues {
                 fc.proto.patch_jump_to(c, increment_pos);
