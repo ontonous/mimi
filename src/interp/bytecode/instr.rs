@@ -134,6 +134,9 @@ pub enum Op {
     /// rd = concat(ra, rb) — string concatenation
     ConcatStr { rd: Reg, ra: Reg, rb: Reg },
 
+    /// ra += rb — in-place string append (avoids O(n²) realloc in loops)
+    StrAppend { ra: Reg, rb: Reg },
+
     // ═══════════════════════════════════════════════════════════
     // Control flow
     // ═══════════════════════════════════════════════════════════
