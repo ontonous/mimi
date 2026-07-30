@@ -135,7 +135,7 @@ fn run_once(
         let prog = compiler
             .compile_file(&merged_file)
             .map_err(|e| format!("bytecode compile error: {}", e))?;
-        let mut vm = BytecodeVM::new(&prog);
+        let mut vm = BytecodeVM::new(&prog).with_cli_args(extra_args.to_vec());
         match vm.run() {
             Ok(exit_code) => {
                 if exit_code != 0 {

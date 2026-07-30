@@ -64,6 +64,8 @@ struct FuncCompiler {
     free_regs: Vec<Reg>,
     /// Registers allocated per scope (for reclaim on pop_scope).
     scope_regs: Vec<Vec<Reg>>,
+    /// Deferred blocks per scope (LIFO execution at scope exit).
+    defer_scopes: Vec<Vec<Block>>,
 }
 
 /// Lightweight type tag for register dispatch.
@@ -89,20 +91,22 @@ impl FuncCompiler {
             current_line: 0,
             free_regs: Vec::new(),
             scope_regs: vec![Vec::new()],
+            defer_scopes: vec![Vec::new()],
         }
     }
 
     fn push_scope(&mut self) {
         self.vars.push(HashMap::new());
         self.scope_regs.push(Vec::new());
+        self.defer_scopes.push(Vec::new());
     }
 
     fn pop_scope(&mut self) {
         self.vars.pop();
-        // Reclaim registers allocated in this scope.
         if let Some(regs) = self.scope_regs.pop() {
             self.free_regs.extend(regs);
         }
+        self.defer_scopes.pop();
     }
 
     /// Look up a variable's register, searching innermost → outermost.
@@ -375,6 +379,13 @@ impl BytecodeCompiler {
             InterpError::new("no main function found")
         })?;
 
+        let max_children = self.flow_defs.values().find_map(|f| {
+            f.annotations.iter().find_map(|a| match a.kind {
+                crate::ast::FlowAnnotationKind::MaxChildren(n) => Some(n),
+                _ => None,
+            })
+        });
+
         Ok(BytecodeProgram {
             functions: std::mem::take(&mut self.functions),
             entry,
@@ -384,6 +395,7 @@ impl BytecodeCompiler {
             flow_transition_funcs: std::mem::take(&mut self.flow_transition_funcs),
             flow_fails_transitions: std::mem::take(&mut self.flow_fails_transitions),
             actor_method_funcs: std::mem::take(&mut self.actor_method_funcs),
+            max_children,
             ast: self.ast_file.clone(),
         })
     }
@@ -498,8 +510,14 @@ impl BytecodeCompiler {
                         if let PatternKind::Variable(name) = &pat.kind {
                             let ty = self.infer_expr_type(fc, init_expr);
                             fc.set_reg_type(name, ty);
+                            // Copy to a new register so subsequent mutation of the
+                            // original does not affect this binding (C-comp1/C-comp2).
+                            let new_r = fc.proto.alloc_reg();
+                            fc.emit(Op::Mov { rd: new_r, rs: r });
+                            fc.vars.last_mut().unwrap().insert(name.clone(), new_r);
+                        } else {
+                            self.bind_pattern(fc, pat, r);
                         }
-                        self.bind_pattern(fc, pat, r);
                     } else {
                         // let x; → Unit
                         if let PatternKind::Variable(name) = &pat.kind {
@@ -603,11 +621,9 @@ impl BytecodeCompiler {
                     fc.pop_scope();
                 }
 
-                Stmt::Defer(_block) => {
-                    // TODO: true defer semantics (LIFO execution at scope exit).
-                    // Deferred — skip compilation; executing immediately would
-                    // violate LIFO scope-exit semantics. Skipped until the VM
-                    // gains a defer stack.
+                Stmt::Defer(block) => {
+                    // Record the deferred block for scope-exit execution (LIFO).
+                    fc.defer_scopes.last_mut().unwrap().push(block.clone());
                 }
 
                 // ── Phase B: Stmt 补全 II ─────────────────────
@@ -667,6 +683,14 @@ impl BytecodeCompiler {
                 }
             }
         }
+
+        // Emit deferred blocks in LIFO order at scope exit.
+        let defers: Vec<Block> = fc.defer_scopes.last().map_or(Vec::new(), |s| s.clone());
+        fc.defer_scopes.last_mut().map(|s| s.clear());
+        for d in defers.into_iter().rev() {
+            self.compile_block(fc, &d)?;
+        }
+
         Ok(last_reg)
     }
 

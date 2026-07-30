@@ -49,6 +49,7 @@ mod tests {
             flow_transition_funcs: std::collections::HashMap::new(),
             flow_fails_transitions: std::collections::HashSet::new(),
             actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
             ast: None,
         };
         assert_eq!(run_program(&prog), Ok(42));
@@ -89,6 +90,7 @@ mod tests {
             flow_transition_funcs: std::collections::HashMap::new(),
             flow_fails_transitions: std::collections::HashSet::new(),
             actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
             ast: None,
         };
         assert_eq!(run_program(&prog), Ok(50));
@@ -131,6 +133,7 @@ mod tests {
             flow_transition_funcs: std::collections::HashMap::new(),
             flow_fails_transitions: std::collections::HashSet::new(),
             actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
             ast: None,
         };
         assert_eq!(run_program(&prog), Ok(7));
@@ -202,6 +205,7 @@ mod tests {
             flow_transition_funcs: std::collections::HashMap::new(),
             flow_fails_transitions: std::collections::HashSet::new(),
             actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
             ast: None,
         };
         // fib(10) = 55
@@ -265,6 +269,7 @@ mod tests {
             flow_transition_funcs: std::collections::HashMap::new(),
             flow_fails_transitions: std::collections::HashSet::new(),
             actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
             ast: None,
         };
         // sum(0..99) = 4950

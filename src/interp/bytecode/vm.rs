@@ -54,6 +54,8 @@ pub struct BytecodeVM<'a> {
     pub max_children: Option<usize>,
     /// Total actors spawned in this VM session.
     pub spawn_count: usize,
+    /// User CLI arguments (args passed after the program filename).
+    pub cli_args: Vec<String>,
 }
 
 const MAX_DEPTH: usize = 768;
@@ -67,9 +69,16 @@ impl<'a> BytecodeVM<'a> {
             depth: 0,
             stop_depth: 0,
             registry: registry::create_registry(),
-            max_children: None,
+            max_children: program.max_children,
             spawn_count: 0,
+            cli_args: Vec::new(),
         }
+    }
+
+    /// Set the user CLI arguments that `args()` / `cli_args()` builtins return.
+    pub fn with_cli_args(mut self, cli_args: Vec<String>) -> Self {
+        self.cli_args = cli_args;
+        self
     }
 
     /// Run the program from the entry point. Returns the exit code.
@@ -221,7 +230,7 @@ impl<'a> BytecodeVM<'a> {
                     } else if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
                         let a = self.get_reg(ra).clone();
                         let b = self.get_reg(rb).clone();
-                        let (af, bf) = (value_to_f64(&a), value_to_f64(&b));
+                        let (af, bf) = (value_to_f64(&a)?, value_to_f64(&b)?);
                         let r = af + bf;
                         self.check_float(r, "+")?;
                         self.set_reg(rd, Value::Float(r));
@@ -237,7 +246,7 @@ impl<'a> BytecodeVM<'a> {
                     if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
                         let a = self.get_reg(ra).clone();
                         let b = self.get_reg(rb).clone();
-                        let (af, bf) = (value_to_f64(&a), value_to_f64(&b));
+                        let (af, bf) = (value_to_f64(&a)?, value_to_f64(&b)?);
                         let r = af - bf;
                         self.check_float(r, "-")?;
                         self.set_reg(rd, Value::Float(r));
@@ -253,7 +262,7 @@ impl<'a> BytecodeVM<'a> {
                     if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
                         let a = self.get_reg(ra).clone();
                         let b = self.get_reg(rb).clone();
-                        let (af, bf) = (value_to_f64(&a), value_to_f64(&b));
+                        let (af, bf) = (value_to_f64(&a)?, value_to_f64(&b)?);
                         let r = af * bf;
                         self.check_float(r, "*")?;
                         self.set_reg(rd, Value::Float(r));
@@ -269,7 +278,7 @@ impl<'a> BytecodeVM<'a> {
                     if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
                         let a = self.get_reg(ra).clone();
                         let b = self.get_reg(rb).clone();
-                        let (af, bf) = (value_to_f64(&a), value_to_f64(&b));
+                        let (af, bf) = (value_to_f64(&a)?, value_to_f64(&b)?);
                         if bf == 0.0 {
                             return Err(InterpError::div_by_zero());
                         }
@@ -289,8 +298,8 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::ModInt { rd, ra, rb } => {
                     if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
-                        let a = value_to_f64(self.get_reg(ra));
-                        let b = value_to_f64(self.get_reg(rb));
+                        let a = value_to_f64(self.get_reg(ra))?;
+                        let b = value_to_f64(self.get_reg(rb))?;
                         if b == 0.0 {
                             return Err(InterpError::div_by_zero());
                         }
@@ -1690,10 +1699,12 @@ impl<'a> BytecodeVM<'a> {
 }
 
 /// Convert a Value to f64 (for runtime int/float dispatch fallback).
-fn value_to_f64(v: &Value) -> f64 {
+fn value_to_f64(v: &Value) -> Result<f64, InterpError> {
     match v {
-        Value::Float(f) => *f,
-        Value::Int(i) => *i as f64,
-        other => panic!("value_to_f64: expected numeric type, got {:?}", other),
+        Value::Float(f) => Ok(*f),
+        Value::Int(i) => Ok(*i as f64),
+        other => Err(InterpError::new(format!(
+            "value_to_f64: expected numeric type, got {:?}", other
+        ))),
     }
 }

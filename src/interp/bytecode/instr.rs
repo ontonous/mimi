@@ -468,6 +468,8 @@ pub struct BytecodeProgram {
     pub flow_fails_transitions: std::collections::HashSet<(String, String, String)>,
     /// Actor method function indices: (actor_name, method_name) → FuncIdx.
     pub actor_method_funcs: std::collections::HashMap<(String, String), FuncIdx>,
+    /// Global max_children limit extracted from flow @max_children annotations.
+    pub max_children: Option<usize>,
     /// The original AST (for actor worker threads that use tree-walker internally).
     pub ast: Option<std::sync::Arc<crate::ast::File>>,
 }
