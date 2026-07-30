@@ -36,7 +36,6 @@ pub fn register(reg: &mut BuiltinRegistry) {
     reg.register(BuiltinDesc { name: "regex_find_all", arity: 2, category: BuiltinCategory::String, func: builtin_regex_find_all });
     // Misc value ops
     reg.register(BuiltinDesc { name: "eq", arity: 2, category: BuiltinCategory::System, func: builtin_eq });
-    reg.register(BuiltinDesc { name: "bind", arity: 2, category: BuiltinCategory::System, func: builtin_bind });
     reg.register(BuiltinDesc { name: "inner", arity: 1, category: BuiltinCategory::System, func: builtin_inner });
     reg.register(BuiltinDesc { name: "deref", arity: 1, category: BuiltinCategory::System, func: builtin_inner });
     reg.register(BuiltinDesc { name: "fields", arity: 1, category: BuiltinCategory::System, func: builtin_fields });
@@ -60,6 +59,10 @@ pub fn register(reg: &mut BuiltinRegistry) {
     reg.register(BuiltinDesc { name: "read_lines_json_builtin", arity: 1, category: BuiltinCategory::System, func: builtin_read_lines_json });
     // Regex extended
     reg.register(BuiltinDesc { name: "regex_capture_groups", arity: 2, category: BuiltinCategory::String, func: builtin_regex_capture_groups });
+    // Tooling / meta
+    reg.register(BuiltinDesc { name: "lexer", arity: 1, category: BuiltinCategory::System, func: builtin_lexer });
+    reg.register(BuiltinDesc { name: "mms_parse", arity: 1, category: BuiltinCategory::System, func: builtin_mms_parse });
+    reg.register(BuiltinDesc { name: "ast_eval", arity: 1, category: BuiltinCategory::System, func: builtin_ast_eval });
     // Shadow memory
     reg.register(BuiltinDesc { name: "shadow_alloc", arity: 3, category: BuiltinCategory::System, func: builtin_shadow_alloc });
     reg.register(BuiltinDesc { name: "shadow_tag", arity: 2, category: BuiltinCategory::System, func: builtin_shadow_tag });
@@ -373,12 +376,6 @@ fn builtin_regex_find_all(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Va
 
 fn builtin_eq(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     Ok(Value::Bool(crate::interp::values_equal(&args[0], &args[1])))
-}
-
-fn builtin_bind(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    // bind(value, fn) — apply fn to value (monadic bind).
-    // For now, just return the value.
-    Ok(args[0].clone())
 }
 
 fn builtin_inner(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
@@ -724,4 +721,42 @@ fn builtin_shadow_free(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value
 fn builtin_alloc_noop(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
     // Allocator builtins are no-ops in the interpreter (memory is GC'd).
     Ok(Value::Unit)
+}
+
+// === Tooling / meta builtins ===
+
+fn builtin_lexer(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    let source = args[0].as_string().ok_or_else(|| InterpError::new("lexer expects a string source"))?;
+    let c_source = std::ffi::CString::new(source)
+        .map_err(|_| InterpError::new("lexer: source contains null bytes"))?;
+    let result_ptr = crate::runtime::mimi_lexer_tokenize(c_source.as_ptr());
+    if result_ptr.is_null() {
+        return Ok(Value::String("[]".to_string()));
+    }
+    let result = unsafe { std::ffi::CStr::from_ptr(result_ptr) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { libc::free(result_ptr as *mut libc::c_void) };
+    Ok(Value::String(result))
+}
+
+fn builtin_mms_parse(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    let source = args[0].as_string().ok_or_else(|| InterpError::new("parse expects a string source"))?;
+    let c_source = std::ffi::CString::new(source)
+        .map_err(|_| InterpError::new("parse: source contains null bytes"))?;
+    let result_ptr = crate::runtime::mimi_parse_source(c_source.as_ptr());
+    if result_ptr.is_null() {
+        return Ok(Value::String(
+            r#"{"functions":[],"types":[],"imports":[],"has_main":false}"#.to_string(),
+        ));
+    }
+    let result = unsafe { std::ffi::CStr::from_ptr(result_ptr) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { libc::free(result_ptr as *mut libc::c_void) };
+    Ok(Value::String(result))
+}
+
+fn builtin_ast_eval(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    Err(InterpError::new("ast_eval is not available in bytecode VM (use tree-walker interpreter)"))
 }
