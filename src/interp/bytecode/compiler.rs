@@ -67,12 +67,14 @@ struct FuncCompiler {
 }
 
 /// Lightweight type tag for register dispatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum VarType {
     Int,
     Float,
     Bool,
     String,
+    /// User-defined type (named), prevents fallback to Int operations.
+    User(String),
     Unknown,
 }
 
@@ -405,6 +407,7 @@ impl BytecodeCompiler {
                 Type::Name(n, _) if n == "i32" || n == "i64" => VarType::Int,
                 Type::Name(n, _) if n == "bool" => VarType::Bool,
                 Type::Name(n, _) if n == "string" => VarType::String,
+                Type::Name(n, _) => VarType::User(n.clone()),
                 _ => VarType::Unknown,
             };
             fc.set_reg_type(&param.name, ty);
@@ -446,6 +449,7 @@ impl BytecodeCompiler {
                 Type::Name(n, _) if n == "i32" || n == "i64" => VarType::Int,
                 Type::Name(n, _) if n == "bool" => VarType::Bool,
                 Type::Name(n, _) if n == "string" => VarType::String,
+                Type::Name(n, _) => VarType::User(n.clone()),
                 _ => VarType::Unknown,
             };
             fc.set_reg_type(&param.name, ty);
@@ -540,18 +544,22 @@ impl BytecodeCompiler {
                     fc.pop_scope();
                 }
                 Stmt::Break(_) => {
-                    // Emit a forward jump; patched when the loop exits.
-                    let idx = fc.emit(Op::Jmp { offset: 0 });
-                    if let Some(jumps) = fc.break_jumps.last_mut() {
-                        jumps.push(idx);
+                    if fc.break_jumps.is_empty() {
+                        return Err(InterpError::new(
+                            "break outside loop",
+                        ));
                     }
+                    let idx = fc.emit(Op::Jmp { offset: 0 });
+                    fc.break_jumps.last_mut().unwrap().push(idx);
                 }
                 Stmt::Continue => {
-                    // Emit a forward jump; patched to loop head by the enclosing loop.
-                    let idx = fc.emit(Op::Jmp { offset: 0 });
-                    if let Some(jumps) = fc.continue_jumps.last_mut() {
-                        jumps.push(idx);
+                    if fc.continue_jumps.is_empty() {
+                        return Err(InterpError::new(
+                            "continue outside loop",
+                        ));
                     }
+                    let idx = fc.emit(Op::Jmp { offset: 0 });
+                    fc.continue_jumps.last_mut().unwrap().push(idx);
                 }
                 // Skip non-executable statements.
                 Stmt::Desc(..) | Stmt::Rule(..) | Stmt::Requires(..)
@@ -595,12 +603,11 @@ impl BytecodeCompiler {
                     fc.pop_scope();
                 }
 
-                Stmt::Defer(block) => {
+                Stmt::Defer(_block) => {
                     // TODO: true defer semantics (LIFO execution at scope exit).
-                    // For now, compile the block immediately.
-                    fc.push_scope();
-                    self.compile_block(fc, block)?;
-                    fc.pop_scope();
+                    // Deferred — skip compilation; executing immediately would
+                    // violate LIFO scope-exit semantics. Skipped until the VM
+                    // gains a defer stack.
                 }
 
                 // ── Phase B: Stmt 补全 II ─────────────────────
@@ -619,12 +626,10 @@ impl BytecodeCompiler {
                     }
                 }
 
-                Stmt::OnFailure(block) => {
-                    // On failure compensation — compile the block.
-                    // Error handling semantics handled at runtime.
-                    fc.push_scope();
-                    self.compile_block(fc, block)?;
-                    fc.pop_scope();
+                Stmt::OnFailure(_block) => {
+                    // OnFailure — deferred fault compensation.
+                    // Skipped: compiling here would execute unconditionally,
+                    // not only on fault. Needs runtime fault binding in the VM.
                 }
 
                 Stmt::Do(block) => {
@@ -824,7 +829,7 @@ impl BytecodeCompiler {
                     self.compile_expr(fc, s)?
                 } else {
                     let r = fc.proto.alloc_reg();
-                    let c0 = fc.proto.add_const(ConstValue::Int(0));
+                let c0 = fc.proto.add_const(ConstValue::Int(0));
                     fc.emit(Op::LoadConst { rd: r, idx: c0 });
                     r
                 };
@@ -1079,10 +1084,41 @@ impl BytecodeCompiler {
                 fc.emit(Op::LoadConst { rd, idx });
             }
             Lit::Unit => { fc.emit(Op::LoadUnit { rd }); }
-            Lit::FString(_) => {
-                return Err(InterpError::new(
-                    "bytecode: f-strings not yet supported",
-                ));
+            Lit::FString(parts) => {
+                // Concatenate all f-string parts.
+                let mut prev = None;
+                for part in parts {
+                    let r_part = match part {
+                        FStringPart::Text(t) => {
+                            let r = fc.proto.alloc_reg();
+                            let idx = fc.proto.add_const(ConstValue::Str(t.clone()));
+                            fc.emit(Op::LoadConst { rd: r, idx });
+                            r
+                        }
+                        FStringPart::Interp(expr) => {
+                            let r_val = self.compile_expr(fc, expr)?;
+                            let r_str = fc.proto.alloc_reg();
+                            fc.emit(Op::ToString { rd: r_str, ra: r_val });
+                            r_str
+                        }
+                    };
+                    match prev {
+                        None => prev = Some(r_part),
+                        Some(r_acc) => {
+                            let r_new = fc.proto.alloc_reg();
+                            fc.emit(Op::ConcatStr { rd: r_new, ra: r_acc, rb: r_part });
+                            prev = Some(r_new);
+                        }
+                    }
+                }
+                let rd = fc.proto.alloc_reg();
+                if let Some(r) = prev {
+                    fc.emit(Op::Mov { rd, rs: r });
+                } else {
+                    let idx = fc.proto.add_const(ConstValue::Str(String::new()));
+                    fc.emit(Op::LoadConst { rd, idx });
+                }
+                return Ok(rd);
             }
         }
         Ok(rd)
@@ -1284,9 +1320,89 @@ impl BytecodeCompiler {
         callee: &Expr,
         args: &[Expr],
     ) -> Result<Reg, InterpError> {
-        // Compile arguments into consecutive registers.
+        // ── Early-return special cases (no pre-allocation) ──
+        if let Expr::Ident(name) = callee.unlocated() {
+            // Special case: push(var, elem) → ListPush (in-place mutation).
+            if name == "push" && args.len() == 2 {
+                if let Expr::Ident(var_name) = args[0].unlocated() {
+                    if let Some(var_reg) = fc.lookup_var(var_name) {
+                        let elem_reg = self.compile_expr(fc, &args[1])?;
+                        fc.emit(Op::ListPush {
+                            ra: var_reg,
+                            rb: elem_reg,
+                        });
+                        // Return the mutated list value (same as tree-walker push
+                        // builtin return, before eval_call_dispatch overrides it to
+                        // Unit for mutate-parameter writeback).
+                        let rd = fc.proto.alloc_reg();
+                        fc.emit(Op::Mov { rd, rs: var_reg });
+                        return Ok(rd);
+                    }
+                }
+            }
+
+            // Variant constructors: Ok(v), Err(v), Some(v), None.
+            match name.as_str() {
+                "Ok" => {
+                    let rd = fc.proto.alloc_reg();
+                    let r_arg = self.compile_expr(fc, &args[0])?;
+                    fc.emit(Op::Ok { rd, ra: r_arg });
+                    return Ok(rd);
+                }
+                "Err" => {
+                    let rd = fc.proto.alloc_reg();
+                    let r_arg = self.compile_expr(fc, &args[0])?;
+                    fc.emit(Op::Err { rd, ra: r_arg });
+                    return Ok(rd);
+                }
+                "Some" => {
+                    let rd = fc.proto.alloc_reg();
+                    let r_arg = self.compile_expr(fc, &args[0])?;
+                    fc.emit(Op::Some { rd, ra: r_arg });
+                    return Ok(rd);
+                }
+                "None" => {
+                    let rd = fc.proto.alloc_reg();
+                    fc.emit(Op::None { rd });
+                    return Ok(rd);
+                }
+                _ => {}
+            }
+
+            // Newtype constructors: UserId(42), etc.
+            if self.newtype_names.contains(name.as_str()) {
+                let rd = fc.proto.alloc_reg();
+                let r_inner = self.compile_expr(fc, &args[0])?;
+                // Newtype is represented as Variant(name, [inner]).
+                let type_name_idx = fc.proto.add_const(ConstValue::Str(name.clone()));
+                fc.emit(Op::NewVariant {
+                    rd,
+                    type_name: type_name_idx,
+                    variant: 0,
+                    base: r_inner,
+                    arity: 1,
+                });
+                return Ok(rd);
+            }
+        }
+
+        // ── Normal path: pre-allocate and compile all arguments ──
+        // Pre-check: resolve target before compiling args to avoid
+        // waste / half-compiled bytecode on failure.
+        if let Expr::Ident(name) = callee.unlocated() {
+            let is_known = self.builtin_table.contains_key(name.as_str())
+                || self.func_table.contains_key(name.as_str())
+                || self.variant_names.contains(name.as_str())
+                || fc.lookup_var(name).is_some();
+            if !is_known {
+                return Err(InterpError::new(format!(
+                    "undefined function '{}'",
+                    name
+                )));
+            }
+        }
+
         let args_base = fc.proto.alloc_reg();
-        // Reserve registers for all args.
         for _ in 1..args.len() {
             fc.proto.alloc_reg();
         }
@@ -1302,24 +1418,6 @@ impl BytecodeCompiler {
         let rd = fc.proto.alloc_reg();
 
         if let Expr::Ident(name) = callee.unlocated() {
-            // Special case: push(var, elem) → ListPush (in-place mutation).
-            if name == "push" && args.len() == 2 {
-                if let Expr::Ident(var_name) = args[0].unlocated() {
-                    if let Some(var_reg) = fc.lookup_var(var_name) {
-                        let elem_reg = self.compile_expr(fc, &args[1])?;
-                        fc.emit(Op::ListPush {
-                            ra: var_reg,
-                            rb: elem_reg,
-                        });
-                        // push returns Unit (matches tree-walker semantics).
-                        let rd = fc.proto.alloc_reg();
-                        let unit_idx = fc.proto.add_const(ConstValue::Unit);
-                        fc.emit(Op::LoadConst { rd, idx: unit_idx });
-                        return Ok(rd);
-                    }
-                }
-            }
-
             // Check builtins first.
             if let Some(&bidx) = self.builtin_table.get(name.as_str()) {
                 fc.emit(Op::CallBuiltin {
@@ -1340,29 +1438,6 @@ impl BytecodeCompiler {
                 });
                 return Ok(rd);
             }
-            // Variant constructors: Ok(v), Err(v), Some(v), None.
-            match name.as_str() {
-                "Ok" => {
-                    let r_arg = self.compile_expr(fc, &args[0])?;
-                    fc.emit(Op::Ok { rd, ra: r_arg });
-                    return Ok(rd);
-                }
-                "Err" => {
-                    let r_arg = self.compile_expr(fc, &args[0])?;
-                    fc.emit(Op::Err { rd, ra: r_arg });
-                    return Ok(rd);
-                }
-                "Some" => {
-                    let r_arg = self.compile_expr(fc, &args[0])?;
-                    fc.emit(Op::Some { rd, ra: r_arg });
-                    return Ok(rd);
-                }
-                "None" => {
-                    fc.emit(Op::None { rd });
-                    return Ok(rd);
-                }
-                _ => {}
-            }
             // Enum variant constructors: Circle(5), Point(1, 2), etc.
             if self.variant_names.contains(name.as_str()) {
                 let type_name_idx = fc.proto.add_const(ConstValue::Str(name.clone()));
@@ -1372,20 +1447,6 @@ impl BytecodeCompiler {
                     variant: 0,
                     base: args_base,
                     arity: args.len() as u16,
-                });
-                return Ok(rd);
-            }
-            // Newtype constructors: UserId(42), etc.
-            if self.newtype_names.contains(name.as_str()) {
-                let r_inner = self.compile_expr(fc, &args[0])?;
-                // Newtype is represented as Variant(name, [inner]).
-                let type_name_idx = fc.proto.add_const(ConstValue::Str(name.clone()));
-                fc.emit(Op::NewVariant {
-                    rd,
-                    type_name: type_name_idx,
-                    variant: 0,
-                    base: r_inner,
-                    arity: 1,
                 });
                 return Ok(rd);
             }
@@ -1428,15 +1489,14 @@ impl BytecodeCompiler {
                 }
             }
 
-            // Compile the receiver as the first argument.
-            let recv_reg = self.compile_expr(fc, obj)?;
-
-            // Shift existing args to make room for receiver.
+            // Allocate shifted arg block BEFORE compiling receiver,
+            // so receiver compilation cannot accidentally alias the block.
             let new_args_base = fc.proto.alloc_reg();
             for _ in 0..args.len() {
                 fc.proto.alloc_reg();
             }
-            // Move receiver to new_args_base.
+            // Compile receiver and move it into place.
+            let recv_reg = self.compile_expr(fc, obj)?;
             fc.emit(Op::Mov { rd: new_args_base, rs: recv_reg });
             // Move existing args to new_args_base + 1..
             for i in 0..args.len() {
@@ -1662,10 +1722,15 @@ impl BytecodeCompiler {
             }
 
             PatternKind::Literal(lit) => {
-                // Compare subject with the literal.
+                // Compare subject with the literal using type-specialized op.
                 let r_lit = self.compile_literal(fc, lit)?;
                 let r_test = fc.proto.alloc_reg();
-                fc.emit(Op::Eq { rd: r_test, ra: r_subject, rb: r_lit });
+                let eq_op = match lit {
+                    Lit::Int(_) => Op::EqInt { rd: r_test, ra: r_subject, rb: r_lit },
+                    Lit::Float(_) => Op::EqFloat { rd: r_test, ra: r_subject, rb: r_lit },
+                    _ => Op::Eq { rd: r_test, ra: r_subject, rb: r_lit },
+                };
+                fc.emit(eq_op);
                 Ok((Some(r_test), Vec::new()))
             }
 
@@ -1680,7 +1745,7 @@ impl BytecodeCompiler {
                 // (e.g., extracting field 0 from a zero-arity variant like None).
                 let skip_extraction = fc.emit(Op::JmpIfNot { offset: 0, ra: r_test });
 
-                let mut bindings = Vec::new();
+                let mut binding_map = std::collections::HashMap::new();
                 for (i, (field_name, sub_pat)) in pats.iter().enumerate() {
                     // Extract field i from the variant (safe: variant was checked above).
                     let r_field = fc.proto.alloc_reg();
@@ -1696,12 +1761,15 @@ impl BytecodeCompiler {
                     if let Some(r_sub) = sub_test {
                         fc.emit(Op::And { rd: r_test, ra: r_test, rb: r_sub });
                     }
-                    bindings.extend(sub_bindings);
+                    for (n, r) in sub_bindings {
+                        binding_map.insert(n, r);
+                    }
                     // If field_name is not a placeholder, bind it.
                     if !field_name.starts_with('_') {
-                        bindings.push((field_name.clone(), r_field));
+                        binding_map.insert(field_name.clone(), r_field);
                     }
                 }
+                let bindings: Vec<_> = binding_map.into_iter().collect();
 
                 // Patch skip_extraction to jump past field extraction.
                 fc.proto.patch_jump(skip_extraction);
@@ -1710,9 +1778,17 @@ impl BytecodeCompiler {
             }
 
             PatternKind::Tuple(pats) => {
-                // Match each element.
+                // Type guard: check subject is a tuple before element access.
+                let r_type = fc.proto.alloc_reg();
+                fc.emit(Op::TypeOf { rd: r_type, ra: r_subject });
+                let r_tuple_str = fc.proto.alloc_reg();
+                let tuple_str_idx = fc.proto.add_const(ConstValue::Str("tuple".into()));
+                fc.emit(Op::LoadConst { rd: r_tuple_str, idx: tuple_str_idx });
+                let r_is_tuple = fc.proto.alloc_reg();
+                fc.emit(Op::Eq { rd: r_is_tuple, ra: r_type, rb: r_tuple_str });
+
                 let mut bindings = Vec::new();
-                let mut test_reg = None;
+                let mut test_reg = Some(r_is_tuple);
 
                 for (i, sub_pat) in pats.iter().enumerate() {
                     let r_elem = fc.proto.alloc_reg();
@@ -1724,11 +1800,10 @@ impl BytecodeCompiler {
                     let (sub_test, sub_bindings) =
                         self.compile_pattern_test(fc, sub_pat, r_elem)?;
                     if let Some(r_sub) = sub_test {
-                        match test_reg {
-                            None => test_reg = Some(r_sub),
-                            Some(r_main) => {
-                                fc.emit(Op::And { rd: r_main, ra: r_main, rb: r_sub });
-                            }
+                        if let Some(r_main) = test_reg {
+                            fc.emit(Op::And { rd: r_main, ra: r_main, rb: r_sub });
+                        } else {
+                            test_reg = Some(r_sub);
                         }
                     }
                     bindings.extend(sub_bindings);
@@ -1738,10 +1813,17 @@ impl BytecodeCompiler {
             }
 
             PatternKind::Array(pats) | PatternKind::Slice(pats, _) => {
-                // For now, just match the length and elements.
-                // This is a simplified implementation.
+                // Type guard: check subject is a list/array before element access.
+                let r_type = fc.proto.alloc_reg();
+                fc.emit(Op::TypeOf { rd: r_type, ra: r_subject });
+                let r_list_str = fc.proto.alloc_reg();
+                let list_str_idx = fc.proto.add_const(ConstValue::Str("list".into()));
+                fc.emit(Op::LoadConst { rd: r_list_str, idx: list_str_idx });
+                let r_is_list = fc.proto.alloc_reg();
+                fc.emit(Op::Eq { rd: r_is_list, ra: r_type, rb: r_list_str });
+
                 let mut bindings = Vec::new();
-                let mut test_reg = None;
+                let mut test_reg: Option<Reg> = Some(r_is_list);
 
                 // Check length.
                 let r_len = fc.proto.alloc_reg();
@@ -1755,7 +1837,11 @@ impl BytecodeCompiler {
                     ra: r_len,
                     rb: r_expected,
                 });
-                test_reg = Some(r_len_test);
+                if let Some(r_main) = test_reg {
+                    fc.emit(Op::And { rd: r_main, ra: r_main, rb: r_len_test });
+                } else {
+                    test_reg = Some(r_len_test);
+                }
 
                 // Match each element.
                 for (i, sub_pat) in pats.iter().enumerate() {
@@ -2489,9 +2575,10 @@ impl BytecodeCompiler {
             Expr::Cast(_, ty) => match ty.unlocated() {
                 Type::Name(n, _) if n == "f64" => VarType::Float,
                 Type::Name(n, _) if n == "i32" || n == "i64" => VarType::Int,
+                Type::Name(n, _) => VarType::User(n.clone()),
                 _ => VarType::Unknown,
             },
-            Expr::Ident(name) => fc.var_types.get(name).copied().unwrap_or(VarType::Unknown),
+            Expr::Ident(name) => fc.var_types.get(name).cloned().unwrap_or(VarType::Unknown),
             Expr::Binary(op, l, r) => {
                 // Comparison operators produce Bool.
                 if matches!(op, BinOp::EqCmp | BinOp::NeCmp | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {

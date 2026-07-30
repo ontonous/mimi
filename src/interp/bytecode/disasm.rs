@@ -183,7 +183,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             format!("{:04}  {:<16} r{} -> {}", pc, name, ra, target)
         }
         Op::Call { rd, func, args_base, argc } => {
-            let fname = proto.constants.get(*func as usize)
+            let _fname = proto.constants.get(*func as usize)
                 .map(|c| match c { ConstValue::Str(s) => s.as_str(), _ => "?" })
                 .unwrap_or("?");
             format!("{:04}  {:<16} r{} = func[{}](r{}..r{})", pc, name, rd, func, args_base, *args_base as u16 + argc.saturating_sub(1))
