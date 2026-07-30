@@ -1,13 +1,14 @@
 //! AST → Bytecode compiler.
 //!
 //! Compiles Mimi AST functions into `FunctionProto` bytecode.
-//! Register allocation: variables are assigned registers at first use.
-//! Scope management: nested scopes share the register file (no reuse yet).
+//! Register allocation: variables are assigned registers at first use,
+//! with free-list reuse on scope exit (register pressure reduction).
 
 use super::instr::*;
 use super::registry;
 use crate::ast::*;
 use crate::interp::error::InterpError;
+use crate::interp::value::Value;
 use std::collections::HashMap;
 
 /// Bytecode compiler: transforms AST functions into FunctionProto.
@@ -32,6 +33,15 @@ pub struct BytecodeCompiler {
     flow_names: std::collections::HashSet<String>,
     /// Known actor names (for spawn resolution).
     actor_names: std::collections::HashSet<String>,
+    /// Known extern function names (for clear error messages).
+    extern_names: std::collections::HashSet<String>,
+    /// Type hints from CheckedProgram: function name → parameter VarTypes.
+    /// Eliminates expr_is_float heuristics for parameters (G1).
+    type_hints: HashMap<String, Vec<VarType>>,
+    /// Method resolution table from CheckedProgram impls:
+    /// (type_name, method_name) → mangled function name.
+    /// Eliminates string prefix guessing (G1).
+    method_table: HashMap<(String, String), String>,
     /// Flow definitions (for transition compilation).
     flow_defs: HashMap<String, FlowDef>,
     /// Actor definitions (for runtime spawn).
@@ -70,6 +80,12 @@ struct FuncCompiler {
     on_failure_scopes: Vec<Vec<Block>>,
     /// Instruction index of SetFaultPc for the current scope (for patching).
     set_fault_pc_idx: Option<usize>,
+    /// Borrow aliases: variable name → the original place expression it borrows.
+    /// Used to resolve `*alias = value` write-back through mutable references.
+    borrow_aliases: HashMap<String, Expr>,
+    /// Loop result registers: one per active loop (for break-with-value).
+    /// `break expr` writes to the top register; the loop expression reads it.
+    loop_result_regs: Vec<Reg>,
 }
 
 /// Lightweight type tag for register dispatch.
@@ -98,6 +114,8 @@ impl FuncCompiler {
             defer_scopes: vec![Vec::new()],
             on_failure_scopes: vec![Vec::new()],
             set_fault_pc_idx: None,
+            borrow_aliases: HashMap::new(),
+            loop_result_regs: Vec::new(),
         }
     }
 
@@ -192,12 +210,42 @@ impl BytecodeCompiler {
             constants: HashMap::new(),
             flow_names: std::collections::HashSet::new(),
             actor_names: std::collections::HashSet::new(),
+            extern_names: std::collections::HashSet::new(),
+            type_hints: HashMap::new(),
+            method_table: HashMap::new(),
             flow_defs: HashMap::new(),
             actor_defs: HashMap::new(),
             flow_transition_funcs: HashMap::new(),
             flow_fails_transitions: std::collections::HashSet::new(),
             actor_method_funcs: HashMap::new(),
             ast_file: None,
+        }
+    }
+
+    /// Install type information from CheckedProgram (G1 integration).
+    /// Populates `type_hints` (parameter types) and `method_table` (impl dispatch).
+    /// Call this BEFORE `compile_file` to enable type-directed compilation.
+    pub fn install_checked_program(&mut self, program: &crate::core::CheckedProgram) {
+        // Extract parameter types for each function.
+        for func in program.functions().values() {
+            let param_types: Vec<VarType> = func
+                .params
+                .iter()
+                .map(|(_, ty)| surface_type_to_var_type(ty))
+                .collect();
+            self.type_hints
+                .insert(func.qualified_name.clone(), param_types);
+        }
+
+        // Build method resolution table from impls.
+        for impl_def in program.impls().values() {
+            for method_name in &impl_def.methods {
+                let mangled = format!("{}_{}", impl_def.type_name, method_name);
+                self.method_table.insert(
+                    (impl_def.type_name.clone(), method_name.clone()),
+                    mangled,
+                );
+            }
         }
     }
 
@@ -241,6 +289,12 @@ impl BytecodeCompiler {
             if let Item::Actor(a) = item {
                 self.actor_names.insert(a.name.clone());
                 self.actor_defs.insert(a.name.clone(), a.clone());
+            }
+            // Collect extern function names (for clear error on call).
+            if let Item::ExternBlock(block) = item {
+                for f in &block.funcs {
+                    self.extern_names.insert(f.name.clone());
+                }
             }
         }
 
@@ -523,6 +577,13 @@ impl BytecodeCompiler {
                 }
                 Stmt::Let { pat, init, .. } => {
                     if let Some(init_expr) = init {
+                        // Detect borrow: let x = &mut place / &place.
+                        // Record alias so `*x = v` can write back to the place.
+                        if let PatternKind::Variable(name) = &pat.kind {
+                            if let Expr::Unary(UnOp::RefMut | UnOp::Ref, place) = init_expr.unlocated() {
+                                fc.borrow_aliases.insert(name.clone(), *place.clone());
+                            }
+                        }
                         let r = self.compile_expr(fc, init_expr)?;
                         // Track variable type for int/float dispatch.
                         if let PatternKind::Variable(name) = &pat.kind {
@@ -569,21 +630,36 @@ impl BytecodeCompiler {
                     }
                 }
                 Stmt::While { cond, body } => {
-                    self.compile_while(fc, cond, body)?;
+                    let result_reg = self.compile_while(fc, cond, body)?;
+                    if is_last {
+                        last_reg = Some(result_reg);
+                    }
                 }
                 Stmt::For { var, iterable, body } => {
-                    self.compile_for(fc, var, iterable, body)?;
+                    let result_reg = self.compile_for(fc, var, iterable, body)?;
+                    if is_last {
+                        last_reg = Some(result_reg);
+                    }
                 }
                 Stmt::Block(b) => {
                     fc.push_scope();
                     self.compile_block(fc, b)?;
                     fc.pop_scope();
                 }
-                Stmt::Break(_) => {
+                Stmt::Break(val) => {
                     if fc.break_jumps.is_empty() {
                         return Err(InterpError::new(
                             "break outside loop",
                         ));
+                    }
+                    // Break with value: store the value in the loop result register.
+                    if let Some(expr) = val {
+                        if let Some(&result_reg) = fc.loop_result_regs.last() {
+                            let r_val = self.compile_expr(fc, expr)?;
+                            if r_val != result_reg {
+                                fc.emit(Op::Mov { rd: result_reg, rs: r_val });
+                            }
+                        }
                     }
                     let idx = fc.emit(Op::Jmp { offset: 0 });
                     fc.break_jumps.last_mut().unwrap().push(idx);
@@ -602,28 +678,48 @@ impl BytecodeCompiler {
                 | Stmt::Ensures(..) | Stmt::Invariant(..) | Stmt::Math(..)
                 | Stmt::MmsBlock { .. } => {}
 
+                // Nested function definition: compile as a closure and bind
+                // the function name as a local variable holding the closure.
+                // Calls to this name will resolve via CallIndirect.
+                Stmt::Func(f) => {
+                    let closure_reg = self.compile_lambda(fc, &f.params, &f.body)?;
+                    fc.vars.last_mut().unwrap().insert(f.name.clone(), closure_reg);
+                }
+
                 // ── Phase B: Stmt 补全 I ──────────────────────
 
                 Stmt::Loop(body) => {
-                    self.compile_loop(fc, body)?;
+                    let result_reg = self.compile_loop(fc, body)?;
+                    if is_last {
+                        last_reg = Some(result_reg);
+                    }
                 }
 
                 Stmt::WhileLet { pat, init, body } => {
-                    self.compile_while_let(fc, pat, init, body)?;
+                    let result_reg = self.compile_while_let(fc, pat, init, body)?;
+                    if is_last {
+                        last_reg = Some(result_reg);
+                    }
                 }
 
                 Stmt::Unsafe(block) => {
                     // Interpreter doesn't enforce safety — just compile the block.
                     fc.push_scope();
-                    self.compile_block(fc, block)?;
+                    let result = self.compile_block(fc, block)?;
                     fc.pop_scope();
+                    if is_last {
+                        last_reg = result;
+                    }
                 }
 
                 Stmt::Arena(block) => {
                     // Interpreter doesn't do region-based memory — just compile the block.
                     fc.push_scope();
-                    self.compile_block(fc, block)?;
+                    let result = self.compile_block(fc, block)?;
                     fc.pop_scope();
+                    if is_last {
+                        last_reg = result;
+                    }
                 }
 
                 Stmt::Drop(expr) => {
@@ -668,8 +764,11 @@ impl BytecodeCompiler {
                 Stmt::Do(block) => {
                     // Do block — transition implementation body.
                     fc.push_scope();
-                    self.compile_block(fc, block)?;
+                    let result = self.compile_block(fc, block)?;
                     fc.pop_scope();
+                    if is_last {
+                        last_reg = result;
+                    }
                 }
 
                 Stmt::Become(expr) => {
@@ -764,9 +863,27 @@ impl BytecodeCompiler {
                 if let Some(const_expr) = self.constants.get(name).cloned() {
                     return self.compile_expr(fc, &const_expr);
                 }
-                fc.lookup_var(name).ok_or_else(|| {
-                    InterpError::new(format!("undefined variable '{}' in bytecode", name))
-                })
+                // Local variable reference.
+                if let Some(r) = fc.lookup_var(name) {
+                    return Ok(r);
+                }
+                // First-class function reference: emit a zero-capture closure
+                // pointing to the function prototype. This enables HOF usage
+                // like `map_list(xs, increment)` where `increment` is a func.
+                if let Some(&fidx) = self.func_table.get(name.as_str()) {
+                    let rd = fc.proto.alloc_reg();
+                    fc.emit(Op::NewClosure {
+                        rd,
+                        proto: fidx,
+                        captures_base: 0,
+                        capture_count: 0,
+                    });
+                    return Ok(rd);
+                }
+                Err(InterpError::new(format!(
+                    "undefined variable '{}' in bytecode",
+                    name
+                )))
             }
             Expr::Binary(op, l, r) => self.compile_binary(fc, *op, l, r),
             Expr::Unary(op, e) => self.compile_unary(fc, *op, e),
@@ -828,18 +945,7 @@ impl BytecodeCompiler {
                 // start..end → list [start, start+1, ..., end-1]
                 let r_start = self.compile_expr(fc, start)?;
                 let r_end = self.compile_expr(fc, end)?;
-                let rd = fc.proto.alloc_reg();
-                // Use range builtin.
-                let args_base = fc.proto.alloc_reg();
-                fc.proto.alloc_reg(); // second arg slot
-                fc.emit(Op::Mov { rd: args_base, rs: r_start });
-                fc.emit(Op::Mov { rd: args_base + 1, rs: r_end });
-                if let Some(&bidx) = self.builtin_table.get("range") {
-                    fc.emit(Op::CallBuiltin { rd, builtin: bidx, args_base, argc: 2 });
-                } else {
-                    return Err(InterpError::new("bytecode: range builtin not registered"));
-                }
-                Ok(rd)
+                self.compile_range_loop(fc, r_start, r_end)
             }
 
             Expr::Comprehension { expr, var, iter, guard } => {
@@ -896,13 +1002,13 @@ impl BytecodeCompiler {
             }
 
             Expr::SliceExpr { target, start, end } => {
-                // target[start..end] → sublist
+                // target[start..end] → __slice builtin (handles List + String + negative indices).
                 let r_target = self.compile_expr(fc, target)?;
                 let r_start = if let Some(s) = start {
                     self.compile_expr(fc, s)?
                 } else {
                     let r = fc.proto.alloc_reg();
-                let c0 = fc.proto.add_const(ConstValue::Int(0));
+                    let c0 = fc.proto.add_const(ConstValue::Int(0));
                     fc.emit(Op::LoadConst { rd: r, idx: c0 });
                     r
                 };
@@ -914,31 +1020,19 @@ impl BytecodeCompiler {
                     r
                 };
 
-                // Build sublist via loop.
+                // Call __slice(target, start, end).
                 let rd = fc.proto.alloc_reg();
-                fc.emit(Op::NewList { rd, capacity: 0 });
-                let r_idx = fc.proto.alloc_reg();
-                let r_one = fc.proto.alloc_reg();
-                let c0 = fc.proto.add_const(ConstValue::Int(0));
-                let c1 = fc.proto.add_const(ConstValue::Int(1));
-                fc.emit(Op::Mov { rd: r_idx, rs: r_start });
-                fc.emit(Op::LoadConst { rd: r_one, idx: c1 });
-
-                let loop_start = fc.proto.code.len();
-                let r_cmp = fc.proto.alloc_reg();
-                fc.emit(Op::LtInt { rd: r_cmp, ra: r_idx, rb: r_end });
-                let jmp_end = fc.emit(Op::JmpIfNot { offset: 0, ra: r_cmp });
-
-                let r_elem = fc.proto.alloc_reg();
-                fc.emit(Op::ListGet { rd: r_elem, ra: r_target, rb: r_idx });
-                fc.emit(Op::ListPush { ra: rd, rb: r_elem });
-
-                fc.emit(Op::AddInt { rd: r_idx, ra: r_idx, rb: r_one });
-                fc.emit(Op::Jmp { offset: 0 });
-                let jmp_back = fc.proto.code.len() - 1;
-                fc.proto.patch_jump_to(jmp_back, loop_start);
-                fc.proto.patch_jump_to(jmp_end, fc.proto.code.len());
-
+                let args_base = fc.proto.alloc_reg();
+                fc.proto.alloc_reg();
+                fc.proto.alloc_reg();
+                fc.emit(Op::Mov { rd: args_base, rs: r_target });
+                fc.emit(Op::Mov { rd: args_base + 1, rs: r_start });
+                fc.emit(Op::Mov { rd: args_base + 2, rs: r_end });
+                if let Some(&bidx) = self.builtin_table.get("__slice") {
+                    fc.emit(Op::CallBuiltin { rd, builtin: bidx, args_base, argc: 3 });
+                } else {
+                    return Err(InterpError::new("bytecode: __slice builtin not registered"));
+                }
                 Ok(rd)
             }
 
@@ -1004,7 +1098,13 @@ impl BytecodeCompiler {
             }
 
             Expr::Turbofish(name, _type_args, args) => {
-                // Type arguments ignored at runtime — compile as regular call.
+                // Special case: from_json::<T>(s) → typed deserialization.
+                // Redirect to from_json_typed which parses JSON into Value.
+                if name == "from_json" {
+                    let callee = Expr::Ident("from_json_typed".to_string());
+                    return self.compile_call(fc, &callee, args);
+                }
+                // Other turbofish: type arguments ignored at runtime.
                 let callee = Expr::Ident(name.clone());
                 self.compile_call(fc, &callee, args)
             }
@@ -1054,11 +1154,119 @@ impl BytecodeCompiler {
                 self.compile_expr(fc, inner)
             }
 
+            Expr::Comptime(block) => {
+                // Compile-time evaluation: compile the block as a temporary
+                // function, execute it in a sub-VM, and inline the result.
+                self.eval_comptime_at_compile_time(fc, block)
+            }
+
+            Expr::Quote(_) | Expr::QuoteInterpolate(_) => {
+                Err(InterpError::new(
+                    "bytecode compiler: quote!/interpolation not yet supported (0.1.4)",
+                ))
+            }
+
+            Expr::Arena(block) => {
+                // Arena block: same semantics as a regular block expression.
+                fc.push_scope();
+                let result = self.compile_block(fc, block)?;
+                fc.pop_scope();
+                Ok(result.unwrap_or_else(|| {
+                    let r = fc.proto.alloc_reg();
+                    fc.emit(Op::LoadUnit { rd: r });
+                    r
+                }))
+            }
+
+            Expr::NamedArg(_name, inner) => {
+                // Named argument: the name is call-site metadata; compile the value.
+                self.compile_expr(fc, inner)
+            }
+
             _ => Err(InterpError::new(format!(
                 "bytecode compiler: expression {:?} not yet supported",
                 std::mem::discriminant(expr.unlocated())
             ))),
         }
+    }
+
+    /// Evaluate a `comptime { ... }` block at compile time.
+    /// Compiles the block as a temporary zero-param function, runs it in a
+    /// sub-VM against the already-compiled function table, and inlines the
+    /// result as a constant.
+    fn eval_comptime_at_compile_time(
+        &mut self,
+        fc: &mut FuncCompiler,
+        block: &Block,
+    ) -> Result<Reg, InterpError> {
+        // Compile the block into a temporary function prototype.
+        let temp_name = format!("__comptime_{}", fc.proto.name);
+        let mut temp_fc = FuncCompiler::new(temp_name.clone(), 0);
+        let last_reg = self.compile_block(&mut temp_fc, block)?;
+        if let Some(r) = last_reg {
+            temp_fc.emit(Op::Ret { ra: r });
+        } else {
+            temp_fc.emit(Op::RetUnit);
+        }
+        let temp_proto = temp_fc.proto;
+
+        // Build a temporary program: clone current functions + append temp.
+        let temp_idx = self.functions.len() as FuncIdx;
+        let mut temp_functions = self.functions.clone();
+        temp_functions.push(temp_proto);
+
+        let temp_program = BytecodeProgram {
+            functions: temp_functions,
+            entry: temp_idx,
+            builtin_names: self.builtin_names.clone(),
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
+            ast: None,
+        };
+
+        // Execute in a sub-VM using call_function (returns precise Value).
+        let mut vm = super::vm::BytecodeVM::new(&temp_program);
+        let result = vm.call_function(temp_idx, &[]).map_err(|e| {
+            InterpError::new(format!("comptime evaluation failed: {}", e))
+        })?;
+
+        // Inline the result as a constant.
+        let rd = fc.proto.alloc_reg();
+        match result {
+            Value::Int(n) => {
+                let cidx = fc.proto.add_const(ConstValue::Int(n));
+                fc.emit(Op::LoadConst { rd, idx: cidx });
+            }
+            Value::Float(f) => {
+                let cidx = fc.proto.add_const(ConstValue::Float(f));
+                fc.emit(Op::LoadConst { rd, idx: cidx });
+            }
+            Value::Bool(b) => {
+                let cidx = fc.proto.add_const(ConstValue::Bool(b));
+                fc.emit(Op::LoadConst { rd, idx: cidx });
+            }
+            Value::String(s) => {
+                let cidx = fc.proto.add_const(ConstValue::Str(s));
+                fc.emit(Op::LoadConst { rd, idx: cidx });
+            }
+            Value::Unit => {
+                fc.emit(Op::LoadUnit { rd });
+            }
+            other => {
+                // Complex values (List, Record, etc.) cannot be inlined as
+                // constants. This is a known limitation; comptime blocks that
+                // produce complex values should use quote! instead.
+                return Err(InterpError::new(format!(
+                    "comptime block produced non-constant value: {}",
+                    other
+                )));
+            }
+        }
+        Ok(rd)
     }
 
     /// Constant folding: evaluate binary operations on literals at compile time.
@@ -1207,6 +1415,13 @@ impl BytecodeCompiler {
         // Short-circuit for && and ||.
         if matches!(op, BinOp::And | BinOp::Or) {
             return self.compile_short_circuit(fc, op, l, r);
+        }
+
+        // Range operator: a..b → compile as Expr::Range (builds a list).
+        if matches!(op, BinOp::Range) {
+            let r_start = self.compile_expr(fc, l)?;
+            let r_end = self.compile_expr(fc, r)?;
+            return self.compile_range_loop(fc, r_start, r_end);
         }
 
         // Constant folding: if both operands are literals, compute at compile time.
@@ -1377,11 +1592,10 @@ impl BytecodeCompiler {
             UnOp::Not => {
                 fc.emit(Op::Not { rd, ra });
             }
-            _ => {
-                return Err(InterpError::new(format!(
-                    "bytecode: unsupported unary op {:?}",
-                    op
-                )))
+            // Ownership operators: no-ops in value semantics.
+            // &x, &mut x, *x all evaluate to the inner value at runtime.
+            UnOp::Ref | UnOp::RefMut | UnOp::Deref => {
+                fc.emit(Op::Mov { rd, rs: ra });
             }
         }
         Ok(rd)
@@ -1468,6 +1682,14 @@ impl BytecodeCompiler {
                 || self.variant_names.contains(name.as_str())
                 || fc.lookup_var(name).is_some();
             if !is_known {
+                // Provide a specific error for extern functions.
+                if self.extern_names.contains(name.as_str()) {
+                    return Err(InterpError::new(format!(
+                        "extern function '{}' is not supported in bytecode VM \
+                         (FFI calls require the codegen backend: mimi build)",
+                        name
+                    )));
+                }
                 return Err(InterpError::new(format!(
                     "undefined function '{}'",
                     name
@@ -1491,21 +1713,35 @@ impl BytecodeCompiler {
         let rd = fc.proto.alloc_reg();
 
         if let Expr::Ident(name) = callee.unlocated() {
-            // Check builtins first.
-            if let Some(&bidx) = self.builtin_table.get(name.as_str()) {
-                fc.emit(Op::CallBuiltin {
+            // Resolution order (matches tree-walker scoping):
+            // 1. User functions (top-level named functions)
+            // 2. Local variables (closures bound via let)
+            // 3. Builtins
+            // 4. Variant constructors
+            if let Some(&fidx) = self.func_table.get(name.as_str()) {
+                fc.emit(Op::Call {
                     rd,
-                    builtin: bidx,
+                    func: fidx,
                     args_base,
                     argc: args.len() as u16,
                 });
                 return Ok(rd);
             }
-            // User function.
-            if let Some(&fidx) = self.func_table.get(name.as_str()) {
-                fc.emit(Op::Call {
+            // Local variable holding a closure (shadows builtins).
+            if let Some(callee_reg) = fc.lookup_var(name) {
+                fc.emit(Op::CallIndirect {
                     rd,
-                    func: fidx,
+                    callee: callee_reg,
+                    args_base,
+                    argc: args.len() as u16,
+                });
+                return Ok(rd);
+            }
+            // Builtin function.
+            if let Some(&bidx) = self.builtin_table.get(name.as_str()) {
+                fc.emit(Op::CallBuiltin {
+                    rd,
+                    builtin: bidx,
                     args_base,
                     argc: args.len() as u16,
                 });
@@ -1523,16 +1759,7 @@ impl BytecodeCompiler {
                 });
                 return Ok(rd);
             }
-            // Might be a closure variable.
-            if let Some(callee_reg) = fc.lookup_var(name) {
-                fc.emit(Op::CallIndirect {
-                    rd,
-                    callee: callee_reg,
-                    args_base,
-                    argc: args.len() as u16,
-                });
-                return Ok(rd);
-            }
+
         }
 
         // Method call: obj.method(args) → method(obj, args)
@@ -1612,19 +1839,42 @@ impl BytecodeCompiler {
                 _ => {}
             }
 
-            // Try builtin methods FIRST (before user functions, to avoid
-            // shadowing actor methods with stdlib functions like `increment`).
-            if let Some(&bidx) = self.builtin_table.get(method.as_str()) {
-                fc.emit(Op::CallBuiltin {
-                    rd,
-                    builtin: bidx,
-                    args_base: new_args_base,
-                    argc: total_args as u16,
-                });
-                return Ok(rd);
+            // If the method matches a known actor method, use DynMethodCall
+            // (actor methods shadow builtins with the same name, e.g. `format`).
+            let is_actor_method = self.actor_defs.values().any(|a| {
+                a.methods.iter().any(|m| m.name == *method)
+            });
+            if !is_actor_method {
+                // Try builtin methods (only if not an actor method).
+                if let Some(&bidx) = self.builtin_table.get(method.as_str()) {
+                    fc.emit(Op::CallBuiltin {
+                        rd,
+                        builtin: bidx,
+                        args_base: new_args_base,
+                        argc: total_args as u16,
+                    });
+                    return Ok(rd);
+                }
             }
 
-            // Try mangled names: impl type prefixes + common built-in type prefixes.
+            // Try CheckedProgram method table (G1: precise dispatch).
+            // The method_table maps (type_name, method_name) → mangled function name.
+            // We try all known impl types as potential receivers.
+            for type_name in &self.impl_type_names.clone() {
+                if let Some(mangled) = self.method_table.get(&(type_name.clone(), method.clone())) {
+                    if let Some(&fidx) = self.func_table.get(mangled) {
+                        fc.emit(Op::Call {
+                            rd,
+                            func: fidx,
+                            args_base: new_args_base,
+                            argc: total_args as u16,
+                        });
+                        return Ok(rd);
+                    }
+                }
+            }
+
+            // Fallback: mangled names via string prefix matching.
             let mut prefixes: Vec<&str> = self.impl_type_names.iter().map(|s| s.as_str()).collect();
             for p in ["List", "list", "String", "string", "Map", "map", "Set", "set"] {
                 if !prefixes.contains(&p) {
@@ -1658,10 +1908,16 @@ impl BytecodeCompiler {
             return Ok(rd);
         }
 
-        Err(InterpError::new(format!(
-            "bytecode: cannot resolve call target {:?}",
-            callee
-        )))
+        // Fallback: arbitrary callee expression (e.g., fns[0](args), get_func()(args)).
+        // Compile the callee to a register and use CallIndirect.
+        let r_callee = self.compile_expr(fc, callee)?;
+        fc.emit(Op::CallIndirect {
+            rd,
+            callee: r_callee,
+            args_base,
+            argc: args.len() as u16,
+        });
+        Ok(rd)
     }
 
     fn compile_if_expr(
@@ -1885,8 +2141,8 @@ impl BytecodeCompiler {
                 Ok((test_reg, bindings))
             }
 
-            PatternKind::Array(pats) | PatternKind::Slice(pats, _) => {
-                // Type guard: check subject is a list/array before element access.
+            PatternKind::Array(pats) => {
+                // Exact-length array pattern: [p1, p2, p3]
                 let r_type = fc.proto.alloc_reg();
                 fc.emit(Op::TypeOf { rd: r_type, ra: r_subject });
                 let r_list_str = fc.proto.alloc_reg();
@@ -1898,35 +2154,36 @@ impl BytecodeCompiler {
                 let mut bindings = Vec::new();
                 let mut test_reg: Option<Reg> = Some(r_is_list);
 
-                // Check length.
+                // Check exact length.
                 let r_len = fc.proto.alloc_reg();
                 fc.emit(Op::Len { rd: r_len, ra: r_subject });
                 let r_expected = fc.proto.alloc_reg();
                 let len_idx = fc.proto.add_const(ConstValue::Int(pats.len() as i64));
                 fc.emit(Op::LoadConst { rd: r_expected, idx: len_idx });
                 let r_len_test = fc.proto.alloc_reg();
-                fc.emit(Op::EqInt {
-                    rd: r_len_test,
-                    ra: r_len,
-                    rb: r_expected,
-                });
+                fc.emit(Op::EqInt { rd: r_len_test, ra: r_len, rb: r_expected });
                 if let Some(r_main) = test_reg {
                     fc.emit(Op::And { rd: r_main, ra: r_main, rb: r_len_test });
                 } else {
                     test_reg = Some(r_len_test);
                 }
 
-                // Match each element.
+                // Match each element (guarded by length check above).
+                // If length check already failed, element access would OOB.
+                // Use a conditional skip: if test_reg is false, skip element access.
+                let skip_elements = if test_reg.is_some() {
+                    let r_test = test_reg.unwrap();
+                    Some(fc.emit(Op::JmpIfNot { offset: 0, ra: r_test }))
+                } else {
+                    None
+                };
+
                 for (i, sub_pat) in pats.iter().enumerate() {
                     let r_elem = fc.proto.alloc_reg();
                     let r_idx = fc.proto.alloc_reg();
                     let idx_const = fc.proto.add_const(ConstValue::Int(i as i64));
                     fc.emit(Op::LoadConst { rd: r_idx, idx: idx_const });
-                    fc.emit(Op::ListGet {
-                        rd: r_elem,
-                        ra: r_subject,
-                        rb: r_idx,
-                    });
+                    fc.emit(Op::ListGet { rd: r_elem, ra: r_subject, rb: r_idx });
                     let (sub_test, sub_bindings) =
                         self.compile_pattern_test(fc, sub_pat, r_elem)?;
                     if let Some(r_sub) = sub_test {
@@ -1937,6 +2194,92 @@ impl BytecodeCompiler {
                         }
                     }
                     bindings.extend(sub_bindings);
+                }
+
+                // Patch the skip jump to land here (after element access).
+                if let Some(skip_idx) = skip_elements {
+                    fc.proto.patch_jump(skip_idx);
+                }
+
+                Ok((test_reg, bindings))
+            }
+
+            PatternKind::Slice(pats, rest) => {
+                // Slice pattern: [p1, p2, ..rest] — length >= pats.len().
+                let r_type = fc.proto.alloc_reg();
+                fc.emit(Op::TypeOf { rd: r_type, ra: r_subject });
+                let r_list_str = fc.proto.alloc_reg();
+                let list_str_idx = fc.proto.add_const(ConstValue::Str("list".into()));
+                fc.emit(Op::LoadConst { rd: r_list_str, idx: list_str_idx });
+                let r_is_list = fc.proto.alloc_reg();
+                fc.emit(Op::Eq { rd: r_is_list, ra: r_type, rb: r_list_str });
+
+                let mut bindings = Vec::new();
+                let mut test_reg: Option<Reg> = Some(r_is_list);
+
+                // Check length >= pats.len() (minimum required elements).
+                let r_len = fc.proto.alloc_reg();
+                fc.emit(Op::Len { rd: r_len, ra: r_subject });
+                let r_min = fc.proto.alloc_reg();
+                let min_idx = fc.proto.add_const(ConstValue::Int(pats.len() as i64));
+                fc.emit(Op::LoadConst { rd: r_min, idx: min_idx });
+                let r_len_test = fc.proto.alloc_reg();
+                fc.emit(Op::GeInt { rd: r_len_test, ra: r_len, rb: r_min });
+                if let Some(r_main) = test_reg {
+                    fc.emit(Op::And { rd: r_main, ra: r_main, rb: r_len_test });
+                } else {
+                    test_reg = Some(r_len_test);
+                }
+
+                // Match each fixed element (guarded by length check).
+                let skip_elems = if test_reg.is_some() {
+                    let r_test = test_reg.unwrap();
+                    Some(fc.emit(Op::JmpIfNot { offset: 0, ra: r_test }))
+                } else {
+                    None
+                };
+
+                for (i, sub_pat) in pats.iter().enumerate() {
+                    let r_elem = fc.proto.alloc_reg();
+                    let r_idx = fc.proto.alloc_reg();
+                    let idx_const = fc.proto.add_const(ConstValue::Int(i as i64));
+                    fc.emit(Op::LoadConst { rd: r_idx, idx: idx_const });
+                    fc.emit(Op::ListGet { rd: r_elem, ra: r_subject, rb: r_idx });
+                    let (sub_test, sub_bindings) =
+                        self.compile_pattern_test(fc, sub_pat, r_elem)?;
+                    if let Some(r_sub) = sub_test {
+                        if let Some(r_main) = test_reg {
+                            fc.emit(Op::And { rd: r_main, ra: r_main, rb: r_sub });
+                        } else {
+                            test_reg = Some(r_sub);
+                        }
+                    }
+                    bindings.extend(sub_bindings);
+                }
+
+                if let Some(skip_idx) = skip_elems {
+                    fc.proto.patch_jump(skip_idx);
+                }
+
+                // Bind rest pattern: rest = subject[pats.len()..]
+                if let Some(rest_pat) = rest {
+                    if let PatternKind::Variable(rest_name) = &rest_pat.kind {
+                        let r_rest = fc.proto.alloc_reg();
+                        let r_start = fc.proto.alloc_reg();
+                        let start_idx = fc.proto.add_const(ConstValue::Int(pats.len() as i64));
+                        fc.emit(Op::LoadConst { rd: r_start, idx: start_idx });
+                        // __slice(subject, pats.len(), len(subject))
+                        let args_base = fc.proto.alloc_reg();
+                        fc.proto.alloc_reg();
+                        fc.proto.alloc_reg();
+                        fc.emit(Op::Mov { rd: args_base, rs: r_subject });
+                        fc.emit(Op::Mov { rd: args_base + 1, rs: r_start });
+                        fc.emit(Op::Mov { rd: args_base + 2, rs: r_len });
+                        if let Some(&bidx) = self.builtin_table.get("__slice") {
+                            fc.emit(Op::CallBuiltin { rd: r_rest, builtin: bidx, args_base, argc: 3 });
+                        }
+                        bindings.push((rest_name.clone(), r_rest));
+                    }
                 }
 
                 Ok((test_reg, bindings))
@@ -1971,12 +2314,18 @@ impl BytecodeCompiler {
         Ok(())
     }
 
+    /// Compile `while cond { body }`.
+    /// Mimi semantic: non-Unit body value terminates the loop (loop-as-expression).
     fn compile_while(
         &mut self,
         fc: &mut FuncCompiler,
         cond: &Expr,
         body: &Block,
-    ) -> Result<(), InterpError> {
+    ) -> Result<Reg, InterpError> {
+        let result_reg = fc.proto.alloc_reg();
+        fc.emit(Op::LoadUnit { rd: result_reg });
+        fc.loop_result_regs.push(result_reg);
+
         fc.break_jumps.push(Vec::new());
         fc.continue_jumps.push(Vec::new());
 
@@ -1985,8 +2334,21 @@ impl BytecodeCompiler {
         let jmp_end = fc.emit(Op::JmpIfNot { offset: 0, ra: r_cond });
 
         fc.push_scope();
-        self.compile_block(fc, body)?;
+        let body_result = self.compile_block(fc, body)?;
         fc.pop_scope();
+
+        // Loop-as-expression: non-Unit body value → terminate.
+        if let Some(r_body) = body_result {
+            let r_is_unit = fc.proto.alloc_reg();
+            let r_unit = fc.proto.alloc_reg();
+            fc.emit(Op::LoadUnit { rd: r_unit });
+            fc.emit(Op::Eq { rd: r_is_unit, ra: r_body, rb: r_unit });
+            let jmp_continue = fc.emit(Op::JmpIf { offset: 0, ra: r_is_unit });
+            fc.emit(Op::Mov { rd: result_reg, rs: r_body });
+            let jmp_break = fc.emit(Op::Jmp { offset: 0 });
+            fc.break_jumps.last_mut().unwrap().push(jmp_break);
+            fc.proto.patch_jump(jmp_continue);
+        }
 
         // Jump back to loop start.
         fc.emit(Op::Jmp { offset: 0 });
@@ -2010,15 +2372,23 @@ impl BytecodeCompiler {
             }
         }
 
-        Ok(())
+        fc.loop_result_regs.pop();
+        Ok(result_reg)
     }
 
     /// Compile `loop { body }` — infinite loop with break.
+    /// Compile an infinite loop. Returns the loop result register
+    /// (holds the value from `break expr`, or Unit if no break value).
     fn compile_loop(
         &mut self,
         fc: &mut FuncCompiler,
         body: &Block,
-    ) -> Result<(), InterpError> {
+    ) -> Result<Reg, InterpError> {
+        // Allocate loop result register (initialized to Unit).
+        let result_reg = fc.proto.alloc_reg();
+        fc.emit(Op::LoadUnit { rd: result_reg });
+        fc.loop_result_regs.push(result_reg);
+
         fc.break_jumps.push(Vec::new());
         fc.continue_jumps.push(Vec::new());
 
@@ -2048,17 +2418,26 @@ impl BytecodeCompiler {
             }
         }
 
-        Ok(())
+        fc.loop_result_regs.pop();
+        Ok(result_reg)
     }
 
     /// Compile `while let pat = init { body }`.
+    /// Mimi semantic: if the body produces a non-Unit value, the loop
+    /// terminates and returns that value (loop-as-expression).
+    /// Returns the loop result register.
     fn compile_while_let(
         &mut self,
         fc: &mut FuncCompiler,
         pat: &Pattern,
         init: &Expr,
         body: &Block,
-    ) -> Result<(), InterpError> {
+    ) -> Result<Reg, InterpError> {
+        // Loop result register (for body-value termination + break-with-value).
+        let result_reg = fc.proto.alloc_reg();
+        fc.emit(Op::LoadUnit { rd: result_reg });
+        fc.loop_result_regs.push(result_reg);
+
         fc.break_jumps.push(Vec::new());
         fc.continue_jumps.push(Vec::new());
 
@@ -2081,8 +2460,25 @@ impl BytecodeCompiler {
         for (name, r) in &bindings {
             fc.vars.last_mut().unwrap().insert(name.clone(), *r);
         }
-        self.compile_block(fc, body)?;
+        let body_result = self.compile_block(fc, body)?;
         fc.pop_scope();
+
+        // Mimi loop-as-expression: if body produced a non-Unit value,
+        // store it in result_reg and terminate the loop.
+        if let Some(r_body) = body_result {
+            // Check if body value != Unit → terminate.
+            let r_is_unit = fc.proto.alloc_reg();
+            let r_unit = fc.proto.alloc_reg();
+            fc.emit(Op::LoadUnit { rd: r_unit });
+            fc.emit(Op::Eq { rd: r_is_unit, ra: r_body, rb: r_unit });
+            let jmp_continue = fc.emit(Op::JmpIf { offset: 0, ra: r_is_unit });
+            // Non-Unit: store and break.
+            fc.emit(Op::Mov { rd: result_reg, rs: r_body });
+            let jmp_break = fc.emit(Op::Jmp { offset: 0 });
+            fc.break_jumps.last_mut().unwrap().push(jmp_break);
+            // Unit: continue looping.
+            fc.proto.patch_jump(jmp_continue);
+        }
 
         // Jump back to loop start.
         fc.emit(Op::Jmp { offset: 0 });
@@ -2108,16 +2504,23 @@ impl BytecodeCompiler {
             }
         }
 
-        Ok(())
+        fc.loop_result_regs.pop();
+        Ok(result_reg)
     }
 
+    /// Compile `for var in iter { body }`.
+    /// Mimi semantic: non-Unit body value terminates the loop (loop-as-expression).
     fn compile_for(
         &mut self,
         fc: &mut FuncCompiler,
         var: &str,
         iter: &Expr,
         body: &Block,
-    ) -> Result<(), InterpError> {
+    ) -> Result<Reg, InterpError> {
+        let result_reg = fc.proto.alloc_reg();
+        fc.emit(Op::LoadUnit { rd: result_reg });
+        fc.loop_result_regs.push(result_reg);
+
         // Compile iterable.
         let r_iter = self.compile_expr(fc, iter)?;
         // Allocate index counter and length.
@@ -2147,8 +2550,21 @@ impl BytecodeCompiler {
         let r_var = fc.bind_var(var);
         fc.emit(Op::ListGet { rd: r_var, ra: r_iter, rb: r_idx });
 
-        self.compile_block(fc, body)?;
+        let body_result = self.compile_block(fc, body)?;
         fc.pop_scope();
+
+        // Loop-as-expression: non-Unit body value → terminate.
+        if let Some(r_body) = body_result {
+            let r_is_unit = fc.proto.alloc_reg();
+            let r_unit = fc.proto.alloc_reg();
+            fc.emit(Op::LoadUnit { rd: r_unit });
+            fc.emit(Op::Eq { rd: r_is_unit, ra: r_body, rb: r_unit });
+            let jmp_continue = fc.emit(Op::JmpIf { offset: 0, ra: r_is_unit });
+            fc.emit(Op::Mov { rd: result_reg, rs: r_body });
+            let jmp_break = fc.emit(Op::Jmp { offset: 0 });
+            fc.break_jumps.last_mut().unwrap().push(jmp_break);
+            fc.proto.patch_jump(jmp_continue);
+        }
 
         // Increment step (continue jumps here).
         let increment_pos = fc.proto.code.len();
@@ -2171,7 +2587,8 @@ impl BytecodeCompiler {
             }
         }
 
-        Ok(())
+        fc.loop_result_regs.pop();
+        Ok(result_reg)
     }
 
     fn compile_assign(
@@ -2200,17 +2617,129 @@ impl BytecodeCompiler {
                 Ok(())
             }
             Expr::Field(obj, field) => {
-                // obj.field = value (record or actor field set)
-                let r_obj = self.compile_expr(fc, obj)?;
+                // obj.field = value (record or actor field set).
+                // For nested fields (e.g. outer.inner.value = x), we need
+                // write-back: modify the sub-record, then store it back into
+                // the parent. This is recursive.
                 let r_val = self.compile_expr(fc, value)?;
-                let field_idx = fc.proto.add_const(ConstValue::Str(field.clone()));
-                fc.emit(Op::RecordSet { ra: r_obj, field: field_idx, rb: r_val });
-                Ok(())
+                self.compile_field_assign(fc, obj, field, r_val)
+            }
+            Expr::Unary(UnOp::Deref, inner) => {
+                // *ref = value → write through borrow alias to the original place.
+                if let Expr::Ident(alias_name) = inner.unlocated() {
+                    if let Some(place) = fc.borrow_aliases.get(alias_name).cloned() {
+                        return self.compile_assign(fc, &place, value);
+                    }
+                }
+                // Fallback: compile the deref target as a regular expression
+                // and treat it as a variable assignment (best-effort).
+                let r_val = self.compile_expr(fc, value)?;
+                let r_target = self.compile_expr(fc, inner)?;
+                // If the inner is a variable, write to it directly.
+                if let Expr::Ident(name) = inner.unlocated() {
+                    if let Some(r_var) = fc.lookup_var(name) {
+                        if r_val != r_var {
+                            fc.emit(Op::Mov { rd: r_var, rs: r_val });
+                        }
+                        let _ = r_target;
+                        return Ok(());
+                    }
+                }
+                Err(InterpError::new(
+                    "bytecode: cannot resolve deref assignment target",
+                ))
             }
             _ => Err(InterpError::new(
                 "bytecode: unsupported assignment target",
             )),
         }
+    }
+
+    /// Assign to a field with write-back for nested access.
+    /// For `outer.inner.value = x`:
+    ///   1. Get outer's register (the root variable)
+    ///   2. RecordGet outer.inner → temp_inner
+    ///   3. RecordSet temp_inner.value = x
+    ///   4. RecordSet outer.inner = temp_inner (write-back)
+    fn compile_field_assign(
+        &mut self,
+        fc: &mut FuncCompiler,
+        obj: &Expr,
+        field: &str,
+        r_val: Reg,
+    ) -> Result<(), InterpError> {
+        match obj.unlocated() {
+            Expr::Ident(name) => {
+                // Simple case: var.field = value. No write-back needed.
+                let r_obj = fc.lookup_var(name).ok_or_else(|| {
+                    InterpError::new(format!("undefined variable '{}' in field assign", name))
+                })?;
+                let field_idx = fc.proto.add_const(ConstValue::Str(field.to_string()));
+                fc.emit(Op::RecordSet { ra: r_obj, field: field_idx, rb: r_val });
+                Ok(())
+            }
+            Expr::Field(parent, parent_field) => {
+                // Nested: parent.parent_field.field = value.
+                // 1. Compile parent to get its register.
+                let r_parent = self.compile_expr(fc, parent)?;
+                // 2. Get the sub-record.
+                let pf_idx = fc.proto.add_const(ConstValue::Str(parent_field.clone()));
+                let r_sub = fc.proto.alloc_reg();
+                fc.emit(Op::RecordGet { rd: r_sub, ra: r_parent, field: pf_idx });
+                // 3. Set the target field on the sub-record.
+                let f_idx = fc.proto.add_const(ConstValue::Str(field.to_string()));
+                fc.emit(Op::RecordSet { ra: r_sub, field: f_idx, rb: r_val });
+                // 4. Write back the modified sub-record into the parent.
+                fc.emit(Op::RecordSet { ra: r_parent, field: pf_idx, rb: r_sub });
+                // 5. If parent is itself nested, propagate write-back upward.
+                //    (Handled recursively: compile_expr for Field chains resolves
+                //    to the root variable's register via RecordGet chains, and
+                //    the write-back at step 4 updates the immediate parent. For
+                //    deeper nesting, the parent's RecordGet reads from the root.)
+                Ok(())
+            }
+            Expr::Index(list_expr, idx_expr) => {
+                // list[idx].field = value.
+                let r_list = self.compile_expr(fc, list_expr)?;
+                let r_idx = self.compile_expr(fc, idx_expr)?;
+                // Get element.
+                let r_elem = fc.proto.alloc_reg();
+                fc.emit(Op::ListGet { rd: r_elem, ra: r_list, rb: r_idx });
+                // Set field on element.
+                let f_idx = fc.proto.add_const(ConstValue::Str(field.to_string()));
+                fc.emit(Op::RecordSet { ra: r_elem, field: f_idx, rb: r_val });
+                // Write back element to list.
+                fc.emit(Op::ListSet { ra: r_list, rb: r_idx, rc: r_elem });
+                Ok(())
+            }
+            _ => {
+                // Fallback: compile obj normally and set field.
+                let r_obj = self.compile_expr(fc, obj)?;
+                let field_idx = fc.proto.add_const(ConstValue::Str(field.to_string()));
+                fc.emit(Op::RecordSet { ra: r_obj, field: field_idx, rb: r_val });
+                Ok(())
+            }
+        }
+    }
+
+    /// Compile a range expression (start..end) into a list via the range builtin.
+    fn compile_range_loop(
+        &mut self,
+        fc: &mut FuncCompiler,
+        r_start: Reg,
+        r_end: Reg,
+    ) -> Result<Reg, InterpError> {
+        let rd = fc.proto.alloc_reg();
+        let args_base = fc.proto.alloc_reg();
+        fc.proto.alloc_reg(); // second arg slot
+        fc.emit(Op::Mov { rd: args_base, rs: r_start });
+        fc.emit(Op::Mov { rd: args_base + 1, rs: r_end });
+        if let Some(&bidx) = self.builtin_table.get("range") {
+            fc.emit(Op::CallBuiltin { rd, builtin: bidx, args_base, argc: 2 });
+        } else {
+            return Err(InterpError::new("bytecode: range builtin not registered"));
+        }
+        Ok(rd)
     }
 
     fn compile_index(
@@ -2677,5 +3206,20 @@ impl BytecodeCompiler {
 impl FuncCompiler {
     fn has_mut_params(&mut self, f: &FuncDef) {
         self.proto.has_mut_params = f.params.iter().any(|p| p.mut_);
+    }
+}
+
+/// Convert a surface AST Type to a lightweight VarType tag (G1 helper).
+fn surface_type_to_var_type(ty: &Type) -> VarType {
+    match ty.unlocated() {
+        Type::Name(n, _) => match n.as_str() {
+            "i32" | "i64" | "i8" | "i16" | "u8" | "u16" | "u32" | "u64" => VarType::Int,
+            "f32" | "f64" => VarType::Float,
+            "bool" => VarType::Bool,
+            "string" => VarType::String,
+            other => VarType::User(other.to_string()),
+        },
+        Type::Ref(_, inner) | Type::RefMut(_, inner) => surface_type_to_var_type(inner),
+        _ => VarType::Unknown,
     }
 }

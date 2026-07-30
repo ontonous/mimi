@@ -63,6 +63,8 @@ pub struct BytecodeVM<'a> {
     pub spawn_count: usize,
     /// User CLI arguments (args passed after the program filename).
     pub cli_args: Vec<String>,
+    /// When set, the VM should terminate with this exit code.
+    exit_requested: Option<i64>,
 }
 
 const MAX_DEPTH: usize = 768;
@@ -79,7 +81,14 @@ impl<'a> BytecodeVM<'a> {
             max_children: program.max_children,
             spawn_count: 0,
             cli_args: Vec::new(),
+            exit_requested: None,
         }
+    }
+
+    /// Request the VM to terminate with the given exit code.
+    /// Called by the `exit()` builtin.
+    pub fn request_exit(&mut self, code: i64) {
+        self.exit_requested = Some(code);
     }
 
     /// Set the user CLI arguments that `args()` / `cli_args()` builtins return.
@@ -104,6 +113,20 @@ impl<'a> BytecodeVM<'a> {
             ))),
             Err(e) => Err(e),
         }
+    }
+
+    /// Run the program and return the full Value (not just exit code).
+    /// Used by test infrastructure that needs the actual return value.
+    pub fn run_value(&mut self) -> Result<Value, InterpError> {
+        let entry = self.program.entry;
+        self.push_frame(entry, &[], None)?;
+        let result = self.exec_loop();
+        result.map_err(|e| self.enrich_error(e))
+    }
+
+    /// Take captured stdout (consumes the buffer, leaves empty string).
+    pub fn take_stdout(&mut self) -> String {
+        std::mem::take(&mut self.stdout)
     }
 
     /// Enrich an error with the current frame's function name and source line.
@@ -188,6 +211,11 @@ impl<'a> BytecodeVM<'a> {
     fn exec_loop(&mut self) -> Result<Value, InterpError> {
         let stop = self.stop_depth;
         loop {
+            // Check for exit() builtin request.
+            if let Some(code) = self.exit_requested.take() {
+                return Ok(Value::Int(code));
+            }
+
             let frame = self.stack.last().unwrap();
             let proto = &self.program.functions[frame.proto_idx as usize];
 
@@ -670,20 +698,26 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::ListGet { rd, ra, rb } => {
                     let idx_raw = self.get_int(rb)?;
-                    if idx_raw < 0 {
-                        return Err(InterpError::new(format!(
-                            "negative index {} out of bounds",
-                            idx_raw
-                        )));
-                    }
-                    let idx = idx_raw as usize;
                     let list = self.get_reg(ra).clone();
                     match list {
                         Value::List(l) => {
+                            // Support negative indexing (Python-style: -1 = last).
+                            let idx = if idx_raw < 0 {
+                                let wrapped = l.len() as i64 + idx_raw;
+                                if wrapped < 0 {
+                                    return Err(InterpError::new(format!(
+                                        "index {} out of bounds (len {})",
+                                        idx_raw, l.len()
+                                    )));
+                                }
+                                wrapped as usize
+                            } else {
+                                idx_raw as usize
+                            };
                             if idx >= l.len() {
                                 return Err(InterpError::new(format!(
                                     "index {} out of bounds (len {})",
-                                    idx,
+                                    idx_raw,
                                     l.len()
                                 )));
                             }
@@ -692,10 +726,23 @@ impl<'a> BytecodeVM<'a> {
                         }
                         Value::String(s) => {
                             let bytes = s.as_bytes();
+                            // Support negative indexing for strings too.
+                            let idx = if idx_raw < 0 {
+                                let wrapped = bytes.len() as i64 + idx_raw;
+                                if wrapped < 0 {
+                                    return Err(InterpError::new(format!(
+                                        "string index {} out of bounds (len {})",
+                                        idx_raw, bytes.len()
+                                    )));
+                                }
+                                wrapped as usize
+                            } else {
+                                idx_raw as usize
+                            };
                             if idx >= bytes.len() {
                                 return Err(InterpError::new(format!(
                                     "string index {} out of bounds (len {})",
-                                    idx,
+                                    idx_raw,
                                     bytes.len()
                                 )));
                             }
@@ -1650,10 +1697,9 @@ impl<'a> BytecodeVM<'a> {
 
     // ── Actor spawn helper ───────────────────────────────────
 
-    /// Spawn an actor by name, reusing the tree-walker's ActorHandle infrastructure.
-    /// The actor's worker thread uses the tree-walker internally (it creates a fresh
-    /// Interpreter for each message). This is a pragmatic hybrid: main program runs
-    /// on bytecode, actor workers use tree-walker.
+    /// Spawn an actor by name, reusing the ActorHandle infrastructure.
+    /// The actor's worker thread uses BytecodeVM internally (v0.33 migration).
+    /// Main program and actor workers both run on bytecode.
     pub(crate) fn spawn_actor(&mut self, actor_name: &str) -> Result<Value, InterpError> {
         use crate::interp::value::{ActorInstance, ActorHandle};
         use std::collections::HashMap;
