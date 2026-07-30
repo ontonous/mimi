@@ -254,53 +254,59 @@ impl<'a> BytecodeVM<'a> {
                 }
 
                 // ── Integer arithmetic ─────────────────────────
+                // Fast path: both Int (common case in loops). Fallback: Float/String.
                 Op::AddInt { rd, ra, rb } => {
-                    if matches!(self.get_reg(ra), Value::String(_)) && matches!(self.get_reg(rb), Value::String(_)) {
+                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
+                        let r = a.checked_add(*b).ok_or_else(|| {
+                            InterpError::integer_overflow("integer addition overflow")
+                        })?;
+                        self.set_reg(rd, Value::Int(r));
+                    } else if matches!(self.get_reg(ra), Value::String(_)) && matches!(self.get_reg(rb), Value::String(_)) {
                         let result = format!("{}{}", self.get_reg(ra), self.get_reg(rb));
                         self.set_reg(rd, Value::String(result));
-                    } else if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
+                    } else {
                         let (af, bf) = (value_to_f64(self.get_reg(ra))?, value_to_f64(self.get_reg(rb))?);
                         let r = af + bf;
                         self.check_float(r, "+")?;
                         self.set_reg(rd, Value::Float(r));
-                    } else {
-                        let (a, b) = self.get_int2(ra, rb)?;
-                        let r = a.checked_add(b).ok_or_else(|| {
-                            InterpError::integer_overflow("integer addition overflow")
-                        })?;
-                        self.set_reg(rd, Value::Int(r));
                     }
                 }
                 Op::SubInt { rd, ra, rb } => {
-                    if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
+                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
+                        let r = a.checked_sub(*b).ok_or_else(|| {
+                            InterpError::integer_overflow("integer subtraction overflow")
+                        })?;
+                        self.set_reg(rd, Value::Int(r));
+                    } else {
                         let (af, bf) = (value_to_f64(self.get_reg(ra))?, value_to_f64(self.get_reg(rb))?);
                         let r = af - bf;
                         self.check_float(r, "-")?;
                         self.set_reg(rd, Value::Float(r));
-                    } else {
-                        let (a, b) = self.get_int2(ra, rb)?;
-                        let r = a.checked_sub(b).ok_or_else(|| {
-                            InterpError::integer_overflow("integer subtraction overflow")
-                        })?;
-                        self.set_reg(rd, Value::Int(r));
                     }
                 }
                 Op::MulInt { rd, ra, rb } => {
-                    if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
+                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
+                        let r = a.checked_mul(*b).ok_or_else(|| {
+                            InterpError::integer_overflow("integer multiplication overflow")
+                        })?;
+                        self.set_reg(rd, Value::Int(r));
+                    } else {
                         let (af, bf) = (value_to_f64(self.get_reg(ra))?, value_to_f64(self.get_reg(rb))?);
                         let r = af * bf;
                         self.check_float(r, "*")?;
                         self.set_reg(rd, Value::Float(r));
-                    } else {
-                        let (a, b) = self.get_int2(ra, rb)?;
-                        let r = a.checked_mul(b).ok_or_else(|| {
-                            InterpError::integer_overflow("integer multiplication overflow")
-                        })?;
-                        self.set_reg(rd, Value::Int(r));
                     }
                 }
                 Op::DivInt { rd, ra, rb } => {
-                    if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
+                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
+                        if *b == 0 {
+                            return Err(InterpError::div_by_zero());
+                        }
+                        let r = a.checked_div(*b).ok_or_else(|| {
+                            InterpError::integer_overflow("integer division overflow")
+                        })?;
+                        self.set_reg(rd, Value::Int(r));
+                    } else {
                         let (af, bf) = (value_to_f64(self.get_reg(ra))?, value_to_f64(self.get_reg(rb))?);
                         if bf == 0.0 {
                             return Err(InterpError::div_by_zero());
@@ -308,34 +314,24 @@ impl<'a> BytecodeVM<'a> {
                         let r = af / bf;
                         self.check_float(r, "/")?;
                         self.set_reg(rd, Value::Float(r));
-                    } else {
-                        let (a, b) = self.get_int2(ra, rb)?;
-                        if b == 0 {
-                            return Err(InterpError::div_by_zero());
-                        }
-                        let r = a.checked_div(b).ok_or_else(|| {
-                            InterpError::integer_overflow("integer division overflow")
-                        })?;
-                        self.set_reg(rd, Value::Int(r));
                     }
                 }
                 Op::ModInt { rd, ra, rb } => {
-                    if matches!(self.get_reg(ra), Value::Float(_)) || matches!(self.get_reg(rb), Value::Float(_)) {
+                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
+                        if *b == 0 {
+                            return Err(InterpError::div_by_zero());
+                        }
+                        let r = a.checked_rem(*b).ok_or_else(|| {
+                            InterpError::integer_overflow("integer remainder overflow")
+                        })?;
+                        self.set_reg(rd, Value::Int(r));
+                    } else {
                         let a = value_to_f64(self.get_reg(ra))?;
                         let b = value_to_f64(self.get_reg(rb))?;
                         if b == 0.0 {
                             return Err(InterpError::div_by_zero());
                         }
                         self.set_reg(rd, Value::Float(a % b));
-                    } else {
-                        let (a, b) = self.get_int2(ra, rb)?;
-                        if b == 0 {
-                            return Err(InterpError::div_by_zero());
-                        }
-                        let r = a.checked_rem(b).ok_or_else(|| {
-                            InterpError::integer_overflow("integer remainder overflow")
-                        })?;
-                        self.set_reg(rd, Value::Int(r));
                     }
                 }
                 Op::NegInt { rd, ra } => {
@@ -392,69 +388,63 @@ impl<'a> BytecodeVM<'a> {
 
                 // ── Comparison ─────────────────────────────────
                 Op::EqInt { rd, ra, rb } => {
-                    if !matches!(self.get_reg(ra), Value::Int(_)) || !matches!(self.get_reg(rb), Value::Int(_)) {
+                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
+                        self.set_reg(rd, Value::Bool(a == b));
+                    } else {
                         let result = crate::interp::values_equal(self.get_reg(ra), self.get_reg(rb));
                         self.set_reg(rd, Value::Bool(result));
-                    } else {
-                        let (a, b) = self.get_int2(ra, rb)?;
-                        self.set_reg(rd, Value::Bool(a == b));
                     }
                 }
                 Op::NeInt { rd, ra, rb } => {
-                    if !matches!(self.get_reg(ra), Value::Int(_)) || !matches!(self.get_reg(rb), Value::Int(_)) {
+                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
+                        self.set_reg(rd, Value::Bool(a != b));
+                    } else {
                         let result = !crate::interp::values_equal(self.get_reg(ra), self.get_reg(rb));
                         self.set_reg(rd, Value::Bool(result));
-                    } else {
-                        let (a, b) = self.get_int2(ra, rb)?;
-                        self.set_reg(rd, Value::Bool(a != b));
                     }
                 }
                 Op::LtInt { rd, ra, rb } => {
-                    if matches!(self.get_reg(ra), Value::String(_)) || matches!(self.get_reg(rb), Value::String(_)) {
+                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
+                        self.set_reg(rd, Value::Bool(a < b));
+                    } else {
                         let result = match (self.get_reg(ra), self.get_reg(rb)) {
                             (Value::String(a), Value::String(b)) => a < b,
                             (a, b) => a.to_string() < b.to_string(),
                         };
                         self.set_reg(rd, Value::Bool(result));
-                    } else {
-                        let (a, b) = self.get_int2(ra, rb)?;
-                        self.set_reg(rd, Value::Bool(a < b));
                     }
                 }
                 Op::GtInt { rd, ra, rb } => {
-                    if matches!(self.get_reg(ra), Value::String(_)) || matches!(self.get_reg(rb), Value::String(_)) {
+                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
+                        self.set_reg(rd, Value::Bool(a > b));
+                    } else {
                         let result = match (self.get_reg(ra), self.get_reg(rb)) {
                             (Value::String(a), Value::String(b)) => a > b,
                             (a, b) => a.to_string() > b.to_string(),
                         };
                         self.set_reg(rd, Value::Bool(result));
-                    } else {
-                        let (a, b) = self.get_int2(ra, rb)?;
-                        self.set_reg(rd, Value::Bool(a > b));
                     }
                 }
                 Op::LeInt { rd, ra, rb } => {
-                    if matches!(self.get_reg(ra), Value::String(_)) || matches!(self.get_reg(rb), Value::String(_)) {
+                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
+                        self.set_reg(rd, Value::Bool(a <= b));
+                    } else {
                         let result = match (self.get_reg(ra), self.get_reg(rb)) {
                             (Value::String(a), Value::String(b)) => a <= b,
                             (a, b) => a.to_string() <= b.to_string(),
                         };
                         self.set_reg(rd, Value::Bool(result));
-                    } else {
-                        let (a, b) = self.get_int2(ra, rb)?;
-                        self.set_reg(rd, Value::Bool(a <= b));
                     }
                 }
                 Op::GeInt { rd, ra, rb } => {
-                    if matches!(self.get_reg(ra), Value::String(_)) || matches!(self.get_reg(rb), Value::String(_)) {
+                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
+                        self.set_reg(rd, Value::Bool(a >= b));
+                    } else {
                         let result = match (self.get_reg(ra), self.get_reg(rb)) {
                             (Value::String(a), Value::String(b)) => a >= b,
                             (a, b) => a.to_string() >= b.to_string(),
                         };
                         self.set_reg(rd, Value::Bool(result));
-                    } else {
-                        let (a, b) = self.get_int2(ra, rb)?;
-                        self.set_reg(rd, Value::Bool(a >= b));
                     }
                 }
                 Op::EqFloat { rd, ra, rb } => {
