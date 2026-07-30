@@ -340,6 +340,22 @@ pub enum Op {
 
     /// No operation
     Nop,
+
+    // ═══════════════════════════════════════════════════════════
+    // Fault handling (OnFailure compensation)
+    // ═══════════════════════════════════════════════════════════
+
+    /// Set the current frame's fault handler PC.
+    /// When a builtin call or `?` operator triggers a fault, execution
+    /// jumps to `handler_pc` instead of returning the error.
+    /// handler_pc is an absolute instruction index (not a relative offset).
+    SetFaultPc { handler_pc: u32 },
+    /// Clear the fault handler (normal scope exit — no compensation).
+    ClearFaultPc,
+    /// Like RetEarly but reads the register from frame.fault_reg (set
+    /// by RetEarly when redirected to fault handler). Used at the end
+    /// of OnFailure compensation code to re-emit the original error.
+    FaultRetEarly,
 }
 
 /// A compiled function: constant pool + instruction stream + metadata.

@@ -32,6 +32,13 @@ struct Frame {
     /// Used by wrap_ok to distinguish `?` Err (rejection) from a
     /// final-expression Err (success producing an Err value).
     early_return: bool,
+    /// When set, a fault handler's instruction index. If a builtin call
+    /// fails or `?` triggers RetEarly, execution jumps here instead of
+    /// propagating the error. Set by Op::SetFaultPc, cleared by ClearFaultPc.
+    fault_pc: Option<usize>,
+    /// When fault_pc intercepts RetEarly, saves the error-value register
+    /// so the fault handler can re-emit RetEarly after compensations.
+    fault_reg: Option<Reg>,
 }
 
 /// The bytecode VM.
@@ -154,6 +161,8 @@ impl<'a> BytecodeVM<'a> {
             wrap_ok: false,
             flow_source_state: None,
             early_return: false,
+            fault_pc: None,
+            fault_reg: None,
         });
         Ok(())
     }
@@ -586,8 +595,16 @@ impl<'a> BytecodeVM<'a> {
                     let args: Vec<Value> = (0..argc)
                         .map(|i| self.get_reg(args_base + i).clone())
                         .collect();
-                    let result = self.call_builtin(builtin, &args)?;
-                    self.set_reg(rd, result);
+                    match self.call_builtin(builtin, &args) {
+                        Ok(v) => self.set_reg(rd, v),
+                        Err(e) => {
+                            if let Some(handler_pc) = self.stack.last_mut().and_then(|f| f.fault_pc.take()) {
+                                self.stack.last_mut().unwrap().pc = handler_pc;
+                            } else {
+                                return Err(e);
+                            }
+                        }
+                    }
                 }
                 Op::Ret { ra } => {
                     let v = self.do_return(ra, false, stop)?;
@@ -596,14 +613,22 @@ impl<'a> BytecodeVM<'a> {
                     }
                 }
                 Op::RetEarly { ra } => {
-                    // Set early_return flag so wrap_ok treats this as a
-                    // `?` rejection (not a final-expression Err value).
-                    if let Some(frame) = self.stack.last_mut() {
-                        frame.early_return = true;
-                    }
-                    let v = self.do_return(ra, true, stop)?;
-                    if let Some(v) = v {
-                        return Ok(v);
+                    // Check fault handler before returning.
+                    if let Some(handler_pc) = self.stack.last_mut().and_then(|f| f.fault_pc.take()) {
+                        if let Some(frame) = self.stack.last_mut() {
+                            frame.fault_reg = Some(ra);
+                        }
+                        self.stack.last_mut().unwrap().pc = handler_pc;
+                    } else {
+                        // Set early_return flag so wrap_ok treats this as a
+                        // `?` rejection (not a final-expression Err value).
+                        if let Some(frame) = self.stack.last_mut() {
+                            frame.early_return = true;
+                        }
+                        let v = self.do_return(ra, true, stop)?;
+                        if let Some(v) = v {
+                            return Ok(v);
+                        }
                     }
                 }
                 Op::RetUnit => {
@@ -1334,6 +1359,34 @@ impl<'a> BytecodeVM<'a> {
                         ))),
                     };
                     self.set_reg(rd, weak);
+                }
+
+                // ── Fault handling ──────────────────────────────
+                Op::SetFaultPc { handler_pc } => {
+                    if let Some(frame) = self.stack.last_mut() {
+                        frame.fault_pc = Some(handler_pc as usize);
+                    }
+                }
+                Op::ClearFaultPc => {
+                    if let Some(frame) = self.stack.last_mut() {
+                        frame.fault_pc = None;
+                    }
+                }
+                Op::FaultRetEarly => {
+                    let ra = self.stack.last().and_then(|f| f.fault_reg);
+                    if let Some(ra) = ra {
+                        if let Some(frame) = self.stack.last_mut() {
+                            frame.early_return = true;
+                        }
+                        let v = self.do_return(ra, true, stop)?;
+                        if let Some(v) = v {
+                            return Ok(v);
+                        }
+                    } else {
+                        return Err(InterpError::new(
+                            "FaultRetEarly: no fault_reg set"
+                        ));
+                    }
                 }
 
                 // ── Not yet implemented ────────────────────────
