@@ -1,36 +1,6 @@
 # Changelog
 
-## [Unreleased] — 0.1.4-dev
-
-### Phase A: 全方位查缺补漏
-
-- **fix(codegen): for-in-list i32 元素截断**：`convert_list_elem_i64` 对 IntType 缺少 i64→i32 截断，`for x in [1,2,3]` 段错误。添加 `build_int_truncate` 当 target bit_width < 64。
-
-### Phase B: CODEGEN 性能深度优化
-
-- **perf(codegen): legacy emitter for-range() 计数器循环**：检测 `for i in range(a, b)` 调用模式，编译为计数器循环（零 malloc、零列表分配）。与 `BinOp::Range` 共享 `build_for_index_*` 基础设施。
-- **perf(codegen): LLVM pass pipeline 优化**：添加 `internalize` + `globaldce` pass（消除未使用 prelude 函数）；Target machine O3→O2 对齐 pass pipeline。
-
-### Phase C: INTERP 性能深度优化
-
-- **perf(bytecode): 消除 O(n²) 寄存器克隆**：ListGet/MapGet/MapContains/RecordGet/ConcatStr/JmpIf/EqInt 等 12 个 opcode 消除整个集合克隆，改为借用+仅克隆元素。for-range 10k: 1106ms→53ms (20.9x)。
-- **perf(bytecode): for-range 计数器循环**：编译器检测 `for i in range(a, b)` 模式，直接编译为计数器循环（不调用 range() builtin，零列表分配）。内存 O(n)→O(1)。
-- **perf(bytecode): 算术/比较 Int 快速路径**：AddInt/SubInt/MulInt/DivInt/ModInt/LtInt/GtInt/LeInt/GeInt/EqInt/NeInt 重构为 `if let (Int, Int)` 首选匹配，消除 2-4 个 `matches!` 分支。for-range 1M: 21%↑。
-- **perf(bytecode): push_frame 消除参数双重克隆**：`push_frame` 改为接受 `Vec<Value>` (owned)，消除内部逐元素 clone。
-- **perf(bytecode): StrAppend 原地拼接**：新增 `Op::StrAppend`，检测 `s = s + expr`（仅 String 类型），`push_str` 原地追加。string concat 100k: O(n²)→140ms。
-- **perf(bytecode): do_return mem::replace**：函数返回时 `mem::replace` 移出返回值（frame 即将 pop），消除返回值深拷贝。
-
-### 基准 (debug build)
-
-| 场景 | 优化前 | 优化后 | 加速 |
-|------|--------|--------|------|
-| for-range 10k | 1106ms | 56ms | 19.8x |
-| for-range 1M | >120s (timeout) | 922ms | >130x |
-| string concat 100k | >120s (O(n²)) | 140ms | ∞ |
-| fib(28) | 1.72s | 1.53s | 11% |
-| nested 1k×1k | >120s | 921ms | new |
-
-## [0.1.3] — 2026-07-31
+## [Unreleased] — 0.1.3-dev
 
 ## [0.1.2] — 2026-07-29
 
