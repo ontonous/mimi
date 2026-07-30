@@ -50,9 +50,9 @@ pub(crate) fn run(
 
 fn run_once(
     path: &Path,
-    verify_contracts: bool,
-    verify_ffi: bool,
-    allocator: &str,
+    _verify_contracts: bool,
+    _verify_ffi: bool,
+    _allocator: &str,
     strict: bool,
     extra_args: &[String],
 ) -> Result<i32, String> {
@@ -132,6 +132,9 @@ fn run_once(
     {
         use mimi::interp::bytecode::{BytecodeCompiler, BytecodeVM};
         let mut compiler = BytecodeCompiler::new();
+        // G1: install type information from CheckedProgram for type-directed
+        // method resolution and parameter type tracking.
+        compiler.install_checked_program(&checked_program);
         let prog = compiler
             .compile_file(&merged_file)
             .map_err(|e| format!("bytecode compile error: {}", e))?;

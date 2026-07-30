@@ -1031,4 +1031,92 @@ func main() -> i32 {
         assert!(output.contains("RET"));
         assert!(output.len() > 100);
     }
+
+    /// F1: First-class function references (HOF: pass function as argument).
+    #[test]
+    fn vm_first_class_function_ref() {
+        let source = "
+        func double(x: i32) -> i32 { x * 2 }
+        func apply(f: func(i32) -> i32, v: i32) -> i32 { f(v) }
+        func main() -> i32 { apply(double, 21) }";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let prog = compiler.compile_file(&file).unwrap();
+        let mut vm = BytecodeVM::new(&prog);
+        assert_eq!(vm.run().unwrap(), 42);
+    }
+
+    /// F2: Mutable borrow write-back through &mut reference.
+    #[test]
+    fn vm_borrow_writeback() {
+        let source = "
+        func main() -> i32 {
+            let mut x = 10
+            let r = &mut x
+            *r = 42
+            x
+        }";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let prog = compiler.compile_file(&file).unwrap();
+        let mut vm = BytecodeVM::new(&prog);
+        assert_eq!(vm.run().unwrap(), 42);
+    }
+
+    /// F4: Comptime block evaluation at compile time.
+    #[test]
+    fn vm_comptime_eval() {
+        let source = "
+        comptime func make_const() -> i32 { 21 * 2 }
+        func main() -> i32 {
+            let v = comptime { make_const() }
+            if v == 42 { 0 } else { 1 }
+        }";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let prog = compiler.compile_file(&file).unwrap();
+        let mut vm = BytecodeVM::new(&prog);
+        assert_eq!(vm.run().unwrap(), 0);
+    }
+
+    /// F3: from_json::<T> typed deserialization.
+    #[test]
+    fn vm_from_json_typed() {
+        let source = r#"
+        func main() -> i32 {
+            let nums = from_json::<List<i32>>("[10, 20, 30]")
+            if nums[0] != 10 { return 1 }
+            if nums[2] != 30 { return 2 }
+            0
+        }"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let prog = compiler.compile_file(&file).unwrap();
+        let mut vm = BytecodeVM::new(&prog);
+        assert_eq!(vm.run().unwrap(), 0);
+    }
+
+    /// F2: Nested field write-back through &mut reference.
+    #[test]
+    fn vm_nested_borrow_writeback() {
+        let source = "
+        type Inner { value: i32 }
+        type Outer { inner: Inner, other: i32 }
+        func main() -> i32 {
+            let mut outer = Outer { inner: Inner { value: 3 }, other: 4 }
+            let nested = &mut outer.inner.value
+            *nested = 6 as i32
+            outer.inner.value + outer.other
+        }";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let prog = compiler.compile_file(&file).unwrap();
+        let mut vm = BytecodeVM::new(&prog);
+        assert_eq!(vm.run().unwrap(), 10);
+    }
 }
