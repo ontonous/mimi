@@ -124,11 +124,16 @@ impl<'a> BytecodeVM<'a> {
         let proto = &self.program.functions[func_idx as usize];
         let reg_count = proto.register_count as usize;
 
+        if args.len() != proto.param_count as usize {
+            return Err(InterpError::new(format!(
+                "function '{}' expects {} argument(s), got {}",
+                proto.name, proto.param_count, args.len()
+            )));
+        }
+
         let mut regs = Vec::with_capacity(reg_count);
-        for (i, arg) in args.iter().enumerate() {
-            if i < proto.param_count as usize {
-                regs.push(arg.clone());
-            }
+        for arg in args.iter() {
+            regs.push(arg.clone());
         }
         regs.resize(reg_count, Value::Unit);
 
@@ -171,13 +176,19 @@ impl<'a> BytecodeVM<'a> {
             if frame.pc >= proto.code.len() {
                 // Fell off the end — implicit return Unit.
                 let return_reg = frame.return_reg;
+                let wrap_ok = frame.wrap_ok;
                 self.stack.pop();
                 self.depth -= 1;
+                let v = if wrap_ok {
+                    Value::Variant("Ok".to_string(), vec![Value::Unit])
+                } else {
+                    Value::Unit
+                };
                 if self.stack.is_empty() || (stop > 0 && self.depth < stop) {
-                    return Ok(Value::Unit);
+                    return Ok(v);
                 }
                 if let Some(rd) = return_reg {
-                    self.set_reg(rd, Value::Unit);
+                    self.set_reg(rd, v);
                 }
                 continue;
             }
@@ -296,11 +307,18 @@ impl<'a> BytecodeVM<'a> {
                     }
                 }
                 Op::NegInt { rd, ra } => {
-                    let a = self.get_int(ra)?;
-                    let r = a.checked_neg().ok_or_else(|| {
-                        InterpError::integer_overflow("integer negation overflow")
-                    })?;
-                    self.set_reg(rd, Value::Int(r));
+                    if matches!(self.get_reg(ra), Value::Float(_)) {
+                        let a = self.get_float(ra)?;
+                        let r = -a;
+                        self.check_float(r, "neg")?;
+                        self.set_reg(rd, Value::Float(r));
+                    } else {
+                        let a = self.get_int(ra)?;
+                        let r = a.checked_neg().ok_or_else(|| {
+                            InterpError::integer_overflow("integer negation overflow")
+                        })?;
+                        self.set_reg(rd, Value::Int(r));
+                    }
                 }
 
                 // ── Float arithmetic ───────────────────────────
@@ -475,14 +493,20 @@ impl<'a> BytecodeVM<'a> {
                     self.set_reg(rd, Value::Bool(!crate::interp::is_truthy(v)));
                 }
                 Op::And { rd, ra, rb } => {
-                    let a = crate::interp::is_truthy(self.get_reg(ra));
-                    let b = crate::interp::is_truthy(self.get_reg(rb));
-                    self.set_reg(rd, Value::Bool(a && b));
+                    if crate::interp::is_truthy(self.get_reg(ra)) {
+                        let b = crate::interp::is_truthy(self.get_reg(rb));
+                        self.set_reg(rd, Value::Bool(b));
+                    } else {
+                        self.set_reg(rd, Value::Bool(false));
+                    }
                 }
                 Op::Or { rd, ra, rb } => {
-                    let a = crate::interp::is_truthy(self.get_reg(ra));
-                    let b = crate::interp::is_truthy(self.get_reg(rb));
-                    self.set_reg(rd, Value::Bool(a || b));
+                    if crate::interp::is_truthy(self.get_reg(ra)) {
+                        self.set_reg(rd, Value::Bool(true));
+                    } else {
+                        let b = crate::interp::is_truthy(self.get_reg(rb));
+                        self.set_reg(rd, Value::Bool(b));
+                    }
                 }
 
                 // ── String ─────────────────────────────────────
@@ -495,21 +519,39 @@ impl<'a> BytecodeVM<'a> {
 
                 // ── Control flow ───────────────────────────────
                 Op::Jmp { offset } => {
-                    let frame = self.stack.last_mut().unwrap();
-                    frame.pc = (frame.pc as i32 + offset) as usize;
+                    let pc = self.stack.last().unwrap().pc as i32;
+                    let new_pc = pc + offset;
+                    if new_pc < 0 {
+                        return Err(InterpError::new(format!(
+                            "Jmp underflow: pc={} offset={}", pc, offset
+                        )));
+                    }
+                    self.stack.last_mut().unwrap().pc = new_pc as usize;
                 }
                 Op::JmpIf { offset, ra } => {
                     let v = self.get_reg(ra).clone();
                     if crate::interp::is_truthy(&v) {
-                        let frame = self.stack.last_mut().unwrap();
-                        frame.pc = (frame.pc as i32 + offset) as usize;
+                        let pc = self.stack.last().unwrap().pc as i32;
+                        let new_pc = pc + offset;
+                        if new_pc < 0 {
+                            return Err(InterpError::new(format!(
+                                "JmpIf underflow: pc={} offset={}", pc, offset
+                            )));
+                        }
+                        self.stack.last_mut().unwrap().pc = new_pc as usize;
                     }
                 }
                 Op::JmpIfNot { offset, ra } => {
                     let v = self.get_reg(ra).clone();
                     if !crate::interp::is_truthy(&v) {
-                        let frame = self.stack.last_mut().unwrap();
-                        frame.pc = (frame.pc as i32 + offset) as usize;
+                        let pc = self.stack.last().unwrap().pc as i32;
+                        let new_pc = pc + offset;
+                        if new_pc < 0 {
+                            return Err(InterpError::new(format!(
+                                "JmpIfNot underflow: pc={} offset={}", pc, offset
+                            )));
+                        }
+                        self.stack.last_mut().unwrap().pc = new_pc as usize;
                     }
                 }
 
@@ -614,9 +656,20 @@ impl<'a> BytecodeVM<'a> {
                             let v = l[idx].clone();
                             self.set_reg(rd, v);
                         }
+                        Value::String(s) => {
+                            let bytes = s.as_bytes();
+                            if idx >= bytes.len() {
+                                return Err(InterpError::new(format!(
+                                    "string index {} out of bounds (len {})",
+                                    idx,
+                                    bytes.len()
+                                )));
+                            }
+                            self.set_reg(rd, Value::Int(bytes[idx] as i64));
+                        }
                         other => {
                             return Err(InterpError::new(format!(
-                                "index: expected List, got {}",
+                                "index: expected List or String, got {}",
                                 other
                             )))
                         }
@@ -656,7 +709,7 @@ impl<'a> BytecodeVM<'a> {
                     let v = self.get_reg(ra);
                     let len = match v {
                         Value::List(l) => l.len(),
-                        Value::String(s) => s.chars().count(),
+                        Value::String(s) => s.len(),
                         Value::Tuple(t) => t.len(),
                         other => {
                             return Err(InterpError::new(format!(
@@ -703,22 +756,28 @@ impl<'a> BytecodeVM<'a> {
                     base,
                     count,
                 } => {
-                    let type_name_str = match &proto.constants[type_name as usize] {
-                        ConstValue::Str(s) => {
-                            if s.is_empty() {
-                                None
-                            } else {
-                                Some(s.clone())
-                            }
+                    let type_name_str = match &proto.constants.get(type_name as usize) {
+                        Some(ConstValue::Str(s)) => {
+                            if s.is_empty() { None } else { Some(s.clone()) }
                         }
                         _ => None,
                     };
                     // Field names are stored in constants[type_name+1..type_name+1+count].
                     let mut fields = std::collections::HashMap::new();
                     for i in 0..count {
-                        let field_name = match &proto.constants[(type_name + 1 + i as u32) as usize] {
-                            ConstValue::Str(s) => s.clone(),
-                            _ => format!("_{}", i),
+                        let idx = (type_name + 1 + i as u32) as usize;
+                        let field_name = match proto.constants.get(idx) {
+                            Some(ConstValue::Str(s)) => s.clone(),
+                            _ => {
+                                if idx < proto.constants.len() {
+                                    format!("_{}", i)
+                                } else {
+                                    return Err(InterpError::new(format!(
+                                        "NewRecord: field constant {} out of bounds (len {})",
+                                        idx, proto.constants.len()
+                                    )));
+                                }
+                            }
                         };
                         let value = self.get_reg(base + i).clone();
                         fields.insert(field_name, value);
@@ -910,14 +969,22 @@ impl<'a> BytecodeVM<'a> {
                             // Captures go into registers param_count..param_count+capture_count.
                             let target_proto = &self.program.functions[proto_idx as usize];
                             let param_count = target_proto.param_count as usize;
+                            let frame_len = self.stack.last().map(|f| f.regs.len()).unwrap_or(0);
                             for (i, name) in target_proto.capture_names.iter().enumerate() {
-                                if let Some(value) = captured.get(name) {
-                                    let reg = param_count + i;
-                                    if let Some(frame) = self.stack.last_mut() {
-                                        if reg < frame.regs.len() {
-                                            frame.regs[reg] = value.clone();
-                                        }
-                                    }
+                                let reg = param_count + i;
+                                let value = captured.get(name).ok_or_else(|| {
+                                    InterpError::new(format!(
+                                        "CallIndirect: missing capture '{}'", name
+                                    ))
+                                })?.clone();
+                                if reg >= frame_len {
+                                    return Err(InterpError::new(format!(
+                                        "CallIndirect: capture register {} out of bounds (len {})",
+                                        reg, frame_len
+                                    )));
+                                }
+                                if let Some(frame) = self.stack.last_mut() {
+                                    frame.regs[reg] = value;
                                 }
                             }
                             // Continue loop — new frame is now active.
@@ -935,13 +1002,17 @@ impl<'a> BytecodeVM<'a> {
                 Op::NewVariant {
                     rd,
                     type_name,
-                    variant: _,
+                    variant,
                     base,
                     arity,
                 } => {
                     let tag = match &proto.constants[type_name as usize] {
                         ConstValue::Str(s) => s.clone(),
-                        _ => String::new(),
+                        _ => {
+                            // Fall back to generic variant label for
+                            // multi-variant enums without per-variant labels.
+                            format!("variant_{}", variant)
+                        }
                     };
                     let payload: Vec<Value> = (0..arity)
                         .map(|i| self.get_reg(base + i).clone())
@@ -1072,24 +1143,25 @@ impl<'a> BytecodeVM<'a> {
                     let v = self.get_reg(ra).clone();
                     // target: 0 = i64, 1 = f64 (matching compiler convention)
                     let result = match target {
-                        0 => {
-                            // Cast to i64
-                            match v {
-                                Value::Int(i) => Value::Int(i),
-                                Value::Float(f) => Value::Int(f as i64),
-                                Value::Bool(b) => Value::Int(b as i64),
-                                _ => v,
-                            }
-                        }
-                        1 => {
-                            // Cast to f64
-                            match v {
-                                Value::Float(f) => Value::Float(f),
-                                Value::Int(i) => Value::Float(i as f64),
-                                _ => v,
-                            }
-                        }
-                        _ => v,
+                        0 => match v {
+                            Value::Int(i) => Value::Int(i),
+                            Value::Float(f) => Value::Int(f as i64),
+                            Value::Bool(b) => Value::Int(b as i64),
+                            other => return Err(InterpError::new(format!(
+                                "cannot cast {} to i64", other
+                            ))),
+                        },
+                        1 => match v {
+                            Value::Float(f) => Value::Float(f),
+                            Value::Int(i) => Value::Float(i as f64),
+                            other => return Err(InterpError::new(format!(
+                                "cannot cast {} to f64", other
+                            ))),
+                        },
+                        _ => return Err(InterpError::new(format!(
+                            "Cast: unknown target {}",
+                            target
+                        ))),
                     };
                     self.set_reg(rd, result);
                 }
@@ -1134,12 +1206,11 @@ impl<'a> BytecodeVM<'a> {
                         _ => return Err(InterpError::new("FlowTransition: invalid method name")),
                     };
                     // Extract from-state name from the first argument.
-                    let state_val = self.get_reg(args_base).clone();
-                    let from_state = match &state_val {
+                    let from_state = match self.get_reg(args_base) {
                         Value::Record(Some(name), _) => name.clone(),
-                        _ => return Err(InterpError::new(format!(
+                        other => return Err(InterpError::new(format!(
                             "FlowTransition: first arg must be a state Record, got {}",
-                            state_val
+                            other
                         ))),
                     };
                     // Look up the compiled transition function.
@@ -1158,6 +1229,7 @@ impl<'a> BytecodeVM<'a> {
                     // If the transition has a `fails` clause, wrap the result:
                     // success → Ok(result), failure → Err((source, error)).
                     if self.program.flow_fails_transitions.contains(&key) {
+                        let state_val = self.get_reg(args_base).clone();
                         self.push_frame_wrap_ok(func_idx, &args, Some(rd), state_val)?;
                     } else {
                         self.push_frame(func_idx, &args, Some(rd))?;
@@ -1181,7 +1253,9 @@ impl<'a> BytecodeVM<'a> {
                                 crate::interp::value::ActorHandle::current_worker_id() == handle.id;
 
                             if is_self_call {
-                                // Direct synchronous call.
+                                // Direct synchronous call: push frame and let
+                                // the current exec_loop handle it (same pattern
+                                // as Op::Call), avoiding nested exec_loop re-entry.
                                 let actor_name = {
                                     let actor = handle.inner.read().map_err(|e| {
                                         InterpError::new(format!("actor lock failed: {}", e))
@@ -1194,13 +1268,12 @@ impl<'a> BytecodeVM<'a> {
                                     .ok_or_else(|| InterpError::new(format!(
                                         "self-call: actor method '{}' not found", method_name
                                     )))?;
-                                let mut direct_args = Vec::with_capacity(argc as usize);
-                                direct_args.push(receiver);
-                                for i in 1..argc {
-                                    direct_args.push(self.get_reg(args_base + i).clone());
-                                }
-                                let result = self.call_function(func_idx, &direct_args)?;
-                                self.set_reg(rd, result);
+                                let direct_args: Vec<Value> = (0..argc)
+                                    .map(|i| self.get_reg(args_base + i).clone())
+                                    .collect();
+                                self.push_frame(func_idx, &direct_args, Some(rd))
+                                    .map_err(|e| self.enrich_error(e))?;
+                                // Continue loop — new frame is now active.
                             } else {
                                 // Cross-actor call: enqueue and wait for result.
                                 let args: Vec<Value> = (1..argc)
@@ -1301,7 +1374,7 @@ impl<'a> BytecodeVM<'a> {
                 self.stop_depth = self.depth; // depth was incremented by push_frame
                 let result = self.exec_loop();
                 self.stop_depth = prev_stop;
-                result
+                result.map_err(|e| self.enrich_error(e))
             }
             _ => Err(InterpError::new(
                 "call_closure: expected BytecodeClosure",
@@ -1317,7 +1390,7 @@ impl<'a> BytecodeVM<'a> {
         self.stop_depth = self.depth;
         let result = self.exec_loop();
         self.stop_depth = prev_stop;
-        result
+        result.map_err(|e| self.enrich_error(e))
     }
 
     /// Call a function with wrap_ok semantics (for `fails` transitions).
@@ -1621,6 +1694,6 @@ fn value_to_f64(v: &Value) -> f64 {
     match v {
         Value::Float(f) => *f,
         Value::Int(i) => *i as f64,
-        _ => 0.0,
+        other => panic!("value_to_f64: expected numeric type, got {:?}", other),
     }
 }
