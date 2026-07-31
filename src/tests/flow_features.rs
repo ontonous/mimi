@@ -767,7 +767,7 @@ func main() -> i32 {
     r.v
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(result, Ok(interp::Value::Int(15)));
 }
 
@@ -866,7 +866,7 @@ func main() -> i32 {
     r1.v + r2.v
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(result, Ok(interp::Value::Int(125))); // 15 + 110
 }
 
@@ -1516,7 +1516,7 @@ func main() -> i32 {
     a.result
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(result, Ok(interp::Value::Int(11)));
 }
 
@@ -1657,7 +1657,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "10");
 }
@@ -1691,7 +1691,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "11");
 }
@@ -1724,7 +1724,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     // view is read-only: val stays 10
     assert_eq!(out.trim(), "10");
@@ -1760,7 +1760,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     // mutate writes `self.val` back (identity write-back), then +1
     assert_eq!(out.trim(), "11");
@@ -1786,7 +1786,7 @@ func main() -> i32 {
     0
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(
         result.is_err(),
         "expected error for undefined delegate target, got {:?}",
@@ -1831,7 +1831,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "101");
 }
@@ -1865,7 +1865,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "52");
 }
@@ -1899,7 +1899,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "10");
 }
@@ -1931,7 +1931,7 @@ func main() -> i32 {
     42
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(result, Ok(interp::Value::Int(42)));
 }
 
@@ -1966,7 +1966,7 @@ func main() -> i32 {
         "type check failed: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "15");
 }
@@ -2004,7 +2004,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "7");
 }
@@ -2043,7 +2043,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
 }
 
 #[test]
@@ -2073,7 +2073,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "1");
 }
@@ -2106,7 +2106,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "11");
 }
@@ -2229,7 +2229,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     // Capture stdout from interp via dual path: compile_and_run only for codegen;
     // for interp we verify field values by returning a sentinel after side-effect println.
     // Use a pure return for field checks:
@@ -2257,7 +2257,7 @@ func main() -> i32 {
     0
 }
 "#;
-    assert_eq!(run_source_result(src2), Ok(interp::Value::Int(1)));
+    assert_eq!(run_source_treewalker_result(src2), Ok(interp::Value::Int(1)));
 }
 
 #[test]
@@ -2288,7 +2288,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(lines, vec!["Positive", "inc"], "got {:?}", lines);
@@ -2323,7 +2323,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "2");
 }
@@ -2362,7 +2362,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(1)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(1)));
 }
 
 #[test]
@@ -2406,7 +2406,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(lines, vec!["Active", "Active"], "got {:?}", lines);
@@ -2439,7 +2439,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(lines, vec!["B", "go"], "got {:?}", lines);
@@ -2478,7 +2478,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(
@@ -2516,7 +2516,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(
@@ -2555,7 +2555,7 @@ func main() -> i32 {
 "#;
     // Type checker still sees Ready — field access on f is a static error.
     // Use run_source_result only (interp path, no typecheck).
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(result, Ok(interp::Value::Int(0)), "got {:?}", result);
     // Capture via a pure-return test without println side channel:
     let src2 = r#"
@@ -2588,7 +2588,7 @@ func main() -> i32 {
 "#;
     // match may not support Fault pattern if type is Ready — use record field via Value path.
     // Simpler: just assert run succeeds (absorbed) vs Err (not absorbed).
-    let r = run_source_result(src);
+    let r = run_source_treewalker_result(src);
     assert!(
         r.is_ok(),
         "div-by-zero should be absorbed to Fault, got {:?}",
@@ -2647,7 +2647,7 @@ func main() -> i32 {
 }
 "#;
     // boom from Fault with div-by-zero should error (not re-wrap to Fault)
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(
         result.is_err(),
         "expected panic to propagate from Fault, got {:?}",
@@ -2728,7 +2728,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "0");
 }
@@ -2765,7 +2765,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "7");
 }
@@ -2797,7 +2797,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "0");
 }
@@ -2824,7 +2824,7 @@ func main() -> i32 {
     recovered.value
 }
 "#;
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
 }
 
 #[test]
@@ -2849,7 +2849,7 @@ func main() -> i32 {
     recovered.value
 }
 "#;
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(7)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(7)));
 }
 
 #[test]
@@ -2882,7 +2882,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "42");
 }
@@ -2923,7 +2923,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "11");
 }
@@ -2951,7 +2951,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "7\n3");
 }
@@ -2997,7 +2997,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "0");
 }
@@ -3299,7 +3299,7 @@ func main() -> i32 {
         "multi-target: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
 }
 
 // ── v0.29.19 Session Types compiler skeleton ──────────────────────────
@@ -3664,7 +3664,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "Live\npeer_fault");
 }
@@ -3691,7 +3691,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "15");
 }
@@ -3719,7 +3719,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "3");
 }
@@ -3740,7 +3740,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), "peer-7\ndisconnect");
 }
@@ -3869,7 +3869,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     // depth starts 0, muted 0, bump returns 1
     assert_eq!(out.trim(), "0\n0\n1");
@@ -3904,7 +3904,7 @@ func main() -> i32 {
         "type check: {:?}",
         check_source(src)
     );
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen failed");
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(lines[0], "1");
@@ -3944,7 +3944,7 @@ func main() -> i32 {
     // Fault injected by matrix expand
     assert!(main_flow.states.iter().any(|s| s.name == "Fault"));
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(out.trim(), "42");
 }
@@ -4072,7 +4072,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(
         out.trim(),
@@ -4194,7 +4194,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(out.trim(), "2\n2");
 }
@@ -4217,7 +4217,7 @@ func main() -> i32 {
     0
 }
 "#;
-    let err = run_source_result(src);
+    let err = run_source_treewalker_result(src);
     assert!(err.is_err(), "expected QuotaExceeded");
     let msg = err.unwrap_err();
     assert!(
@@ -4243,7 +4243,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(out.trim(), "1\n1");
 }
@@ -4272,7 +4272,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(out.trim(), "2\n3\n7");
 }
@@ -4292,7 +4292,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(out.trim(), "0");
 }
@@ -4315,7 +4315,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(out.trim(), "1");
 }
@@ -4392,7 +4392,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(out.trim(), "2");
 }
@@ -4510,7 +4510,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(out.trim(), "15");
 }
@@ -4540,7 +4540,7 @@ func main() -> i32 {
     // C::go(s0) would consume s0, making the transition a use-after-move.
     // Pre-transition assertions must use a separate copy or be omitted.
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
 }
 
 #[test]
@@ -4558,7 +4558,7 @@ func main() -> i32 {
     0
 }
 "#;
-    let err = run_source_result(src);
+    let err = run_source_treewalker_result(src);
     assert!(err.is_err(), "assert_state should fail on mismatch");
     let msg = err.unwrap_err().to_string();
     assert!(msg.contains("assert_state failed"), "got: {}", msg);
@@ -4580,7 +4580,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
 }
 
 // ── v0.29.37 Actor lifecycle: SystemKill + spawn detached ─────────────
@@ -4605,7 +4605,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(lines[0], "10");
@@ -4721,7 +4721,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(lines[0], "42", "read result");
@@ -4744,7 +4744,7 @@ func main() -> i32 {
     0
 }
 "#;
-    let err = run_source_result(src);
+    let err = run_source_treewalker_result(src);
     assert!(err.is_err(), "expected QuotaExceeded, got ok");
     let msg = err.unwrap_err().to_string();
     assert!(
@@ -4771,7 +4771,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(out.trim(), "");
 }
@@ -4804,7 +4804,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
 }
 
 #[test]
@@ -4835,7 +4835,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(out.trim(), "1");
 }
@@ -4886,7 +4886,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(out.trim(), "99");
 }
@@ -4912,7 +4912,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    assert_eq!(run_source_result(src), Ok(interp::Value::Int(0)));
+    assert_eq!(run_source_treewalker_result(src), Ok(interp::Value::Int(0)));
     let out = compile_and_run(src).expect("codegen");
     assert_eq!(out.trim(), "FFI_Pinned");
 }
@@ -5031,7 +5031,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    let r = run_source_result(src).expect("run");
+    let r = run_source_treewalker_result(src).expect("run");
     assert_eq!(r, interp::Value::Int(0));
 }
 
@@ -5046,7 +5046,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    let r = run_source_result(src).expect("run");
+    let r = run_source_treewalker_result(src).expect("run");
     assert_eq!(r, interp::Value::Int(0));
 }
 
@@ -5215,7 +5215,7 @@ func main() -> i32 {
     0
 }
 "#;
-    let r = run_source_result(src);
+    let r = run_source_treewalker_result(src);
     assert!(r.is_ok(), "producer mute cascade should not crash: {:?}", r);
 }
 
@@ -5251,7 +5251,7 @@ func main() -> i32 {
     // This test verifies the delegate dispatch path works.
     // The actor call may fail (no __delegate_view method), but the
     // delegate should not silently drop the value.
-    let r = run_source_result(src);
+    let r = run_source_treewalker_result(src);
     // Accept either success (actor handles __delegate_view) or error
     // (actor doesn't have __delegate_view method) — the key is no crash.
     assert!(r.is_ok() || r.is_err(), "delegate should not crash");
@@ -5942,7 +5942,7 @@ func main() -> i32 {
     s1.v
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(result, Ok(interp::Value::Int(10)));
 }
 
