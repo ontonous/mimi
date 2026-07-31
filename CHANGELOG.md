@@ -2,6 +2,13 @@
 
 ## [Unreleased] — 0.1.3-dev
 
+### INTERP 性能深度优化 III（寄存器缓冲池化 + L1 Any 转换修复）
+
+- **fix(codegen): L1 双后端断裂——`to_int`/`to_float` 对 `Any`（map_get 值）返回裸堆指针**：`map_get` 的值在 LLVM 层是未类型化的 i64 handle（字符串存堆指针）。codegen 的 `to_int`/`to_float`/`str_parse_int`/`str_parse_float` IntValue 分支把 handle 当整数直接返回（`to_int("3000")` → 指针值 591434576），interp 正确解析为 3000。修复：新增 runtime `mimi_any_to_int`/`mimi_any_to_float`（复用 `safe_c_string_from_handle` 启发式：<1MB 整数直通、映射页 + NUL 终止 → strtol/strtod 解析），四个 builtin 的 i64 参数统一经 runtime 判定（与既有 `to_string` Any 路径同设计；CheckedProgram 无局部变量类型目录，静态区分不可行）。`parse_c_decimal_i64` 自实现 strtol 语义（runtime libc feature 无 strtol/strtod），含 i64::MIN 饱和边界。
+- **perf(bytecode): frame 寄存器缓冲区池化**：`BytecodeVM.free_regs: Vec<Vec<Value>>` 池 + `pop_frame()` 统一回收（exec_loop 落尾 / RetEarly / do_return 三处），push_frame 复用池中缓冲区（capacity 保留）。release fib(30) 0.72s → **0.57s**（-21%）；debug 被边界检查开销掩盖（3.12s）。
+- **回归测试**：`dual_map_get_string_value_to_int`、`dual_map_get_string_value_to_float`（L1 双后端等价）。
+- 验证：4513 lib 全绿 + real_world 28 + real_world_cli 1 + clippy/fmt 门禁全过。
+
 ### INTERP 性能深度优化 II（exec_loop 单借用重写）
 
 - **perf(bytecode): exec_loop 热分支单借用重写**：常量/整数/浮点/比较/位运算/字符串/跳转 ~40 个 opcode 重写为「单次 `last_mut` 借用内完成读+算+写」，消除每 op 2-3 次 `get_reg`/`set_reg` 的边界检查与 `debug_assert` 开销（debug 构建下 slice/Vec 访问检查约占 40% 执行时间）。`get_int`/`get_float`/`get_float2`/`get_int2` 内联进热分支，错误消息语义逐分支保持（`expected Int/Float, got {}`）；`check_float` 内联为 `is_nan`/`is_infinite` 检查（静态 op 字符串不再 `format!`）。

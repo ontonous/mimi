@@ -1584,6 +1584,72 @@ pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_cha
 }
 
 #[no_mangle]
+/// Interpret a ValueHandle as an integer. If the handle looks like a C string
+/// (per `safe_c_string_from_handle` — aligned, mapped, NUL-terminated), parse
+/// it as a decimal integer; otherwise the handle IS the integer value.
+/// Used by codegen `to_int` on `Any` (e.g. `map_get` values), which arrive as
+/// untyped i64 handles and cannot be distinguished statically.
+pub extern "C" fn mimi_any_to_int(value: ValueHandle) -> i64 {
+    if let Some(s) = safe_c_string_from_handle(value) {
+        parse_c_decimal_i64(&s)
+    } else {
+        value as i64
+    }
+}
+
+/// strtol-style decimal parse (whitespace + optional sign + leading digits;
+/// no digits parses as 0; trailing garbage ignored). Mirrors the semantics of
+/// the libc `strtol` used by codegen's string-to-int path so both backends
+/// agree. Returns 0 for empty/whitespace-only input.
+fn parse_c_decimal_i64(s: &str) -> i64 {
+    let bytes = s.trim_start().as_bytes();
+    let mut i = 0usize;
+    let mut neg = false;
+    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+        neg = bytes[i] == b'-';
+        i += 1;
+    }
+    let mut acc: u64 = 0;
+    let mut any = false;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        any = true;
+        acc = acc
+            .saturating_mul(10)
+            .saturating_add((bytes[i] - b'0') as u64);
+        i += 1;
+    }
+    if !any {
+        return 0;
+    }
+    if neg {
+        // strtol saturates at i64::MIN; |i64::MIN| = 2^63 is representable as u64.
+        if acc > (i64::MAX as u64) + 1 {
+            return i64::MIN;
+        }
+        if acc == (i64::MAX as u64) + 1 {
+            return i64::MIN;
+        }
+        -(acc as i64)
+    } else if acc > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        acc as i64
+    }
+}
+
+#[no_mangle]
+/// Interpret a ValueHandle as a float. If the handle looks like a C string,
+/// parse it as a float; otherwise convert the integer handle to float.
+/// Mirrors `mimi_any_to_int` for the `to_float` builtin.
+pub extern "C" fn mimi_any_to_float(value: ValueHandle) -> f64 {
+    if let Some(s) = safe_c_string_from_handle(value) {
+        s.trim_start().parse::<f64>().unwrap_or(0.0)
+    } else {
+        value as f64
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn mimi_map_remove(handle: MapHandle, key: *const std::ffi::c_char) -> i32 {
     if handle == 0 || key.is_null() {
         return 0;

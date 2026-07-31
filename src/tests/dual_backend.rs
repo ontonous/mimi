@@ -256,6 +256,54 @@ fn dual_map_get() {
 }
 
 #[test]
+fn dual_map_get_string_value_to_int() {
+    // L1 regression (0.33 INTERP/codegen): `to_int` on an `Any` value read
+    // back from a map is an untyped i64 handle at LLVM level. Codegen used to
+    // return the raw heap pointer instead of parsing the string ("3000" → 3).
+    // The runtime heuristic must parse string handles and pass integers
+    // through unchanged.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let mut m = map_new()
+            m = map_set(m, "a", "3000")
+            let (fa, va) = map_get(m, "a")
+            let mut sum = 0
+            if fa { sum = sum + to_int(va) }
+            println(to_string(sum))
+            0
+        }
+    "#,
+        "3000"
+    );
+}
+
+#[test]
+fn dual_map_get_string_value_to_float() {
+    // Same L1 regression as dual_map_get_string_value_to_int, for to_float.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let mut m = map_new()
+            m = map_set(m, "a", "2.5")
+            let (fa, va) = map_get(m, "a")
+            let mut acc = 0.0
+            if fa { acc = acc + to_float(va) }
+            println(to_string(acc))
+            0
+        }
+    "#,
+        "2.5"
+    );
+}
+
+#[test]
 fn dual_map_remove_size() {
     if !can_link() {
         return;
