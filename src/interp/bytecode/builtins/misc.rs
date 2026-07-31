@@ -839,10 +839,10 @@ fn builtin_json_get_element(
         (Value::String(json_str), Value::Int(idx)) => {
             match serde_json::from_str::<serde_json::Value>(json_str) {
                 Ok(json) => match json.get(*idx as usize) {
-                    Some(v) => Ok(Value::Variant("Some".into(), vec![json_to_value(v)])),
-                    None => Ok(Value::Variant("None".into(), vec![])),
+                    Some(v) => Ok(Value::String(v.to_string())),
+                    None => Ok(Value::String(String::new())),
                 },
-                Err(_) => Ok(Value::Variant("None".into(), vec![])),
+                Err(_) => Ok(Value::String(String::new())),
             }
         }
         _ => Err(InterpError::new("json_get_element expects (string, int)")),
