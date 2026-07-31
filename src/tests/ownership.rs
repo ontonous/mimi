@@ -311,7 +311,7 @@ func main() -> i32 {
     process()
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -333,7 +333,7 @@ func main() -> i32 {
     escaped
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -484,7 +484,7 @@ func main() -> i32 {
     b.deref()
 }
 "#;
-    let v = run_source(src);
+    let v = run_source_treewalker(src);
     assert_eq!(v, interp::Value::Int(42));
 }
 
@@ -497,7 +497,7 @@ func main() -> i32 {
     *x
 }
 "#;
-    let v = run_source(src);
+    let v = run_source_treewalker(src);
     assert_eq!(v, interp::Value::Int(99));
 }
 
