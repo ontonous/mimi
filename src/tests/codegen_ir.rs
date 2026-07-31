@@ -661,3 +661,56 @@ func main() -> i32 { 0 }
         ir
     );
 }
+
+// ===================== B9: escaping closure env lifetime =====================
+
+#[test]
+fn ir_b9_closure_return_tracked_at_call_site() {
+    // B9 (audit): a closure returned by a callee must be registered at the
+    // caller's call site so `free_heap_allocs` releases its env at scope exit.
+    let ir = compile_to_ir(
+        r#"
+        func make_adder(n: i32) -> func(i32) -> i32 {
+            fn(x: i32) -> i32 { x + n }
+        }
+        func main() -> i32 {
+            let f = make_adder(5);
+            println(f(37));
+            0
+        }
+        "#,
+    );
+    assert!(
+        ir.contains("call_closure_slot"),
+        "closure return env should be tracked in an entry slot at the call site (B9), got:\n{}",
+        ir
+    );
+    assert!(
+        ir.contains("b9_env_eq"),
+        "escaping closure env should be claimed value-exactly at the return site (B9), got:\n{}",
+        ir
+    );
+}
+
+#[test]
+fn ir_b9_closure_env_guard_on_scope_exit() {
+    // B9 (audit): the claimed env must survive the function's scope-exit free
+    // (runtime guard instead of unconditional free) — the caller owns it.
+    let ir = compile_to_ir(
+        r#"
+        func make_adder(n: i32) -> func(i32) -> i32 {
+            fn(x: i32) -> i32 { x + n }
+        }
+        func main() -> i32 {
+            let f = make_adder(5);
+            println(f(37));
+            0
+        }
+        "#,
+    );
+    assert!(
+        ir.contains("b9_skip_free"),
+        "scope-exit free should branch to a skip block for claimed envs (B9), got:\n{}",
+        ir
+    );
+}

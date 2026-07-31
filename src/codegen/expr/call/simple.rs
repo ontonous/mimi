@@ -6801,7 +6801,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         // can release the data at scope exit. The callee already ensures the
         // data pointer is heap-owned (via `claim_string_return_value`), so
         // the registered pointer is always safe to free.
-        self.track_string_return_lifetime(name, result)
+        let result = self.track_string_return_lifetime(name, result)?;
+        // B9 (audit): same ownership transfer for closures — when the callee
+        // returns a `func(...) -> ...` value, register its env so the
+        // caller's scope exit releases it (the callee claimed it on return).
+        self.track_closure_return_lifetime(name, result)
     }
 
     /// If `result` is a Mimi string struct returned by a function call, stash
@@ -6846,6 +6850,53 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.register_heap_slot(slot, sty, 0);
         }
         let loaded = self.build_load(sty, slot, "call_str_load")?;
+        Ok(loaded.into_struct_value().into())
+    }
+
+    /// B9 (audit): when the callee returns a closure (`func(...) -> ...`),
+    /// register its env pointer so the caller's `free_heap_allocs` releases
+    /// it at scope exit. Mirrors `track_string_return_lifetime`: the struct
+    /// is stored into an entry alloca and the env field (field 1) is tracked
+    /// as a heap slot. Non-closure results pass through unchanged.
+    fn track_closure_return_lifetime(
+        &self,
+        callee_name: &str,
+        result: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let ret_is_closure = self
+            .func_defs
+            .get(callee_name)
+            .and_then(|fd| fd.ret.as_ref())
+            .map(|t| matches!(t.unlocated(), Type::Func(_, _)))
+            .unwrap_or(false);
+        if !ret_is_closure {
+            return Ok(result);
+        }
+        let sv = match result {
+            BasicValueEnum::StructValue(sv) => sv,
+            other => return Ok(other),
+        };
+        let sty = sv.get_type();
+        let fields = sty.get_field_types();
+        let is_closure_struct = fields.len() == 2
+            && matches!(fields[0], BasicTypeEnum::PointerType(_))
+            && matches!(fields[1], BasicTypeEnum::PointerType(_));
+        if !is_closure_struct {
+            return Ok(sv.into());
+        }
+        // Allocate a slot for the struct in the entry block, store into it,
+        // register the env field so the loader sees the latest value at free
+        // time (and null-init makes never-allocated paths free(null) no-ops).
+        let slot = self.build_entry_alloca(sty, "call_closure_slot")?;
+        self.build_store(slot, sv)?;
+        if self
+            .gep()
+            .build_struct_gep(sty, slot, 1, "call_closure_env_gep")
+            .is_ok()
+        {
+            self.register_heap_slot(slot, sty, 1);
+        }
+        let loaded = self.build_load(sty, slot, "call_closure_load")?;
         Ok(loaded.into_struct_value().into())
     }
 

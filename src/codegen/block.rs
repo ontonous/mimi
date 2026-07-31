@@ -17,6 +17,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         block: &Block,
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<()> {
+        // B9: remember the heap-scope depth before this block's own push.
+        // A nested early return flushes scopes down to the function boundary
+        // (including this block's scope), so the end-pop must be skipped when
+        // the stack is already shallower than this block's push point.
+        let heap_depth = self.heap_allocs.borrow().len();
         self.push_comp_scope();
         self.push_defer_scope();
         self.push_shared_scope();
@@ -63,7 +68,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     self.emit_all_shared_releases()?;
                     self.discard_shared_scope();
-                    self.free_heap_allocs()?;
+                    self.flush_heap_scopes_to_boundary()?;
                     self.pop_defer_scope(vars)?;
                     self.pop_comp_scope();
                     self.build_return(Some(&val))?;
@@ -84,7 +89,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     self.emit_all_shared_releases()?;
                     self.discard_shared_scope();
-                    self.free_heap_allocs()?;
+                    self.flush_heap_scopes_to_boundary()?;
                     self.pop_defer_scope(vars)?;
                     self.pop_comp_scope();
                     self.build_return(None)?;
@@ -104,7 +109,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     val = self.load_return_value_if_needed(val)?;
                     self.emit_all_shared_releases()?;
                     self.discard_shared_scope();
-                    self.free_heap_allocs()?;
+                    self.flush_heap_scopes_to_boundary()?;
                     self.pop_defer_scope(vars)?;
                     self.pop_comp_scope();
                     self.build_return(Some(&val))?;
@@ -128,7 +133,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     val = self.load_return_value_if_needed(val)?;
                     self.emit_all_shared_releases()?;
                     self.discard_shared_scope();
-                    self.free_heap_allocs()?;
+                    self.flush_heap_scopes_to_boundary()?;
                     self.pop_defer_scope(vars)?;
                     self.pop_comp_scope();
                     self.build_return(Some(&val))?;
@@ -1208,7 +1213,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         self.pop_shared_scope()?;
-        self.free_heap_allocs()?;
+        if self.heap_allocs.borrow().len() > heap_depth {
+            self.free_heap_allocs()?;
+        }
         // 0.31.24: Defer blocks always run (LIFO), regardless of exit path
         self.pop_defer_scope(vars)?;
         self.pop_comp_scope();
@@ -1520,10 +1527,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // doesn't later free() a .rodata literal pointer.
                     val = self.claim_string_return_value(val, ret_type, Some(e), vars)?;
                     val = self.load_return_value_if_needed(val)?;
+                    self.flush_heap_scopes_to_boundary()?;
                     self.build_return(Some(&val))?;
                     return Ok(val);
                 }
                 Stmt::Return(None) => {
+                    self.flush_heap_scopes_to_boundary()?;
                     self.build_return(None)?;
                     return Ok(self.context.i64_type().const_int(0, false).into());
                 }

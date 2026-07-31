@@ -638,7 +638,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<()> {
         let (ret_type, mut vars) = self.build_actor_method_function(actor, method)?;
         let last_val = self.compile_actor_method_body(method, &mut vars)?;
-        self.emit_actor_method_epilogue(&vars, ret_type, last_val)
+        let result = self.emit_actor_method_epilogue(&vars, ret_type, last_val);
+        self.end_function_heap_scope();
+        result
     }
 
     /// Build the LLVM function for an actor method, push scopes, and bind `self`
@@ -691,7 +693,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.push_cap_scope();
         self.push_comp_scope();
-        self.push_heap_scope();
+        self.begin_function_heap_scope();
 
         let mut vars: HashMap<String, VarEntry> = HashMap::new();
 
@@ -792,7 +794,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.compile_contract_assert(ensures_expr, vars, "ensures violation")?;
                 }
                 self.pop_shared_scope()?;
-                self.free_heap_allocs()?;
+                self.flush_heap_scopes_to_boundary()?;
                 self.pop_comp_scope();
                 self.pop_cap_scope();
                 val = self.load_return_value_if_needed(val)?;
@@ -805,7 +807,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.compile_contract_assert(ensures_expr, vars, "ensures violation")?;
                 }
                 self.pop_shared_scope()?;
-                self.free_heap_allocs()?;
+                self.flush_heap_scopes_to_boundary()?;
                 self.pop_comp_scope();
                 self.pop_cap_scope();
                 self.build_return(None)?;
@@ -1168,7 +1170,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         self.check_unconsumed_caps()?;
         self.release_all_shared()?;
-        self.free_heap_allocs()?;
+        self.flush_heap_scopes_to_boundary()?;
         self.pop_comp_scope();
         self.pop_cap_scope();
 

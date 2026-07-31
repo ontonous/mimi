@@ -826,9 +826,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// MEM-C13: if returning a closure `{fn_ptr, env_ptr}`, pop the env heap
-    /// pointer from the current `heap_allocs` scope so `free_heap_allocs` does
-    /// not free an env the caller still owns.
+    /// MEM-C13: if returning a closure `{fn_ptr, env_ptr}`, claim the env heap
+    /// pointer so `free_heap_allocs` does not free an env the caller still owns.
+    ///
+    /// B9 (audit): the claim is now value-exact. The returned env pointer is
+    /// recorded in `claimed_returned_envs`, and the immediately following
+    /// `free_heap_allocs` emits runtime guards (`ptr != claimed_env` → free).
+    /// The old positional `pop_last_heap_ptr` misfired whenever an unrelated
+    /// allocation was registered after the env (it popped the wrong entry,
+    /// leaking the env or double-freeing data the caller received).
     pub(in crate::codegen) fn claim_returned_closure_env(
         &self,
         val: BasicValueEnum<'ctx>,
@@ -846,11 +852,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !is_closure {
             return Ok(val);
         }
-        // Env was registered as the most recent raw heap ptr when the lambda
-        // was built (see build_closure_struct). Pop it so free_heap_allocs
-        // leaves the env alive for the caller.
-        let _ = self.pop_last_heap_ptr();
-        let _ = val; // value passes through unchanged
+        let sv = match val {
+            BasicValueEnum::StructValue(sv) => sv,
+            _ => return Ok(val),
+        };
+        // The env is the closure struct's second field. For non-capturing
+        // closures it is null — claiming null is harmless (guards only match
+        // null envs, and free(null) is a C no-op).
+        if let BasicValueEnum::PointerValue(env_ptr) =
+            self.build_extract_value(sv.into(), 1, "b9_env_claim")?
+        {
+            self.claim_closure_env(env_ptr);
+        }
         Ok(val)
     }
 
@@ -1145,7 +1158,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|v| self.claim_string_return_value(v, ret_type, expr, vars))
             .transpose()?;
         self.pop_shared_scope()?;
-        self.free_heap_allocs()?;
+        // B9: flush to the function boundary so function-level heap
+        // registrations (closure env slots from call sites, string slots)
+        // are released on every return path, not just the fallthrough.
+        self.flush_heap_scopes_to_boundary()?;
         self.pop_comp_scope();
         self.pop_cap_scope();
         match val {
@@ -2757,7 +2773,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // frame preserves the caller's registrations when codegen recursively
         // monomorphizes a callee while the caller is still being emitted.
         self.pop_shared_scope()?;
-        self.free_heap_allocs()?;
+        self.flush_heap_scopes_to_boundary()?;
         self.pop_comp_scope();
         self.pop_cap_scope();
 
@@ -2937,7 +2953,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.push_cap_scope();
         self.push_comp_scope();
         self.push_defer_scope();
-        self.push_heap_scope();
+        self.begin_function_heap_scope();
         self.push_shared_scope();
 
         let mut vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
@@ -2954,7 +2970,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         });
         match self.compile_func_body(func, ret_type, &mut vars)? {
             ControlFlow::Break(()) => {
-                // Early return: defer blocks already executed inside compile_func_body
+                // Early return: the return statement's flush already released
+                // all heap scopes down to this function's boundary. Only the
+                // boundary marker remains to be popped.
+                self.end_function_heap_scope();
                 return Ok(());
             }
             ControlFlow::Continue(last_val) => {
@@ -2965,6 +2984,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )?;
             }
         }
+
+        self.end_function_heap_scope();
 
         Ok(())
     }
@@ -3056,7 +3077,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.push_cap_scope();
         self.push_comp_scope();
-        self.push_heap_scope();
+        self.begin_function_heap_scope();
         self.push_shared_scope();
 
         let mut vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
@@ -3074,6 +3095,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let last_val = self.compile_block_last_val(&func.body, &mut vars)?;
 
         self.emit_implicit_return(ret_type, ret_ty_ast, last_val, &func.name, &vars, last_expr)?;
+        self.end_function_heap_scope();
         self.type_map = prev_type_map;
         if let Some(bb) = saved_block {
             self.builder.position_at_end(bb);

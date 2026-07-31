@@ -1,6 +1,6 @@
 # Mimi Runtime Architecture
 
-> 500-word runtime architecture overview (0.31.22 盲审修正)
+> 500-word runtime architecture overview（v0.31.22 盲审修正，v0.33 当前）
 
 ## Overview
 
@@ -40,7 +40,7 @@ Objects are allocated with a hidden `RcHeader` prefix:
 Strings are C-style null-terminated (`*mut c_char`):
 - `mimi_string_new(str)` — allocate from Rust string
 - `mimi_string_free(ptr)` — free string
-- **Known limitation**: Binary data with `\0` is truncated (fat pointer planned for Phase C)
+- **Known limitation**: Binary data with `\0` is truncated (fat pointer deferred to 1.0)
 
 ## Collections
 
@@ -52,14 +52,14 @@ Strings are C-style null-terminated (`*mut c_char`):
 ```
 - `mimi_list_new()` / `mimi_list_free()`
 - `mimi_list_push/pop/get/set`
-- **0.31.23 planned**: Typed storage (de-stringification)
+- **Typed storage (de-stringification)**: Not implemented (deferred)
 
 ### Map/Set
 
 Global handle registry with integer handles:
 - `mimi_map_new()` → handle (i64)
 - `mimi_map_get/set/remove`
-- **Phase C planned**: Fat pointer (de-global-lock)
+- **Fat pointer (de-global-lock)**: Not implemented (handle registry persists)
 
 ## Concurrency
 
@@ -68,7 +68,7 @@ Built-in functions (not std::sync):
 - `channel_new()` / `channel_send()` / `channel_recv()`
 - `atomic_i32_new()` / `atomic_i32_load()` / `atomic_i32_store()`
 
-**Phase C planned**: Opaque pointer + Generation (thread-safety enforcement)
+**Opaque pointer + Generation (thread-safety enforcement)**: Not implemented (deferred)
 
 ## Networking
 
@@ -88,7 +88,7 @@ extern "C" functions use passport types:
 
 - Contract violations → `abort()` (async-signal-safe)
 - Environment failures → `Result<T, E>` or error codes
-- **0.31.24 planned**: Typed errors (FsError, JsonError, etc.)
+- **Typed errors (FsError, JsonError, etc.)**: Not implemented (deferred to post-1.0)
 
 ## Optimization Levels
 
@@ -100,7 +100,7 @@ extern "C" functions use passport types:
 ## Thread Safety
 
 - RC operations use atomic CAS (Acquire/Release ordering)
-- Global handle registry uses `Mutex` (Phase C: remove)
+- Global handle registry uses `Mutex` (handle registry persists, removal deferred)
 - Thread-local storage for shadow maps (deprecated)
 
 ## Deprecated/Removed
@@ -111,6 +111,7 @@ extern "C" functions use passport types:
 
 ## Future Work
 
-- **Phase C**: Component IR, Native ABI, fat pointers, opaque handles
-- **0.31.23**: List typed storage, Value clone elimination
-- **0.31.24**: Error algebra, defer LIFO, comptime purity
+- **Component IR / Native ABI / fat pointers / opaque handles**: Deferred (Phase C of 0.1.1 partially scoped down)
+- **Value clone elimination**: Partially addressed by bytecode VM (0.33), full fix deferred to 0.1.4+
+- **Typed errors / Error algebra**: Deferred to post-1.0
+- **Comptime purity / defer LIFO**: Deferred

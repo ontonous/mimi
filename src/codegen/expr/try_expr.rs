@@ -535,7 +535,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Return the Err((source, error)) from the transition function.
         self.emit_all_shared_releases()?;
         self.discard_shared_scope();
-        self.free_heap_allocs()?;
+        self.flush_heap_scopes_to_boundary()?;
         self.pop_comp_scope();
         self.build_return(Some(&rejected_val))?;
 

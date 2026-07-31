@@ -2,6 +2,44 @@
 
 ## [Unreleased] — 0.1.3-dev
 
+### Soundness 收尾：审计遗留项修复
+
+- **fix(codegen): B9 逃逸闭包 env 泄漏（0.33 收尾审计遗留）**：
+  - 根因：旧 claim 设计在 emit_return 只释放函数级 scope 顶部的共享注册项，嵌套 scope（lambda 参数 / 泛型 body / 提前 return 未回退路径）中的闭包 env 泄漏；且 claim 持久化跨 CFG 路径，跨块引用导致 SSA dominance 违规（valgrind uninitialised value）。
+  - 重构为「函数边界 + 每条 CFG 路径各自发射 free」设计：`begin_function_heap_scope` / `end_function_heap_scope` / `flush_heap_scopes_to_boundary`（`src/codegen/mod.rs`）。flush 只发射 free、不弹栈、不删注册（编译期堆栈是所有路径共享的），栈平衡由 `end_function_heap_scope`（只丢弃）在函数编译结束时完成。
+  - claim 一次性消费：每次 flush `mem::take` 清空 `claimed_returned_envs`，守卫只在当前块内生成 → 消除跨块 SSA 引用。
+  - 覆盖全部 return 路径：emit_return / emit_implicit_return / compile_block 4 条提前返回 / compile_block_last_val / lambda 3 处 / try RejectPath / actor 提前返回 + epilogue / legacy Break-Continue；`compile_block` 结尾 heap_depth 守卫防嵌套提前 return 后重复弹栈。
+  - 回归测试：`e2e_valgrind_b9_closure_env`（valgrind 零泄漏零未初始化）、`dual_b9_closure_escape_chain`、`ir_b9_closure_env_guard_on_scope_exit`、`ir_b9_closure_return_tracked_at_call_site`。
+- **fix(interp): IN-H8 并发 builtin channel_recv sentinel 缺陷**：旧实现用 try_recv 自旋 + 哨兵 -1 表示超时，与合法通道数据冲突（发送 -1 被静默丢弃并替换为 0）。改为直接调用阻塞式 `mimi_channel_recv`，与 codegen 路径语义一致（`src/interp/builtins/concurrency.rs:326`）。
+- **fix(runtime): CG-H16 Any 值整数标记残留**：`mimi_any_to_string` 整数不再带 `(val<<1)|1` 标记，直接存储；指针与整数靠对齐/大小/有界扫描启发式区分（`src/runtime/mod.rs:1502`，`MAX_BOUNDED_SCAN=256` C12 限制）。
+- **fix(builtins): bytecode Phase D builtin 迁移补全（~55 个）**：并发 26 + Shadow/FS/Regex/Allocator 15 + 网络/工具/actor/测试缺口 14。bytecode builtins 总注册 254 个，覆盖 12 模块（`src/interp/bytecode/builtins/`）。
+- **A6 状态澄清（LSP 文本搜索 → AST 位置）**：领域基础设施（Span/Origin/AstNodeMeta + `PositionMap` 字节/字符索引）已在 v0.31.1 落地，但 LSP 消费端 ~20 处文本搜索调用点（如 `state.rs:530 find_enclosing_func_in_items`）尚未迁移到 AST 位置——A6 仅基础设施部分完成，消费端迁移未完成。
+
+### INTERP 性能深度优化（原 0.1.4-dev 周期归入）
+
+- **perf(bytecode): 消除 O(n²) 寄存器克隆**：ListGet/MapGet/MapContains/RecordGet/ConcatStr/JmpIf/EqInt 等 12 个 opcode 消除整个集合克隆，改为借用+仅克隆元素。for-range 10k: 1106ms→53ms (20.9x)。
+- **perf(bytecode): for-range 计数器循环**：编译器检测 `for i in range(a, b)` 模式，直接编译为计数器循环（不调用 range() builtin，零列表分配）。内存 O(n)→O(1)。
+- **perf(bytecode): 算术/比较 Int 快速路径**：AddInt/SubInt/MulInt/DivInt/ModInt/LtInt/GtInt/LeInt/GeInt/EqInt/NeInt 重构为 `if let (Int, Int)` 首选匹配，消除 2-4 个 `matches!` 分支。for-range 1M: 21%↑。
+- **perf(bytecode): push_frame 消除参数双重克隆**：`push_frame` 改为接受 `Vec<Value>` (owned)，消除内部逐元素 clone。
+- **perf(bytecode): StrAppend 原地拼接**：新增 `Op::StrAppend`，检测 `s = s + expr`（仅 String 类型），`push_str` 原地追加。string concat 100k: O(n²)→140ms。
+- **perf(bytecode): do_return mem::replace**：函数返回时 `mem::replace` 移出返回值（frame 即将 pop），消除返回值深拷贝。
+
+### CODEGEN 性能深度优化（原 0.1.4-dev 周期归入）
+
+- **perf(codegen): legacy emitter for-range() 计数器循环**：检测 `for i in range(a, b)` 调用模式，编译为计数器循环（零 malloc、零列表分配）。与 `BinOp::Range` 共享 `build_for_index_*` 基础设施。
+- **perf(codegen): LLVM pass pipeline 优化**：添加 `internalize` + `globaldce` pass（消除未使用 prelude 函数）；Target machine O3→O2 对齐 pass pipeline。
+- **fix(codegen): for-in-list i32 元素截断**：`convert_list_elem_i64` 对 IntType 缺少 i64→i32 截断，`for x in [1,2,3]` 段错误。添加 `build_int_truncate` 当 target bit_width < 64。
+
+### 基准 (debug build)
+
+| 场景 | 优化前 | 优化后 | 加速 |
+|------|--------|--------|------|
+| for-range 10k | 1106ms | 56ms | 19.8x |
+| for-range 1M | >120s (timeout) | 922ms | >130x |
+| string concat 100k | >120s (O(n²)) | 140ms | ∞ |
+| fib(28) | 1.72s | 1.53s | 11% |
+| nested 1k×1k | >120s | 921ms | new |
+
 ## [0.1.2] — 2026-07-29
 
 ### Phase A: Codegen 全量迁移（0.32.1–0.32.15）

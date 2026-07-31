@@ -5450,6 +5450,43 @@ fn dual_higher_order_closure_return() {
 }
 
 #[test]
+fn dual_b9_closure_escape_chain() {
+    if !can_link() {
+        return;
+    }
+    // B9 (audit): escaping closure envs transfer ownership across function
+    // boundaries (make_adder → use → main). Multiple closures in one scope
+    // must not corrupt each other's env lifetime — the unused one dies with
+    // its scope, the escaped ones stay alive for the caller.
+    dual_assert!(
+        r#"
+        func make_adder(n: i32) -> func(i32) -> i32 {
+            fn(x: i32) -> i32 { x + n }
+        }
+        func pick(c: bool) -> func(i32) -> i32 {
+            let a = make_adder(5);
+            let b = make_adder(10);
+            if c {
+                return a;
+            }
+            return b;
+        }
+        func main() -> i32 {
+            let f = pick(true);
+            let g = pick(false);
+            let z = 3;
+            let h = fn(y: i32) -> i32 { y + z };
+            println(f(37));
+            println(g(20));
+            println(h(4));
+            0
+        }
+        "#,
+        "42\n30\n7"
+    );
+}
+
+#[test]
 fn dual_higher_order_concrete_list_param() {
     if !can_link() {
         return;
