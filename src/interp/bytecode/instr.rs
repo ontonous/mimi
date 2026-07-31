@@ -766,6 +766,9 @@ pub struct BytecodeProgram {
     pub max_children: Option<usize>,
     /// The original AST (for actor worker threads that use tree-walker internally).
     pub ast: Option<std::sync::Arc<crate::ast::File>>,
+    /// Record field types: type_name → [(field_name, field_type_str)].
+    /// Used by from_json_typed for recursive field coercion.
+    pub record_fields: std::collections::HashMap<String, Vec<(String, String)>>,
 }
 
 impl BytecodeProgram {

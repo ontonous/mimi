@@ -62,6 +62,10 @@ pub struct BytecodeCompiler {
     func_defaults: HashMap<String, Vec<Option<Expr>>>,
     /// Parameter names: function name → ordered param names (for named arg reordering).
     func_param_names: HashMap<String, Vec<String>>,
+    /// Type aliases: alias name → aliased Type (for from_json::<T> resolution).
+    type_aliases: HashMap<String, Type>,
+    /// Record field types: type_name → [(field_name, field_type_str)].
+    record_fields: HashMap<String, Vec<(String, String)>>,
 }
 
 /// Per-function compilation state.
@@ -295,6 +299,8 @@ impl BytecodeCompiler {
             ast_file: None,
             func_defaults: HashMap::new(),
             func_param_names: HashMap::new(),
+            type_aliases: HashMap::new(),
+            record_fields: HashMap::new(),
         }
     }
 
@@ -359,6 +365,19 @@ impl BytecodeCompiler {
                     }
                     TypeDefKind::Newtype(_) => {
                         self.newtype_names.insert(td.name.clone());
+                    }
+                    TypeDefKind::Alias(ty) => {
+                        self.type_aliases.insert(td.name.clone(), ty.clone());
+                    }
+                    TypeDefKind::Record(fields) => {
+                        let field_types: Vec<(String, String)> = fields
+                            .iter()
+                            .map(|f| {
+                                let resolved = self.resolve_type(&f.ty);
+                                (f.name.clone(), crate::core::fmt_type(&resolved))
+                            })
+                            .collect();
+                        self.record_fields.insert(td.name.clone(), field_types);
                     }
                     _ => {}
                 }
@@ -571,7 +590,53 @@ impl BytecodeCompiler {
             actor_method_funcs: std::mem::take(&mut self.actor_method_funcs),
             max_children,
             ast: self.ast_file.clone(),
+            record_fields: std::mem::take(&mut self.record_fields),
         })
+    }
+
+    /// Resolve type aliases recursively: if `ty` is a Name that matches a
+    /// known alias, replace it with the aliased type. Recurses into generic
+    /// arguments and composite types.
+    fn resolve_type(&self, ty: &Type) -> Type {
+        match ty {
+            Type::Name(n, args) if args.is_empty() => {
+                if let Some(aliased) = self.type_aliases.get(n) {
+                    self.resolve_type(aliased)
+                } else {
+                    ty.clone()
+                }
+            }
+            Type::Name(n, args) => {
+                let resolved_args: Vec<Type> = args.iter().map(|a| self.resolve_type(a)).collect();
+                // Check if the outer name is also an alias (e.g., type MyMap = Map<string, i32>)
+                if let Some(aliased) = self.type_aliases.get(n) {
+                    // For generic aliases, we can't easily substitute type params,
+                    // so just resolve the inner args.
+                    let mut result = self.resolve_type(aliased);
+                    if let Type::Name(_, ref mut inner_args) = result {
+                        *inner_args = resolved_args;
+                    }
+                    result
+                } else {
+                    Type::Name(n.clone(), resolved_args)
+                }
+            }
+            Type::Located { ty: inner, .. } => self.resolve_type(inner),
+            Type::Option(inner) => Type::Option(Box::new(self.resolve_type(inner))),
+            Type::Result(ok, err) => {
+                Type::Result(Box::new(self.resolve_type(ok)), Box::new(self.resolve_type(err)))
+            }
+            Type::Tuple(elems) => {
+                Type::Tuple(elems.iter().map(|e| self.resolve_type(e)).collect())
+            }
+            Type::Ref(lt, inner) => Type::Ref(lt.clone(), Box::new(self.resolve_type(inner))),
+            Type::RefMut(lt, inner) => Type::RefMut(lt.clone(), Box::new(self.resolve_type(inner))),
+            Type::Shared(inner) => Type::Shared(Box::new(self.resolve_type(inner))),
+            Type::LocalShared(inner) => Type::LocalShared(Box::new(self.resolve_type(inner))),
+            Type::Weak(inner) => Type::Weak(Box::new(self.resolve_type(inner))),
+            Type::WeakLocal(inner) => Type::WeakLocal(Box::new(self.resolve_type(inner))),
+            other => other.clone(),
+        }
     }
 
     /// Compile a file for comptime evaluation only.
@@ -670,6 +735,7 @@ impl BytecodeCompiler {
             actor_method_funcs: std::mem::take(&mut self.actor_method_funcs),
             max_children: None,
             ast: self.ast_file.clone(),
+            record_fields: std::mem::take(&mut self.record_fields),
         })
     }
 
@@ -1462,7 +1528,8 @@ impl BytecodeCompiler {
                 // Pass the type string as a second argument so the builtin
                 // can coerce the generic JSON value to the target type.
                 if name == "from_json" && !type_args.is_empty() {
-                    let type_str = crate::core::fmt_type(&type_args[0]);
+                    let resolved = self.resolve_type(&type_args[0]);
+                    let type_str = crate::core::fmt_type(&resolved);
                     // Compile the JSON string argument.
                     let r_json = self.compile_expr(fc, &args[0])?;
                     // Allocate consecutive registers for args: [json_str, type_str].
@@ -1616,6 +1683,7 @@ impl BytecodeCompiler {
             actor_method_funcs: std::collections::HashMap::new(),
             max_children: None,
             ast: None,
+            record_fields: std::collections::HashMap::new(),
         };
 
         // Execute in a sub-VM using call_function (returns precise Value).
