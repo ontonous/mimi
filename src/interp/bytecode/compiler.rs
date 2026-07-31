@@ -1303,12 +1303,37 @@ impl BytecodeCompiler {
                 Ok(rd)
             }
 
-            Expr::Turbofish(name, _type_args, args) => {
+            Expr::Turbofish(name, type_args, args) => {
                 // Special case: from_json::<T>(s) → typed deserialization.
-                // Redirect to from_json_typed which parses JSON into Value.
-                if name == "from_json" {
-                    let callee = Expr::Ident("from_json_typed".to_string());
-                    return self.compile_call(fc, &callee, args);
+                // Pass the type string as a second argument so the builtin
+                // can coerce the generic JSON value to the target type.
+                if name == "from_json" && !type_args.is_empty() {
+                    let type_str = crate::core::fmt_type(&type_args[0]);
+                    // Compile the JSON string argument.
+                    let r_json = self.compile_expr(fc, &args[0])?;
+                    // Allocate consecutive registers for args: [json_str, type_str].
+                    let args_base = fc.proto.alloc_reg();
+                    let r_type = fc.proto.alloc_reg();
+                    // Move json arg into args_base (may already be there).
+                    if r_json != args_base {
+                        fc.emit(Op::Mov { rd: args_base, rs: r_json });
+                    }
+                    // Load type string into r_type (args_base + 1).
+                    let type_idx = fc.proto.add_const(ConstValue::Str(type_str));
+                    fc.emit(Op::LoadConst { rd: r_type, idx: type_idx });
+                    // Call from_json_typed(json_str, type_str).
+                    let rd = fc.proto.alloc_reg();
+                    if let Some(&bidx) = self.builtin_table.get("from_json_typed") {
+                        fc.emit(Op::CallBuiltin {
+                            rd,
+                            builtin: bidx,
+                            args_base,
+                            argc: 2,
+                        });
+                    } else {
+                        return Err(InterpError::new("from_json_typed builtin not registered"));
+                    }
+                    return Ok(rd);
                 }
                 // Other turbofish: type arguments ignored at runtime.
                 let callee = Expr::Ident(name.clone());
