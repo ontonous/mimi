@@ -7,7 +7,7 @@ use super::*;
 #[test]
 fn overflow_addition_max() {
     let src = "func main() -> i32 { 9223372036854775807 + 1 }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "addition overflow should error");
     assert!(
         result.unwrap_err().contains("overflow"),
@@ -18,7 +18,7 @@ fn overflow_addition_max() {
 #[test]
 fn overflow_subtraction_min() {
     let src = "func main() -> i32 { -9223372036854775807 - 2 }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "subtraction overflow should error");
     assert!(
         result.unwrap_err().contains("overflow"),
@@ -29,7 +29,7 @@ fn overflow_subtraction_min() {
 #[test]
 fn overflow_multiplication_max() {
     let src = "func main() -> i32 { 4611686018427387904 * 2 }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "multiplication overflow should error");
     assert!(
         result.unwrap_err().contains("overflow"),
@@ -40,7 +40,7 @@ fn overflow_multiplication_max() {
 #[test]
 fn overflow_negation_min() {
     let src = "func main() -> i32 { -(-9223372036854775807 - 1) }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "negation overflow should error");
     assert!(
         result.unwrap_err().contains("overflow"),
@@ -51,7 +51,7 @@ fn overflow_negation_min() {
 #[test]
 fn overflow_power_large() {
     let src = "func main() -> i32 { 2 ** 63 }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "pow overflow should error");
     assert!(
         result.unwrap_err().contains("overflow"),
@@ -62,7 +62,7 @@ fn overflow_power_large() {
 #[test]
 fn overflow_shift_left_64() {
     let src = "func main() -> i32 { 1 << 64 }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "shift overflow should error");
     assert!(
         result.unwrap_err().contains("overflow"),
@@ -73,7 +73,7 @@ fn overflow_shift_left_64() {
 #[test]
 fn overflow_shift_right_64() {
     let src = "func main() -> i32 { 1 >> 64 }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "shift overflow should error");
     assert!(
         result.unwrap_err().contains("overflow"),
@@ -84,7 +84,7 @@ fn overflow_shift_right_64() {
 #[test]
 fn overflow_division_min_by_neg_one() {
     let src = "func main() -> i32 { (-9223372036854775807 - 1) / -1 }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "i64::MIN / -1 overflow should error");
     assert!(
         result.unwrap_err().contains("overflow"),
@@ -95,7 +95,7 @@ fn overflow_division_min_by_neg_one() {
 #[test]
 fn overflow_addition_safe_normal() {
     let src = "func main() -> i32 { 100 + 200 }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:75 unwrap failed"),
         interp::Value::Int(300)
@@ -116,7 +116,7 @@ func main() -> i32 {
     recurse(10)
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:93 unwrap failed"),
         interp::Value::Int(0)
@@ -130,7 +130,7 @@ func main() -> i32 {
 #[test]
 fn float_negative_zero_equals_positive_zero() {
     let src = "func main() -> bool { -0.0 == 0.0 }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:104 unwrap failed"),
         interp::Value::Bool(true)
@@ -140,7 +140,7 @@ fn float_negative_zero_equals_positive_zero() {
 #[test]
 fn float_negative_zero_comparison_not_less() {
     let src = "func main() -> bool { -0.0 < 0.0 }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:111 unwrap failed"),
         interp::Value::Bool(false)
@@ -150,7 +150,7 @@ fn float_negative_zero_comparison_not_less() {
 #[test]
 fn float_large_values_equal() {
     let src = "func main() -> bool { 1000000.0 == 1000000.0 }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:118 unwrap failed"),
         interp::Value::Bool(true)
@@ -160,7 +160,7 @@ fn float_large_values_equal() {
 #[test]
 fn float_large_values_not_equal() {
     let src = "func main() -> bool { 1000000.0 == 1000001.0 }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:125 unwrap failed"),
         interp::Value::Bool(false)
@@ -170,7 +170,7 @@ fn float_large_values_not_equal() {
 #[test]
 fn float_tiny_values_equal() {
     let src = "func main() -> bool { 0.000001 == 0.000001 }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:132 unwrap failed"),
         interp::Value::Bool(true)
@@ -189,7 +189,7 @@ func main() -> string {
     s[10]
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "index out of bounds should error");
     assert!(
         result.unwrap_err().contains("out of bounds"),
@@ -205,7 +205,7 @@ func main() -> string {
     s[0]
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(
         result.is_err(),
         "index out of bounds on empty string should error"
@@ -220,7 +220,7 @@ func main() -> string {
     s[-1]
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_ok(), "negative index should wrap: {:?}", result);
     if let Ok(interp::Value::String(s)) = result {
         assert_eq!(s, "c", "negative index -1 should give last char");
@@ -234,7 +234,7 @@ func main() -> string {
     "hello".substring(0, 10)
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "substring out of bounds should error");
 }
 
@@ -245,7 +245,7 @@ func main() -> string {
     "abc".char_at(10)
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "char_at out of bounds should error");
 }
 
@@ -262,7 +262,7 @@ func main() -> i32 {
     Some
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:215 unwrap failed"),
         interp::Value::Int(42)
@@ -277,7 +277,7 @@ func main() -> i32 {
     None
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:227 unwrap failed"),
         interp::Value::Int(99)
@@ -292,7 +292,7 @@ func main() -> i32 {
     Err
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:239 unwrap failed"),
         interp::Value::Int(-1)
@@ -310,7 +310,7 @@ func main() -> i32 {
     }
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:254 unwrap failed"),
         interp::Value::Int(1)
@@ -337,7 +337,7 @@ func main() -> i32 {
     f()
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:278 unwrap failed"),
         interp::Value::Int(6)
@@ -358,7 +358,7 @@ func main() -> i32 {
     f(10)
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:296 unwrap failed"),
         interp::Value::Int(15)
@@ -376,7 +376,7 @@ func main() -> i32 {
     f()
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:311 unwrap failed"),
         interp::Value::Int(20)
@@ -395,7 +395,7 @@ func main() -> i32 {
     f()
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:327 unwrap failed"),
         interp::Value::Int(42)
@@ -417,7 +417,7 @@ func main() -> i32 {
     f()
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:346 unwrap failed"),
         interp::Value::Int(10)
@@ -440,7 +440,7 @@ func main() -> i32 {
     0
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "arena escape through list should error");
 }
 
@@ -459,7 +459,7 @@ func main() -> i32 {
     0
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "arena escape through record should error");
 }
 
@@ -480,7 +480,7 @@ func main() -> i32 {
     }
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:406 unwrap failed"),
         interp::Value::Int(22)
@@ -500,7 +500,7 @@ func main() -> i32 {
     }
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:423 unwrap failed"),
         interp::Value::Int(-1)
@@ -519,7 +519,7 @@ func main() -> i32 {
     }
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:439 unwrap failed"),
         interp::Value::Int(63)
@@ -538,7 +538,7 @@ func main() -> i32 {
     }
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:455 unwrap failed"),
         interp::Value::Int(0),
@@ -557,7 +557,7 @@ func main() -> i32 {
     }
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:470 unwrap failed"),
         interp::Value::Int(-1)
@@ -575,7 +575,7 @@ func main() -> i32 {
     }
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:485 unwrap failed"),
         interp::Value::Int(42)
@@ -594,7 +594,7 @@ func main() -> i32 {
     }
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:501 unwrap failed"),
         interp::Value::Int(-1)
@@ -608,7 +608,7 @@ func main() -> i32 {
 #[test]
 fn range_values_equal() {
     let src = "func main() -> bool { (1..5) == (1..5) }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:512 unwrap failed"),
         interp::Value::Bool(true)
@@ -618,7 +618,7 @@ fn range_values_equal() {
 #[test]
 fn range_values_not_equal() {
     let src = "func main() -> bool { (1..5) == (1..10) }";
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:519 unwrap failed"),
         interp::Value::Bool(false)
@@ -636,7 +636,7 @@ func main() -> List<i32> {
     sort([])
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:534 unwrap failed"),
         interp::Value::List(vec![])
@@ -650,7 +650,7 @@ func main() -> List<i32> {
     reverse([])
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:545 unwrap failed"),
         interp::Value::List(vec![])
@@ -670,7 +670,7 @@ func main() -> bool {
     x == y
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert_eq!(
         result.expect("src/tests/v1_2_core_edge.rs:562 unwrap failed"),
         interp::Value::Bool(true)
