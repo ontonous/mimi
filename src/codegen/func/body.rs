@@ -28,7 +28,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(loop_bb);
         let cond_val = self.compile_expr(cond, vars)?;
         let cond_bool = if let BasicValueEnum::IntValue(iv) = cond_val {
-            iv
+            // Normalize i64 booleans (builtin predicates) to i1 for the branch.
+            if iv.get_type().get_bit_width() == 1 {
+                iv
+            } else {
+                self.builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        iv,
+                        self.context.i64_type().const_int(0, false),
+                        "while_cond_bool",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("cond normalize: {}", e)))?
+            }
         } else {
             let fn_name = function.get_name().to_str().unwrap_or("unknown");
             return Err(CompileError::TypeMismatch(format!(
@@ -686,7 +698,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Build the LLVM type used to represent a Mimi list: `{ i64, i8** }`.
-    fn list_struct_basic_type(&self) -> BasicTypeEnum<'ctx> {
+    pub(in crate::codegen) fn list_struct_basic_type(&self) -> BasicTypeEnum<'ctx> {
         BasicTypeEnum::StructType(self.context.struct_type(
             &[
                 BasicTypeEnum::IntType(self.context.i64_type()),
@@ -912,12 +924,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         let Some(elem_ty) = elem_ty else {
             return Ok(None);
         };
-        // Skip conversion for known scalar element types
+        // Skip conversion for known scalar element types. f32/f64 are NOT
+        // skipped: list slots store their bit patterns as i64, so they must be
+        // recovered via bit_cast (handled after generic-param resolution).
         if let Type::Name(inner, _) = elem_ty.unlocated() {
-            if matches!(
-                inner.as_str(),
-                "i32" | "i64" | "f32" | "f64" | "bool" | "string"
-            ) {
+            if matches!(inner.as_str(), "i32" | "i64" | "bool" | "string") {
                 return Ok(None);
             }
         }
@@ -932,6 +943,35 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => elem_ty.clone(),
         };
+        // Float elements are stored as i64 bit patterns in the list data array
+        // (store_list_elements bit-casts FloatValue to i64). Recover the float.
+        if let Type::Name(inner, _) = concrete_ty.unlocated() {
+            match inner.as_str() {
+                "f64" => {
+                    let fv = self
+                        .builder
+                        .build_bit_cast(
+                            elem_int,
+                            BasicTypeEnum::FloatType(self.context.f64_type()),
+                            "i64_to_f64",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("f64 elem cast: {}", e)))?;
+                    return Ok(Some(fv));
+                }
+                "f32" => {
+                    let fv = self
+                        .builder
+                        .build_bit_cast(
+                            elem_int,
+                            BasicTypeEnum::FloatType(self.context.f32_type()),
+                            "i64_to_f32",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("f32 elem cast: {}", e)))?;
+                    return Ok(Some(fv));
+                }
+                _ => {}
+            }
+        }
         if let Some(BasicTypeEnum::StructType(sty)) = self.llvm_type_for(&concrete_ty) {
             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
             let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "loop_elem_ptr")?;

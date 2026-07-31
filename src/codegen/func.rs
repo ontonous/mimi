@@ -447,7 +447,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // ── Step 2a: Generate poll function ──
         // void @foo_poll(i8* %future_ptr)
         let poll_name = format!("{}__poll", func.name);
-        let poll_fn_type = i8_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
+        let poll_fn_type = self
+            .context
+            .void_type()
+            .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
         let poll_fn = self.module.add_function(
             &poll_name,
             poll_fn_type,
@@ -1185,6 +1188,26 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// but the constructor saw a raw `ptr`), the LLVM struct types no longer match
     /// and the caller misinterprets the bytes. This helper repacks the
     /// discriminant and payload into the target layout.
+    /// If a block's last expression yields a raw C-string pointer (string
+    /// literal), wrap it into the canonical {ptr, i64} struct so if-expressions
+    /// and merge phis see a uniform string layout.
+    fn normalize_block_last_string(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        block: &Block,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        if let BasicValueEnum::PointerValue(_) = val {
+            if let Some(last) = block.last() {
+                if let Stmt::Expr(e) = last.unlocated() {
+                    if self.expr_is_string(e) {
+                        return self.wrap_raw_string_ptr(val.into_pointer_value());
+                    }
+                }
+            }
+        }
+        Ok(val)
+    }
+
     fn coerce_variant_value(
         &self,
         val: BasicValueEnum<'ctx>,
@@ -2176,7 +2199,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Stmt::If { cond, then_, else_ } => {
                     let cond_val = self.compile_expr(cond, vars)?;
                     let cond_bool = if let BasicValueEnum::IntValue(iv) = cond_val {
-                        iv
+                        // Normalize i64 booleans (builtin predicates) to i1.
+                        if iv.get_type().get_bit_width() == 1 {
+                            iv
+                        } else {
+                            self.builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::NE,
+                                    iv,
+                                    self.context.i64_type().const_int(0, false),
+                                    "cond_bool",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("cond normalize: {}", e))
+                                })?
+                        }
                     } else {
                         return Err(CompileError::TypeMismatch(format!(
                             "if condition must be bool, got {} in function '{}'",
@@ -2198,7 +2235,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // return layout before branching to the merge block.
                     self.builder.position_at_end(then_bb);
                     let mut then_vars = vars.clone();
-                    let then_val = self.compile_block_last_val(then_, &mut then_vars)?;
+                    let mut then_val = self.compile_block_last_val(then_, &mut then_vars)?;
+                    // String literals produce raw C pointers; wrap so the merge
+                    // phi and return see the canonical {ptr, i64} struct.
+                    then_val = self.normalize_block_last_string(then_val, then_)?;
                     let then_val = self.coerce_variant_value(then_val, ret_type, ret_ty_ast)?;
                     let then_reaches = !self.block_has_terminator();
                     if then_reaches {
@@ -2212,7 +2252,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.builder.position_at_end(else_bb);
                     let else_val = if let Some(else_block) = else_ {
                         let mut else_vars = vars.clone();
-                        let v = self.compile_block_last_val(else_block, &mut else_vars)?;
+                        let mut v = self.compile_block_last_val(else_block, &mut else_vars)?;
+                        v = self.normalize_block_last_string(v, else_block)?;
                         let v = self.coerce_variant_value(v, ret_type, ret_ty_ast)?;
                         let reaches = !self.block_has_terminator();
                         if reaches {

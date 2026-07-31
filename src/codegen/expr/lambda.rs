@@ -211,6 +211,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                             CompileError::LlvmError(format!("pattern bind error: {}", e))
                         })?;
                 }
+                Stmt::If { cond, then_, else_ } => {
+                    if let Some(v) = self.compile_if_stmt(cond, then_, else_, lambda_vars, false)? {
+                        let v = self.adjust_int_value_width(v, ret_type, "lambda_if_ret")?;
+                        last_val = v;
+                        last_expr = None;
+                    }
+                }
+                Stmt::Assign { target, value } => {
+                    self.compile_assign_stmt(target, value, lambda_vars)?;
+                }
+                Stmt::While { cond, body } => {
+                    self.compile_while_stmt(cond, body, lambda_vars)?;
+                }
+                Stmt::For {
+                    var,
+                    iterable,
+                    body,
+                } => {
+                    self.compile_for_stmt(var, iterable, body, lambda_vars)?;
+                }
+                Stmt::Block(block) => {
+                    self.compile_block(block, lambda_vars)?;
+                }
                 _ => {}
             }
         }
@@ -529,7 +552,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 }
 
-fn lambda_ret_type<'ctx>(
+pub(in crate::codegen) fn lambda_ret_type<'ctx>(
     context: &'ctx inkwell::context::Context,
     ret: &Option<Type>,
 ) -> BasicTypeEnum<'ctx> {
@@ -540,7 +563,7 @@ fn lambda_ret_type<'ctx>(
     }
 }
 
-fn lambda_fn_type<'ctx>(
+pub(in crate::codegen) fn lambda_fn_type<'ctx>(
     context: &'ctx inkwell::context::Context,
     ret_type: BasicTypeEnum<'ctx>,
     param_types_llvm: &[BasicTypeEnum<'ctx>],
@@ -572,7 +595,7 @@ fn default_ret_value<'ctx>(
     ret_type: BasicTypeEnum<'ctx>,
 ) -> BasicValueEnum<'ctx> {
     match ret_type {
-        BasicTypeEnum::IntType(_) => context.i64_type().const_int(0, false).into(),
+        BasicTypeEnum::IntType(it) => it.const_int(0, false).into(),
         BasicTypeEnum::FloatType(ft) => ft.const_float(0.0).into(),
         _ => context.i64_type().const_int(0, false).into(),
     }

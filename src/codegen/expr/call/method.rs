@@ -702,6 +702,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .get_nth_param(param_idx as u32)
                     .map(|p| p.get_type())
                     .unwrap_or(val.get_type());
+                // String literals compile to raw C pointers; wrap into the
+                // canonical {ptr, i64} struct when the param is a string.
+                let val = if matches!(param_ty, BasicTypeEnum::StructType(_))
+                    && matches!(val, BasicValueEnum::PointerValue(_))
+                    && self.expr_is_string(arg)
+                {
+                    self.wrap_raw_string_ptr(val.into_pointer_value())?
+                } else {
+                    val
+                };
                 self.adjust_int_value_width(val, param_ty, call_name)?
             } else {
                 val
@@ -2100,6 +2110,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     json_as_i64_fn,
                                     json_as_f64_fn,
                                     json_as_bool_fn,
+                                )?;
+                                let slot_ty = sty.get_field_types()[i];
+                                let field_val = self.adjust_int_value_width(
+                                    field_val,
+                                    slot_ty,
+                                    "json_record_field",
                                 )?;
                                 self.build_store(gep, field_val)?;
                             }
@@ -5800,6 +5816,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 json_as_f64_fn,
                 json_as_bool_fn,
             )?;
+            let slot_ty = sty.get_field_types()[i];
+            let field_val = self.adjust_int_value_width(field_val, slot_ty, "json_record_field")?;
             self.build_store(gep, field_val)?;
         }
         Ok(alloca.into())
@@ -6250,6 +6268,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )));
                     }
                 };
+                let pay_i64 =
+                    self.adjust_int_value_width(pay_i64.into(), pay_fields[1], "opt_pay_coerce")?;
                 self.build_store(pay_slot, pay_i64)?;
             }
         }

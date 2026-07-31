@@ -1,10 +1,28 @@
 use crate::ast::*;
+use crate::codegen::expr::lambda::{lambda_fn_type, lambda_ret_type};
 use crate::codegen::types;
 use crate::codegen::{call_try_basic_value, CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
+
+/// Convert a BasicValueEnum to its metadata form for call argument lists.
+pub(super) fn metadata_of<'ctx>(v: &BasicValueEnum<'ctx>) -> BasicMetadataValueEnum<'ctx> {
+    match v {
+        BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(*iv),
+        BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(*fv),
+        BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(*pv),
+        BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
+        BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
+        BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
+        // ScalableVectorValue cannot be a call argument here (reduce operands
+        // are scalars); this arm is unreachable in practice.
+        BasicValueEnum::ScalableVectorValue(_) => {
+            unreachable!("scalable vector as reduce operand")
+        }
+    }
+}
 
 impl<'ctx> CodeGenerator<'ctx> {
     pub(in crate::codegen) fn build_string_list(
@@ -1109,10 +1127,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         // dispatching via an indirect call inside the loop body.
         enum ReduceCallee<'ctx> {
             Direct(inkwell::values::FunctionValue<'ctx>),
-            Indirect(
-                inkwell::values::PointerValue<'ctx>,
-                inkwell::values::PointerValue<'ctx>,
-            ),
+            Indirect {
+                fn_ptr: inkwell::values::PointerValue<'ctx>,
+                env_ptr: inkwell::values::PointerValue<'ctx>,
+                acc_ty: BasicTypeEnum<'ctx>,
+                elem_ty: BasicTypeEnum<'ctx>,
+                ret_ty: BasicTypeEnum<'ctx>,
+            },
         }
         let callee = match args[1].unlocated() {
             Expr::Ident(n) => ReduceCallee::Direct(
@@ -1123,7 +1144,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Lambda { params, ret, body } => {
                 let closure_val = self.compile_lambda_expr(params, ret, body, vars)?;
                 let (fn_ptr, env_ptr) = self.extract_closure_ptrs(closure_val)?;
-                ReduceCallee::Indirect(fn_ptr, env_ptr)
+                let acc_ty = params
+                    .first()
+                    .and_then(|p| self.llvm_type_for(&p.ty))
+                    .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+                let elem_ty = params
+                    .get(1)
+                    .and_then(|p| self.llvm_type_for(&p.ty))
+                    .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
+                let ret_ty = lambda_ret_type(self.context, ret);
+                ReduceCallee::Indirect {
+                    fn_ptr,
+                    env_ptr,
+                    acc_ty,
+                    elem_ty,
+                    ret_ty,
+                }
             }
             _ => {
                 return Err(
@@ -1161,8 +1197,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "data_i64",
             )?
             .into_pointer_value();
-        let acc_alloca = self.build_alloca(i64_ty, "acc")?;
-        self.build_store(acc_alloca, init_val)?;
+        let acc_ty = match &callee {
+            ReduceCallee::Direct(func) => func
+                .get_nth_param(0)
+                .map(|p| p.get_type())
+                .unwrap_or(BasicTypeEnum::IntType(i64_ty)),
+            ReduceCallee::Indirect { acc_ty, .. } => *acc_ty,
+        };
+        let elem_ty = match &callee {
+            ReduceCallee::Direct(func) => func
+                .get_nth_param(1)
+                .map(|p| p.get_type())
+                .unwrap_or(BasicTypeEnum::IntType(i64_ty)),
+            ReduceCallee::Indirect { elem_ty, .. } => *elem_ty,
+        };
+        let acc_alloca = self.build_alloca(acc_ty, "acc")?;
+        let init_adj = self.coerce_reduce_value(init_val, acc_ty, "reduce_init")?;
+        self.build_store(acc_alloca, init_adj)?;
         let function = self
             .current_function()
             .ok_or_else(|| "codegen: no current function for reduce loop".to_string())?;
@@ -1193,30 +1244,33 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
         let elem = self.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")?;
-        let acc = self.build_load(BasicTypeEnum::IntType(i64_ty), acc_alloca, "acc")?;
+        let acc = self.build_load(acc_ty, acc_alloca, "acc")?;
+        // List element slots store i64 bit patterns; when the closure expects a
+        // float, recover the bit pattern (bit_cast), not a numeric conversion.
+        let elem_adj = match (elem.get_type(), elem_ty) {
+            (BasicTypeEnum::IntType(_), BasicTypeEnum::FloatType(ft)) => self
+                .builder
+                .build_bit_cast(elem, BasicTypeEnum::FloatType(ft), "elem_bits_to_fp")
+                .map_err(|e| CompileError::LlvmError(format!("elem bitcast: {}", e)))?,
+            _ => self.coerce_reduce_value(elem.into(), elem_ty, "reduce_elem")?,
+        };
 
         let fn_result = match callee {
-            ReduceCallee::Direct(func) => self
-                .build_call(
-                    func,
-                    &[
-                        BasicMetadataValueEnum::IntValue(acc.into_int_value()),
-                        BasicMetadataValueEnum::IntValue(elem.into_int_value()),
-                    ],
-                    "reduce_call",
-                )?
-                .try_as_basic_value_opt()
-                .ok_or("function returned void")?,
-            ReduceCallee::Indirect(fn_ptr, env_ptr) => {
-                // Closure ABI: fn(env_ptr: i8*, acc: i64, elem: i64) -> i64
-                let closure_fn_type = i64_ty.fn_type(
-                    &[
-                        BasicMetadataTypeEnum::PointerType(i8_ptr),
-                        BasicMetadataTypeEnum::IntType(i64_ty),
-                        BasicMetadataTypeEnum::IntType(i64_ty),
-                    ],
-                    false,
-                );
+            ReduceCallee::Direct(func) => {
+                let acc_adj = metadata_of(&acc);
+                let elem_adj = metadata_of(&elem_adj);
+                self.build_call(func, &[acc_adj, elem_adj], "reduce_call")?
+                    .try_as_basic_value_opt()
+                    .ok_or("function returned void")?
+            }
+            ReduceCallee::Indirect {
+                fn_ptr,
+                env_ptr,
+                ret_ty,
+                ..
+            } => {
+                // Closure ABI: fn(env_ptr: i8*, acc: T, elem: U) -> V
+                let closure_fn_type = lambda_fn_type(self.context, ret_ty, &[acc_ty, elem_ty]);
                 let fn_ptr_typed = self.build_pointer_cast(fn_ptr, i8_ptr, "reduce_fn_ptr")?;
                 let call = self
                     .builder
@@ -1225,8 +1279,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         fn_ptr_typed,
                         &[
                             BasicMetadataValueEnum::PointerValue(env_ptr),
-                            BasicMetadataValueEnum::IntValue(acc.into_int_value()),
-                            BasicMetadataValueEnum::IntValue(elem.into_int_value()),
+                            metadata_of(&acc),
+                            metadata_of(&elem_adj),
                         ],
                         "reduce_call",
                     )
@@ -1236,6 +1290,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
 
+        let fn_result = self.coerce_reduce_value(fn_result, acc_ty, "reduce_acc_result")?;
         self.build_store(acc_alloca, fn_result)?;
         let next = self
             .builder
@@ -1244,8 +1299,62 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_store(idx_alloca, next)?;
         self.build_br(loop_bb)?;
         self.builder.position_at_end(done_bb);
-        let result = self.build_load(BasicTypeEnum::IntType(i64_ty), acc_alloca, "result")?;
+        let result = self.build_load(acc_ty, acc_alloca, "result")?;
         Ok(result)
+    }
+
+    /// Coerce a reduce value (init/acc/elem/result) to the target LLVM type.
+    /// Int→int: width adjust; int→float: signed fp conversion; float→float:
+    /// width adjust; float→int: fp conversion. Element slots store i64 bit
+    /// patterns, so int→float is always a real conversion (not bit_cast) —
+    /// except list elements where the bit pattern is a float; callers handle
+    /// that by loading through `elem_ty` instead of i64 when needed.
+    fn coerce_reduce_value(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        target_ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match (val, target_ty) {
+            (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(t)) => {
+                self.adjust_int_value_width(iv.into(), BasicTypeEnum::IntType(t), name)
+            }
+            (BasicValueEnum::FloatValue(fv), BasicTypeEnum::FloatType(t)) => {
+                let w = fv.get_type().get_bit_width();
+                let tw = t.get_bit_width();
+                if w == tw {
+                    Ok(fv.into())
+                } else if w < tw {
+                    Ok(self
+                        .builder
+                        .build_float_ext(fv, t, &format!("{}_fpext", name))
+                        .map_err(|e| CompileError::LlvmError(format!("{} fpext: {}", name, e)))?
+                        .into())
+                } else {
+                    Ok(self
+                        .builder
+                        .build_float_trunc(fv, t, &format!("{}_fptrunc", name))
+                        .map_err(|e| CompileError::LlvmError(format!("{} fptrunc: {}", name, e)))?
+                        .into())
+                }
+            }
+            (BasicValueEnum::IntValue(iv), BasicTypeEnum::FloatType(t)) => Ok(self
+                .builder
+                .build_signed_int_to_float(iv, t, &format!("{}_si2fp", name))
+                .map_err(|e| CompileError::LlvmError(format!("{} si2fp: {}", name, e)))?
+                .into()),
+            (BasicValueEnum::FloatValue(fv), BasicTypeEnum::IntType(t)) => Ok(self
+                .builder
+                .build_float_to_signed_int(fv, t, &format!("{}_fp2si", name))
+                .map_err(|e| CompileError::LlvmError(format!("{} fp2si: {}", name, e)))?
+                .into()),
+            (val, ty) if val.get_type() == ty => Ok(val),
+            _ => Err(CompileError::LlvmError(format!(
+                "reduce: cannot coerce {} to {}",
+                val.get_type(),
+                target_ty
+            ))),
+        }
     }
 
     /// Wrap a raw C string pointer into the Mimi `{ ptr, len }` string struct.

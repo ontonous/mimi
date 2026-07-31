@@ -6455,7 +6455,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if self.extern_func_defs.contains_key(name) {
             self.generate_extern_fn(name)?;
         }
-        self.emit_named_call(name, args, &metadata_args, vars)
+        self.emit_named_call(name, args, &mut compiled_args, &metadata_args, vars)
     }
 
     /// G1b: Convert closure struct args to thunk pointers for extern callback params.
@@ -6668,6 +6668,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         name: &str,
         args: &[Expr],
+        compiled_args: &mut [BasicValueEnum<'ctx>],
         metadata_args: &[BasicMetadataValueEnum<'ctx>],
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
@@ -6752,7 +6753,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         if let Some(function) = self.module.get_function(&mangled) {
-            let call = self.build_call(function, metadata_args, "call")?;
+            // Generic functions were skipped during pre-call coercion; the
+            // monomorphized function has concrete parameter types, so coerce
+            // the already-compiled args against them now (int width, int↔float).
+            self.coerce_args_to_function(function, compiled_args)?;
+            let metadata_args: Vec<_> = compiled_args
+                .iter()
+                .map(|v| types::basic_value_to_metadata_value(v, self.context.i64_type()))
+                .collect();
+            let call = self.build_call(function, &metadata_args, "call")?;
             Ok(call_try_basic_value(&call)
                 .unwrap_or(self.context.i64_type().const_int(0, false).into()))
         } else if let Some(value) = self.comptime_values.get(name).cloned() {
@@ -7381,6 +7390,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             return Ok(());
         };
+        // Generic functions: skip coercion here. The outer type_map cannot
+        // resolve generic params (llvm_type_for falls back to i64, so `0.0`
+        // would be fptosi'd to i64 0 before monomorphization). The monomorph
+        // call site re-coerces against the concrete function's parameter
+        // types (see coerce_args_to_function).
+        if !fdef.generics.is_empty() {
+            return Ok(());
+        }
         for (i, param) in fdef.params.iter().enumerate() {
             if i >= args.len() {
                 break;
@@ -7390,6 +7407,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             if let Some(target) = self.llvm_type_for(&param.ty) {
                 args[i] = self.adjust_int_val(args[i], target)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Coerce already-compiled call args to a concrete function's parameter
+    /// types (used at monomorphized call sites where generic params are
+    /// resolved). Rebuilds the metadata arg list from the coerced values.
+    fn coerce_args_to_function(
+        &self,
+        function: inkwell::values::FunctionValue<'ctx>,
+        args: &mut [BasicValueEnum<'ctx>],
+    ) -> Result<(), CompileError> {
+        for (i, arg) in args.iter_mut().enumerate() {
+            if let Some(pt) = function.get_nth_param(i as u32) {
+                let target = pt.get_type();
+                *arg = self.adjust_int_val(*arg, target)?;
             }
         }
         Ok(())

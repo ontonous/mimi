@@ -989,7 +989,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if reaches {
                         self.build_br(merge_bb)?;
                     }
-                    (None, reaches)
+                    // Synthesize a default value so the merge phi receives an
+                    // incoming entry for the else edge. A phi with zero entries
+                    // is invalid IR (its entry count must equal the block's
+                    // predecessor count); LLVM O0 tolerates it, but O1/O2
+                    // verifier passes crash on it (SIGSEGV in mimi build).
+                    // Mirrors the func.rs if-statement handling.
+                    let default_val = match then_val.get_type() {
+                        BasicTypeEnum::IntType(t) => t.const_int(0, false).into(),
+                        BasicTypeEnum::FloatType(t) => t.const_float(0.0).into(),
+                        _ => self.context.i64_type().const_int(0, false).into(),
+                    };
+                    (Some(default_val), reaches)
                 };
                 let else_bb_end = else_reaches
                     .then(|| self.builder.get_insert_block())

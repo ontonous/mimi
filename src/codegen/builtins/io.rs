@@ -10183,17 +10183,38 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("fopen returned void")?
             .into_pointer_value();
-        // CG-H11 (deep audit): check fopen result for NULL (file not writable).
-        let null_check_bb = self.context.append_basic_block(
-            self.current_function()
-                .ok_or(CompileError::LlvmError("no current function".into()))?,
-            "fopen_null_check",
+        // Result<(), string> layout: {i1 disc, i64 ok, i64 err}
+        let bool_ty = self.context.bool_type();
+        let i64_ty = self.context.i64_type();
+        let ok_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(bool_ty),
+                BasicTypeEnum::IntType(i64_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
         );
-        let write_bb = self.context.append_basic_block(
-            self.current_function()
-                .ok_or(CompileError::LlvmError("no current function".into()))?,
-            "fopen_not_null",
-        );
+        let function = self
+            .current_function()
+            .ok_or_else(|| "codegen: no current function".to_string())?;
+        let null_check_bb = self
+            .context
+            .append_basic_block(function, "fopen_null_check");
+        let write_bb = self.context.append_basic_block(function, "fopen_not_null");
+        let merge_bb = self.context.append_basic_block(function, "write_merge");
+        let alloca = self.build_alloca(BasicTypeEnum::StructType(ok_ty), "write_result")?;
+        let disc_gep = self
+            .gep()
+            .build_struct_gep(ok_ty, alloca, 0, "wr_disc")
+            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+        let ok_gep = self
+            .gep()
+            .build_struct_gep(ok_ty, alloca, 1, "wr_ok")
+            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+        let err_gep = self
+            .gep()
+            .build_struct_gep(ok_ty, alloca, 2, "wr_err")
+            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
         let is_null = self
             .builder
             .build_int_compare(
@@ -10208,14 +10229,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_conditional_branch(is_null, null_check_bb, write_bb)
             .map_err(|e| CompileError::LlvmError(format!("cbr error: {}", e)))?;
+        // ── Err branch: fopen returned NULL ──
+        // Result Err: {i1 false, i64 0, i64 err_msg_handle}
         self.builder.position_at_end(null_check_bb);
-        // Return empty string on fopen failure
-        let empty_str = self
+        let err_msg = self
             .builder
-            .build_global_string_ptr("", "empty_str")
+            .build_global_string_ptr("write_file: fopen failed", "write_file_err_msg")
             .map_err(|e| CompileError::LlvmError(format!("gstr error: {}", e)))?;
-        let ret_val: BasicValueEnum = empty_str.as_pointer_value().into();
-        self.build_return(Some(&ret_val))?;
+        self.build_store(disc_gep, bool_ty.const_int(0, false))?;
+        self.build_store(ok_gep, i64_ty.const_int(0, false))?;
+        let err_ptr_int =
+            self.build_ptr_to_int(err_msg.as_pointer_value(), i64_ty, "err_ptr_int")?;
+        self.build_store(err_gep, err_ptr_int)?;
+        self.build_br(merge_bb)?;
+        // ── Ok branch: fopen succeeded ──
         self.builder.position_at_end(write_bb);
         // strlen(content) for length
         let strlen_fn = self
@@ -10270,33 +10297,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             &[BasicMetadataValueEnum::PointerValue(file)],
             "fclose_call",
         )?;
-        // Build Result<(), string> Ok struct: {i1 true, i64 0, i64 0}
-        let bool_ty = self.context.bool_type();
-        let i64_ty = self.context.i64_type();
-        let ok_ty = self.context.struct_type(
-            &[
-                BasicTypeEnum::IntType(bool_ty),
-                BasicTypeEnum::IntType(i64_ty),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let alloca = self.build_alloca(BasicTypeEnum::StructType(ok_ty), "write_result")?;
-        let disc_gep = self
-            .gep()
-            .build_struct_gep(ok_ty, alloca, 0, "wr_disc")
-            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
+        // Result Ok: {i1 true, i64 0, i64 0}
         self.build_store(disc_gep, bool_ty.const_int(1, false))?;
-        let ok_gep = self
-            .gep()
-            .build_struct_gep(ok_ty, alloca, 1, "wr_ok")
-            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
         self.build_store(ok_gep, i64_ty.const_int(0, false))?;
-        let err_gep = self
-            .gep()
-            .build_struct_gep(ok_ty, alloca, 2, "wr_err")
-            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
         self.build_store(err_gep, i64_ty.const_int(0, false))?;
+        self.build_br(merge_bb)?;
+        // ── Merge ──
+        self.builder.position_at_end(merge_bb);
         self.build_load(
             BasicTypeEnum::StructType(ok_ty),
             alloca,
