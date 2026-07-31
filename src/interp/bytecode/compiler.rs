@@ -890,6 +890,14 @@ impl BytecodeCompiler {
                     self.compile_assign(fc, target, value)?;
                 }
                 Stmt::Return(expr) => {
+                    // Execute deferred blocks in LIFO order before returning.
+                    let defers: Vec<Block> = fc.defer_scopes.last().map_or(Vec::new(), |s| s.clone());
+                    if let Some(s) = fc.defer_scopes.last_mut() {
+                        s.clear();
+                    }
+                    for d in defers.into_iter().rev() {
+                        self.compile_block(fc, &d)?;
+                    }
                     if let Some(e) = expr {
                         let r = self.compile_expr(fc, e)?;
                         fc.emit(Op::Ret { ra: r });
@@ -3603,26 +3611,13 @@ impl BytecodeCompiler {
                         return self.compile_assign(fc, &place, value);
                     }
                 }
-                // Fallback: compile the deref target as a regular expression
-                // and treat it as a variable assignment (best-effort).
+                // Compile the value first.
                 let r_val = self.compile_expr(fc, value)?;
+                // Compile the deref target.
                 let r_target = self.compile_expr(fc, inner)?;
-                // If the inner is a variable, write to it directly.
-                if let Expr::Ident(name) = inner.unlocated() {
-                    if let Some(r_var) = fc.lookup_var(name) {
-                        if r_val != r_var {
-                            fc.emit(Op::Mov {
-                                rd: r_var,
-                                rs: r_val,
-                            });
-                        }
-                        let _ = r_target;
-                        return Ok(());
-                    }
-                }
-                Err(InterpError::new(
-                    "bytecode: cannot resolve deref assignment target",
-                ))
+                // Emit SharedSet to write through the reference.
+                fc.emit(Op::SharedSet { ra: r_target, rb: r_val });
+                Ok(())
             }
             _ => Err(InterpError::new("bytecode: unsupported assignment target")),
         }
