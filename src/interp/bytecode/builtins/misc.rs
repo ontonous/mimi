@@ -7,75 +7,350 @@ use crate::interp::value::Value;
 
 pub fn register(reg: &mut BuiltinRegistry) {
     // JSON
-    reg.register(BuiltinDesc { name: "to_json", arity: 1, category: BuiltinCategory::System, func: builtin_to_json });
-    reg.register(BuiltinDesc { name: "from_json", arity: 1, category: BuiltinCategory::System, func: builtin_from_json });
-    reg.register(BuiltinDesc { name: "from_json_typed", arity: 1, category: BuiltinCategory::System, func: builtin_from_json_typed });
-    reg.register(BuiltinDesc { name: "json_get_string", arity: 2, category: BuiltinCategory::System, func: builtin_json_get_string });
-    reg.register(BuiltinDesc { name: "json_get_int", arity: 2, category: BuiltinCategory::System, func: builtin_json_get_int });
-    reg.register(BuiltinDesc { name: "json_is_valid", arity: 1, category: BuiltinCategory::System, func: builtin_json_is_valid });
+    reg.register(BuiltinDesc {
+        name: "to_json",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_to_json,
+    });
+    reg.register(BuiltinDesc {
+        name: "from_json",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_from_json,
+    });
+    reg.register(BuiltinDesc {
+        name: "from_json_typed",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_from_json_typed,
+    });
+    reg.register(BuiltinDesc {
+        name: "json_get_string",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_json_get_string,
+    });
+    reg.register(BuiltinDesc {
+        name: "json_get_int",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_json_get_int,
+    });
+    reg.register(BuiltinDesc {
+        name: "json_is_valid",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_json_is_valid,
+    });
     // Crypto
-    reg.register(BuiltinDesc { name: "sha256", arity: 1, category: BuiltinCategory::System, func: builtin_sha256 });
-    reg.register(BuiltinDesc { name: "base64_encode", arity: 1, category: BuiltinCategory::System, func: builtin_base64_encode });
-    reg.register(BuiltinDesc { name: "base64_decode", arity: 1, category: BuiltinCategory::System, func: builtin_base64_decode });
+    reg.register(BuiltinDesc {
+        name: "sha256",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_sha256,
+    });
+    reg.register(BuiltinDesc {
+        name: "base64_encode",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_base64_encode,
+    });
+    reg.register(BuiltinDesc {
+        name: "base64_decode",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_base64_decode,
+    });
     // Testing / assertions
-    reg.register(BuiltinDesc { name: "assert", arity: 1, category: BuiltinCategory::System, func: builtin_assert });
-    reg.register(BuiltinDesc { name: "assert_eq", arity: 2, category: BuiltinCategory::System, func: builtin_assert_eq });
-    reg.register(BuiltinDesc { name: "assert_ne", arity: 2, category: BuiltinCategory::System, func: builtin_assert_ne });
-    reg.register(BuiltinDesc { name: "assert_approx_eq", arity: 2, category: BuiltinCategory::System, func: builtin_assert_approx_eq });
+    reg.register(BuiltinDesc {
+        name: "assert",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_assert,
+    });
+    reg.register(BuiltinDesc {
+        name: "assert_eq",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_assert_eq,
+    });
+    reg.register(BuiltinDesc {
+        name: "assert_ne",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_assert_ne,
+    });
+    reg.register(BuiltinDesc {
+        name: "assert_approx_eq",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_assert_approx_eq,
+    });
     // IO misc
-    reg.register(BuiltinDesc { name: "eprintln", arity: usize::MAX, category: BuiltinCategory::Io, func: builtin_eprintln });
-    reg.register(BuiltinDesc { name: "input", arity: 0, category: BuiltinCategory::Io, func: builtin_input });
-    reg.register(BuiltinDesc { name: "input_float", arity: 0, category: BuiltinCategory::Io, func: builtin_input_float });
-    reg.register(BuiltinDesc { name: "input_bool", arity: 0, category: BuiltinCategory::Io, func: builtin_input_bool });
+    reg.register(BuiltinDesc {
+        name: "eprintln",
+        arity: usize::MAX,
+        category: BuiltinCategory::Io,
+        func: builtin_eprintln,
+    });
+    reg.register(BuiltinDesc {
+        name: "input",
+        arity: 0,
+        category: BuiltinCategory::Io,
+        func: builtin_input,
+    });
+    reg.register(BuiltinDesc {
+        name: "input_float",
+        arity: 0,
+        category: BuiltinCategory::Io,
+        func: builtin_input_float,
+    });
+    reg.register(BuiltinDesc {
+        name: "input_bool",
+        arity: 0,
+        category: BuiltinCategory::Io,
+        func: builtin_input_bool,
+    });
     // Convert misc
-    reg.register(BuiltinDesc { name: "from_int", arity: 1, category: BuiltinCategory::Convert, func: builtin_from_int });
+    reg.register(BuiltinDesc {
+        name: "from_int",
+        arity: 1,
+        category: BuiltinCategory::Convert,
+        func: builtin_from_int,
+    });
     // JSON extended
-    reg.register(BuiltinDesc { name: "json_get_element", arity: 2, category: BuiltinCategory::System, func: builtin_json_get_element });
-    reg.register(BuiltinDesc { name: "json_has_key", arity: 2, category: BuiltinCategory::System, func: builtin_json_has_key });
-    reg.register(BuiltinDesc { name: "json_array_length", arity: 1, category: BuiltinCategory::System, func: builtin_json_array_length });
+    reg.register(BuiltinDesc {
+        name: "json_get_element",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_json_get_element,
+    });
+    reg.register(BuiltinDesc {
+        name: "json_has_key",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_json_has_key,
+    });
+    reg.register(BuiltinDesc {
+        name: "json_array_length",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_json_array_length,
+    });
     // Regex extended
-    reg.register(BuiltinDesc { name: "regex_find_all", arity: 2, category: BuiltinCategory::String, func: builtin_regex_find_all });
+    reg.register(BuiltinDesc {
+        name: "regex_find_all",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_regex_find_all,
+    });
     // Misc value ops
-    reg.register(BuiltinDesc { name: "eq", arity: 2, category: BuiltinCategory::System, func: builtin_eq });
-    reg.register(BuiltinDesc { name: "inner", arity: 1, category: BuiltinCategory::System, func: builtin_inner });
-    reg.register(BuiltinDesc { name: "deref", arity: 1, category: BuiltinCategory::System, func: builtin_inner });
-    reg.register(BuiltinDesc { name: "fields", arity: 1, category: BuiltinCategory::System, func: builtin_fields });
-    reg.register(BuiltinDesc { name: "type_fields", arity: 1, category: BuiltinCategory::System, func: builtin_fields });
-    reg.register(BuiltinDesc { name: "type_variants", arity: 1, category: BuiltinCategory::System, func: builtin_type_variants });
+    reg.register(BuiltinDesc {
+        name: "eq",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_eq,
+    });
+    reg.register(BuiltinDesc {
+        name: "inner",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_inner,
+    });
+    reg.register(BuiltinDesc {
+        name: "deref",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_inner,
+    });
+    reg.register(BuiltinDesc {
+        name: "fields",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_fields,
+    });
+    reg.register(BuiltinDesc {
+        name: "type_fields",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_fields,
+    });
+    reg.register(BuiltinDesc {
+        name: "type_variants",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_type_variants,
+    });
     // C string
-    reg.register(BuiltinDesc { name: "str_to_c_str", arity: 1, category: BuiltinCategory::String, func: builtin_str_to_c_str });
-    reg.register(BuiltinDesc { name: "c_str_to_string", arity: 1, category: BuiltinCategory::String, func: builtin_c_str_to_string });
+    reg.register(BuiltinDesc {
+        name: "str_to_c_str",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_str_to_c_str,
+    });
+    reg.register(BuiltinDesc {
+        name: "c_str_to_string",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_c_str_to_string,
+    });
     // Process
-    reg.register(BuiltinDesc { name: "exec", arity: 1, category: BuiltinCategory::System, func: builtin_exec });
-    reg.register(BuiltinDesc { name: "exec_pipe", arity: 1, category: BuiltinCategory::System, func: builtin_exec_pipe });
-    reg.register(BuiltinDesc { name: "exec_safe", arity: usize::MAX, category: BuiltinCategory::System, func: builtin_exec_safe });
+    reg.register(BuiltinDesc {
+        name: "exec",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_exec,
+    });
+    reg.register(BuiltinDesc {
+        name: "exec_pipe",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_exec_pipe,
+    });
+    reg.register(BuiltinDesc {
+        name: "exec_safe",
+        arity: usize::MAX,
+        category: BuiltinCategory::System,
+        func: builtin_exec_safe,
+    });
     // FS extended
-    reg.register(BuiltinDesc { name: "file_stat", arity: 1, category: BuiltinCategory::System, func: builtin_file_stat });
-    reg.register(BuiltinDesc { name: "read_file_bytes", arity: 1, category: BuiltinCategory::System, func: builtin_read_file_bytes });
-    reg.register(BuiltinDesc { name: "write_file_bytes", arity: 2, category: BuiltinCategory::System, func: builtin_write_file_bytes });
-    reg.register(BuiltinDesc { name: "close_fd", arity: 1, category: BuiltinCategory::System, func: builtin_close_fd });
-    reg.register(BuiltinDesc { name: "read_file_partial", arity: 3, category: BuiltinCategory::System, func: builtin_read_file_partial });
-    reg.register(BuiltinDesc { name: "read_lines_each", arity: 2, category: BuiltinCategory::System, func: builtin_read_lines_each });
-    reg.register(BuiltinDesc { name: "read_lines_json", arity: 1, category: BuiltinCategory::System, func: builtin_read_lines_json });
-    reg.register(BuiltinDesc { name: "read_lines_json_builtin", arity: 1, category: BuiltinCategory::System, func: builtin_read_lines_json });
+    reg.register(BuiltinDesc {
+        name: "file_stat",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_file_stat,
+    });
+    reg.register(BuiltinDesc {
+        name: "read_file_bytes",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_read_file_bytes,
+    });
+    reg.register(BuiltinDesc {
+        name: "write_file_bytes",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_write_file_bytes,
+    });
+    reg.register(BuiltinDesc {
+        name: "close_fd",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_close_fd,
+    });
+    reg.register(BuiltinDesc {
+        name: "read_file_partial",
+        arity: 3,
+        category: BuiltinCategory::System,
+        func: builtin_read_file_partial,
+    });
+    reg.register(BuiltinDesc {
+        name: "read_lines_each",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_read_lines_each,
+    });
+    reg.register(BuiltinDesc {
+        name: "read_lines_json",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_read_lines_json,
+    });
+    reg.register(BuiltinDesc {
+        name: "read_lines_json_builtin",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_read_lines_json,
+    });
     // Regex extended
-    reg.register(BuiltinDesc { name: "regex_capture_groups", arity: 2, category: BuiltinCategory::String, func: builtin_regex_capture_groups });
+    reg.register(BuiltinDesc {
+        name: "regex_capture_groups",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_regex_capture_groups,
+    });
     // Tooling / meta
-    reg.register(BuiltinDesc { name: "lexer", arity: 1, category: BuiltinCategory::System, func: builtin_lexer });
-    reg.register(BuiltinDesc { name: "mms_parse", arity: 1, category: BuiltinCategory::System, func: builtin_mms_parse });
-    reg.register(BuiltinDesc { name: "ast_eval", arity: 1, category: BuiltinCategory::System, func: builtin_ast_eval });
+    reg.register(BuiltinDesc {
+        name: "lexer",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_lexer,
+    });
+    reg.register(BuiltinDesc {
+        name: "mms_parse",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_mms_parse,
+    });
+    reg.register(BuiltinDesc {
+        name: "ast_eval",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_ast_eval,
+    });
     // Shadow memory
-    reg.register(BuiltinDesc { name: "shadow_alloc", arity: 3, category: BuiltinCategory::System, func: builtin_shadow_alloc });
-    reg.register(BuiltinDesc { name: "shadow_tag", arity: 2, category: BuiltinCategory::System, func: builtin_shadow_tag });
-    reg.register(BuiltinDesc { name: "shadow_check", arity: 2, category: BuiltinCategory::System, func: builtin_shadow_check });
-    reg.register(BuiltinDesc { name: "shadow_free", arity: 1, category: BuiltinCategory::System, func: builtin_shadow_free });
+    reg.register(BuiltinDesc {
+        name: "shadow_alloc",
+        arity: 3,
+        category: BuiltinCategory::System,
+        func: builtin_shadow_alloc,
+    });
+    reg.register(BuiltinDesc {
+        name: "shadow_tag",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_shadow_tag,
+    });
+    reg.register(BuiltinDesc {
+        name: "shadow_check",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_shadow_check,
+    });
+    reg.register(BuiltinDesc {
+        name: "shadow_free",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_shadow_free,
+    });
     // Allocator (no-op in interpreter)
-    reg.register(BuiltinDesc { name: "alloc", arity: usize::MAX, category: BuiltinCategory::System, func: builtin_alloc_noop });
-    reg.register(BuiltinDesc { name: "allocator_arena", arity: 0, category: BuiltinCategory::System, func: builtin_alloc_noop });
-    reg.register(BuiltinDesc { name: "allocator_bump", arity: 0, category: BuiltinCategory::System, func: builtin_alloc_noop });
-    reg.register(BuiltinDesc { name: "allocator_system", arity: 0, category: BuiltinCategory::System, func: builtin_alloc_noop });
-    reg.register(BuiltinDesc { name: "arena_reset", arity: 1, category: BuiltinCategory::System, func: builtin_alloc_noop });
-    reg.register(BuiltinDesc { name: "bump_used", arity: 1, category: BuiltinCategory::System, func: builtin_alloc_noop });
+    reg.register(BuiltinDesc {
+        name: "alloc",
+        arity: usize::MAX,
+        category: BuiltinCategory::System,
+        func: builtin_alloc_noop,
+    });
+    reg.register(BuiltinDesc {
+        name: "allocator_arena",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_alloc_noop,
+    });
+    reg.register(BuiltinDesc {
+        name: "allocator_bump",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_alloc_noop,
+    });
+    reg.register(BuiltinDesc {
+        name: "allocator_system",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_alloc_noop,
+    });
+    reg.register(BuiltinDesc {
+        name: "arena_reset",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_alloc_noop,
+    });
+    reg.register(BuiltinDesc {
+        name: "bump_used",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_alloc_noop,
+    });
 }
 
 // ── JSON ────────────────────────────────────────────────
@@ -166,7 +441,11 @@ fn builtin_json_get_string(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
                 .map_err(|e| InterpError::new(format!("json_get_string parse error: {}", e)))?;
             match jv.get(key) {
                 Some(serde_json::Value::String(s)) => Ok(Value::String(s.clone())),
-                Some(serde_json::Value::Bool(b)) => Ok(Value::String(if *b { "true".into() } else { "false".into() })),
+                Some(serde_json::Value::Bool(b)) => Ok(Value::String(if *b {
+                    "true".into()
+                } else {
+                    "false".into()
+                })),
                 Some(serde_json::Value::Number(n)) => Ok(Value::String(n.to_string())),
                 Some(serde_json::Value::Null) => Ok(Value::String("null".into())),
                 Some(val) => Ok(Value::String(val.to_string())),
@@ -184,10 +463,19 @@ fn builtin_json_get_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
                 .map_err(|e| InterpError::new(format!("json_get_int parse error: {}", e)))?;
             match jv.get(key) {
                 Some(serde_json::Value::Number(n)) => n.as_i64().map(Value::Int).ok_or_else(|| {
-                    InterpError::new(format!("json_get_int: value for key '{}' is not an integer", key))
+                    InterpError::new(format!(
+                        "json_get_int: value for key '{}' is not an integer",
+                        key
+                    ))
                 }),
-                Some(_) => Err(InterpError::new(format!("json_get_int: key '{}' is not a number", key))),
-                None => Err(InterpError::new(format!("json_get_int: key '{}' not found", key))),
+                Some(_) => Err(InterpError::new(format!(
+                    "json_get_int: key '{}' is not a number",
+                    key
+                ))),
+                None => Err(InterpError::new(format!(
+                    "json_get_int: key '{}' not found",
+                    key
+                ))),
             }
         }
         _ => Err(InterpError::new("json_get_int expects (string, string)")),
@@ -196,7 +484,9 @@ fn builtin_json_get_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
 
 fn builtin_json_is_valid(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
-        Value::String(s) => Ok(Value::Bool(serde_json::from_str::<serde_json::Value>(s).is_ok())),
+        Value::String(s) => Ok(Value::Bool(
+            serde_json::from_str::<serde_json::Value>(s).is_ok(),
+        )),
         _ => Err(InterpError::new("json_is_valid expects a string")),
     }
 }
@@ -228,7 +518,10 @@ fn builtin_base64_decode(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
     match &args[0] {
         Value::String(data) => match crate::runtime::base64_decode_str(data) {
             Ok(decoded) => Ok(Value::Variant("Ok".into(), vec![Value::String(decoded)])),
-            Err(_) => Ok(Value::Variant("Err".into(), vec![Value::String("invalid base64".to_string())])),
+            Err(_) => Ok(Value::Variant(
+                "Err".into(),
+                vec![Value::String("invalid base64".to_string())],
+            )),
         },
         _ => Err(InterpError::new("base64_decode expects a string")),
     }
@@ -263,9 +556,20 @@ fn builtin_assert_ne(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     Ok(Value::Unit)
 }
 
-fn builtin_assert_approx_eq(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let a = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err(InterpError::new("assert_approx_eq expects numbers")) };
-    let b = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err(InterpError::new("assert_approx_eq expects numbers")) };
+fn builtin_assert_approx_eq(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
+    let a = match &args[0] {
+        Value::Float(f) => *f,
+        Value::Int(i) => *i as f64,
+        _ => return Err(InterpError::new("assert_approx_eq expects numbers")),
+    };
+    let b = match &args[1] {
+        Value::Float(f) => *f,
+        Value::Int(i) => *i as f64,
+        _ => return Err(InterpError::new("assert_approx_eq expects numbers")),
+    };
     if (a - b).abs() > 1e-6 {
         return Err(InterpError::new(format!(
             "assertion failed: {} !≈ {}",
@@ -286,14 +590,21 @@ fn builtin_eprintln(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
 fn builtin_input(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
     let mut input = String::new();
     match std::io::stdin().read_line(&mut input) {
-        Ok(_) => Ok(Value::Variant("Ok".into(), vec![Value::String(input.trim_end().to_string())])),
-        Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
+        Ok(_) => Ok(Value::Variant(
+            "Ok".into(),
+            vec![Value::String(input.trim_end().to_string())],
+        )),
+        Err(e) => Ok(Value::Variant(
+            "Err".into(),
+            vec![Value::String(e.to_string())],
+        )),
     }
 }
 
 fn builtin_input_float(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
     let mut input = String::new();
-    std::io::stdin().read_line(&mut input)
+    std::io::stdin()
+        .read_line(&mut input)
         .map_err(|e| InterpError::new(format!("input_float error: {}", e)))?;
     match input.trim().parse::<f64>() {
         Ok(n) => Ok(Value::Float(n)),
@@ -303,10 +614,13 @@ fn builtin_input_float(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Valu
 
 fn builtin_input_bool(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
     let mut input = String::new();
-    std::io::stdin().read_line(&mut input)
+    std::io::stdin()
+        .read_line(&mut input)
         .map_err(|e| InterpError::new(format!("input_bool error: {}", e)))?;
     let trimmed = input.trim().to_lowercase();
-    Ok(Value::Bool(trimmed == "true" || trimmed == "1" || trimmed == "yes"))
+    Ok(Value::Bool(
+        trimmed == "true" || trimmed == "1" || trimmed == "yes",
+    ))
 }
 
 // ── Convert misc ────────────────────────────────────────
@@ -321,16 +635,17 @@ fn builtin_from_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
 
 // ── JSON extended ───────────────────────────────────────
 
-fn builtin_json_get_element(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_json_get_element(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(json_str), Value::Int(idx)) => {
             match serde_json::from_str::<serde_json::Value>(json_str) {
-                Ok(json) => {
-                    match json.get(*idx as usize) {
-                        Some(v) => Ok(Value::Variant("Some".into(), vec![json_to_value(v)])),
-                        None => Ok(Value::Variant("None".into(), vec![])),
-                    }
-                }
+                Ok(json) => match json.get(*idx as usize) {
+                    Some(v) => Ok(Value::Variant("Some".into(), vec![json_to_value(v)])),
+                    None => Ok(Value::Variant("None".into(), vec![])),
+                },
                 Err(_) => Ok(Value::Variant("None".into(), vec![])),
             }
         }
@@ -350,19 +665,18 @@ fn builtin_json_has_key(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     }
 }
 
-fn builtin_json_array_length(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_json_array_length(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     match &args[0] {
-        Value::String(json_str) => {
-            match serde_json::from_str::<serde_json::Value>(json_str) {
-                Ok(json) => {
-                    match json.as_array() {
-                        Some(arr) => Ok(Value::Int(arr.len() as i64)),
-                        None => Ok(Value::Int(0)),
-                    }
-                }
-                Err(_) => Ok(Value::Int(0)),
-            }
-        }
+        Value::String(json_str) => match serde_json::from_str::<serde_json::Value>(json_str) {
+            Ok(json) => match json.as_array() {
+                Some(arr) => Ok(Value::Int(arr.len() as i64)),
+                None => Ok(Value::Int(0)),
+            },
+            Err(_) => Ok(Value::Int(0)),
+        },
         _ => Err(InterpError::new("json_array_length expects a string")),
     }
 }
@@ -374,9 +688,10 @@ fn builtin_regex_find_all(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Va
         (Value::String(text), Value::String(pattern)) => {
             let re = regex::Regex::new(pattern)
                 .map_err(|e| InterpError::new(format!("regex error: {}", e)))?;
-            let matches: Vec<String> = re.find_iter(text)
-                .map(|m| m.as_str().to_string()).collect();
-            let json = matches.iter().enumerate()
+            let matches: Vec<String> = re.find_iter(text).map(|m| m.as_str().to_string()).collect();
+            let json = matches
+                .iter()
+                .enumerate()
                 .map(|(i, m)| {
                     if i > 0 { "," } else { "" }.to_string()
                         + &format!("\"{}\"", m.replace('\\', "\\\\").replace('"', "\\\""))
@@ -400,9 +715,9 @@ fn builtin_inner(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
         Value::Variant(_, payload) => Ok(payload.first().cloned().unwrap_or(Value::Unit)),
         Value::Newtype(_, inner) => Ok(*inner.clone()),
         Value::Shared(arc) => {
-            let inner = arc.read().map_err(|e| {
-                InterpError::new(format!("shared read lock failed: {}", e))
-            })?;
+            let inner = arc
+                .read()
+                .map_err(|e| InterpError::new(format!("shared read lock failed: {}", e)))?;
             Ok(inner.clone())
         }
         Value::LocalShared(rc) => {
@@ -478,7 +793,10 @@ fn builtin_exec(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
                     let mut fields = std::collections::HashMap::new();
                     fields.insert("exit_code".to_string(), Value::Int(-1));
                     fields.insert("stdout".to_string(), Value::String(String::new()));
-                    fields.insert("stderr".to_string(), Value::String(format!("exec error: {}", e)));
+                    fields.insert(
+                        "stderr".to_string(),
+                        Value::String(format!("exec error: {}", e)),
+                    );
                     Ok(Value::Record(Some("ExecResult".to_string()), fields))
                 }
             }
@@ -510,16 +828,24 @@ fn builtin_exec_pipe(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
 
 fn builtin_exec_safe(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     if args.is_empty() {
-        return Err(InterpError::new("exec_safe expects at least 1 argument (program)"));
+        return Err(InterpError::new(
+            "exec_safe expects at least 1 argument (program)",
+        ));
     }
     let prog = match &args[0] {
         Value::String(s) => s.clone(),
-        _ => return Err(InterpError::new("exec_safe: first argument must be a string (program)")),
+        _ => {
+            return Err(InterpError::new(
+                "exec_safe: first argument must be a string (program)",
+            ))
+        }
     };
     let mut cmd = std::process::Command::new(&prog);
     for arg in args.iter().skip(1) {
         match arg {
-            Value::String(s) => { cmd.arg(s); }
+            Value::String(s) => {
+                cmd.arg(s);
+            }
             _ => return Err(InterpError::new("exec_safe: all arguments must be strings")),
         }
     }
@@ -538,7 +864,10 @@ fn builtin_exec_safe(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
             let mut fields = std::collections::HashMap::new();
             fields.insert("exit_code".to_string(), Value::Int(-1));
             fields.insert("stdout".to_string(), Value::String(String::new()));
-            fields.insert("stderr".to_string(), Value::String(format!("exec error: {}", e)));
+            fields.insert(
+                "stderr".to_string(),
+                Value::String(format!("exec error: {}", e)),
+            );
             Ok(Value::Record(Some("ExecResult".to_string()), fields))
         }
     }
@@ -553,7 +882,8 @@ fn builtin_file_stat(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
             match std::fs::metadata(path) {
                 Ok(meta) => {
                     fields.insert("size".to_string(), Value::Int(meta.len() as i64));
-                    let modified = meta.modified()
+                    let modified = meta
+                        .modified()
                         .ok()
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs() as i64)
@@ -577,28 +907,35 @@ fn builtin_file_stat(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
 
 fn builtin_read_file_bytes(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
-        Value::String(path) => {
-            match std::fs::read(path) {
-                Ok(bytes) => {
-                    let s = String::from_utf8_lossy(&bytes).to_string();
-                    Ok(Value::Variant("Ok".into(), vec![Value::String(s)]))
-                }
-                Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
+        Value::String(path) => match std::fs::read(path) {
+            Ok(bytes) => {
+                let s = String::from_utf8_lossy(&bytes).to_string();
+                Ok(Value::Variant("Ok".into(), vec![Value::String(s)]))
             }
-        }
+            Err(e) => Ok(Value::Variant(
+                "Err".into(),
+                vec![Value::String(e.to_string())],
+            )),
+        },
         _ => Err(InterpError::new("read_file_bytes expects a string path")),
     }
 }
 
-fn builtin_write_file_bytes(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_write_file_bytes(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
-        (Value::String(path), Value::String(data)) => {
-            match std::fs::write(path, data.as_bytes()) {
-                Ok(()) => Ok(Value::Variant("Ok".into(), vec![Value::Unit])),
-                Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
-            }
-        }
-        _ => Err(InterpError::new("write_file_bytes expects (string, string)")),
+        (Value::String(path), Value::String(data)) => match std::fs::write(path, data.as_bytes()) {
+            Ok(()) => Ok(Value::Variant("Ok".into(), vec![Value::Unit])),
+            Err(e) => Ok(Value::Variant(
+                "Err".into(),
+                vec![Value::String(e.to_string())],
+            )),
+        },
+        _ => Err(InterpError::new(
+            "write_file_bytes expects (string, string)",
+        )),
     }
 }
 
@@ -607,21 +944,27 @@ fn builtin_close_fd(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, 
     Ok(Value::Unit)
 }
 
-fn builtin_read_file_partial(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_read_file_partial(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     match (&args[0], &args[1], &args[2]) {
-        (Value::String(path), Value::Int(offset), Value::Int(len)) => {
-            match std::fs::read(path) {
-                Ok(data) => {
-                    let start = (*offset as usize).min(data.len());
-                    let end = (start + *len as usize).min(data.len());
-                    let slice = &data[start..end];
-                    let content = String::from_utf8_lossy(slice).to_string();
-                    Ok(Value::Variant("Ok".into(), vec![Value::String(content)]))
-                }
-                Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
+        (Value::String(path), Value::Int(offset), Value::Int(len)) => match std::fs::read(path) {
+            Ok(data) => {
+                let start = (*offset as usize).min(data.len());
+                let end = (start + *len as usize).min(data.len());
+                let slice = &data[start..end];
+                let content = String::from_utf8_lossy(slice).to_string();
+                Ok(Value::Variant("Ok".into(), vec![Value::String(content)]))
             }
-        }
-        _ => Err(InterpError::new("read_file_partial expects (string, int, int)")),
+            Err(e) => Ok(Value::Variant(
+                "Err".into(),
+                vec![Value::String(e.to_string())],
+            )),
+        },
+        _ => Err(InterpError::new(
+            "read_file_partial expects (string, int, int)",
+        )),
     }
 }
 
@@ -629,7 +972,11 @@ fn builtin_read_lines_each(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Va
     // read_lines_each(path, callback) — iterate lines calling closure, return count.
     let path = match &args[0] {
         Value::String(s) => s.clone(),
-        _ => return Err(InterpError::new("read_lines_each expects (string, closure)")),
+        _ => {
+            return Err(InterpError::new(
+                "read_lines_each expects (string, closure)",
+            ))
+        }
     };
     let callback = &args[1];
     use std::io::BufRead;
@@ -659,7 +1006,9 @@ fn builtin_read_lines_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
     let mut result = String::from("[");
     let mut first = true;
     for line in reader.lines().map_while(Result::ok) {
-        if !first { result.push(','); }
+        if !first {
+            result.push(',');
+        }
         first = false;
         result.push('"');
         for ch in line.chars() {
@@ -679,7 +1028,10 @@ fn builtin_read_lines_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
     Ok(Value::String(result))
 }
 
-fn builtin_regex_capture_groups(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_regex_capture_groups(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(text), Value::String(pattern)) => {
             let re = regex::Regex::new(pattern)
@@ -687,10 +1039,14 @@ fn builtin_regex_capture_groups(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Res
             match re.captures(text) {
                 Some(caps) => {
                     // Skip group 0 (full match), start from index 1 (tree-walker semantics).
-                    let groups: Vec<String> = caps.iter().skip(1)
+                    let groups: Vec<String> = caps
+                        .iter()
+                        .skip(1)
                         .map(|m| m.map(|m| m.as_str().to_string()).unwrap_or_default())
                         .collect();
-                    let json = groups.iter().enumerate()
+                    let json = groups
+                        .iter()
+                        .enumerate()
                         .map(|(i, g)| {
                             if i > 0 { "," } else { "" }.to_string()
                                 + &format!("\"{}\"", g.replace('\\', "\\\\").replace('"', "\\\""))
@@ -701,35 +1057,63 @@ fn builtin_regex_capture_groups(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Res
                 None => Ok(Value::String("[]".to_string())),
             }
         }
-        _ => Err(InterpError::new("regex_capture_groups expects (string, string)")),
+        _ => Err(InterpError::new(
+            "regex_capture_groups expects (string, string)",
+        )),
     }
 }
 
 // ── Shadow memory ───────────────────────────────────────
 
 fn builtin_shadow_alloc(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let size = match &args[0] { Value::Int(n) => *n as usize, _ => return Err(InterpError::new("shadow_alloc: size must be int")) };
-    let tag = match &args[1] { Value::Int(n) => *n as u8, _ => return Err(InterpError::new("shadow_alloc: tag must be int")) };
-    let label = match &args[2] { Value::String(s) => s.clone(), _ => return Err(InterpError::new("shadow_alloc: label must be string")) };
+    let size = match &args[0] {
+        Value::Int(n) => *n as usize,
+        _ => return Err(InterpError::new("shadow_alloc: size must be int")),
+    };
+    let tag = match &args[1] {
+        Value::Int(n) => *n as u8,
+        _ => return Err(InterpError::new("shadow_alloc: tag must be int")),
+    };
+    let label = match &args[2] {
+        Value::String(s) => s.clone(),
+        _ => return Err(InterpError::new("shadow_alloc: label must be string")),
+    };
     let c_label = std::ffi::CString::new(label).unwrap_or_default();
     let ptr = crate::runtime::mimi_shadow_alloc(size, tag, c_label.as_ptr());
     Ok(Value::Int(ptr as i64))
 }
 
 fn builtin_shadow_tag(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let ptr = match &args[0] { Value::Int(n) => *n as *const u8, _ => return Err(InterpError::new("shadow_tag: ptr must be int")) };
-    let tag = match &args[1] { Value::Int(n) => *n as u8, _ => return Err(InterpError::new("shadow_tag: tag must be int")) };
+    let ptr = match &args[0] {
+        Value::Int(n) => *n as *const u8,
+        _ => return Err(InterpError::new("shadow_tag: ptr must be int")),
+    };
+    let tag = match &args[1] {
+        Value::Int(n) => *n as u8,
+        _ => return Err(InterpError::new("shadow_tag: tag must be int")),
+    };
     Ok(Value::Int(crate::runtime::mimi_shadow_tag(ptr, tag) as i64))
 }
 
 fn builtin_shadow_check(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let ptr = match &args[0] { Value::Int(n) => *n as *const u8, _ => return Err(InterpError::new("shadow_check: ptr must be int")) };
-    let tag = match &args[1] { Value::Int(n) => *n as u8, _ => return Err(InterpError::new("shadow_check: tag must be int")) };
-    Ok(Value::Bool(crate::runtime::mimi_shadow_check(ptr, tag) == 1))
+    let ptr = match &args[0] {
+        Value::Int(n) => *n as *const u8,
+        _ => return Err(InterpError::new("shadow_check: ptr must be int")),
+    };
+    let tag = match &args[1] {
+        Value::Int(n) => *n as u8,
+        _ => return Err(InterpError::new("shadow_check: tag must be int")),
+    };
+    Ok(Value::Bool(
+        crate::runtime::mimi_shadow_check(ptr, tag) == 1,
+    ))
 }
 
 fn builtin_shadow_free(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let ptr = match &args[0] { Value::Int(n) => *n as *mut u8, _ => return Err(InterpError::new("shadow_free: ptr must be int")) };
+    let ptr = match &args[0] {
+        Value::Int(n) => *n as *mut u8,
+        _ => return Err(InterpError::new("shadow_free: ptr must be int")),
+    };
     crate::runtime::mimi_shadow_free(ptr);
     Ok(Value::Unit)
 }
@@ -742,7 +1126,9 @@ fn builtin_alloc_noop(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value
 // === Tooling / meta builtins ===
 
 fn builtin_lexer(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let source = args[0].as_string().ok_or_else(|| InterpError::new("lexer expects a string source"))?;
+    let source = args[0]
+        .as_string()
+        .ok_or_else(|| InterpError::new("lexer expects a string source"))?;
     let c_source = std::ffi::CString::new(source)
         .map_err(|_| InterpError::new("lexer: source contains null bytes"))?;
     let result_ptr = crate::runtime::mimi_lexer_tokenize(c_source.as_ptr());
@@ -757,7 +1143,9 @@ fn builtin_lexer(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
 }
 
 fn builtin_mms_parse(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let source = args[0].as_string().ok_or_else(|| InterpError::new("parse expects a string source"))?;
+    let source = args[0]
+        .as_string()
+        .ok_or_else(|| InterpError::new("parse expects a string source"))?;
     let c_source = std::ffi::CString::new(source)
         .map_err(|_| InterpError::new("parse: source contains null bytes"))?;
     let result_ptr = crate::runtime::mimi_parse_source(c_source.as_ptr());
@@ -774,5 +1162,7 @@ fn builtin_mms_parse(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
 }
 
 fn builtin_ast_eval(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
-    Err(InterpError::new("ast_eval is not available in bytecode VM (use tree-walker interpreter)"))
+    Err(InterpError::new(
+        "ast_eval is not available in bytecode VM (use tree-walker interpreter)",
+    ))
 }

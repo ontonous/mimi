@@ -157,27 +157,47 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::LoadTrue { rd } => format!("{:04}  {:<16} r{} = true", pc, name, rd),
         Op::LoadFalse { rd } => format!("{:04}  {:<16} r{} = false", pc, name, rd),
         Op::Mov { rd, rs } => format!("{:04}  {:<16} r{} = r{}", pc, name, rd, rs),
-        Op::AddInt { rd, ra, rb } | Op::SubInt { rd, ra, rb } | Op::MulInt { rd, ra, rb }
-        | Op::DivInt { rd, ra, rb } | Op::ModInt { rd, ra, rb }
-        | Op::AddFloat { rd, ra, rb } | Op::SubFloat { rd, ra, rb }
-        | Op::MulFloat { rd, ra, rb } | Op::DivFloat { rd, ra, rb }
-        | Op::EqInt { rd, ra, rb } | Op::NeInt { rd, ra, rb }
-        | Op::LtInt { rd, ra, rb } | Op::GtInt { rd, ra, rb }
-        | Op::LeInt { rd, ra, rb } | Op::GeInt { rd, ra, rb }
-        | Op::EqFloat { rd, ra, rb } | Op::LtFloat { rd, ra, rb }
-        | Op::GtFloat { rd, ra, rb } | Op::LeFloat { rd, ra, rb }
-        | Op::GeFloat { rd, ra, rb } | Op::Eq { rd, ra, rb } | Op::Ne { rd, ra, rb }
-        | Op::BitAnd { rd, ra, rb } | Op::BitOr { rd, ra, rb }
-        | Op::BitXor { rd, ra, rb } | Op::Shl { rd, ra, rb } | Op::Shr { rd, ra, rb }
-        | Op::And { rd, ra, rb } | Op::Or { rd, ra, rb }
+        Op::AddInt { rd, ra, rb }
+        | Op::SubInt { rd, ra, rb }
+        | Op::MulInt { rd, ra, rb }
+        | Op::DivInt { rd, ra, rb }
+        | Op::ModInt { rd, ra, rb }
+        | Op::AddFloat { rd, ra, rb }
+        | Op::SubFloat { rd, ra, rb }
+        | Op::MulFloat { rd, ra, rb }
+        | Op::DivFloat { rd, ra, rb }
+        | Op::EqInt { rd, ra, rb }
+        | Op::NeInt { rd, ra, rb }
+        | Op::LtInt { rd, ra, rb }
+        | Op::GtInt { rd, ra, rb }
+        | Op::LeInt { rd, ra, rb }
+        | Op::GeInt { rd, ra, rb }
+        | Op::EqFloat { rd, ra, rb }
+        | Op::LtFloat { rd, ra, rb }
+        | Op::GtFloat { rd, ra, rb }
+        | Op::LeFloat { rd, ra, rb }
+        | Op::GeFloat { rd, ra, rb }
+        | Op::Eq { rd, ra, rb }
+        | Op::Ne { rd, ra, rb }
+        | Op::BitAnd { rd, ra, rb }
+        | Op::BitOr { rd, ra, rb }
+        | Op::BitXor { rd, ra, rb }
+        | Op::Shl { rd, ra, rb }
+        | Op::Shr { rd, ra, rb }
+        | Op::And { rd, ra, rb }
+        | Op::Or { rd, ra, rb }
         | Op::ConcatStr { rd, ra, rb } => {
             format!("{:04}  {:<16} r{} = r{} op r{}", pc, name, rd, ra, rb)
         }
         Op::StrAppend { ra, rb } => {
             format!("{:04}  {:<16} r{} += r{}", pc, name, ra, rb)
         }
-        Op::NegInt { rd, ra } | Op::NegFloat { rd, ra } | Op::IntToFloat { rd, ra }
-        | Op::BitNot { rd, ra } | Op::Not { rd, ra } | Op::ToString { rd, ra }
+        Op::NegInt { rd, ra }
+        | Op::NegFloat { rd, ra }
+        | Op::IntToFloat { rd, ra }
+        | Op::BitNot { rd, ra }
+        | Op::Not { rd, ra }
+        | Op::ToString { rd, ra }
         | Op::TypeOf { rd, ra } => {
             format!("{:04}  {:<16} r{} = op r{}", pc, name, rd, ra)
         }
@@ -189,43 +209,126 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             let target = pc as i32 + 1 + offset;
             format!("{:04}  {:<16} r{} -> {}", pc, name, ra, target)
         }
-        Op::Call { rd, func, args_base, argc } => {
-            let _fname = proto.constants.get(*func as usize)
-                .map(|c| match c { ConstValue::Str(s) => s.as_str(), _ => "?" })
+        Op::Call {
+            rd,
+            func,
+            args_base,
+            argc,
+        } => {
+            let _fname = proto
+                .constants
+                .get(*func as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.as_str(),
+                    _ => "?",
+                })
                 .unwrap_or("?");
-            format!("{:04}  {:<16} r{} = func[{}](r{}..r{})", pc, name, rd, func, args_base, *args_base as u16 + argc.saturating_sub(1))
+            format!(
+                "{:04}  {:<16} r{} = func[{}](r{}..r{})",
+                pc,
+                name,
+                rd,
+                func,
+                args_base,
+                *args_base as u16 + argc.saturating_sub(1)
+            )
         }
-        Op::CallBuiltin { rd, builtin, args_base, argc } => {
-            format!("{:04}  {:<16} r{} = builtin[{}](r{}..r{})", pc, name, rd, builtin, args_base, *args_base as u16 + argc.saturating_sub(1))
+        Op::CallBuiltin {
+            rd,
+            builtin,
+            args_base,
+            argc,
+        } => {
+            format!(
+                "{:04}  {:<16} r{} = builtin[{}](r{}..r{})",
+                pc,
+                name,
+                rd,
+                builtin,
+                args_base,
+                *args_base as u16 + argc.saturating_sub(1)
+            )
         }
-        Op::CallIndirect { rd, callee, args_base, argc } => {
-            format!("{:04}  {:<16} r{} = r{}(r{}..r{})", pc, name, rd, callee, args_base, *args_base as u16 + argc.saturating_sub(1))
+        Op::CallIndirect {
+            rd,
+            callee,
+            args_base,
+            argc,
+        } => {
+            format!(
+                "{:04}  {:<16} r{} = r{}(r{}..r{})",
+                pc,
+                name,
+                rd,
+                callee,
+                args_base,
+                *args_base as u16 + argc.saturating_sub(1)
+            )
         }
         Op::Ret { ra } => format!("{:04}  {:<16} return r{}", pc, name, ra),
         Op::RetEarly { ra } => format!("{:04}  {:<16} ret_early r{}", pc, name, ra),
         Op::RetUnit => format!("{:04}  {:<16} return unit", pc, name),
-        Op::NewList { rd, capacity } => format!("{:04}  {:<16} r{} = list(cap={})", pc, name, rd, capacity),
+        Op::NewList { rd, capacity } => {
+            format!("{:04}  {:<16} r{} = list(cap={})", pc, name, rd, capacity)
+        }
         Op::ListPush { ra, rb } => format!("{:04}  {:<16} r{}.push(r{})", pc, name, ra, rb),
         Op::ListGet { rd, ra, rb } => format!("{:04}  {:<16} r{} = r{}[r{}]", pc, name, rd, ra, rb),
         Op::ListSet { ra, rb, rc } => format!("{:04}  {:<16} r{}[r{}] = r{}", pc, name, ra, rb, rc),
         Op::Len { rd, ra } => format!("{:04}  {:<16} r{} = len(r{})", pc, name, rd, ra),
-        Op::NewTuple { rd, base, arity } => format!("{:04}  {:<16} r{} = tuple(r{}..r{})", pc, name, rd, base, *base as u16 + arity.saturating_sub(1)),
-        Op::TupleGet { rd, ra, idx } => format!("{:04}  {:<16} r{} = r{}.{}", pc, name, rd, ra, idx),
-        Op::NewRecord { rd, type_name, base, count } => {
-            let tname = proto.constants.get(*type_name as usize)
-                .map(|c| match c { ConstValue::Str(s) => s.as_str(), _ => "?" })
+        Op::NewTuple { rd, base, arity } => format!(
+            "{:04}  {:<16} r{} = tuple(r{}..r{})",
+            pc,
+            name,
+            rd,
+            base,
+            *base as u16 + arity.saturating_sub(1)
+        ),
+        Op::TupleGet { rd, ra, idx } => {
+            format!("{:04}  {:<16} r{} = r{}.{}", pc, name, rd, ra, idx)
+        }
+        Op::NewRecord {
+            rd,
+            type_name,
+            base,
+            count,
+        } => {
+            let tname = proto
+                .constants
+                .get(*type_name as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.as_str(),
+                    _ => "?",
+                })
                 .unwrap_or("?");
-            format!("{:04}  {:<16} r{} = {}(r{}..r{})", pc, name, rd, tname, base, *base as u16 + count.saturating_sub(1))
+            format!(
+                "{:04}  {:<16} r{} = {}(r{}..r{})",
+                pc,
+                name,
+                rd,
+                tname,
+                base,
+                *base as u16 + count.saturating_sub(1)
+            )
         }
         Op::RecordGet { rd, ra, field } => {
-            let fname = proto.constants.get(*field as usize)
-                .map(|c| match c { ConstValue::Str(s) => s.as_str(), _ => "?" })
+            let fname = proto
+                .constants
+                .get(*field as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.as_str(),
+                    _ => "?",
+                })
                 .unwrap_or("?");
             format!("{:04}  {:<16} r{} = r{}.{}", pc, name, rd, ra, fname)
         }
         Op::RecordSet { ra, field, rb } => {
-            let fname = proto.constants.get(*field as usize)
-                .map(|c| match c { ConstValue::Str(s) => s.as_str(), _ => "?" })
+            let fname = proto
+                .constants
+                .get(*field as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.as_str(),
+                    _ => "?",
+                })
                 .unwrap_or("?");
             format!("{:04}  {:<16} r{}.{} = r{}", pc, name, ra, fname, rb)
         }
@@ -233,71 +336,189 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::NewSet { rd } => format!("{:04}  {:<16} r{} = set()", pc, name, rd),
         Op::MapGet { rd, ra, rb } => format!("{:04}  {:<16} r{} = r{}[r{}]", pc, name, rd, ra, rb),
         Op::MapSet { ra, rb, rc } => format!("{:04}  {:<16} r{}[r{}] = r{}", pc, name, ra, rb, rc),
-        Op::MapContains { rd, ra, rb } => format!("{:04}  {:<16} r{} = contains(r{}, r{})", pc, name, rd, ra, rb),
+        Op::MapContains { rd, ra, rb } => format!(
+            "{:04}  {:<16} r{} = contains(r{}, r{})",
+            pc, name, rd, ra, rb
+        ),
         Op::SetAdd { ra, rb } => format!("{:04}  {:<16} r{}.add(r{})", pc, name, ra, rb),
-        Op::SetContains { rd, ra, rb } => format!("{:04}  {:<16} r{} = contains(r{}, r{})", pc, name, rd, ra, rb),
-        Op::NewVariant { rd, type_name, variant, base, arity } => {
-            let tname = proto.constants.get(*type_name as usize)
-                .map(|c| match c { ConstValue::Str(s) => s.as_str(), _ => "?" })
+        Op::SetContains { rd, ra, rb } => format!(
+            "{:04}  {:<16} r{} = contains(r{}, r{})",
+            pc, name, rd, ra, rb
+        ),
+        Op::NewVariant {
+            rd,
+            type_name,
+            variant,
+            base,
+            arity,
+        } => {
+            let tname = proto
+                .constants
+                .get(*type_name as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.as_str(),
+                    _ => "?",
+                })
                 .unwrap_or("?");
-            format!("{:04}  {:<16} r{} = {}::v{}(r{}..r{})", pc, name, rd, tname, variant, base, *base as u16 + arity.saturating_sub(1))
+            format!(
+                "{:04}  {:<16} r{} = {}::v{}(r{}..r{})",
+                pc,
+                name,
+                rd,
+                tname,
+                variant,
+                base,
+                *base as u16 + arity.saturating_sub(1)
+            )
         }
         Op::VariantTag { rd, ra } => format!("{:04}  {:<16} r{} = tag(r{})", pc, name, rd, ra),
-        Op::VariantPayload { rd, ra, idx } => format!("{:04}  {:<16} r{} = payload(r{}, {})", pc, name, rd, ra, idx),
+        Op::VariantPayload { rd, ra, idx } => format!(
+            "{:04}  {:<16} r{} = payload(r{}, {})",
+            pc, name, rd, ra, idx
+        ),
         Op::IsVariant { rd, ra, tag } => {
-            let tname = proto.constants.get(*tag as usize)
-                .map(|c| match c { ConstValue::Str(s) => s.as_str(), _ => "?" })
+            let tname = proto
+                .constants
+                .get(*tag as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.as_str(),
+                    _ => "?",
+                })
                 .unwrap_or("?");
             format!("{:04}  {:<16} r{} = is(r{}, {})", pc, name, rd, ra, tname)
         }
-        Op::VariantGet { rd, ra, idx } => format!("{:04}  {:<16} r{} = r{}[{}]", pc, name, rd, ra, idx),
+        Op::VariantGet { rd, ra, idx } => {
+            format!("{:04}  {:<16} r{} = r{}[{}]", pc, name, rd, ra, idx)
+        }
         Op::Some { rd, ra } => format!("{:04}  {:<16} r{} = Some(r{})", pc, name, rd, ra),
         Op::None { rd } => format!("{:04}  {:<16} r{} = None", pc, name, rd),
         Op::Ok { rd, ra } => format!("{:04}  {:<16} r{} = Ok(r{})", pc, name, rd, ra),
         Op::Err { rd, ra } => format!("{:04}  {:<16} r{} = Err(r{})", pc, name, rd, ra),
         Op::IsSome { rd, ra } => format!("{:04}  {:<16} r{} = is_some(r{})", pc, name, rd, ra),
         Op::Unwrap { rd, ra } => format!("{:04}  {:<16} r{} = unwrap(r{})", pc, name, rd, ra),
-        Op::NewClosure { rd, proto: pidx, captures_base, capture_count } => {
-            format!("{:04}  {:<16} r{} = closure(proto={}, cap=r{}..r{})", pc, name, rd, pidx, captures_base, *captures_base as u16 + capture_count.saturating_sub(1))
+        Op::NewClosure {
+            rd,
+            proto: pidx,
+            captures_base,
+            capture_count,
+        } => {
+            format!(
+                "{:04}  {:<16} r{} = closure(proto={}, cap=r{}..r{})",
+                pc,
+                name,
+                rd,
+                pidx,
+                captures_base,
+                *captures_base as u16 + capture_count.saturating_sub(1)
+            )
         }
-        Op::Spawn { rd, func, args_base, argc } => {
-            format!("{:04}  {:<16} r{} = spawn(func[{}], r{}..r{})", pc, name, rd, func, args_base, *args_base as u16 + argc.saturating_sub(1))
+        Op::Spawn {
+            rd,
+            func,
+            args_base,
+            argc,
+        } => {
+            format!(
+                "{:04}  {:<16} r{} = spawn(func[{}], r{}..r{})",
+                pc,
+                name,
+                rd,
+                func,
+                args_base,
+                *args_base as u16 + argc.saturating_sub(1)
+            )
         }
         Op::Await { rd, ra } => format!("{:04}  {:<16} r{} = await(r{})", pc, name, rd, ra),
-        Op::Cast { rd, ra, target } => format!("{:04}  {:<16} r{} = cast(r{}, ty={})", pc, name, rd, ra, target),
+        Op::Cast { rd, ra, target } => format!(
+            "{:04}  {:<16} r{} = cast(r{}, ty={})",
+            pc, name, rd, ra, target
+        ),
         Op::Trap { msg } => {
-            let m = proto.constants.get(*msg as usize)
-                .map(|c| match c { ConstValue::Str(s) => s.as_str(), _ => "?" })
+            let m = proto
+                .constants
+                .get(*msg as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.as_str(),
+                    _ => "?",
+                })
                 .unwrap_or("?");
             format!("{:04}  {:<16} {:?}", pc, name, m)
         }
         Op::Nop => format!("{:04}  {:<16}", pc, name),
         Op::ActorSpawn { rd, actor } => {
-            let a = proto.constants.get(*actor as usize)
-                .map(|c| match c { ConstValue::Str(s) => s.as_str(), _ => "?" })
+            let a = proto
+                .constants
+                .get(*actor as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.as_str(),
+                    _ => "?",
+                })
                 .unwrap_or("?");
             format!("{:04}  {:<16} r{} = actor_spawn({})", pc, name, rd, a)
         }
-        Op::FlowTransition { rd, flow, method, args_base, argc } => {
-            let f = proto.constants.get(*flow as usize)
-                .map(|c| match c { ConstValue::Str(s) => s.as_str(), _ => "?" })
+        Op::FlowTransition {
+            rd,
+            flow,
+            method,
+            args_base,
+            argc,
+        } => {
+            let f = proto
+                .constants
+                .get(*flow as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.as_str(),
+                    _ => "?",
+                })
                 .unwrap_or("?");
-            let m = proto.constants.get(*method as usize)
-                .map(|c| match c { ConstValue::Str(s) => s.as_str(), _ => "?" })
+            let m = proto
+                .constants
+                .get(*method as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.as_str(),
+                    _ => "?",
+                })
                 .unwrap_or("?");
-            format!("{:04}  {:<16} r{} = {}::{}(r{}..r{})", pc, name, rd, f, m, args_base, *args_base as u16 + argc.saturating_sub(1))
+            format!(
+                "{:04}  {:<16} r{} = {}::{}(r{}..r{})",
+                pc,
+                name,
+                rd,
+                f,
+                m,
+                args_base,
+                *args_base as u16 + argc.saturating_sub(1)
+            )
         }
-        Op::DynMethodCall { rd, method, args_base, argc } => {
-            let m = proto.constants.get(*method as usize)
-                .map(|c| match c { ConstValue::Str(s) => s.as_str(), _ => "?" })
+        Op::DynMethodCall {
+            rd,
+            method,
+            args_base,
+            argc,
+        } => {
+            let m = proto
+                .constants
+                .get(*method as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.as_str(),
+                    _ => "?",
+                })
                 .unwrap_or("?");
-            format!("{:04}  {:<16} r{} = dyn_call(r{}, {}, {})", pc, name, rd, args_base, m, argc)
+            format!(
+                "{:04}  {:<16} r{} = dyn_call(r{}, {}, {})",
+                pc, name, rd, args_base, m, argc
+            )
         }
         Op::SharedNew { rd, ra } => format!("{:04}  {:<16} r{} = shared(r{})", pc, name, rd, ra),
         Op::WeakNew { rd, ra } => format!("{:04}  {:<16} r{} = weak(r{})", pc, name, rd, ra),
-        Op::SetFaultPc { handler_pc } => format!("{:04}  {:<16} handler_pc={}", pc, name, handler_pc),
+        Op::SetFaultPc { handler_pc } => {
+            format!("{:04}  {:<16} handler_pc={}", pc, name, handler_pc)
+        }
         Op::ClearFaultPc => format!("{:04}  {:<16}", pc, name),
-        Op::FaultRetEarly => format!("{:04}  {:<16}  ; re-emit early return after compensations", pc, name),
+        Op::FaultRetEarly => format!(
+            "{:04}  {:<16}  ; re-emit early return after compensations",
+            pc, name
+        ),
     }
 }
 

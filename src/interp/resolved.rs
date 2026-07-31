@@ -2114,7 +2114,11 @@ fn eval_collection_callable(
     name: &str,
     arguments: Vec<RuntimeArgument>,
 ) -> Result<Value, InterpError> {
-    let expected = if name == "reduce" || name == "reduce_list" { 3 } else { 2 };
+    let expected = if name == "reduce" || name == "reduce_list" {
+        3
+    } else {
+        2
+    };
     if arguments.len() != expected {
         return Err(InterpError::wrong_arg_count(format!(
             "builtin '{name}' expects {expected} arguments, got {}",

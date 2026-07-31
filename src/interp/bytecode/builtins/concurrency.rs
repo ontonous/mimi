@@ -8,57 +8,267 @@ use crate::interp::value::Value;
 
 pub fn register(reg: &mut BuiltinRegistry) {
     // Atomic i32
-    reg.register(BuiltinDesc { name: "atomic_i32_new", arity: 1, category: BuiltinCategory::System, func: builtin_atomic_i32_new });
-    reg.register(BuiltinDesc { name: "atomic_i32_load", arity: 1, category: BuiltinCategory::System, func: builtin_atomic_i32_load });
-    reg.register(BuiltinDesc { name: "atomic_i32_store", arity: 2, category: BuiltinCategory::System, func: builtin_atomic_i32_store });
-    reg.register(BuiltinDesc { name: "atomic_i32_fetch_add", arity: 2, category: BuiltinCategory::System, func: builtin_atomic_i32_fetch_add });
-    reg.register(BuiltinDesc { name: "atomic_i32_compare_exchange", arity: 3, category: BuiltinCategory::System, func: builtin_atomic_i32_compare_exchange });
-    reg.register(BuiltinDesc { name: "atomic_i32_drop", arity: 1, category: BuiltinCategory::System, func: builtin_atomic_i32_drop });
+    reg.register(BuiltinDesc {
+        name: "atomic_i32_new",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_i32_new,
+    });
+    reg.register(BuiltinDesc {
+        name: "atomic_i32_load",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_i32_load,
+    });
+    reg.register(BuiltinDesc {
+        name: "atomic_i32_store",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_i32_store,
+    });
+    reg.register(BuiltinDesc {
+        name: "atomic_i32_fetch_add",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_i32_fetch_add,
+    });
+    reg.register(BuiltinDesc {
+        name: "atomic_i32_compare_exchange",
+        arity: 3,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_i32_compare_exchange,
+    });
+    reg.register(BuiltinDesc {
+        name: "atomic_i32_drop",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_i32_drop,
+    });
     // Atomic i64
-    reg.register(BuiltinDesc { name: "atomic_i64_new", arity: 1, category: BuiltinCategory::System, func: builtin_atomic_i64_new });
-    reg.register(BuiltinDesc { name: "atomic_i64_load", arity: 1, category: BuiltinCategory::System, func: builtin_atomic_i64_load });
-    reg.register(BuiltinDesc { name: "atomic_i64_store", arity: 2, category: BuiltinCategory::System, func: builtin_atomic_i64_store });
-    reg.register(BuiltinDesc { name: "atomic_i64_fetch_add", arity: 2, category: BuiltinCategory::System, func: builtin_atomic_i64_fetch_add });
-    reg.register(BuiltinDesc { name: "atomic_i64_drop", arity: 1, category: BuiltinCategory::System, func: builtin_atomic_i64_drop });
+    reg.register(BuiltinDesc {
+        name: "atomic_i64_new",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_i64_new,
+    });
+    reg.register(BuiltinDesc {
+        name: "atomic_i64_load",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_i64_load,
+    });
+    reg.register(BuiltinDesc {
+        name: "atomic_i64_store",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_i64_store,
+    });
+    reg.register(BuiltinDesc {
+        name: "atomic_i64_fetch_add",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_i64_fetch_add,
+    });
+    reg.register(BuiltinDesc {
+        name: "atomic_i64_drop",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_i64_drop,
+    });
     // Atomic bool
-    reg.register(BuiltinDesc { name: "atomic_bool_new", arity: 1, category: BuiltinCategory::System, func: builtin_atomic_bool_new });
-    reg.register(BuiltinDesc { name: "atomic_bool_load", arity: 1, category: BuiltinCategory::System, func: builtin_atomic_bool_load });
-    reg.register(BuiltinDesc { name: "atomic_bool_store", arity: 2, category: BuiltinCategory::System, func: builtin_atomic_bool_store });
-    reg.register(BuiltinDesc { name: "atomic_bool_drop", arity: 1, category: BuiltinCategory::System, func: builtin_atomic_bool_drop });
+    reg.register(BuiltinDesc {
+        name: "atomic_bool_new",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_bool_new,
+    });
+    reg.register(BuiltinDesc {
+        name: "atomic_bool_load",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_bool_load,
+    });
+    reg.register(BuiltinDesc {
+        name: "atomic_bool_store",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_bool_store,
+    });
+    reg.register(BuiltinDesc {
+        name: "atomic_bool_drop",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_atomic_bool_drop,
+    });
     // Mutex
-    reg.register(BuiltinDesc { name: "mutex_new", arity: 1, category: BuiltinCategory::System, func: builtin_mutex_new });
-    reg.register(BuiltinDesc { name: "mutex_lock", arity: 1, category: BuiltinCategory::System, func: builtin_mutex_lock });
-    reg.register(BuiltinDesc { name: "mutex_get", arity: 1, category: BuiltinCategory::System, func: builtin_mutex_get });
-    reg.register(BuiltinDesc { name: "mutex_set", arity: 2, category: BuiltinCategory::System, func: builtin_mutex_set });
-    reg.register(BuiltinDesc { name: "mutex_unlock", arity: 1, category: BuiltinCategory::System, func: builtin_mutex_unlock });
-    reg.register(BuiltinDesc { name: "mutex_drop", arity: 1, category: BuiltinCategory::System, func: builtin_mutex_drop });
+    reg.register(BuiltinDesc {
+        name: "mutex_new",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_mutex_new,
+    });
+    reg.register(BuiltinDesc {
+        name: "mutex_lock",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_mutex_lock,
+    });
+    reg.register(BuiltinDesc {
+        name: "mutex_get",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_mutex_get,
+    });
+    reg.register(BuiltinDesc {
+        name: "mutex_set",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_mutex_set,
+    });
+    reg.register(BuiltinDesc {
+        name: "mutex_unlock",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_mutex_unlock,
+    });
+    reg.register(BuiltinDesc {
+        name: "mutex_drop",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_mutex_drop,
+    });
     // Channel
-    reg.register(BuiltinDesc { name: "channel_new", arity: 0, category: BuiltinCategory::System, func: builtin_channel_new });
-    reg.register(BuiltinDesc { name: "channel_send", arity: 2, category: BuiltinCategory::System, func: builtin_channel_send });
-    reg.register(BuiltinDesc { name: "channel_recv", arity: 1, category: BuiltinCategory::System, func: builtin_channel_recv });
-    reg.register(BuiltinDesc { name: "channel_try_recv", arity: 1, category: BuiltinCategory::System, func: builtin_channel_try_recv });
-    reg.register(BuiltinDesc { name: "channel_drop", arity: 1, category: BuiltinCategory::System, func: builtin_channel_drop });
+    reg.register(BuiltinDesc {
+        name: "channel_new",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_channel_new,
+    });
+    reg.register(BuiltinDesc {
+        name: "channel_send",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_channel_send,
+    });
+    reg.register(BuiltinDesc {
+        name: "channel_recv",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_channel_recv,
+    });
+    reg.register(BuiltinDesc {
+        name: "channel_try_recv",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_channel_try_recv,
+    });
+    reg.register(BuiltinDesc {
+        name: "channel_drop",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_channel_drop,
+    });
     // Session (cross-wired channels)
-    reg.register(BuiltinDesc { name: "session_pair", arity: 0, category: BuiltinCategory::System, func: builtin_session_pair });
-    reg.register(BuiltinDesc { name: "session_send", arity: 2, category: BuiltinCategory::System, func: builtin_session_send });
-    reg.register(BuiltinDesc { name: "session_recv", arity: 1, category: BuiltinCategory::System, func: builtin_session_recv });
-    reg.register(BuiltinDesc { name: "session_close", arity: 1, category: BuiltinCategory::System, func: builtin_session_close });
+    reg.register(BuiltinDesc {
+        name: "session_pair",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_session_pair,
+    });
+    reg.register(BuiltinDesc {
+        name: "session_send",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_session_send,
+    });
+    reg.register(BuiltinDesc {
+        name: "session_recv",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_session_recv,
+    });
+    reg.register(BuiltinDesc {
+        name: "session_close",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_session_close,
+    });
     // Actor quota
-    reg.register(BuiltinDesc { name: "actor_max_children", arity: 0, category: BuiltinCategory::System, func: builtin_actor_max_children });
-    reg.register(BuiltinDesc { name: "actor_set_max_children", arity: 1, category: BuiltinCategory::System, func: builtin_actor_set_max_children });
-    reg.register(BuiltinDesc { name: "actor_spawn_count", arity: 0, category: BuiltinCategory::System, func: builtin_actor_spawn_count });
+    reg.register(BuiltinDesc {
+        name: "actor_max_children",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_actor_max_children,
+    });
+    reg.register(BuiltinDesc {
+        name: "actor_set_max_children",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_actor_set_max_children,
+    });
+    reg.register(BuiltinDesc {
+        name: "actor_spawn_count",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_actor_spawn_count,
+    });
     // Actor management
-    reg.register(BuiltinDesc { name: "actor_set_mailbox_depth", arity: 2, category: BuiltinCategory::System, func: builtin_actor_set_mailbox_depth });
-    reg.register(BuiltinDesc { name: "actor_mailbox_depth", arity: 1, category: BuiltinCategory::System, func: builtin_actor_mailbox_depth });
-    reg.register(BuiltinDesc { name: "actor_is_faulted", arity: 1, category: BuiltinCategory::System, func: builtin_actor_is_faulted });
-    reg.register(BuiltinDesc { name: "actor_is_muted", arity: 1, category: BuiltinCategory::System, func: builtin_actor_is_muted });
-    reg.register(BuiltinDesc { name: "broadcast", arity: 2, category: BuiltinCategory::System, func: builtin_broadcast });
+    reg.register(BuiltinDesc {
+        name: "actor_set_mailbox_depth",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_actor_set_mailbox_depth,
+    });
+    reg.register(BuiltinDesc {
+        name: "actor_mailbox_depth",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_actor_mailbox_depth,
+    });
+    reg.register(BuiltinDesc {
+        name: "actor_is_faulted",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_actor_is_faulted,
+    });
+    reg.register(BuiltinDesc {
+        name: "actor_is_muted",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_actor_is_muted,
+    });
+    reg.register(BuiltinDesc {
+        name: "broadcast",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_broadcast,
+    });
     // Flow test utilities
-    reg.register(BuiltinDesc { name: "assert_state", arity: 2, category: BuiltinCategory::System, func: builtin_assert_state });
-    reg.register(BuiltinDesc { name: "inject_fault", arity: 1, category: BuiltinCategory::System, func: builtin_inject_fault });
+    reg.register(BuiltinDesc {
+        name: "assert_state",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_assert_state,
+    });
+    reg.register(BuiltinDesc {
+        name: "inject_fault",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_inject_fault,
+    });
     // Spawn / testing
-    reg.register(BuiltinDesc { name: "spawn_detached", arity: 1, category: BuiltinCategory::System, func: builtin_spawn_detached });
-    reg.register(BuiltinDesc { name: "test_sandbox", arity: 1, category: BuiltinCategory::System, func: builtin_test_sandbox });
+    reg.register(BuiltinDesc {
+        name: "spawn_detached",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_spawn_detached,
+    });
+    reg.register(BuiltinDesc {
+        name: "test_sandbox",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_test_sandbox,
+    });
 }
 
 fn handle(args: &[Value], idx: usize) -> Result<i64, InterpError> {
@@ -71,7 +281,10 @@ fn handle(args: &[Value], idx: usize) -> Result<i64, InterpError> {
 // ── Atomic i32 ──────────────────────────────────────────
 
 fn builtin_atomic_i32_new(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let v = match &args[0] { Value::Int(x) => *x as i32, _ => return Err(InterpError::new("atomic_i32_new expects i32")) };
+    let v = match &args[0] {
+        Value::Int(x) => *x as i32,
+        _ => return Err(InterpError::new("atomic_i32_new expects i32")),
+    };
     Ok(Value::Int(crate::runtime::mimi_atomic_i32_new(v)))
 }
 
@@ -80,24 +293,49 @@ fn builtin_atomic_i32_load(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
     Ok(Value::Int(crate::runtime::mimi_atomic_i32_load(h) as i64))
 }
 
-fn builtin_atomic_i32_store(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_atomic_i32_store(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    let v = match &args[1] { Value::Int(x) => *x as i32, _ => return Err(InterpError::new("expects i32")) };
+    let v = match &args[1] {
+        Value::Int(x) => *x as i32,
+        _ => return Err(InterpError::new("expects i32")),
+    };
     crate::runtime::mimi_atomic_i32_store(h, v);
     Ok(Value::Unit)
 }
 
-fn builtin_atomic_i32_fetch_add(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_atomic_i32_fetch_add(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    let d = match &args[1] { Value::Int(x) => *x as i32, _ => return Err(InterpError::new("expects i32")) };
-    Ok(Value::Int(crate::runtime::mimi_atomic_i32_fetch_add(h, d) as i64))
+    let d = match &args[1] {
+        Value::Int(x) => *x as i32,
+        _ => return Err(InterpError::new("expects i32")),
+    };
+    Ok(Value::Int(
+        crate::runtime::mimi_atomic_i32_fetch_add(h, d) as i64
+    ))
 }
 
-fn builtin_atomic_i32_compare_exchange(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_atomic_i32_compare_exchange(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    let exp = match &args[1] { Value::Int(x) => *x as i32, _ => return Err(InterpError::new("expects i32")) };
-    let nv = match &args[2] { Value::Int(x) => *x as i32, _ => return Err(InterpError::new("expects i32")) };
-    Ok(Value::Int(crate::runtime::mimi_atomic_i32_compare_exchange(h, exp, nv) as i64))
+    let exp = match &args[1] {
+        Value::Int(x) => *x as i32,
+        _ => return Err(InterpError::new("expects i32")),
+    };
+    let nv = match &args[2] {
+        Value::Int(x) => *x as i32,
+        _ => return Err(InterpError::new("expects i32")),
+    };
+    Ok(Value::Int(
+        crate::runtime::mimi_atomic_i32_compare_exchange(h, exp, nv) as i64,
+    ))
 }
 
 fn builtin_atomic_i32_drop(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
@@ -118,14 +356,20 @@ fn builtin_atomic_i64_load(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
     Ok(Value::Int(crate::runtime::mimi_atomic_i64_load(h)))
 }
 
-fn builtin_atomic_i64_store(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_atomic_i64_store(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
     let v = handle(args, 1)?;
     crate::runtime::mimi_atomic_i64_store(h, v);
     Ok(Value::Unit)
 }
 
-fn builtin_atomic_i64_fetch_add(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_atomic_i64_fetch_add(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
     let d = handle(args, 1)?;
     Ok(Value::Int(crate::runtime::mimi_atomic_i64_fetch_add(h, d)))
@@ -140,23 +384,50 @@ fn builtin_atomic_i64_drop(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
 // ── Atomic bool ─────────────────────────────────────────
 
 fn builtin_atomic_bool_new(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let v = match &args[0] { Value::Bool(b) => if *b { 1 } else { 0 }, _ => return Err(InterpError::new("expects bool")) };
+    let v = match &args[0] {
+        Value::Bool(b) => {
+            if *b {
+                1
+            } else {
+                0
+            }
+        }
+        _ => return Err(InterpError::new("expects bool")),
+    };
     Ok(Value::Int(crate::runtime::mimi_atomic_bool_new(v)))
 }
 
-fn builtin_atomic_bool_load(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_atomic_bool_load(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
     Ok(Value::Bool(crate::runtime::mimi_atomic_bool_load(h) != 0))
 }
 
-fn builtin_atomic_bool_store(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_atomic_bool_store(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
-    let v = match &args[1] { Value::Bool(b) => if *b { 1i32 } else { 0i32 }, _ => return Err(InterpError::new("expects bool")) };
+    let v = match &args[1] {
+        Value::Bool(b) => {
+            if *b {
+                1i32
+            } else {
+                0i32
+            }
+        }
+        _ => return Err(InterpError::new("expects bool")),
+    };
     crate::runtime::mimi_atomic_bool_store(h, v);
     Ok(Value::Unit)
 }
 
-fn builtin_atomic_bool_drop(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_atomic_bool_drop(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
     crate::runtime::mimi_atomic_bool_drop(h);
     Ok(Value::Unit)
@@ -216,7 +487,10 @@ fn builtin_channel_recv(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     Ok(Value::Int(crate::runtime::mimi_channel_recv(h)))
 }
 
-fn builtin_channel_try_recv(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_channel_try_recv(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     let h = handle(args, 0)?;
     Ok(Value::Int(crate::runtime::mimi_channel_try_recv(h)))
 }
@@ -256,11 +530,17 @@ fn builtin_session_close(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
 
 // ── Actor quota ────────────────────────────────────────
 
-fn builtin_actor_max_children(vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_actor_max_children(
+    vm: &mut BytecodeVM<'_>,
+    _args: &[Value],
+) -> Result<Value, InterpError> {
     Ok(Value::Int(vm.max_children.map(|n| n as i64).unwrap_or(0)))
 }
 
-fn builtin_actor_set_max_children(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_actor_set_max_children(
+    vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     let n = match &args[0] {
         Value::Int(x) if *x <= 0 => None,
         Value::Int(x) => Some(*x as usize),
@@ -271,34 +551,52 @@ fn builtin_actor_set_max_children(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Re
     Ok(Value::Unit)
 }
 
-fn builtin_actor_spawn_count(vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_actor_spawn_count(
+    vm: &mut BytecodeVM<'_>,
+    _args: &[Value],
+) -> Result<Value, InterpError> {
     Ok(Value::Int(vm.spawn_count as i64))
 }
 
 // ── Actor management ───────────────────────────────────
 
-fn builtin_actor_set_mailbox_depth(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_actor_set_mailbox_depth(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     let depth = match &args[1] {
         Value::Int(n) if *n > 0 => *n as usize,
-        _ => return Err(InterpError::new("actor_set_mailbox_depth: depth must be positive i64")),
+        _ => {
+            return Err(InterpError::new(
+                "actor_set_mailbox_depth: depth must be positive i64",
+            ))
+        }
     };
     match &args[0] {
         Value::Actor(h) => {
             h.set_mailbox_depth_limit(depth);
             Ok(Value::Unit)
         }
-        _ => Err(InterpError::new("actor_set_mailbox_depth expects actor handle")),
+        _ => Err(InterpError::new(
+            "actor_set_mailbox_depth expects actor handle",
+        )),
     }
 }
 
-fn builtin_actor_mailbox_depth(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_actor_mailbox_depth(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Actor(h) => Ok(Value::Int(h.mailbox_depth() as i64)),
         _ => Err(InterpError::new("actor_mailbox_depth expects actor handle")),
     }
 }
 
-fn builtin_actor_is_faulted(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_actor_is_faulted(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     match &args[0] {
         Value::Actor(h) => Ok(Value::Bool(h.is_faulted())),
         _ => Err(InterpError::new("actor_is_faulted expects actor handle")),
@@ -315,11 +613,19 @@ fn builtin_actor_is_muted(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Va
 fn builtin_broadcast(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let targets = match &args[0] {
         Value::List(items) => items.clone(),
-        _ => return Err(InterpError::new("broadcast: first argument must be a List of actors")),
+        _ => {
+            return Err(InterpError::new(
+                "broadcast: first argument must be a List of actors",
+            ))
+        }
     };
     let method = match &args[1] {
         Value::String(s) => s.clone(),
-        _ => return Err(InterpError::new("broadcast: second argument must be a method name string")),
+        _ => {
+            return Err(InterpError::new(
+                "broadcast: second argument must be a method name string",
+            ))
+        }
     };
     let mut results = Vec::with_capacity(targets.len());
     for target in targets {
@@ -353,7 +659,11 @@ fn builtin_assert_state(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     };
     let expected_state = match &args[1] {
         Value::String(s) => s.clone(),
-        _ => return Err(InterpError::new("assert_state: state_name must be a string")),
+        _ => {
+            return Err(InterpError::new(
+                "assert_state: state_name must be a string",
+            ))
+        }
     };
     if actual_state != expected_state {
         return Err(InterpError::new(format!(
@@ -372,35 +682,55 @@ fn builtin_inject_fault(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     // Construct a Fault record matching tree-walker semantics.
     let mut fault_fields = std::collections::HashMap::new();
     fault_fields.insert("last_state".to_string(), Value::String(state_name.clone()));
-    fault_fields.insert("unexpected_event".to_string(), Value::String("inject_fault".to_string()));
+    fault_fields.insert(
+        "unexpected_event".to_string(),
+        Value::String("inject_fault".to_string()),
+    );
     fault_fields.insert("snapshot".to_string(), args[0].clone());
 
     // SystemTrace sub-record (v0.29.39 expanded).
     let mut trace_fields = std::collections::HashMap::new();
     trace_fields.insert("last_state_name".to_string(), Value::String(state_name));
-    trace_fields.insert("unexpected_event".to_string(), Value::String("inject_fault".to_string()));
+    trace_fields.insert(
+        "unexpected_event".to_string(),
+        Value::String("inject_fault".to_string()),
+    );
     trace_fields.insert("snapshot".to_string(), Value::String(String::new()));
 
     // MemoryDump: empty dump.
     let mut dump_fields = std::collections::HashMap::new();
     dump_fields.insert("count".to_string(), Value::Int(0));
     dump_fields.insert("regions".to_string(), Value::List(Vec::new()));
-    trace_fields.insert("memory_dump".to_string(), Value::Record(Some("MemoryDump".to_string()), dump_fields));
+    trace_fields.insert(
+        "memory_dump".to_string(),
+        Value::Record(Some("MemoryDump".to_string()), dump_fields),
+    );
 
     // PanicPayload: synthetic injection info.
     let mut panic_fields = std::collections::HashMap::new();
-    panic_fields.insert("error_type".to_string(), Value::String("InjectFault".to_string()));
+    panic_fields.insert(
+        "error_type".to_string(),
+        Value::String("InjectFault".to_string()),
+    );
     panic_fields.insert("file".to_string(), Value::String(String::new()));
     panic_fields.insert("line".to_string(), Value::Int(0));
     panic_fields.insert("stack_snapshot".to_string(), Value::String(String::new()));
-    trace_fields.insert("panic_payload".to_string(), Value::Record(Some("PanicPayload".to_string()), panic_fields));
+    trace_fields.insert(
+        "panic_payload".to_string(),
+        Value::Record(Some("PanicPayload".to_string()), panic_fields),
+    );
 
-    fault_fields.insert("trace".to_string(), Value::Record(Some("SystemTrace".to_string()), trace_fields));
+    fault_fields.insert(
+        "trace".to_string(),
+        Value::Record(Some("SystemTrace".to_string()), trace_fields),
+    );
     Ok(Value::Record(Some("Fault".to_string()), fault_fields))
 }
 
 fn builtin_spawn_detached(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let name = args[0].as_string().ok_or_else(|| InterpError::new("spawn_detached expects a string"))?;
+    let name = args[0]
+        .as_string()
+        .ok_or_else(|| InterpError::new("spawn_detached expects a string"))?;
     vm.spawn_actor(name)
 }
 
@@ -421,8 +751,15 @@ fn builtin_test_sandbox(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value
         if let Some(Value::List(calls)) = fields.get("calls") {
             for call in calls {
                 if let Value::Record(_, cf) = call {
-                    let method = cf.get("method")
-                        .and_then(|v| if let Value::String(s) = v { Some(s.clone()) } else { None })
+                    let method = cf
+                        .get("method")
+                        .and_then(|v| {
+                            if let Value::String(s) = v {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        })
                         .unwrap_or_default();
                     results.push(Value::String(format!("called:{}", method)));
                 }
@@ -431,8 +768,15 @@ fn builtin_test_sandbox(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value
         if let Some(Value::List(faults)) = fields.get("faults") {
             for fault in faults {
                 if let Value::Record(_, ff) = fault {
-                    let ftype = ff.get("fault_type")
-                        .and_then(|v| if let Value::String(s) = v { Some(s.clone()) } else { None })
+                    let ftype = ff
+                        .get("fault_type")
+                        .and_then(|v| {
+                            if let Value::String(s) = v {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        })
                         .unwrap_or_default();
                     results.push(Value::String(format!("injected:{}", ftype)));
                 }

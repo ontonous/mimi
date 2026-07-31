@@ -7,50 +7,225 @@ use crate::interp::value::Value;
 
 pub fn register(reg: &mut BuiltinRegistry) {
     // Abs
-    reg.register(BuiltinDesc { name: "abs", arity: 1, category: BuiltinCategory::Math, func: builtin_abs });
+    reg.register(BuiltinDesc {
+        name: "abs",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_abs,
+    });
     // Trig
-    reg.register(BuiltinDesc { name: "sin", arity: 1, category: BuiltinCategory::Math, func: builtin_sin });
-    reg.register(BuiltinDesc { name: "cos", arity: 1, category: BuiltinCategory::Math, func: builtin_cos });
-    reg.register(BuiltinDesc { name: "tan", arity: 1, category: BuiltinCategory::Math, func: builtin_tan });
-    reg.register(BuiltinDesc { name: "asin", arity: 1, category: BuiltinCategory::Math, func: builtin_asin });
-    reg.register(BuiltinDesc { name: "acos", arity: 1, category: BuiltinCategory::Math, func: builtin_acos });
-    reg.register(BuiltinDesc { name: "atan", arity: 1, category: BuiltinCategory::Math, func: builtin_atan });
-    reg.register(BuiltinDesc { name: "atan2", arity: 2, category: BuiltinCategory::Math, func: builtin_atan2 });
-    reg.register(BuiltinDesc { name: "sinh", arity: 1, category: BuiltinCategory::Math, func: builtin_sinh });
-    reg.register(BuiltinDesc { name: "cosh", arity: 1, category: BuiltinCategory::Math, func: builtin_cosh });
-    reg.register(BuiltinDesc { name: "tanh", arity: 1, category: BuiltinCategory::Math, func: builtin_tanh });
+    reg.register(BuiltinDesc {
+        name: "sin",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_sin,
+    });
+    reg.register(BuiltinDesc {
+        name: "cos",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_cos,
+    });
+    reg.register(BuiltinDesc {
+        name: "tan",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_tan,
+    });
+    reg.register(BuiltinDesc {
+        name: "asin",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_asin,
+    });
+    reg.register(BuiltinDesc {
+        name: "acos",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_acos,
+    });
+    reg.register(BuiltinDesc {
+        name: "atan",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_atan,
+    });
+    reg.register(BuiltinDesc {
+        name: "atan2",
+        arity: 2,
+        category: BuiltinCategory::Math,
+        func: builtin_atan2,
+    });
+    reg.register(BuiltinDesc {
+        name: "sinh",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_sinh,
+    });
+    reg.register(BuiltinDesc {
+        name: "cosh",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_cosh,
+    });
+    reg.register(BuiltinDesc {
+        name: "tanh",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_tanh,
+    });
     // Exp / log
-    reg.register(BuiltinDesc { name: "exp", arity: 1, category: BuiltinCategory::Math, func: builtin_exp });
-    reg.register(BuiltinDesc { name: "exp2", arity: 1, category: BuiltinCategory::Math, func: builtin_exp2 });
-    reg.register(BuiltinDesc { name: "ln", arity: 1, category: BuiltinCategory::Math, func: builtin_ln });
-    reg.register(BuiltinDesc { name: "log", arity: usize::MAX, category: BuiltinCategory::Math, func: builtin_log });
-    reg.register(BuiltinDesc { name: "log2", arity: 1, category: BuiltinCategory::Math, func: builtin_log2 });
-    reg.register(BuiltinDesc { name: "log10", arity: 1, category: BuiltinCategory::Math, func: builtin_log10 });
+    reg.register(BuiltinDesc {
+        name: "exp",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_exp,
+    });
+    reg.register(BuiltinDesc {
+        name: "exp2",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_exp2,
+    });
+    reg.register(BuiltinDesc {
+        name: "ln",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_ln,
+    });
+    reg.register(BuiltinDesc {
+        name: "log",
+        arity: usize::MAX,
+        category: BuiltinCategory::Math,
+        func: builtin_log,
+    });
+    reg.register(BuiltinDesc {
+        name: "log2",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_log2,
+    });
+    reg.register(BuiltinDesc {
+        name: "log10",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_log10,
+    });
     // Power / root
-    reg.register(BuiltinDesc { name: "sqrt", arity: 1, category: BuiltinCategory::Math, func: builtin_sqrt });
-    reg.register(BuiltinDesc { name: "cbrt", arity: 1, category: BuiltinCategory::Math, func: builtin_cbrt });
-    reg.register(BuiltinDesc { name: "pow", arity: 2, category: BuiltinCategory::Math, func: builtin_pow });
+    reg.register(BuiltinDesc {
+        name: "sqrt",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_sqrt,
+    });
+    reg.register(BuiltinDesc {
+        name: "cbrt",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_cbrt,
+    });
+    reg.register(BuiltinDesc {
+        name: "pow",
+        arity: 2,
+        category: BuiltinCategory::Math,
+        func: builtin_pow,
+    });
     // Rounding
-    reg.register(BuiltinDesc { name: "floor", arity: 1, category: BuiltinCategory::Math, func: builtin_floor });
-    reg.register(BuiltinDesc { name: "ceil", arity: 1, category: BuiltinCategory::Math, func: builtin_ceil });
-    reg.register(BuiltinDesc { name: "round", arity: 1, category: BuiltinCategory::Math, func: builtin_round });
+    reg.register(BuiltinDesc {
+        name: "floor",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_floor,
+    });
+    reg.register(BuiltinDesc {
+        name: "ceil",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_ceil,
+    });
+    reg.register(BuiltinDesc {
+        name: "round",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_round,
+    });
     // Min / max
-    reg.register(BuiltinDesc { name: "min", arity: 2, category: BuiltinCategory::Math, func: builtin_min });
-    reg.register(BuiltinDesc { name: "max", arity: 2, category: BuiltinCategory::Math, func: builtin_max });
+    reg.register(BuiltinDesc {
+        name: "min",
+        arity: 2,
+        category: BuiltinCategory::Math,
+        func: builtin_min,
+    });
+    reg.register(BuiltinDesc {
+        name: "max",
+        arity: 2,
+        category: BuiltinCategory::Math,
+        func: builtin_max,
+    });
     // Constants
-    reg.register(BuiltinDesc { name: "pi", arity: 0, category: BuiltinCategory::Math, func: builtin_pi });
+    reg.register(BuiltinDesc {
+        name: "pi",
+        arity: 0,
+        category: BuiltinCategory::Math,
+        func: builtin_pi,
+    });
     // Random
-    reg.register(BuiltinDesc { name: "random", arity: 0, category: BuiltinCategory::Math, func: builtin_random });
+    reg.register(BuiltinDesc {
+        name: "random",
+        arity: 0,
+        category: BuiltinCategory::Math,
+        func: builtin_random,
+    });
     // Float classification
-    reg.register(BuiltinDesc { name: "is_nan", arity: 1, category: BuiltinCategory::Math, func: builtin_is_nan });
-    reg.register(BuiltinDesc { name: "is_finite", arity: 1, category: BuiltinCategory::Math, func: builtin_is_finite });
-    reg.register(BuiltinDesc { name: "is_infinite", arity: 1, category: BuiltinCategory::Math, func: builtin_is_infinite });
-    reg.register(BuiltinDesc { name: "is_close", arity: 3, category: BuiltinCategory::Math, func: builtin_is_close });
-    reg.register(BuiltinDesc { name: "f64_eq_exact", arity: 2, category: BuiltinCategory::Math, func: builtin_f64_eq_exact });
+    reg.register(BuiltinDesc {
+        name: "is_nan",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_is_nan,
+    });
+    reg.register(BuiltinDesc {
+        name: "is_finite",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_is_finite,
+    });
+    reg.register(BuiltinDesc {
+        name: "is_infinite",
+        arity: 1,
+        category: BuiltinCategory::Math,
+        func: builtin_is_infinite,
+    });
+    reg.register(BuiltinDesc {
+        name: "is_close",
+        arity: 3,
+        category: BuiltinCategory::Math,
+        func: builtin_is_close,
+    });
+    reg.register(BuiltinDesc {
+        name: "f64_eq_exact",
+        arity: 2,
+        category: BuiltinCategory::Math,
+        func: builtin_f64_eq_exact,
+    });
     // Wrapping arithmetic
-    reg.register(BuiltinDesc { name: "wrapping_add", arity: 2, category: BuiltinCategory::Math, func: builtin_wrapping_add });
-    reg.register(BuiltinDesc { name: "wrapping_sub", arity: 2, category: BuiltinCategory::Math, func: builtin_wrapping_sub });
-    reg.register(BuiltinDesc { name: "wrapping_mul", arity: 2, category: BuiltinCategory::Math, func: builtin_wrapping_mul });
+    reg.register(BuiltinDesc {
+        name: "wrapping_add",
+        arity: 2,
+        category: BuiltinCategory::Math,
+        func: builtin_wrapping_add,
+    });
+    reg.register(BuiltinDesc {
+        name: "wrapping_sub",
+        arity: 2,
+        category: BuiltinCategory::Math,
+        func: builtin_wrapping_sub,
+    });
+    reg.register(BuiltinDesc {
+        name: "wrapping_mul",
+        arity: 2,
+        category: BuiltinCategory::Math,
+        func: builtin_wrapping_mul,
+    });
 }
 
 fn builtin_abs(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
@@ -113,7 +288,9 @@ unary_float!(builtin_log10, log10);
 fn builtin_log(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     // log(x) or log(x, base)
     if args.len() < 1 || args.len() > 2 {
-        return Err(InterpError::new("log expects 1 or 2 arguments (x) or (x, base)"));
+        return Err(InterpError::new(
+            "log expects 1 or 2 arguments (x) or (x, base)",
+        ));
     }
     let x = to_f64(&args[0])?;
     let r = if args.len() == 2 {
@@ -172,11 +349,13 @@ fn builtin_pow(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpE
     match (&args[0], &args[1]) {
         (Value::Int(base), Value::Int(exp)) => {
             if *exp < 0 {
-                return Err(InterpError::new("pow: negative exponent not allowed for integers"));
+                return Err(InterpError::new(
+                    "pow: negative exponent not allowed for integers",
+                ));
             }
-            let r = base.checked_pow(*exp as u32).ok_or_else(|| {
-                InterpError::new("pow: integer overflow")
-            })?;
+            let r = base
+                .checked_pow(*exp as u32)
+                .ok_or_else(|| InterpError::new("pow: integer overflow"))?;
             Ok(Value::Int(r))
         }
         _ => {
@@ -193,7 +372,9 @@ fn builtin_min(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Interp
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int((*a).min(*b))),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.min(*b))),
-        _ => Err(InterpError::new("min: arguments must have the same type (both int or both float)")),
+        _ => Err(InterpError::new(
+            "min: arguments must have the same type (both int or both float)",
+        )),
     }
 }
 
@@ -201,7 +382,9 @@ fn builtin_max(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Interp
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int((*a).max(*b))),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.max(*b))),
-        _ => Err(InterpError::new("max: arguments must have the same type (both int or both float)")),
+        _ => Err(InterpError::new(
+            "max: arguments must have the same type (both int or both float)",
+        )),
     }
 }
 
@@ -216,7 +399,10 @@ fn builtin_random(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, In
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos() as u64;
-    let val = (seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)) >> 33;
+    let val = (seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407))
+        >> 33;
     Ok(Value::Float((val as f64) / (u32::MAX as f64)))
 }
 

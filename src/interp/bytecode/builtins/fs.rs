@@ -6,37 +6,150 @@ use crate::interp::error::InterpError;
 use crate::interp::value::Value;
 
 pub fn register(reg: &mut BuiltinRegistry) {
-    reg.register(BuiltinDesc { name: "read_file", arity: 1, category: BuiltinCategory::System, func: builtin_read_file });
-    reg.register(BuiltinDesc { name: "write_file", arity: 2, category: BuiltinCategory::System, func: builtin_write_file });
-    reg.register(BuiltinDesc { name: "append_file", arity: 2, category: BuiltinCategory::System, func: builtin_append_file });
-    reg.register(BuiltinDesc { name: "file_exists", arity: 1, category: BuiltinCategory::System, func: builtin_file_exists });
-    reg.register(BuiltinDesc { name: "remove_file", arity: 1, category: BuiltinCategory::System, func: builtin_remove_file });
-    reg.register(BuiltinDesc { name: "is_dir", arity: 1, category: BuiltinCategory::System, func: builtin_is_dir });
-    reg.register(BuiltinDesc { name: "is_file", arity: 1, category: BuiltinCategory::System, func: builtin_is_file });
-    reg.register(BuiltinDesc { name: "mkdir_p", arity: 1, category: BuiltinCategory::System, func: builtin_mkdir_p });
-    reg.register(BuiltinDesc { name: "listdir", arity: 1, category: BuiltinCategory::System, func: builtin_listdir });
-    reg.register(BuiltinDesc { name: "walk_dir", arity: 1, category: BuiltinCategory::System, func: builtin_listdir });
-    reg.register(BuiltinDesc { name: "path_basename", arity: 1, category: BuiltinCategory::System, func: builtin_path_basename });
-    reg.register(BuiltinDesc { name: "path_dirname", arity: 1, category: BuiltinCategory::System, func: builtin_path_dirname });
-    reg.register(BuiltinDesc { name: "path_ext", arity: 1, category: BuiltinCategory::System, func: builtin_path_ext });
-    reg.register(BuiltinDesc { name: "path_join", arity: 2, category: BuiltinCategory::System, func: builtin_path_join });
+    reg.register(BuiltinDesc {
+        name: "read_file",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_read_file,
+    });
+    reg.register(BuiltinDesc {
+        name: "write_file",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_write_file,
+    });
+    reg.register(BuiltinDesc {
+        name: "append_file",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_append_file,
+    });
+    reg.register(BuiltinDesc {
+        name: "file_exists",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_file_exists,
+    });
+    reg.register(BuiltinDesc {
+        name: "remove_file",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_remove_file,
+    });
+    reg.register(BuiltinDesc {
+        name: "is_dir",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_is_dir,
+    });
+    reg.register(BuiltinDesc {
+        name: "is_file",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_is_file,
+    });
+    reg.register(BuiltinDesc {
+        name: "mkdir_p",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_mkdir_p,
+    });
+    reg.register(BuiltinDesc {
+        name: "listdir",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_listdir,
+    });
+    reg.register(BuiltinDesc {
+        name: "walk_dir",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_listdir,
+    });
+    reg.register(BuiltinDesc {
+        name: "path_basename",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_path_basename,
+    });
+    reg.register(BuiltinDesc {
+        name: "path_dirname",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_path_dirname,
+    });
+    reg.register(BuiltinDesc {
+        name: "path_ext",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_path_ext,
+    });
+    reg.register(BuiltinDesc {
+        name: "path_join",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_path_join,
+    });
     // Env
-    reg.register(BuiltinDesc { name: "args", arity: 0, category: BuiltinCategory::System, func: builtin_args });
-    reg.register(BuiltinDesc { name: "getenv", arity: 1, category: BuiltinCategory::System, func: builtin_getenv });
-    reg.register(BuiltinDesc { name: "set_env", arity: 2, category: BuiltinCategory::System, func: builtin_set_env });
+    reg.register(BuiltinDesc {
+        name: "args",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_args,
+    });
+    reg.register(BuiltinDesc {
+        name: "getenv",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_getenv,
+    });
+    reg.register(BuiltinDesc {
+        name: "set_env",
+        arity: 2,
+        category: BuiltinCategory::System,
+        func: builtin_set_env,
+    });
     // Time
-    reg.register(BuiltinDesc { name: "timestamp", arity: 0, category: BuiltinCategory::System, func: builtin_timestamp });
-    reg.register(BuiltinDesc { name: "timestamp_ms", arity: 0, category: BuiltinCategory::System, func: builtin_timestamp_ms });
-    reg.register(BuiltinDesc { name: "now", arity: 0, category: BuiltinCategory::System, func: builtin_timestamp });
-    reg.register(BuiltinDesc { name: "now_ms", arity: 0, category: BuiltinCategory::System, func: builtin_timestamp_ms });
-    reg.register(BuiltinDesc { name: "sleep", arity: 1, category: BuiltinCategory::System, func: builtin_sleep });
+    reg.register(BuiltinDesc {
+        name: "timestamp",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_timestamp,
+    });
+    reg.register(BuiltinDesc {
+        name: "timestamp_ms",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_timestamp_ms,
+    });
+    reg.register(BuiltinDesc {
+        name: "now",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_timestamp,
+    });
+    reg.register(BuiltinDesc {
+        name: "now_ms",
+        arity: 0,
+        category: BuiltinCategory::System,
+        func: builtin_timestamp_ms,
+    });
+    reg.register(BuiltinDesc {
+        name: "sleep",
+        arity: 1,
+        category: BuiltinCategory::System,
+        func: builtin_sleep,
+    });
 }
 
 fn expect_str(args: &[Value], idx: usize) -> Result<String, InterpError> {
     match args.get(idx) {
         Some(Value::String(s)) => Ok(s.clone()),
         Some(_) => Err(InterpError::new("expected a string argument")),
-        None => Err(InterpError::new(format!("missing argument at index {}", idx))),
+        None => Err(InterpError::new(format!(
+            "missing argument at index {}",
+            idx
+        ))),
     }
 }
 
@@ -47,14 +160,18 @@ fn builtin_read_file(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     // Guard against oversized files (matches tree-walker CL-H1).
     if let Ok(meta) = std::fs::metadata(&path) {
         if meta.len() > crate::path_safety::MAX_SOURCE_BYTES {
-            return Ok(Value::Variant("Err".into(), vec![
-                Value::String("read_file: file too large".to_string()),
-            ]));
+            return Ok(Value::Variant(
+                "Err".into(),
+                vec![Value::String("read_file: file too large".to_string())],
+            ));
         }
     }
     match std::fs::read_to_string(&path) {
         Ok(content) => Ok(Value::Variant("Ok".into(), vec![Value::String(content)])),
-        Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
+        Err(e) => Ok(Value::Variant(
+            "Err".into(),
+            vec![Value::String(e.to_string())],
+        )),
     }
 }
 
@@ -63,7 +180,10 @@ fn builtin_write_file(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value,
     let content = expect_str(args, 1)?;
     match std::fs::write(&path, &content) {
         Ok(()) => Ok(Value::Variant("Ok".into(), vec![Value::Unit])),
-        Err(e) => Ok(Value::Variant("Err".into(), vec![Value::String(e.to_string())])),
+        Err(e) => Ok(Value::Variant(
+            "Err".into(),
+            vec![Value::String(e.to_string())],
+        )),
     }
 }
 
@@ -71,7 +191,10 @@ fn builtin_append_file(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value
     let path = expect_str(args, 0)?;
     let content = expect_str(args, 1)?;
     use std::io::Write;
-    let ok = std::fs::OpenOptions::new().create(true).append(true).open(&path)
+    let ok = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
         .and_then(|mut file| file.write_all(content.as_bytes()))
         .is_ok();
     Ok(Value::Bool(ok))
@@ -108,7 +231,9 @@ fn builtin_listdir(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
         Ok(entries) => {
             let mut result = Vec::new();
             for entry in entries.flatten() {
-                result.push(Value::String(entry.file_name().to_string_lossy().to_string()));
+                result.push(Value::String(
+                    entry.file_name().to_string_lossy().to_string(),
+                ));
             }
             Ok(Value::List(result))
         }
@@ -156,7 +281,11 @@ fn builtin_path_join(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
 // ── Env ─────────────────────────────────────────────────
 
 fn builtin_args(vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
-    let args: Vec<Value> = vm.cli_args.iter().map(|s| Value::String(s.clone())).collect();
+    let args: Vec<Value> = vm
+        .cli_args
+        .iter()
+        .map(|s| Value::String(s.clone()))
+        .collect();
     Ok(Value::List(args))
 }
 
@@ -164,7 +293,10 @@ fn builtin_getenv(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
     let key = expect_str(args, 0)?;
     match std::env::var(&key) {
         Ok(val) => Ok(Value::Variant("Ok".into(), vec![Value::String(val)])),
-        Err(_) => Ok(Value::Variant("Err".into(), vec![Value::String(format!("env var '{}' not set", key))])),
+        Err(_) => Ok(Value::Variant(
+            "Err".into(),
+            vec![Value::String(format!("env var '{}' not set", key))],
+        )),
     }
 }
 

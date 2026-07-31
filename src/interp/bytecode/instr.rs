@@ -44,114 +44,262 @@ pub enum Op {
     // ═══════════════════════════════════════════════════════════
     // Constants & moves
     // ═══════════════════════════════════════════════════════════
-
     /// rd = constant_pool[idx]
-    LoadConst { rd: Reg, idx: ConstIdx },
+    LoadConst {
+        rd: Reg,
+        idx: ConstIdx,
+    },
     /// rd = Value::Unit
-    LoadUnit { rd: Reg },
+    LoadUnit {
+        rd: Reg,
+    },
     /// rd = Value::Bool(true)
-    LoadTrue { rd: Reg },
+    LoadTrue {
+        rd: Reg,
+    },
     /// rd = Value::Bool(false)
-    LoadFalse { rd: Reg },
+    LoadFalse {
+        rd: Reg,
+    },
     /// rd = rs (shallow copy; Value::Int/Float/Bool are Copy)
-    Mov { rd: Reg, rs: Reg },
+    Mov {
+        rd: Reg,
+        rs: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Integer arithmetic (checked: trap on overflow per SD-7)
     // ═══════════════════════════════════════════════════════════
-
-    AddInt { rd: Reg, ra: Reg, rb: Reg },
-    SubInt { rd: Reg, ra: Reg, rb: Reg },
-    MulInt { rd: Reg, ra: Reg, rb: Reg },
+    AddInt {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    SubInt {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    MulInt {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
     /// Trap on rb == 0 (E0801 per SD-8)
-    DivInt { rd: Reg, ra: Reg, rb: Reg },
+    DivInt {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
     /// Trap on rb == 0
-    ModInt { rd: Reg, ra: Reg, rb: Reg },
-    NegInt { rd: Reg, ra: Reg },
+    ModInt {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    NegInt {
+        rd: Reg,
+        ra: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Float arithmetic (finiteness invariant per SD-9)
     // ═══════════════════════════════════════════════════════════
-
-    AddFloat { rd: Reg, ra: Reg, rb: Reg },
-    SubFloat { rd: Reg, ra: Reg, rb: Reg },
-    MulFloat { rd: Reg, ra: Reg, rb: Reg },
-    DivFloat { rd: Reg, ra: Reg, rb: Reg },
-    NegFloat { rd: Reg, ra: Reg },
+    AddFloat {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    SubFloat {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    MulFloat {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    DivFloat {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    NegFloat {
+        rd: Reg,
+        ra: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Mixed int/float (int operand promoted to f64)
     // ═══════════════════════════════════════════════════════════
-
-    IntToFloat { rd: Reg, ra: Reg },
+    IntToFloat {
+        rd: Reg,
+        ra: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Comparison (rd = Bool)
     // ═══════════════════════════════════════════════════════════
+    EqInt {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    NeInt {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    LtInt {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    GtInt {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    LeInt {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    GeInt {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
 
-    EqInt { rd: Reg, ra: Reg, rb: Reg },
-    NeInt { rd: Reg, ra: Reg, rb: Reg },
-    LtInt { rd: Reg, ra: Reg, rb: Reg },
-    GtInt { rd: Reg, ra: Reg, rb: Reg },
-    LeInt { rd: Reg, ra: Reg, rb: Reg },
-    GeInt { rd: Reg, ra: Reg, rb: Reg },
-
-    EqFloat { rd: Reg, ra: Reg, rb: Reg },
-    LtFloat { rd: Reg, ra: Reg, rb: Reg },
-    GtFloat { rd: Reg, ra: Reg, rb: Reg },
-    LeFloat { rd: Reg, ra: Reg, rb: Reg },
-    GeFloat { rd: Reg, ra: Reg, rb: Reg },
+    EqFloat {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    LtFloat {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    GtFloat {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    LeFloat {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    GeFloat {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
 
     /// Generic equality (Value::eq — strings, lists, records, etc.)
-    Eq { rd: Reg, ra: Reg, rb: Reg },
-    Ne { rd: Reg, ra: Reg, rb: Reg },
+    Eq {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    Ne {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Bitwise (integers only)
     // ═══════════════════════════════════════════════════════════
-
-    BitAnd { rd: Reg, ra: Reg, rb: Reg },
-    BitOr { rd: Reg, ra: Reg, rb: Reg },
-    BitXor { rd: Reg, ra: Reg, rb: Reg },
-    Shl { rd: Reg, ra: Reg, rb: Reg },
-    Shr { rd: Reg, ra: Reg, rb: Reg },
-    BitNot { rd: Reg, ra: Reg },
+    BitAnd {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    BitOr {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    BitXor {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    Shl {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    Shr {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    BitNot {
+        rd: Reg,
+        ra: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Logical
     // ═══════════════════════════════════════════════════════════
-
-    Not { rd: Reg, ra: Reg },
+    Not {
+        rd: Reg,
+        ra: Reg,
+    },
     /// rd = ra && rb (logical AND, short-circuit not needed at bytecode level)
-    And { rd: Reg, ra: Reg, rb: Reg },
+    And {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
     /// rd = ra || rb (logical OR)
-    Or { rd: Reg, ra: Reg, rb: Reg },
+    Or {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // String
     // ═══════════════════════════════════════════════════════════
-
     /// rd = concat(ra, rb) — string concatenation
-    ConcatStr { rd: Reg, ra: Reg, rb: Reg },
+    ConcatStr {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
 
     /// ra += rb — in-place string append (avoids O(n²) realloc in loops)
-    StrAppend { ra: Reg, rb: Reg },
+    StrAppend {
+        ra: Reg,
+        rb: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Control flow
     // ═══════════════════════════════════════════════════════════
-
     /// Unconditional jump: pc += offset
-    Jmp { offset: JumpOff },
+    Jmp {
+        offset: JumpOff,
+    },
     /// Jump if ra is truthy: if truthy(ra) { pc += offset }
-    JmpIf { offset: JumpOff, ra: Reg },
+    JmpIf {
+        offset: JumpOff,
+        ra: Reg,
+    },
     /// Jump if ra is falsy: if !truthy(ra) { pc += offset }
-    JmpIfNot { offset: JumpOff, ra: Reg },
+    JmpIfNot {
+        offset: JumpOff,
+        ra: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Function calls
     // ═══════════════════════════════════════════════════════════
-
     /// Call user function: rd = func[idx](args[0..argc])
     /// Arguments are in registers [args_base .. args_base + argc).
     Call {
@@ -176,32 +324,60 @@ pub enum Op {
         argc: u16,
     },
     /// Return from function: return ra
-    Ret { ra: Reg },
+    Ret {
+        ra: Reg,
+    },
     /// Return Unit
     RetUnit,
     /// Early return from `?` operator: return ra, marking it as a rejection
     /// for `fails` transitions (distinguishes `?` Err from final-expression Err).
-    RetEarly { ra: Reg },
+    RetEarly {
+        ra: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Data structures
     // ═══════════════════════════════════════════════════════════
-
     /// rd = new List with `capacity` pre-allocated slots
-    NewList { rd: Reg, capacity: u32 },
+    NewList {
+        rd: Reg,
+        capacity: u32,
+    },
     /// Append rb to list in ra
-    ListPush { ra: Reg, rb: Reg },
+    ListPush {
+        ra: Reg,
+        rb: Reg,
+    },
     /// rd = ra[rb] (list index; rb is Int)
-    ListGet { rd: Reg, ra: Reg, rb: Reg },
+    ListGet {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
     /// ra[rb] = rc (list set)
-    ListSet { ra: Reg, rb: Reg, rc: Reg },
+    ListSet {
+        ra: Reg,
+        rb: Reg,
+        rc: Reg,
+    },
     /// rd = len(ra)
-    Len { rd: Reg, ra: Reg },
+    Len {
+        rd: Reg,
+        ra: Reg,
+    },
 
     /// rd = new Tuple with `arity` elements from [base .. base+arity)
-    NewTuple { rd: Reg, base: Reg, arity: u16 },
+    NewTuple {
+        rd: Reg,
+        base: Reg,
+        arity: u16,
+    },
     /// rd = ra.idx (tuple field access)
-    TupleGet { rd: Reg, ra: Reg, idx: FieldIdx },
+    TupleGet {
+        rd: Reg,
+        ra: Reg,
+        idx: FieldIdx,
+    },
 
     /// rd = new Record of type `type_name_idx` with fields from [base..base+count)
     /// Field names are stored in constants[type_name..type_name+count].
@@ -212,29 +388,59 @@ pub enum Op {
         count: u16,
     },
     /// rd = ra.field[field_name] — field name is a string constant
-    RecordGet { rd: Reg, ra: Reg, field: ConstIdx },
+    RecordGet {
+        rd: Reg,
+        ra: Reg,
+        field: ConstIdx,
+    },
     /// ra.field[field_name] = rb — field name is a string constant
-    RecordSet { ra: Reg, field: ConstIdx, rb: Reg },
+    RecordSet {
+        ra: Reg,
+        field: ConstIdx,
+        rb: Reg,
+    },
 
     /// rd = new Map (empty)
-    NewMap { rd: Reg },
+    NewMap {
+        rd: Reg,
+    },
     /// rd = new Set (empty)
-    NewSet { rd: Reg },
+    NewSet {
+        rd: Reg,
+    },
     /// rd = map_get(ra, rb) — get value for key rb from map ra
-    MapGet { rd: Reg, ra: Reg, rb: Reg },
+    MapGet {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
     /// map_set(ra, rb, rc) — set key rb to value rc in map ra
-    MapSet { ra: Reg, rb: Reg, rc: Reg },
+    MapSet {
+        ra: Reg,
+        rb: Reg,
+        rc: Reg,
+    },
     /// rd = map_contains(ra, rb) — check if map ra contains key rb
-    MapContains { rd: Reg, ra: Reg, rb: Reg },
+    MapContains {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
     /// set_add(ra, rb) — add value rb to set ra
-    SetAdd { ra: Reg, rb: Reg },
+    SetAdd {
+        ra: Reg,
+        rb: Reg,
+    },
     /// rd = set_contains(ra, rb) — check if set ra contains value rb
-    SetContains { rd: Reg, ra: Reg, rb: Reg },
+    SetContains {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Enum / pattern matching
     // ═══════════════════════════════════════════════════════════
-
     /// rd = Variant(type_name, variant_idx, payload[0..arity])
     NewVariant {
         rd: Reg,
@@ -244,35 +450,65 @@ pub enum Op {
         arity: u16,
     },
     /// rd = variant_tag(ra) — extract tag as Int
-    VariantTag { rd: Reg, ra: Reg },
+    VariantTag {
+        rd: Reg,
+        ra: Reg,
+    },
     /// rd = variant_payload(ra, idx) — extract payload field
-    VariantPayload { rd: Reg, ra: Reg, idx: FieldIdx },
+    VariantPayload {
+        rd: Reg,
+        ra: Reg,
+        idx: FieldIdx,
+    },
     /// rd = is_variant(ra, tag) — check if ra is a Variant with the given tag
-    IsVariant { rd: Reg, ra: Reg, tag: ConstIdx },
+    IsVariant {
+        rd: Reg,
+        ra: Reg,
+        tag: ConstIdx,
+    },
     /// rd = variant_get(ra, idx) — extract payload field (alias for VariantPayload)
-    VariantGet { rd: Reg, ra: Reg, idx: u16 },
+    VariantGet {
+        rd: Reg,
+        ra: Reg,
+        idx: u16,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Option / Result
     // ═══════════════════════════════════════════════════════════
-
     /// rd = Some(ra)
-    Some { rd: Reg, ra: Reg },
+    Some {
+        rd: Reg,
+        ra: Reg,
+    },
     /// rd = None
-    None { rd: Reg },
+    None {
+        rd: Reg,
+    },
     /// rd = Ok(ra)
-    Ok { rd: Reg, ra: Reg },
+    Ok {
+        rd: Reg,
+        ra: Reg,
+    },
     /// rd = Err(ra)
-    Err { rd: Reg, ra: Reg },
+    Err {
+        rd: Reg,
+        ra: Reg,
+    },
     /// rd = is_some(ra)
-    IsSome { rd: Reg, ra: Reg },
+    IsSome {
+        rd: Reg,
+        ra: Reg,
+    },
     /// rd = unwrap(ra) — trap if None
-    Unwrap { rd: Reg, ra: Reg },
+    Unwrap {
+        rd: Reg,
+        ra: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Closures
     // ═══════════════════════════════════════════════════════════
-
     /// rd = new Closure(proto_idx, captures[0..capture_count])
     NewClosure {
         rd: Reg,
@@ -284,7 +520,6 @@ pub enum Op {
     // ═══════════════════════════════════════════════════════════
     // Concurrency
     // ═══════════════════════════════════════════════════════════
-
     /// rd = spawn(func_idx, args[0..argc])
     Spawn {
         rd: Reg,
@@ -293,27 +528,43 @@ pub enum Op {
         argc: u16,
     },
     /// rd = await(ra)
-    Await { rd: Reg, ra: Reg },
+    Await {
+        rd: Reg,
+        ra: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Misc
     // ═══════════════════════════════════════════════════════════
-
     /// rd = ra as f64 / i32 / etc. (type cast)
-    Cast { rd: Reg, ra: Reg, target: u8 },
+    Cast {
+        rd: Reg,
+        ra: Reg,
+        target: u8,
+    },
     /// rd = to_string(ra)
-    ToString { rd: Reg, ra: Reg },
+    ToString {
+        rd: Reg,
+        ra: Reg,
+    },
     /// rd = typeof(ra) as string
-    TypeOf { rd: Reg, ra: Reg },
+    TypeOf {
+        rd: Reg,
+        ra: Reg,
+    },
     /// Trap with message from constant pool
-    Trap { msg: ConstIdx },
+    Trap {
+        msg: ConstIdx,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Actor / Flow / Session (Phase D)
     // ═══════════════════════════════════════════════════════════
-
     /// rd = spawn actor by name (constant pool string).
-    ActorSpawn { rd: Reg, actor: ConstIdx },
+    ActorSpawn {
+        rd: Reg,
+        actor: ConstIdx,
+    },
     /// rd = flow transition dispatch: flow.method(args[0..argc]).
     /// args[0] is the from-state value; runtime extracts state name
     /// and looks up the compiled transition function.
@@ -337,9 +588,15 @@ pub enum Op {
     },
 
     /// rd = Shared(ra) — wrap value in Arc<RwLock<>>.
-    SharedNew { rd: Reg, ra: Reg },
+    SharedNew {
+        rd: Reg,
+        ra: Reg,
+    },
     /// rd = Weak(ra) — downgrade Shared to Weak reference.
-    WeakNew { rd: Reg, ra: Reg },
+    WeakNew {
+        rd: Reg,
+        ra: Reg,
+    },
 
     /// No operation
     Nop,
@@ -347,12 +604,13 @@ pub enum Op {
     // ═══════════════════════════════════════════════════════════
     // Fault handling (OnFailure compensation)
     // ═══════════════════════════════════════════════════════════
-
     /// Set the current frame's fault handler PC.
     /// When a builtin call or `?` operator triggers a fault, execution
     /// jumps to `handler_pc` instead of returning the error.
     /// handler_pc is an absolute instruction index (not a relative offset).
-    SetFaultPc { handler_pc: u32 },
+    SetFaultPc {
+        handler_pc: u32,
+    },
     /// Clear the fault handler (normal scope exit — no compensation).
     ClearFaultPc,
     /// Like RetEarly but reads the register from frame.fault_reg (set

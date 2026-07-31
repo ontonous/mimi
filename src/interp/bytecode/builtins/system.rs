@@ -6,7 +6,12 @@ use crate::interp::error::InterpError;
 use crate::interp::value::Value;
 
 pub fn register(reg: &mut BuiltinRegistry) {
-    reg.register(BuiltinDesc { name: "exit", arity: usize::MAX, category: BuiltinCategory::System, func: builtin_exit });
+    reg.register(BuiltinDesc {
+        name: "exit",
+        arity: usize::MAX,
+        category: BuiltinCategory::System,
+        func: builtin_exit,
+    });
 }
 
 fn builtin_exit(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {

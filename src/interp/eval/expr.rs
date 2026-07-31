@@ -217,13 +217,29 @@ impl<'a> Interpreter<'a> {
                 BinOp::BitAnd => return Ok(Value::Int(a & b)),
                 BinOp::BitOr => return Ok(Value::Int(a | b)),
                 BinOp::BitXor => return Ok(Value::Int(a ^ b)),
-                BinOp::Shl => u32::try_from(*b).ok().and_then(|s| a.checked_shl(s)).map(Value::Int),
-                BinOp::Shr => u32::try_from(*b).ok().and_then(|s| a.checked_shr(s)).map(Value::Int),
+                BinOp::Shl => u32::try_from(*b)
+                    .ok()
+                    .and_then(|s| a.checked_shl(s))
+                    .map(Value::Int),
+                BinOp::Shr => u32::try_from(*b)
+                    .ok()
+                    .and_then(|s| a.checked_shr(s))
+                    .map(Value::Int),
                 _ => None, // Fall through to general path for Pow, Range, etc.
             };
             match result {
                 Some(v) => return Ok(v),
-                None if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Shl | BinOp::Shr) => {
+                None if matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Mod
+                        | BinOp::Shl
+                        | BinOp::Shr
+                ) =>
+                {
                     return Err(InterpError::integer_overflow("integer arithmetic overflow"));
                 }
                 _ => {} // Fall through
