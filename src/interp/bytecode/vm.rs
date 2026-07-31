@@ -1829,6 +1829,82 @@ impl<'a> BytecodeVM<'a> {
                             })?;
                             self.set_reg(rd, inner.clone());
                         }
+                        // Option/Result built-in methods (matches tree-walker call.rs:1178+).
+                        Value::Variant(tag, payload) => {
+                            let result = match (tag.as_str(), method_name.as_str()) {
+                                // unwrap / expect
+                                ("Some" | "Ok", "unwrap") | ("Some" | "Ok", "expect") => {
+                                    Ok(payload.first().cloned().unwrap_or(Value::Unit))
+                                }
+                                ("None", "unwrap") | ("None", "expect") => {
+                                    Err(InterpError::new("called unwrap() on None"))
+                                }
+                                ("Err", "unwrap") | ("Err", "expect") => {
+                                    let msg = payload.first()
+                                        .map(|v| format!("called unwrap() on Err({})", v))
+                                        .unwrap_or_else(|| "called unwrap() on Err".to_string());
+                                    Err(InterpError::new(msg))
+                                }
+                                // is_some / is_none / is_ok / is_err
+                                ("Some", "is_some") => Ok(Value::Bool(true)),
+                                ("None", "is_some") => Ok(Value::Bool(false)),
+                                ("Some", "is_none") => Ok(Value::Bool(false)),
+                                ("None", "is_none") => Ok(Value::Bool(true)),
+                                ("Ok", "is_ok") => Ok(Value::Bool(true)),
+                                ("Err", "is_ok") => Ok(Value::Bool(false)),
+                                ("Ok", "is_err") => Ok(Value::Bool(false)),
+                                ("Err", "is_err") => Ok(Value::Bool(true)),
+                                // and_then: call closure with payload on Some/Ok, pass through on None/Err
+                                ("Some" | "Ok", "and_then") => {
+                                    let closure_reg = args_base + 1;
+                                    let closure = self.get_reg(closure_reg).clone();
+                                    let arg = payload.first().cloned().unwrap_or(Value::Unit);
+                                    self.call_closure(&closure, &[arg])
+                                }
+                                ("None", "and_then") => Ok(Value::Variant("None".into(), vec![])),
+                                ("Err", "and_then") => Ok(receiver.clone()),
+                                // map: transform payload on Some/Ok, pass through on None/Err
+                                ("Some", "map") => {
+                                    let closure_reg = args_base + 1;
+                                    let closure = self.get_reg(closure_reg).clone();
+                                    let arg = payload.first().cloned().unwrap_or(Value::Unit);
+                                    let mapped = self.call_closure(&closure, &[arg])?;
+                                    Ok(Value::Variant("Some".into(), vec![mapped]))
+                                }
+                                ("Ok", "map") => {
+                                    let closure_reg = args_base + 1;
+                                    let closure = self.get_reg(closure_reg).clone();
+                                    let arg = payload.first().cloned().unwrap_or(Value::Unit);
+                                    let mapped = self.call_closure(&closure, &[arg])?;
+                                    Ok(Value::Variant("Ok".into(), vec![mapped]))
+                                }
+                                ("None", "map") => Ok(Value::Variant("None".into(), vec![])),
+                                ("Err", "map") => Ok(receiver.clone()),
+                                // map_err: transform error on Err, pass through on Ok/Some
+                                ("Err", "map_err") => {
+                                    let closure_reg = args_base + 1;
+                                    let closure = self.get_reg(closure_reg).clone();
+                                    let arg = payload.first().cloned().unwrap_or(Value::Unit);
+                                    let mapped = self.call_closure(&closure, &[arg])?;
+                                    Ok(Value::Variant("Err".into(), vec![mapped]))
+                                }
+                                ("Ok", "map_err") | ("Some", "map_err") => Ok(receiver.clone()),
+                                // unwrap_or: return payload on Some/Ok, default on None/Err
+                                ("Some" | "Ok", "unwrap_or") => {
+                                    Ok(payload.first().cloned().unwrap_or(Value::Unit))
+                                }
+                                ("None" | "Err", "unwrap_or") => {
+                                    Ok(self.get_reg(args_base + 1).clone())
+                                }
+                                _ => {
+                                    return Err(InterpError::new(format!(
+                                        "cannot call method '{}' on {}",
+                                        method_name, receiver
+                                    )));
+                                }
+                            };
+                            self.set_reg(rd, result?);
+                        }
                         _ => {
                             return Err(InterpError::new(format!(
                                 "cannot call method '{}' on {}",
