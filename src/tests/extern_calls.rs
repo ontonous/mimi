@@ -33,7 +33,7 @@ func main() -> i32 {
 "#;
     let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/nonexistent/lib.so");
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(
         result.is_err(),
         "calling extern with nonexistent lib should fail: {:?}",
@@ -64,7 +64,7 @@ func main() -> i32 {
 "#;
     let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/nonexistent/ffi_test_lib.so");
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "calling extern with bad lib should fail");
     let err = result.unwrap_err();
     assert!(
