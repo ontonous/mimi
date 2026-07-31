@@ -35,6 +35,10 @@ pub struct BytecodeCompiler {
     actor_names: std::collections::HashSet<String>,
     /// Known extern function names (for clear error messages).
     extern_names: std::collections::HashSet<String>,
+    /// Known capability names (for cap value construction).
+    cap_names: std::collections::HashSet<String>,
+    /// Capability components: cap_name → [component_names] (for combined caps).
+    cap_components: HashMap<String, Vec<String>>,
     /// Type hints from CheckedProgram: function name → parameter VarTypes.
     /// Eliminates expr_is_float heuristics for parameters (G1).
     type_hints: HashMap<String, Vec<VarType>>,
@@ -279,6 +283,8 @@ impl BytecodeCompiler {
             flow_names: std::collections::HashSet::new(),
             actor_names: std::collections::HashSet::new(),
             extern_names: std::collections::HashSet::new(),
+            cap_names: std::collections::HashSet::new(),
+            cap_components: HashMap::new(),
             type_hints: HashMap::new(),
             method_table: HashMap::new(),
             flow_defs: HashMap::new(),
@@ -376,6 +382,26 @@ impl BytecodeCompiler {
                 for f in &block.funcs {
                     self.extern_names.insert(f.name.clone());
                 }
+            }
+            // Collect capability names (for cap value construction).
+            if let Item::Cap(cap) = item {
+                self.cap_names.insert(cap.name.clone());
+                // Store components: combined caps have [part1, part2], simple caps have [name].
+                let components = if let Some(ref combined) = cap.combined_with {
+                    // Parse "A + B" format (matches tree-walker collect_caps).
+                    let parts: Vec<String> = combined
+                        .split(" + ")
+                        .map(|s| s.trim().to_string())
+                        .collect();
+                    if parts.len() > 1 {
+                        parts
+                    } else {
+                        vec![cap.name.clone(), combined.clone()]
+                    }
+                } else {
+                    vec![cap.name.clone()]
+                };
+                self.cap_components.insert(cap.name.clone(), components);
             }
         }
 
@@ -1031,6 +1057,17 @@ impl BytecodeCompiler {
                         base: 0,
                         arity: 0,
                     });
+                    return Ok(rd);
+                }
+                // Capability names: FullAccess, Read, Write, etc.
+                if self.cap_names.contains(name.as_str()) {
+                    let rd = fc.proto.alloc_reg();
+                    // Store components as comma-separated string for VM to parse.
+                    let components = self.cap_components.get(name.as_str())
+                        .map(|c| c.join(","))
+                        .unwrap_or_else(|| name.clone());
+                    let name_idx = fc.proto.add_const(ConstValue::Str(components));
+                    fc.emit(Op::NewCap { rd, name: name_idx });
                     return Ok(rd);
                 }
                 Err(InterpError::new(format!(
