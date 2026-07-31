@@ -95,7 +95,7 @@ func main() -> i32 {
     f()
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(
         result.is_ok(),
         "cap drop in closure should work: {:?}",

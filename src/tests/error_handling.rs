@@ -209,7 +209,7 @@ func main() -> i32 {
     x
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(

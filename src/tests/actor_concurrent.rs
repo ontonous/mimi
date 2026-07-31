@@ -370,7 +370,7 @@ func main() -> i32 {
     make_and_use()
 }
 "#;
-    assert_eq!(run_source(src), interp::Value::Int(55));
+    assert_eq!(run_source_treewalker(src), interp::Value::Int(55));
 }
 
 #[test]
