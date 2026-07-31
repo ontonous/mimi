@@ -865,6 +865,7 @@ fn lsp_references_definition_at_correct_line() {
 fn nan_is_falsy_in_if() {
     // NaN should be falsy in a boolean context.
     // NaN != NaN is the standard NaN check.
+    // SD-9: bytecode traps on NaN; tree-walker permits IEEE-754 NaN.
     let src = r#"
 func main() -> i32 {
     let nan = sqrt(-1.0)
@@ -875,7 +876,7 @@ func main() -> i32 {
 }
 "#;
     assert!(check_source(src).is_ok());
-    assert_eq!(run_source(src).as_int().unwrap_or(-1), 1);
+    assert_eq!(run_source_treewalker(src).as_int().unwrap_or(-1), 1);
 }
 
 #[test]
@@ -1259,6 +1260,7 @@ fn dual_nan_falsy() {
     if !can_link() {
         return;
     }
+    // SD-9: bytecode traps on NaN; tree-walker permits IEEE-754 NaN.
     let src = r#"
 func main() -> i32 {
     let nan = sqrt(-1.0)
@@ -1268,7 +1270,7 @@ func main() -> i32 {
     return 1
 }
 "#;
-    let interp_val = run_source(src);
+    let interp_val = run_source_treewalker(src);
     let codegen_out = compile_and_run(src);
     if let Ok(out) = codegen_out {
         let codegen_val: i64 = out.trim().parse().unwrap_or(-999);
