@@ -171,7 +171,7 @@ func main() -> i32 {
     x / y
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "runtime division by zero should error");
     let err = result.unwrap_err();
     assert!(
@@ -189,7 +189,7 @@ func main() -> i32 {
     list[10]
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "index out of bounds should error");
     let err = result.unwrap_err();
     assert!(
@@ -206,7 +206,7 @@ func main() -> i32 {
     pop([])
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "pop from empty list should error");
     let err = result.unwrap_err();
     assert!(
@@ -224,7 +224,7 @@ func main() -> i32 {
     42
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "assert(false) should error");
     let err = result.unwrap_err();
     assert!(
@@ -283,7 +283,7 @@ func main() -> i32 {
     nonexistent()
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "undefined function should error");
 }
 
@@ -296,7 +296,7 @@ func main() -> string {
     s
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err(), "use after move should error");
 }
 
@@ -309,7 +309,7 @@ func main() -> i32 {
     x
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(
         result.is_err(),
         "mutating immutable should error at runtime"
