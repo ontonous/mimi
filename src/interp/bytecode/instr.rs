@@ -497,6 +497,11 @@ pub enum Op {
     None {
         rd: Reg,
     },
+    /// rd = Cap([name]) — create a capability value.
+    NewCap {
+        rd: Reg,
+        name: ConstIdx,
+    },
     /// rd = Ok(ra)
     Ok {
         rd: Reg,

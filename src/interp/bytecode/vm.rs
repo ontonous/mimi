@@ -1583,6 +1583,16 @@ impl<'a> BytecodeVM<'a> {
                 Op::None { rd } => {
                     self.set_reg(rd, Value::Variant("None".into(), vec![]));
                 }
+                Op::NewCap { rd, name } => {
+                    let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
+                    let cap_str = match &proto.constants[name as usize] {
+                        ConstValue::Str(s) => s.clone(),
+                        _ => "unknown_cap".to_string(),
+                    };
+                    // Components stored as comma-separated string.
+                    let components: Vec<String> = cap_str.split(',').map(|s| s.to_string()).collect();
+                    self.set_reg(rd, Value::Cap(components));
+                }
                 Op::Ok { rd, ra } => {
                     let v = self.get_reg(ra).clone();
                     self.set_reg(rd, Value::Variant("Ok".into(), vec![v]));
@@ -1828,6 +1838,33 @@ impl<'a> BytecodeVM<'a> {
                                 InterpError::new(format!("shared read lock failed: {}", e))
                             })?;
                             self.set_reg(rd, inner.clone());
+                        }
+                        // Capability methods (split, drop).
+                        Value::Cap(components) => {
+                            let result: Result<Value, InterpError> = match method_name.as_str() {
+                                "split" => {
+                                    // Split combined cap into tuple of individual caps.
+                                    if components.len() <= 1 {
+                                        Err(InterpError::new(
+                                            "cannot split a simple capability (no combined parts)",
+                                        ))
+                                    } else {
+                                        let parts: Vec<Value> = components
+                                            .iter()
+                                            .map(|c| Value::Cap(vec![c.clone()]))
+                                            .collect();
+                                        Ok(Value::Tuple(parts))
+                                    }
+                                }
+                                "drop" => Ok(Value::Unit),
+                                _ => {
+                                    return Err(InterpError::new(format!(
+                                        "cannot call method '{}' on Cap",
+                                        method_name
+                                    )));
+                                }
+                            };
+                            self.set_reg(rd, result?);
                         }
                         // Set built-in methods (remove, insert, is_empty, contains, size, to_list).
                         Value::Set(items) => {

@@ -117,6 +117,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::VariantGet { .. } => "VARIANT_GET",
         Op::Some { .. } => "SOME",
         Op::None { .. } => "NONE",
+        Op::NewCap { .. } => "NEW_CAP",
         Op::Ok { .. } => "OK",
         Op::Err { .. } => "ERR",
         Op::IsSome { .. } => "IS_SOME",
@@ -396,6 +397,9 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         }
         Op::Some { rd, ra } => format!("{:04}  {:<16} r{} = Some(r{})", pc, name, rd, ra),
         Op::None { rd } => format!("{:04}  {:<16} r{} = None", pc, name, rd),
+        Op::NewCap { rd, name: cap_idx } => {
+            format!("{:04}  {:<16} r{} = Cap(const[{}])", pc, name, rd, cap_idx)
+        }
         Op::Ok { rd, ra } => format!("{:04}  {:<16} r{} = Ok(r{})", pc, name, rd, ra),
         Op::Err { rd, ra } => format!("{:04}  {:<16} r{} = Err(r{})", pc, name, rd, ra),
         Op::IsSome { rd, ra } => format!("{:04}  {:<16} r{} = is_some(r{})", pc, name, rd, ra),

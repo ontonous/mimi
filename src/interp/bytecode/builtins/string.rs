@@ -34,7 +34,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
     });
     reg.register(BuiltinDesc {
         name: "split",
-        arity: 2,
+        arity: usize::MAX, // 1 arg = Cap.split(), 2 args = string.split(delimiter)
         category: BuiltinCategory::String,
         func: builtin_str_split,
     });
@@ -294,6 +294,23 @@ fn builtin_str_substring(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
 }
 
 fn builtin_str_split(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    // Cap.split() — split combined capability into tuple of parts.
+    if args.len() == 1 {
+        if let Value::Cap(components) = &args[0] {
+            if components.len() <= 1 {
+                return Err(InterpError::new(
+                    "cannot split a simple capability (no combined parts)",
+                ));
+            }
+            let parts: Vec<Value> = components
+                .iter()
+                .map(|c| Value::Cap(vec![c.clone()]))
+                .collect();
+            return Ok(Value::Tuple(parts));
+        }
+        return Err(InterpError::new("split with 1 argument expects a Cap value"));
+    }
+    // String split: split(string, delimiter).
     match (&args[0], &args[1]) {
         (Value::String(s), Value::String(d)) => {
             let parts: Vec<Value> = s
