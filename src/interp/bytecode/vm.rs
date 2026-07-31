@@ -1183,6 +1183,14 @@ impl<'a> BytecodeVM<'a> {
                             let elem = t[idx as usize].clone();
                             self.set_reg(rd, elem);
                         }
+                        // Newtype .0 accessor: unwrap the inner value.
+                        // Newtypes are represented as Variant(name, [inner]) in bytecode.
+                        Value::Newtype(_, inner) if idx == 0 => {
+                            self.set_reg(rd, *inner);
+                        }
+                        Value::Variant(_, payload) if idx == 0 && payload.len() == 1 => {
+                            self.set_reg(rd, payload[0].clone());
+                        }
                         other => {
                             return Err(InterpError::new(format!(
                                 "tuple get: expected Tuple, got {}",
