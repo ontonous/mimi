@@ -21,7 +21,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
     });
     reg.register(BuiltinDesc {
         name: "from_json_typed",
-        arity: 1,
+        arity: 2,
         category: BuiltinCategory::System,
         func: builtin_from_json_typed,
     });
@@ -421,17 +421,178 @@ fn builtin_from_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     }
 }
 
-/// from_json_typed: parse JSON string into a Mimi Value (Record/List/Int/etc).
+/// from_json_typed: parse JSON string into a Mimi Value, coerced to target type.
 /// Called by the compiler when `from_json::<T>(s)` is used with a type parameter.
+/// args[0] = JSON string, args[1] = type string (e.g. "List<(i32, i32)>").
 fn builtin_from_json_typed(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    match &args[0] {
-        Value::String(s) => {
-            let jv: serde_json::Value = serde_json::from_str(s)
-                .map_err(|e| InterpError::new(format!("from_json parse error: {}", e)))?;
-            Ok(json_to_value(&jv))
+    let json_str = match &args[0] {
+        Value::String(s) => s.clone(),
+        _ => return Err(InterpError::new("from_json::<T> expects a string")),
+    };
+    let jv: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| InterpError::new(format!("from_json parse error: {}", e)))?;
+    let val = json_to_value(&jv);
+    // If a type string is provided, coerce the value to the target type.
+    if args.len() >= 2 {
+        if let Value::String(type_str) = &args[1] {
+            return coerce_json_to_type(val, type_str);
         }
-        _ => Err(InterpError::new("from_json::<T> expects a string")),
     }
+    Ok(val)
+}
+
+/// Coerce a generic JSON value to a target type specified as a string.
+/// Handles: scalars, List<T>, Option<T>, Result<T,E>, Set<T>, tuples, records.
+fn coerce_json_to_type(val: Value, type_str: &str) -> Result<Value, InterpError> {
+    let type_str = type_str.trim();
+    match type_str {
+        // Scalars
+        "i32" | "i64" | "i8" | "i16" | "int" => match val {
+            Value::Int(n) => Ok(Value::Int(n)),
+            Value::Float(f) => Ok(Value::Int(f as i64)),
+            _ => Err(InterpError::new(format!("expected integer, got {}", val))),
+        },
+        "f32" | "f64" | "float" => match val {
+            Value::Float(f) => Ok(Value::Float(f)),
+            Value::Int(n) => Ok(Value::Float(n as f64)),
+            _ => Err(InterpError::new(format!("expected float, got {}", val))),
+        },
+        "string" | "str" => match val {
+            Value::String(s) => Ok(Value::String(s)),
+            _ => Err(InterpError::new(format!("expected string, got {}", val))),
+        },
+        "bool" => match val {
+            Value::Bool(b) => Ok(Value::Bool(b)),
+            _ => Err(InterpError::new(format!("expected bool, got {}", val))),
+        },
+        "unit" | "()" => Ok(Value::Unit),
+        _ => {
+            // Parameterized types: List<T>, Option<T>, Result<T,E>, Set<T>, (T1,T2,...)
+            if let Some(inner) = type_str.strip_prefix("List<").and_then(|s| s.strip_suffix('>')) {
+                match val {
+                    Value::List(items) => {
+                        let converted: Result<Vec<Value>, _> = items
+                            .into_iter()
+                            .map(|item| coerce_json_to_type(item, inner))
+                            .collect();
+                        Ok(Value::List(converted?))
+                    }
+                    _ => Err(InterpError::new(format!("expected list, got {}", val))),
+                }
+            } else if let Some(inner) = type_str.strip_prefix("Option<").and_then(|s| s.strip_suffix('>')) {
+                match val {
+                    Value::Unit => Ok(Value::Variant("None".into(), vec![])),
+                    val => {
+                        let inner_val = coerce_json_to_type(val, inner)?;
+                        Ok(Value::Variant("Some".into(), vec![inner_val]))
+                    }
+                }
+            } else if type_str.starts_with("Result<") {
+                // Parse Result<T, E>
+                let inner = &type_str[7..type_str.len()-1]; // strip "Result<" and ">"
+                let parts = split_type_args(inner);
+                if parts.len() == 2 {
+                    let (ok_type, err_type) = (&parts[0], &parts[1]);
+                    match val {
+                        Value::Variant(name, payload) if name == "Ok" => {
+                            let converted = payload.into_iter()
+                                .map(|v| coerce_json_to_type(v, ok_type))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            Ok(Value::Variant("Ok".into(), converted))
+                        }
+                        Value::Variant(name, payload) if name == "Err" => {
+                            let converted = payload.into_iter()
+                                .map(|v| coerce_json_to_type(v, err_type))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            Ok(Value::Variant("Err".into(), converted))
+                        }
+                        Value::Record(_, ref fields) if fields.len() == 1 => {
+                            if let Some(v) = fields.get("Ok") {
+                                let ok_val = coerce_json_to_type(v.clone(), ok_type)?;
+                                Ok(Value::Variant("Ok".into(), vec![ok_val]))
+                            } else if let Some(v) = fields.get("Err") {
+                                let err_val = coerce_json_to_type(v.clone(), err_type)?;
+                                Ok(Value::Variant("Err".into(), vec![err_val]))
+                            } else {
+                                let ok_val = coerce_json_to_type(val, ok_type)?;
+                                Ok(Value::Variant("Ok".into(), vec![ok_val]))
+                            }
+                        }
+                        other => {
+                            let ok_val = coerce_json_to_type(other, ok_type)?;
+                            Ok(Value::Variant("Ok".into(), vec![ok_val]))
+                        }
+                    }
+                } else {
+                    Ok(val) // can't parse, return as-is
+                }
+            } else if let Some(inner) = type_str.strip_prefix("Set<").and_then(|s| s.strip_suffix('>')) {
+                match val {
+                    Value::List(items) | Value::Set(items) => {
+                        let mut out = Vec::new();
+                        for item in items {
+                            let v = coerce_json_to_type(item, inner)?;
+                            if !out.iter().any(|e: &Value| crate::interp::value::values_equal(e, &v)) {
+                                out.push(v);
+                            }
+                        }
+                        Ok(Value::Set(out))
+                    }
+                    other => Err(InterpError::new(format!("expected list/set for Set, got {}", other))),
+                }
+            } else if type_str.starts_with('(') && type_str.ends_with(')') {
+                // Tuple type: (T1, T2, ...)
+                let inner = &type_str[1..type_str.len()-1];
+                let parts = split_type_args(inner);
+                match val {
+                    Value::List(items) if items.len() == parts.len() => {
+                        let converted: Result<Vec<Value>, _> = items.into_iter()
+                            .zip(parts.iter())
+                            .map(|(item, ty)| coerce_json_to_type(item, ty))
+                            .collect();
+                        Ok(Value::Tuple(converted?))
+                    }
+                    Value::Tuple(items) if items.len() == parts.len() => {
+                        let converted: Result<Vec<Value>, _> = items.into_iter()
+                            .zip(parts.iter())
+                            .map(|(item, ty)| coerce_json_to_type(item, ty))
+                            .collect();
+                        Ok(Value::Tuple(converted?))
+                    }
+                    _ => Err(InterpError::new(format!(
+                        "expected {}-element list/tuple for {}, got {}",
+                        parts.len(), type_str, val
+                    ))),
+                }
+            } else {
+                // Unknown type — return value as-is (best effort).
+                Ok(val)
+            }
+        }
+    }
+}
+
+/// Split top-level type arguments by comma, respecting nested < > and ( ).
+fn split_type_args(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0;
+    let mut current = String::new();
+    for ch in s.chars() {
+        match ch {
+            '<' | '(' => { depth += 1; current.push(ch); }
+            '>' | ')' => { depth -= 1; current.push(ch); }
+            ',' if depth == 0 => {
+                parts.push(current.trim().to_string());
+                current = String::new();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        parts.push(trimmed);
+    }
+    parts
 }
 
 fn builtin_json_get_string(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
