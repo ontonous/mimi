@@ -373,7 +373,18 @@ fn value_to_json(v: &Value) -> serde_json::Value {
             serde_json::Value::Object(map)
         }
         Value::Tuple(t) => serde_json::Value::Array(t.iter().map(value_to_json).collect()),
-        Value::Set(s) => serde_json::Value::Array(s.iter().map(value_to_json).collect()),
+        Value::Set(s) => {
+            // Sort elements for deterministic JSON output (matches Display ordering).
+            let mut sorted: Vec<String> = s.iter().map(|v| format!("{}", v)).collect();
+            sorted.sort();
+            let json_elems: Vec<serde_json::Value> = s.iter().map(value_to_json).collect();
+            // Re-order JSON elements to match sorted Display order.
+            let mut indexed: Vec<(String, serde_json::Value)> = s.iter()
+                .map(|v| (format!("{}", v), value_to_json(v)))
+                .collect();
+            indexed.sort_by(|a, b| a.0.cmp(&b.0));
+            serde_json::Value::Array(indexed.into_iter().map(|(_, j)| j).collect())
+        }
         Value::Variant(tag, payload) => {
             // Serialize as {"Tag": [payload...]} for variants with payload,
             // or "Tag" for nullary variants. Matches codegen JSON encoding.
