@@ -6,12 +6,42 @@ use crate::interp::error::InterpError;
 use crate::interp::value::Value;
 
 pub fn register(reg: &mut BuiltinRegistry) {
-    reg.register(BuiltinDesc { name: "to_int", arity: 1, category: BuiltinCategory::Convert, func: builtin_to_int });
-    reg.register(BuiltinDesc { name: "to_float", arity: 1, category: BuiltinCategory::Convert, func: builtin_to_float });
-    reg.register(BuiltinDesc { name: "to_string", arity: 1, category: BuiltinCategory::Convert, func: builtin_to_string });
-    reg.register(BuiltinDesc { name: "str", arity: 1, category: BuiltinCategory::Convert, func: builtin_to_string });
-    reg.register(BuiltinDesc { name: "int", arity: 1, category: BuiltinCategory::Convert, func: builtin_to_int });
-    reg.register(BuiltinDesc { name: "float", arity: 1, category: BuiltinCategory::Convert, func: builtin_to_float });
+    reg.register(BuiltinDesc {
+        name: "to_int",
+        arity: 1,
+        category: BuiltinCategory::Convert,
+        func: builtin_to_int,
+    });
+    reg.register(BuiltinDesc {
+        name: "to_float",
+        arity: 1,
+        category: BuiltinCategory::Convert,
+        func: builtin_to_float,
+    });
+    reg.register(BuiltinDesc {
+        name: "to_string",
+        arity: 1,
+        category: BuiltinCategory::Convert,
+        func: builtin_to_string,
+    });
+    reg.register(BuiltinDesc {
+        name: "str",
+        arity: 1,
+        category: BuiltinCategory::Convert,
+        func: builtin_to_string,
+    });
+    reg.register(BuiltinDesc {
+        name: "int",
+        arity: 1,
+        category: BuiltinCategory::Convert,
+        func: builtin_to_int,
+    });
+    reg.register(BuiltinDesc {
+        name: "float",
+        arity: 1,
+        category: BuiltinCategory::Convert,
+        func: builtin_to_float,
+    });
 }
 
 fn builtin_to_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {

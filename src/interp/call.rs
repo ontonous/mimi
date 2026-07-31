@@ -380,7 +380,9 @@ impl<'a> Interpreter<'a> {
                 match &args[0] {
                     Value::List(l) => Ok(Value::Bool(l.is_empty())),
                     Value::String(s) => Ok(Value::Bool(s.is_empty())),
-                    _ => Err(InterpError::new("is_empty: argument must be a list or string")),
+                    _ => Err(InterpError::new(
+                        "is_empty: argument must be a list or string",
+                    )),
                 }
             }
             "any" => {
@@ -388,7 +390,15 @@ impl<'a> Interpreter<'a> {
                     return Err(InterpError::new("any expects 2 arguments (list, pred)"));
                 }
                 match (&args[0], &args[1]) {
-                    (Value::List(l), Value::Closure { params, body, captured, .. }) => {
+                    (
+                        Value::List(l),
+                        Value::Closure {
+                            params,
+                            body,
+                            captured,
+                            ..
+                        },
+                    ) => {
                         if params.len() != 1 {
                             return Err(InterpError::new("any closure must take 1 argument"));
                         }
@@ -414,7 +424,15 @@ impl<'a> Interpreter<'a> {
                     return Err(InterpError::new("all expects 2 arguments (list, pred)"));
                 }
                 match (&args[0], &args[1]) {
-                    (Value::List(l), Value::Closure { params, body, captured, .. }) => {
+                    (
+                        Value::List(l),
+                        Value::Closure {
+                            params,
+                            body,
+                            captured,
+                            ..
+                        },
+                    ) => {
                         if params.len() != 1 {
                             return Err(InterpError::new("all closure must take 1 argument"));
                         }

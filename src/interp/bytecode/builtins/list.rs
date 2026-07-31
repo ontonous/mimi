@@ -7,47 +7,222 @@ use crate::interp::value::Value;
 
 pub fn register(reg: &mut BuiltinRegistry) {
     // Core list
-    reg.register(BuiltinDesc { name: "len", arity: 1, category: BuiltinCategory::List, func: builtin_len });
-    reg.register(BuiltinDesc { name: "size", arity: 1, category: BuiltinCategory::List, func: builtin_len });
-    reg.register(BuiltinDesc { name: "push", arity: 2, category: BuiltinCategory::List, func: builtin_push });
-    reg.register(BuiltinDesc { name: "pop", arity: 1, category: BuiltinCategory::List, func: builtin_pop });
-    reg.register(BuiltinDesc { name: "range", arity: 2, category: BuiltinCategory::List, func: builtin_range });
-    reg.register(BuiltinDesc { name: "is_empty", arity: 1, category: BuiltinCategory::List, func: builtin_is_empty });
-    reg.register(BuiltinDesc { name: "find", arity: 2, category: BuiltinCategory::List, func: builtin_find });
+    reg.register(BuiltinDesc {
+        name: "len",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_len,
+    });
+    reg.register(BuiltinDesc {
+        name: "size",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_len,
+    });
+    reg.register(BuiltinDesc {
+        name: "push",
+        arity: 2,
+        category: BuiltinCategory::List,
+        func: builtin_push,
+    });
+    reg.register(BuiltinDesc {
+        name: "pop",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_pop,
+    });
+    reg.register(BuiltinDesc {
+        name: "range",
+        arity: 2,
+        category: BuiltinCategory::List,
+        func: builtin_range,
+    });
+    reg.register(BuiltinDesc {
+        name: "is_empty",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_is_empty,
+    });
+    reg.register(BuiltinDesc {
+        name: "find",
+        arity: 2,
+        category: BuiltinCategory::List,
+        func: builtin_find,
+    });
     // Sort
-    reg.register(BuiltinDesc { name: "sort_list", arity: 1, category: BuiltinCategory::List, func: builtin_sort_list });
-    reg.register(BuiltinDesc { name: "sort", arity: 1, category: BuiltinCategory::List, func: builtin_sort_list });
-    reg.register(BuiltinDesc { name: "sort_f64", arity: 1, category: BuiltinCategory::List, func: builtin_sort_list });
-    reg.register(BuiltinDesc { name: "sort_str", arity: 1, category: BuiltinCategory::List, func: builtin_sort_list });
+    reg.register(BuiltinDesc {
+        name: "sort_list",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_sort_list,
+    });
+    reg.register(BuiltinDesc {
+        name: "sort",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_sort_list,
+    });
+    reg.register(BuiltinDesc {
+        name: "sort_f64",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_sort_list,
+    });
+    reg.register(BuiltinDesc {
+        name: "sort_str",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_sort_list,
+    });
     // Transform
-    reg.register(BuiltinDesc { name: "reverse", arity: 1, category: BuiltinCategory::List, func: builtin_reverse });
-    reg.register(BuiltinDesc { name: "flatten", arity: 1, category: BuiltinCategory::List, func: builtin_flatten });
-    reg.register(BuiltinDesc { name: "enumerate", arity: 1, category: BuiltinCategory::List, func: builtin_enumerate });
-    reg.register(BuiltinDesc { name: "zip", arity: 2, category: BuiltinCategory::List, func: builtin_zip });
-    reg.register(BuiltinDesc { name: "sum", arity: 1, category: BuiltinCategory::List, func: builtin_sum });
-    reg.register(BuiltinDesc { name: "to_list", arity: 1, category: BuiltinCategory::List, func: builtin_to_list });
-    reg.register(BuiltinDesc { name: "clone", arity: 1, category: BuiltinCategory::List, func: builtin_clone });
-    reg.register(BuiltinDesc { name: "__slice", arity: 3, category: BuiltinCategory::List, func: builtin_slice });
+    reg.register(BuiltinDesc {
+        name: "reverse",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_reverse,
+    });
+    reg.register(BuiltinDesc {
+        name: "flatten",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_flatten,
+    });
+    reg.register(BuiltinDesc {
+        name: "enumerate",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_enumerate,
+    });
+    reg.register(BuiltinDesc {
+        name: "zip",
+        arity: 2,
+        category: BuiltinCategory::List,
+        func: builtin_zip,
+    });
+    reg.register(BuiltinDesc {
+        name: "sum",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_sum,
+    });
+    reg.register(BuiltinDesc {
+        name: "to_list",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_to_list,
+    });
+    reg.register(BuiltinDesc {
+        name: "clone",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_clone,
+    });
+    reg.register(BuiltinDesc {
+        name: "__slice",
+        arity: 3,
+        category: BuiltinCategory::List,
+        func: builtin_slice,
+    });
     // Higher-order aliases
-    reg.register(BuiltinDesc { name: "map", arity: 2, category: BuiltinCategory::List, func: super::hof::builtin_map_list });
-    reg.register(BuiltinDesc { name: "filter", arity: 2, category: BuiltinCategory::List, func: super::hof::builtin_filter_list });
-    reg.register(BuiltinDesc { name: "reduce", arity: 3, category: BuiltinCategory::List, func: super::hof::builtin_reduce_list });
+    reg.register(BuiltinDesc {
+        name: "map",
+        arity: 2,
+        category: BuiltinCategory::List,
+        func: super::hof::builtin_map_list,
+    });
+    reg.register(BuiltinDesc {
+        name: "filter",
+        arity: 2,
+        category: BuiltinCategory::List,
+        func: super::hof::builtin_filter_list,
+    });
+    reg.register(BuiltinDesc {
+        name: "reduce",
+        arity: 3,
+        category: BuiltinCategory::List,
+        func: super::hof::builtin_reduce_list,
+    });
     // Map operations
-    reg.register(BuiltinDesc { name: "map_new", arity: 0, category: BuiltinCategory::List, func: builtin_map_new });
-    reg.register(BuiltinDesc { name: "map_get", arity: 2, category: BuiltinCategory::List, func: builtin_map_get });
-    reg.register(BuiltinDesc { name: "map_set", arity: 3, category: BuiltinCategory::List, func: builtin_map_set });
-    reg.register(BuiltinDesc { name: "map_remove", arity: 2, category: BuiltinCategory::List, func: builtin_map_remove });
-    reg.register(BuiltinDesc { name: "map_size", arity: 1, category: BuiltinCategory::List, func: builtin_map_size });
-    reg.register(BuiltinDesc { name: "map_from_list", arity: 1, category: BuiltinCategory::List, func: builtin_map_from_list });
-    reg.register(BuiltinDesc { name: "has_key", arity: 2, category: BuiltinCategory::List, func: builtin_has_key });
-    reg.register(BuiltinDesc { name: "keys", arity: 1, category: BuiltinCategory::List, func: builtin_keys });
-    reg.register(BuiltinDesc { name: "values", arity: 1, category: BuiltinCategory::List, func: builtin_values });
-    reg.register(BuiltinDesc { name: "insert", arity: usize::MAX, category: BuiltinCategory::List, func: builtin_insert });
-    reg.register(BuiltinDesc { name: "remove", arity: 2, category: BuiltinCategory::List, func: builtin_map_remove });
+    reg.register(BuiltinDesc {
+        name: "map_new",
+        arity: 0,
+        category: BuiltinCategory::List,
+        func: builtin_map_new,
+    });
+    reg.register(BuiltinDesc {
+        name: "map_get",
+        arity: 2,
+        category: BuiltinCategory::List,
+        func: builtin_map_get,
+    });
+    reg.register(BuiltinDesc {
+        name: "map_set",
+        arity: 3,
+        category: BuiltinCategory::List,
+        func: builtin_map_set,
+    });
+    reg.register(BuiltinDesc {
+        name: "map_remove",
+        arity: 2,
+        category: BuiltinCategory::List,
+        func: builtin_map_remove,
+    });
+    reg.register(BuiltinDesc {
+        name: "map_size",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_map_size,
+    });
+    reg.register(BuiltinDesc {
+        name: "map_from_list",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_map_from_list,
+    });
+    reg.register(BuiltinDesc {
+        name: "has_key",
+        arity: 2,
+        category: BuiltinCategory::List,
+        func: builtin_has_key,
+    });
+    reg.register(BuiltinDesc {
+        name: "keys",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_keys,
+    });
+    reg.register(BuiltinDesc {
+        name: "values",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_values,
+    });
+    reg.register(BuiltinDesc {
+        name: "insert",
+        arity: usize::MAX,
+        category: BuiltinCategory::List,
+        func: builtin_insert,
+    });
+    reg.register(BuiltinDesc {
+        name: "remove",
+        arity: 2,
+        category: BuiltinCategory::List,
+        func: builtin_map_remove,
+    });
     // Option
-    reg.register(BuiltinDesc { name: "option_value_or", arity: 2, category: BuiltinCategory::List, func: builtin_option_value_or });
+    reg.register(BuiltinDesc {
+        name: "option_value_or",
+        arity: 2,
+        category: BuiltinCategory::List,
+        func: builtin_option_value_or,
+    });
     // Type reflection
-    reg.register(BuiltinDesc { name: "type_name", arity: 1, category: BuiltinCategory::List, func: builtin_type_name });
+    reg.register(BuiltinDesc {
+        name: "type_name",
+        arity: 1,
+        category: BuiltinCategory::List,
+        func: builtin_type_name,
+    });
 }
 
 // ── Core list ───────────────────────────────────────────
@@ -71,7 +246,10 @@ fn builtin_push(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
             new_list.push(args[1].clone());
             Ok(Value::List(new_list))
         }
-        other => Err(InterpError::new(format!("push: expected list, found {}", other))),
+        other => Err(InterpError::new(format!(
+            "push: expected list, found {}",
+            other
+        ))),
     }
 }
 
@@ -79,15 +257,26 @@ fn builtin_pop(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Interp
     match &args[0] {
         Value::List(l) => {
             let mut new_list = l.clone();
-            new_list.pop().ok_or_else(|| InterpError::new("pop from empty list"))
+            new_list
+                .pop()
+                .ok_or_else(|| InterpError::new("pop from empty list"))
         }
-        other => Err(InterpError::new(format!("pop: expected list, found {}", other))),
+        other => Err(InterpError::new(format!(
+            "pop: expected list, found {}",
+            other
+        ))),
     }
 }
 
 fn builtin_range(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let start = match &args[0] { Value::Int(v) => *v, _ => return Err(InterpError::new("range start must be integer")) };
-    let end = match &args[1] { Value::Int(v) => *v, _ => return Err(InterpError::new("range end must be integer")) };
+    let start = match &args[0] {
+        Value::Int(v) => *v,
+        _ => return Err(InterpError::new("range start must be integer")),
+    };
+    let end = match &args[1] {
+        Value::Int(v) => *v,
+        _ => return Err(InterpError::new("range end must be integer")),
+    };
     Ok(Value::List((start..end).map(Value::Int).collect()))
 }
 
@@ -101,7 +290,10 @@ fn builtin_is_empty(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
 }
 
 fn builtin_find(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let list = match &args[0] { Value::List(l) => l, _ => return Err(InterpError::new("find: expected list")) };
+    let list = match &args[0] {
+        Value::List(l) => l,
+        _ => return Err(InterpError::new("find: expected list")),
+    };
     let target = &args[1];
     for (i, elem) in list.iter().enumerate() {
         if elem == target {
@@ -114,7 +306,10 @@ fn builtin_find(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inter
 // ── Sort ────────────────────────────────────────────────
 
 fn builtin_sort_list(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let mut list = match &args[0] { Value::List(l) => l.clone(), _ => return Err(InterpError::new("sort: expected list")) };
+    let mut list = match &args[0] {
+        Value::List(l) => l.clone(),
+        _ => return Err(InterpError::new("sort: expected list")),
+    };
     list.sort_by(|a, b| match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
         (Value::Float(x), Value::Float(y)) => {
@@ -165,7 +360,9 @@ fn builtin_flatten(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
 fn builtin_enumerate(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
         Value::List(l) => {
-            let result: Vec<Value> = l.iter().enumerate()
+            let result: Vec<Value> = l
+                .iter()
+                .enumerate()
                 .map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64), v.clone()]))
                 .collect();
             Ok(Value::List(result))
@@ -177,7 +374,9 @@ fn builtin_enumerate(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
 fn builtin_zip(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::List(a), Value::List(b)) => {
-            let result: Vec<Value> = a.iter().zip(b.iter())
+            let result: Vec<Value> = a
+                .iter()
+                .zip(b.iter())
                 .map(|(x, y)| Value::Tuple(vec![x.clone(), y.clone()]))
                 .collect();
             Ok(Value::List(result))
@@ -195,11 +394,14 @@ fn builtin_sum(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Interp
             for elem in l {
                 match elem {
                     Value::Int(v) => {
-                        int_sum = int_sum.checked_add(*v).ok_or_else(|| {
-                            InterpError::new("sum overflow")
-                        })?;
+                        int_sum = int_sum
+                            .checked_add(*v)
+                            .ok_or_else(|| InterpError::new("sum overflow"))?;
                     }
-                    Value::Float(v) => { float_sum += v; has_float = true; }
+                    Value::Float(v) => {
+                        float_sum += v;
+                        has_float = true;
+                    }
                     _ => return Err(InterpError::new("sum: list must contain only numbers")),
                 }
             }
@@ -217,7 +419,9 @@ fn builtin_to_list(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
     match &args[0] {
         Value::List(_) => Ok(args[0].clone()),
         Value::Tuple(t) => Ok(Value::List(t.clone())),
-        Value::String(s) => Ok(Value::List(s.chars().map(|c| Value::String(c.to_string())).collect())),
+        Value::String(s) => Ok(Value::List(
+            s.chars().map(|c| Value::String(c.to_string())).collect(),
+        )),
         Value::Set(s) => Ok(Value::List(s.clone())),
         other => Ok(Value::List(vec![other.clone()])),
     }
@@ -235,12 +439,10 @@ fn builtin_map_new(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, I
 
 fn builtin_map_get(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
-        (Value::Record(_, fields), Value::String(key)) => {
-            match fields.get(key) {
-                Some(v) => Ok(Value::Tuple(vec![Value::Bool(true), v.clone()])),
-                None => Ok(Value::Tuple(vec![Value::Bool(false), Value::Unit])),
-            }
-        }
+        (Value::Record(_, fields), Value::String(key)) => match fields.get(key) {
+            Some(v) => Ok(Value::Tuple(vec![Value::Bool(true), v.clone()])),
+            None => Ok(Value::Tuple(vec![Value::Bool(false), Value::Unit])),
+        },
         _ => Err(InterpError::new("map_get: expected (map, string key)")),
     }
 }
@@ -252,7 +454,9 @@ fn builtin_map_set(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, In
             new_fields.insert(key.clone(), args[2].clone());
             Ok(Value::Record(ty.clone(), new_fields))
         }
-        _ => Err(InterpError::new("map_set: expected (map, string key, value)")),
+        _ => Err(InterpError::new(
+            "map_set: expected (map, string key, value)",
+        )),
     }
 }
 
@@ -309,7 +513,11 @@ fn builtin_map_from_list(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
                             fields.insert(k.clone(), kv[1].clone());
                         }
                     }
-                    _ => return Err(InterpError::new("map_from_list: expected list of (key, value) tuples")),
+                    _ => {
+                        return Err(InterpError::new(
+                            "map_from_list: expected list of (key, value) tuples",
+                        ))
+                    }
                 }
             }
             Ok(Value::Record(None, fields))
@@ -375,8 +583,16 @@ fn builtin_slice(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
     match target {
         Value::List(l) => {
             let len = l.len() as i64;
-            let start = if start_raw < 0 { (len + start_raw).max(0) } else { start_raw.min(len) } as usize;
-            let end = if end_raw < 0 { (len + end_raw).max(0) } else { end_raw.min(len) } as usize;
+            let start = if start_raw < 0 {
+                (len + start_raw).max(0)
+            } else {
+                start_raw.min(len)
+            } as usize;
+            let end = if end_raw < 0 {
+                (len + end_raw).max(0)
+            } else {
+                end_raw.min(len)
+            } as usize;
             if start >= end {
                 return Ok(Value::List(Vec::new()));
             }
@@ -385,8 +601,16 @@ fn builtin_slice(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
         Value::String(s) => {
             let chars: Vec<char> = s.chars().collect();
             let len = chars.len() as i64;
-            let start = if start_raw < 0 { (len + start_raw).max(0) } else { start_raw.min(len) } as usize;
-            let end = if end_raw < 0 { (len + end_raw).max(0) } else { end_raw.min(len) } as usize;
+            let start = if start_raw < 0 {
+                (len + start_raw).max(0)
+            } else {
+                start_raw.min(len)
+            } as usize;
+            let end = if end_raw < 0 {
+                (len + end_raw).max(0)
+            } else {
+                end_raw.min(len)
+            } as usize;
             if start >= end {
                 return Ok(Value::String(String::new()));
             }

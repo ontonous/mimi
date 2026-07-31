@@ -1966,7 +1966,10 @@ impl<'a> Checker<'a> {
             // Higher-order list operations (shared across backends)
             "map_list" => {
                 if args.len() != 2 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "map_list expects 2 arguments (list, fn)");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "map_list expects 2 arguments (list, fn)",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                     let fn_ty = self.infer_expr(&args[1], scopes);
@@ -1978,7 +1981,10 @@ impl<'a> Checker<'a> {
             }
             "filter_list" => {
                 if args.len() != 2 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "filter_list expects 2 arguments (list, pred)");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "filter_list expects 2 arguments (list, pred)",
+                    );
                 } else {
                     let list_ty = self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
@@ -1988,7 +1994,10 @@ impl<'a> Checker<'a> {
             }
             "reduce_list" => {
                 if args.len() != 3 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "reduce_list expects 3 arguments (list, fn, init)");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "reduce_list expects 3 arguments (list, fn, init)",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
@@ -1999,7 +2008,10 @@ impl<'a> Checker<'a> {
             }
             "sort_list" => {
                 if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "sort_list expects 1 argument (list)");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "sort_list expects 1 argument (list)",
+                    );
                 } else {
                     let list_ty = self.infer_expr(&args[0], scopes);
                     return list_ty;
@@ -2008,16 +2020,25 @@ impl<'a> Checker<'a> {
             }
             "find" => {
                 if args.len() != 2 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "find expects 2 arguments (list, target)");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "find expects 2 arguments (list, target)",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
                 }
-                return Type::Tuple(vec![Type::Name("bool".into(), vec![]), Type::Name("i32".into(), vec![])]);
+                return Type::Tuple(vec![
+                    Type::Name("bool".into(), vec![]),
+                    Type::Name("i32".into(), vec![]),
+                ]);
             }
             "any" | "all" => {
                 if args.len() != 2 {
-                    self.emit_code(crate::diagnostic::codes::E0242, format!("{} expects 2 arguments (list, pred)", name));
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        format!("{} expects 2 arguments (list, pred)", name),
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                     self.infer_expr(&args[1], scopes);
@@ -2026,7 +2047,10 @@ impl<'a> Checker<'a> {
             }
             "is_empty" => {
                 if args.len() != 1 {
-                    self.emit_code(crate::diagnostic::codes::E0242, "is_empty expects 1 argument");
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "is_empty expects 1 argument",
+                    );
                 } else {
                     self.infer_expr(&args[0], scopes);
                 }

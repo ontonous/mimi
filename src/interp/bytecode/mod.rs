@@ -18,7 +18,7 @@ pub mod vm;
 
 pub use compiler::BytecodeCompiler;
 pub use instr::{BytecodeProgram, ConstValue, FunctionProto, Op};
-pub use registry::{BuiltinRegistry, BuiltinCategory, BuiltinDesc};
+pub use registry::{BuiltinCategory, BuiltinDesc, BuiltinRegistry};
 pub use vm::BytecodeVM;
 
 #[cfg(test)]
@@ -76,9 +76,17 @@ mod tests {
         main.emit(Op::LoadConst { rd: r_b, idx: c20 });
         main.emit(Op::LoadConst { rd: r_tmp, idx: c2 });
         // r_tmp = b * 2
-        main.emit(Op::MulInt { rd: r_tmp, ra: r_b, rb: r_tmp });
+        main.emit(Op::MulInt {
+            rd: r_tmp,
+            ra: r_b,
+            rb: r_tmp,
+        });
         // r_result = a + r_tmp
-        main.emit(Op::AddInt { rd: r_result, ra: r_a, rb: r_tmp });
+        main.emit(Op::AddInt {
+            rd: r_result,
+            ra: r_a,
+            rb: r_tmp,
+        });
         main.emit(Op::Ret { ra: r_result });
 
         let prog = BytecodeProgram {
@@ -103,7 +111,11 @@ mod tests {
         let mut add_fn = FunctionProto::new("add".into(), 2);
         // params are r0, r1
         let r_sum = add_fn.alloc_reg(); // 2
-        add_fn.emit(Op::AddInt { rd: r_sum, ra: 0, rb: 1 });
+        add_fn.emit(Op::AddInt {
+            rd: r_sum,
+            ra: 0,
+            rb: 1,
+        });
         add_fn.emit(Op::Ret { ra: r_sum });
 
         let mut main = FunctionProto::new("main".into(), 0);
@@ -114,8 +126,14 @@ mod tests {
         let c3 = main.add_const(ConstValue::Int(3));
         let c4 = main.add_const(ConstValue::Int(4));
 
-        main.emit(Op::LoadConst { rd: r_arg0, idx: c3 });
-        main.emit(Op::LoadConst { rd: r_arg1, idx: c4 });
+        main.emit(Op::LoadConst {
+            rd: r_arg0,
+            idx: c3,
+        });
+        main.emit(Op::LoadConst {
+            rd: r_arg1,
+            idx: c4,
+        });
         main.emit(Op::Call {
             rd: r_result,
             func: 0, // add_fn
@@ -161,28 +179,63 @@ mod tests {
 
         // r_one = 1
         fib.emit(Op::LoadConst { rd: r_one, idx: c1 }); // 0
-        // r_cmp = (n <= 1)
-        fib.emit(Op::LeInt { rd: r_cmp, ra: 0, rb: r_one }); // 1
-        // if !r_cmp goto else (instruction 7)
-        let jmp_else = fib.emit(Op::JmpIfNot { offset: 0, ra: r_cmp }); // 2
-        // then: return n
+                                                        // r_cmp = (n <= 1)
+        fib.emit(Op::LeInt {
+            rd: r_cmp,
+            ra: 0,
+            rb: r_one,
+        }); // 1
+            // if !r_cmp goto else (instruction 7)
+        let jmp_else = fib.emit(Op::JmpIfNot {
+            offset: 0,
+            ra: r_cmp,
+        }); // 2
+            // then: return n
         fib.emit(Op::Ret { ra: 0 }); // 3
-        // else:
-        // r_n1 = n - 1
-        fib.emit(Op::SubInt { rd: r_n1, ra: 0, rb: r_one }); // 4
-        // r_arg = r_n1
-        fib.emit(Op::Mov { rd: r_arg, rs: r_n1 }); // 5
-        // r_f1 = fib(n-1)
-        fib.emit(Op::Call { rd: r_f1, func: 0, args_base: r_arg, argc: 1 }); // 6
-        // r_n2 = n - 2
+                                     // else:
+                                     // r_n1 = n - 1
+        fib.emit(Op::SubInt {
+            rd: r_n1,
+            ra: 0,
+            rb: r_one,
+        }); // 4
+            // r_arg = r_n1
+        fib.emit(Op::Mov {
+            rd: r_arg,
+            rs: r_n1,
+        }); // 5
+            // r_f1 = fib(n-1)
+        fib.emit(Op::Call {
+            rd: r_f1,
+            func: 0,
+            args_base: r_arg,
+            argc: 1,
+        }); // 6
+            // r_n2 = n - 2
         fib.emit(Op::LoadConst { rd: r_one, idx: c2 }); // 7: reuse r_one for 2
-        fib.emit(Op::SubInt { rd: r_n2, ra: 0, rb: r_one }); // 8
-        // r_arg = r_n2
-        fib.emit(Op::Mov { rd: r_arg, rs: r_n2 }); // 9
-        // r_f2 = fib(n-2)
-        fib.emit(Op::Call { rd: r_f2, func: 0, args_base: r_arg, argc: 1 }); // 10
-        // r_sum = r_f1 + r_f2
-        fib.emit(Op::AddInt { rd: r_sum, ra: r_f1, rb: r_f2 }); // 11
+        fib.emit(Op::SubInt {
+            rd: r_n2,
+            ra: 0,
+            rb: r_one,
+        }); // 8
+            // r_arg = r_n2
+        fib.emit(Op::Mov {
+            rd: r_arg,
+            rs: r_n2,
+        }); // 9
+            // r_f2 = fib(n-2)
+        fib.emit(Op::Call {
+            rd: r_f2,
+            func: 0,
+            args_base: r_arg,
+            argc: 1,
+        }); // 10
+            // r_sum = r_f1 + r_f2
+        fib.emit(Op::AddInt {
+            rd: r_sum,
+            ra: r_f1,
+            rb: r_f2,
+        }); // 11
         fib.emit(Op::Ret { ra: r_sum }); // 12
 
         // Patch jump: from instruction 2, jump to instruction 4 (else branch)
@@ -192,8 +245,16 @@ mod tests {
         let r_arg = main.alloc_reg(); // 0
         let r_result = main.alloc_reg(); // 1
         let c10 = main.add_const(ConstValue::Int(10));
-        main.emit(Op::LoadConst { rd: r_arg, idx: c10 });
-        main.emit(Op::Call { rd: r_result, func: 0, args_base: r_arg, argc: 1 });
+        main.emit(Op::LoadConst {
+            rd: r_arg,
+            idx: c10,
+        });
+        main.emit(Op::Call {
+            rd: r_result,
+            func: 0,
+            args_base: r_arg,
+            argc: 1,
+        });
         main.emit(Op::Ret { ra: r_result });
 
         let prog = BytecodeProgram {
@@ -238,20 +299,38 @@ mod tests {
         main.emit(Op::LoadConst { rd: r_sum, idx: c0 }); // 0
         main.emit(Op::LoadConst { rd: r_i, idx: c0 }); // 1
         main.emit(Op::LoadConst { rd: r_one, idx: c1 }); // 2
-        main.emit(Op::LoadConst { rd: r_tmp, idx: c100 }); // 3
+        main.emit(Op::LoadConst {
+            rd: r_tmp,
+            idx: c100,
+        }); // 3
 
         // loop_start:
         // r_cmp = (i < 100)
-        let loop_start = main.emit(Op::LtInt { rd: r_cmp, ra: r_i, rb: r_tmp }); // 4
-        // if !r_cmp goto end
-        let jmp_end = main.emit(Op::JmpIfNot { offset: 0, ra: r_cmp }); // 5
-        // sum = sum + i
-        main.emit(Op::AddInt { rd: r_sum, ra: r_sum, rb: r_i }); // 6
-        // i = i + 1
-        main.emit(Op::AddInt { rd: r_i, ra: r_i, rb: r_one }); // 7
-        // goto loop_start
+        let loop_start = main.emit(Op::LtInt {
+            rd: r_cmp,
+            ra: r_i,
+            rb: r_tmp,
+        }); // 4
+            // if !r_cmp goto end
+        let jmp_end = main.emit(Op::JmpIfNot {
+            offset: 0,
+            ra: r_cmp,
+        }); // 5
+            // sum = sum + i
+        main.emit(Op::AddInt {
+            rd: r_sum,
+            ra: r_sum,
+            rb: r_i,
+        }); // 6
+            // i = i + 1
+        main.emit(Op::AddInt {
+            rd: r_i,
+            ra: r_i,
+            rb: r_one,
+        }); // 7
+            // goto loop_start
         let jmp_loop = main.emit(Op::Jmp { offset: 0 }); // 8
-        // end:
+                                                         // end:
         main.emit(Op::Ret { ra: r_sum }); // 9
 
         // Patch jumps
@@ -412,11 +491,9 @@ mod tests {
 
     #[test]
     fn e2e_println() {
-        let tokens = crate::lexer::Lexer::new(
-            "func main() -> i32 { println(42); 0 }",
-        )
-        .tokenize()
-        .unwrap();
+        let tokens = crate::lexer::Lexer::new("func main() -> i32 { println(42); 0 }")
+            .tokenize()
+            .unwrap();
         let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
         let mut compiler = BytecodeCompiler::new();
         let prog = compiler.compile_file(&file).unwrap();
@@ -1007,8 +1084,14 @@ func main() -> i32 {
         eprintln!("Tree-walker:     {:?}", tree_time);
         eprintln!("BC compile:      {:?}", compile_time);
         eprintln!("BC execute:      {:?}", bc_time);
-        eprintln!("Speedup (exec):  {:.1}x", tree_time.as_secs_f64() / bc_time.as_secs_f64());
-        eprintln!("Speedup (total): {:.1}x", tree_time.as_secs_f64() / (compile_time + bc_time).as_secs_f64());
+        eprintln!(
+            "Speedup (exec):  {:.1}x",
+            tree_time.as_secs_f64() / bc_time.as_secs_f64()
+        );
+        eprintln!(
+            "Speedup (total): {:.1}x",
+            tree_time.as_secs_f64() / (compile_time + bc_time).as_secs_f64()
+        );
     }
 
     // ═══ Disassembler ════════════════════════════════════════

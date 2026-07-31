@@ -7,51 +7,246 @@ use crate::interp::value::Value;
 
 pub fn register(reg: &mut BuiltinRegistry) {
     // Formatting
-    reg.register(BuiltinDesc { name: "format", arity: usize::MAX, category: BuiltinCategory::String, func: builtin_format });
+    reg.register(BuiltinDesc {
+        name: "format",
+        arity: usize::MAX,
+        category: BuiltinCategory::String,
+        func: builtin_format,
+    });
     // Substring / search
-    reg.register(BuiltinDesc { name: "str_substring", arity: 3, category: BuiltinCategory::String, func: builtin_str_substring });
-    reg.register(BuiltinDesc { name: "substring", arity: 3, category: BuiltinCategory::String, func: builtin_str_substring });
-    reg.register(BuiltinDesc { name: "str_split", arity: 2, category: BuiltinCategory::String, func: builtin_str_split });
-    reg.register(BuiltinDesc { name: "split", arity: 2, category: BuiltinCategory::String, func: builtin_str_split });
-    reg.register(BuiltinDesc { name: "str_join", arity: 2, category: BuiltinCategory::String, func: builtin_str_join });
-    reg.register(BuiltinDesc { name: "str_contains", arity: 2, category: BuiltinCategory::String, func: builtin_str_contains });
-    reg.register(BuiltinDesc { name: "contains", arity: 2, category: BuiltinCategory::String, func: builtin_str_contains });
-    reg.register(BuiltinDesc { name: "str_starts_with", arity: 2, category: BuiltinCategory::String, func: builtin_str_starts_with });
-    reg.register(BuiltinDesc { name: "starts_with", arity: 2, category: BuiltinCategory::String, func: builtin_str_starts_with });
-    reg.register(BuiltinDesc { name: "str_ends_with", arity: 2, category: BuiltinCategory::String, func: builtin_str_ends_with });
-    reg.register(BuiltinDesc { name: "ends_with", arity: 2, category: BuiltinCategory::String, func: builtin_str_ends_with });
-    reg.register(BuiltinDesc { name: "str_index_of", arity: 2, category: BuiltinCategory::String, func: builtin_str_index_of });
-    reg.register(BuiltinDesc { name: "index_of", arity: 2, category: BuiltinCategory::String, func: builtin_str_index_of });
-    reg.register(BuiltinDesc { name: "str_count_substring", arity: 2, category: BuiltinCategory::String, func: builtin_str_count_substring });
+    reg.register(BuiltinDesc {
+        name: "str_substring",
+        arity: 3,
+        category: BuiltinCategory::String,
+        func: builtin_str_substring,
+    });
+    reg.register(BuiltinDesc {
+        name: "substring",
+        arity: 3,
+        category: BuiltinCategory::String,
+        func: builtin_str_substring,
+    });
+    reg.register(BuiltinDesc {
+        name: "str_split",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_split,
+    });
+    reg.register(BuiltinDesc {
+        name: "split",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_split,
+    });
+    reg.register(BuiltinDesc {
+        name: "str_join",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_join,
+    });
+    reg.register(BuiltinDesc {
+        name: "str_contains",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_contains,
+    });
+    reg.register(BuiltinDesc {
+        name: "contains",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_contains,
+    });
+    reg.register(BuiltinDesc {
+        name: "str_starts_with",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_starts_with,
+    });
+    reg.register(BuiltinDesc {
+        name: "starts_with",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_starts_with,
+    });
+    reg.register(BuiltinDesc {
+        name: "str_ends_with",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_ends_with,
+    });
+    reg.register(BuiltinDesc {
+        name: "ends_with",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_ends_with,
+    });
+    reg.register(BuiltinDesc {
+        name: "str_index_of",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_index_of,
+    });
+    reg.register(BuiltinDesc {
+        name: "index_of",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_index_of,
+    });
+    reg.register(BuiltinDesc {
+        name: "str_count_substring",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_count_substring,
+    });
     // Transform
-    reg.register(BuiltinDesc { name: "str_replace", arity: 3, category: BuiltinCategory::String, func: builtin_str_replace });
-    reg.register(BuiltinDesc { name: "replace", arity: 3, category: BuiltinCategory::String, func: builtin_str_replace });
-    reg.register(BuiltinDesc { name: "str_trim", arity: 1, category: BuiltinCategory::String, func: builtin_str_trim });
-    reg.register(BuiltinDesc { name: "trim", arity: 1, category: BuiltinCategory::String, func: builtin_str_trim });
-    reg.register(BuiltinDesc { name: "str_to_upper", arity: 1, category: BuiltinCategory::String, func: builtin_str_to_upper });
-    reg.register(BuiltinDesc { name: "to_upper", arity: 1, category: BuiltinCategory::String, func: builtin_str_to_upper });
-    reg.register(BuiltinDesc { name: "str_to_lower", arity: 1, category: BuiltinCategory::String, func: builtin_str_to_lower });
-    reg.register(BuiltinDesc { name: "to_lower", arity: 1, category: BuiltinCategory::String, func: builtin_str_to_lower });
-    reg.register(BuiltinDesc { name: "str_repeat", arity: 2, category: BuiltinCategory::String, func: builtin_str_repeat });
-    reg.register(BuiltinDesc { name: "repeat", arity: 2, category: BuiltinCategory::String, func: builtin_str_repeat });
+    reg.register(BuiltinDesc {
+        name: "str_replace",
+        arity: 3,
+        category: BuiltinCategory::String,
+        func: builtin_str_replace,
+    });
+    reg.register(BuiltinDesc {
+        name: "replace",
+        arity: 3,
+        category: BuiltinCategory::String,
+        func: builtin_str_replace,
+    });
+    reg.register(BuiltinDesc {
+        name: "str_trim",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_str_trim,
+    });
+    reg.register(BuiltinDesc {
+        name: "trim",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_str_trim,
+    });
+    reg.register(BuiltinDesc {
+        name: "str_to_upper",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_str_to_upper,
+    });
+    reg.register(BuiltinDesc {
+        name: "to_upper",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_str_to_upper,
+    });
+    reg.register(BuiltinDesc {
+        name: "str_to_lower",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_str_to_lower,
+    });
+    reg.register(BuiltinDesc {
+        name: "to_lower",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_str_to_lower,
+    });
+    reg.register(BuiltinDesc {
+        name: "str_repeat",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_repeat,
+    });
+    reg.register(BuiltinDesc {
+        name: "repeat",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_repeat,
+    });
     // Char operations
-    reg.register(BuiltinDesc { name: "str_char_at", arity: 2, category: BuiltinCategory::String, func: builtin_str_char_at });
-    reg.register(BuiltinDesc { name: "char_at", arity: 2, category: BuiltinCategory::String, func: builtin_str_char_at });
-    reg.register(BuiltinDesc { name: "char_code", arity: 2, category: BuiltinCategory::String, func: builtin_char_code });
-    reg.register(BuiltinDesc { name: "chr", arity: 1, category: BuiltinCategory::String, func: builtin_chr });
+    reg.register(BuiltinDesc {
+        name: "str_char_at",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_char_at,
+    });
+    reg.register(BuiltinDesc {
+        name: "char_at",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_str_char_at,
+    });
+    reg.register(BuiltinDesc {
+        name: "char_code",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_char_code,
+    });
+    reg.register(BuiltinDesc {
+        name: "chr",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_chr,
+    });
     // Parse
-    reg.register(BuiltinDesc { name: "str_parse_int", arity: 1, category: BuiltinCategory::String, func: builtin_str_parse_int });
-    reg.register(BuiltinDesc { name: "parse_int", arity: 1, category: BuiltinCategory::String, func: builtin_str_parse_int });
-    reg.register(BuiltinDesc { name: "str_parse_float", arity: 1, category: BuiltinCategory::String, func: builtin_str_parse_float });
-    reg.register(BuiltinDesc { name: "parse_float", arity: 1, category: BuiltinCategory::String, func: builtin_str_parse_float });
-    reg.register(BuiltinDesc { name: "string_to_int", arity: 1, category: BuiltinCategory::String, func: builtin_str_parse_int });
+    reg.register(BuiltinDesc {
+        name: "str_parse_int",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_str_parse_int,
+    });
+    reg.register(BuiltinDesc {
+        name: "parse_int",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_str_parse_int,
+    });
+    reg.register(BuiltinDesc {
+        name: "str_parse_float",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_str_parse_float,
+    });
+    reg.register(BuiltinDesc {
+        name: "parse_float",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_str_parse_float,
+    });
+    reg.register(BuiltinDesc {
+        name: "string_to_int",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_str_parse_int,
+    });
     // Convert
-    reg.register(BuiltinDesc { name: "float_to_string", arity: 1, category: BuiltinCategory::String, func: builtin_to_string_val });
-    reg.register(BuiltinDesc { name: "int_to_string", arity: 1, category: BuiltinCategory::String, func: builtin_to_string_val });
+    reg.register(BuiltinDesc {
+        name: "float_to_string",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_to_string_val,
+    });
+    reg.register(BuiltinDesc {
+        name: "int_to_string",
+        arity: 1,
+        category: BuiltinCategory::String,
+        func: builtin_to_string_val,
+    });
     // Regex
-    reg.register(BuiltinDesc { name: "regex_match", arity: 2, category: BuiltinCategory::String, func: builtin_regex_match });
-    reg.register(BuiltinDesc { name: "regex_find", arity: 2, category: BuiltinCategory::String, func: builtin_regex_find });
-    reg.register(BuiltinDesc { name: "regex_replace", arity: 3, category: BuiltinCategory::String, func: builtin_regex_replace });
+    reg.register(BuiltinDesc {
+        name: "regex_match",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_regex_match,
+    });
+    reg.register(BuiltinDesc {
+        name: "regex_find",
+        arity: 2,
+        category: BuiltinCategory::String,
+        func: builtin_regex_find,
+    });
+    reg.register(BuiltinDesc {
+        name: "regex_replace",
+        arity: 3,
+        category: BuiltinCategory::String,
+        func: builtin_regex_replace,
+    });
 }
 
 // ── Formatting ──────────────────────────────────────────
@@ -101,7 +296,10 @@ fn builtin_str_substring(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
 fn builtin_str_split(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(s), Value::String(d)) => {
-            let parts: Vec<Value> = s.split(d.as_str()).map(|p| Value::String(p.to_string())).collect();
+            let parts: Vec<Value> = s
+                .split(d.as_str())
+                .map(|p| Value::String(p.to_string()))
+                .collect();
             Ok(Value::List(parts))
         }
         _ => Err(InterpError::new("str_split expects (string, string)")),
@@ -129,13 +327,17 @@ fn builtin_str_contains(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
         (Value::String(s), Value::String(sub)) => Ok(Value::Bool(s.contains(sub.as_str()))),
         (Value::List(l), target) => Ok(Value::Bool(l.contains(target))),
         (Value::Set(s), target) => Ok(Value::Bool(s.contains(target))),
-        _ => Err(InterpError::new("contains expects (string/list/set, value)")),
+        _ => Err(InterpError::new(
+            "contains expects (string/list/set, value)",
+        )),
     }
 }
 
 fn builtin_str_starts_with(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
-        (Value::String(s), Value::String(prefix)) => Ok(Value::Bool(s.starts_with(prefix.as_str()))),
+        (Value::String(s), Value::String(prefix)) => {
+            Ok(Value::Bool(s.starts_with(prefix.as_str())))
+        }
         _ => Err(InterpError::new("starts_with expects (string, string)")),
     }
 }
@@ -149,20 +351,21 @@ fn builtin_str_ends_with(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
 
 fn builtin_str_index_of(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
-        (Value::String(s), Value::String(sub)) => {
-            match s.find(sub.as_str()) {
-                Some(byte_idx) => {
-                    let char_idx = s[..byte_idx].chars().count() as i64;
-                    Ok(Value::Variant("Some".into(), vec![Value::Int(char_idx)]))
-                }
-                None => Ok(Value::Variant("None".into(), vec![])),
+        (Value::String(s), Value::String(sub)) => match s.find(sub.as_str()) {
+            Some(byte_idx) => {
+                let char_idx = s[..byte_idx].chars().count() as i64;
+                Ok(Value::Variant("Some".into(), vec![Value::Int(char_idx)]))
             }
-        }
+            None => Ok(Value::Variant("None".into(), vec![])),
+        },
         _ => Err(InterpError::new("index_of expects (string, string)")),
     }
 }
 
-fn builtin_str_count_substring(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_str_count_substring(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(s), Value::String(sub)) => {
             if sub.is_empty() {
@@ -226,11 +429,11 @@ fn builtin_str_char_at(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value
         _ => return Err(InterpError::new("char_at expects (string, int)")),
     };
     match &args[0] {
-        Value::String(s) => {
-            s.chars().nth(idx)
-                .map(|c| Value::String(c.to_string()))
-                .ok_or_else(|| InterpError::new(format!("char_at: index {} out of bounds", idx)))
-        }
+        Value::String(s) => s
+            .chars()
+            .nth(idx)
+            .map(|c| Value::String(c.to_string()))
+            .ok_or_else(|| InterpError::new(format!("char_at: index {} out of bounds", idx))),
         _ => Err(InterpError::new("char_at expects (string, int)")),
     }
 }
@@ -252,7 +455,10 @@ fn builtin_chr(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Interp
     match &args[0] {
         Value::Int(code) => {
             if *code < 0 || *code > 0x10FFFF {
-                return Err(InterpError::new(format!("chr: code point out of range: {}", code)));
+                return Err(InterpError::new(format!(
+                    "chr: code point out of range: {}",
+                    code
+                )));
             }
             char::from_u32(*code as u32)
                 .map(|c| Value::String(c.to_string()))
@@ -321,8 +527,12 @@ fn builtin_regex_replace(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
         (Value::String(text), Value::String(pattern), Value::String(replacement)) => {
             let re = regex::Regex::new(pattern)
                 .map_err(|e| InterpError::new(format!("regex error: {}", e)))?;
-            Ok(Value::String(re.replace_all(text, replacement.as_str()).to_string()))
+            Ok(Value::String(
+                re.replace_all(text, replacement.as_str()).to_string(),
+            ))
         }
-        _ => Err(InterpError::new("regex_replace expects (string, string, string)")),
+        _ => Err(InterpError::new(
+            "regex_replace expects (string, string, string)",
+        )),
     }
 }
