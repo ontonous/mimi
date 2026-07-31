@@ -8,6 +8,18 @@
 >
 > **Version**: v1.0-spec-draft (2026-07-17)
 
+> **⚠ 实现差异登记（2026-08-01）**：本文件为 1.0 规范草案，正文保留不改为设计意图；
+> 以下条目与当前 parser/checker 实况**矛盾或未落地**，规范评审时需裁决（详细证据见
+> `devdocs/v0.34/golden-document.md` 与 `devdocs/v0.34/golden/syntax-reference.golden.md`）：
+>
+> | 规范位置 | 规范主张 | 实现实况 | 处置 |
+> |---------|---------|---------|------|
+> | §6.1 `LANG-FUNCTION-001` | `func(T)->U` **removed**，迁移到 `fn(T)->U` | `func(T)->U` 仍解析（parse_type.rs:213-237）；`fn` 仅限闭包表达式与 `extern "C" fn(...)` 类型（parse_type.rs:242） | 待 ADR-003 裁决（golden §1.2） |
+> | §3.12 `FLOW-FAULT-001` | fault 变体块 `fault F { A \| B }` + `fault Variant(...)` terminal + `reset`/`recover` 语句 | 仅 `fault ErrorType`（top_level.rs:1216-1222）；变体块语法全仓零匹配；reset/recover 仅系统注入 transition 名 | 收缩到现实（golden §3.2，spec 改由实现驱动） |
+> | §6.12 `SYNTAX-REMOVED-001` | `\|>` 已 removed | parser 仍接受 `transition t(A) -> X \|> Y`（top_level.rs:1349-1354，`\|>` 与 `\|` 都接受） | 0.34.1 删除（golden §1.1） |
+> | §7.9 | `stay { payload }` 带 payload 形式 | 仅裸 `stay;`（parse_stmt.rs:134-137） | 随 ADR-001 终止符裁决一并处理（golden §1.2） |
+> | state-level `invariant` | :776 文档化 | 未实现；仅块内 `invariant:` 子句（parse_stmt.rs:831-843） | 未排期，见 golden §8.3 |
+
 Normative requirements use stable IDs defined in `docs/language-requirements.toml`. Design rationale lives in `devdocs/pre-1.0/`; implementation structure and progress live in `docs/ast-appendix.md` and `docs/language-support.toml`. Parser acceptance and an existing implementation do not grant stable status.
 
 Normative implementation profiles are defined in:
