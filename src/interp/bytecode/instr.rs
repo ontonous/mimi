@@ -609,6 +609,11 @@ pub enum Op {
         rd: Reg,
         ra: Reg,
     },
+    /// *ra = rb — write through Shared/Ref/RefMut reference.
+    SharedSet {
+        ra: Reg,
+        rb: Reg,
+    },
     /// rd = Weak(ra) — downgrade Shared to Weak reference.
     WeakNew {
         rd: Reg,

@@ -137,6 +137,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::FlowTransition { .. } => "FLOW_TRANSITION",
         Op::DynMethodCall { .. } => "DYN_METHOD_CALL",
         Op::SharedNew { .. } => "SHARED_NEW",
+        Op::SharedSet { .. } => "SHARED_SET",
         Op::WeakNew { .. } => "WEAK_NEW",
     }
 }
@@ -518,6 +519,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             )
         }
         Op::SharedNew { rd, ra } => format!("{:04}  {:<16} r{} = shared(r{})", pc, name, rd, ra),
+        Op::SharedSet { ra, rb } => format!("{:04}  {:<16} *r{} = r{}", pc, name, ra, rb),
         Op::WeakNew { rd, ra } => format!("{:04}  {:<16} r{} = weak(r{})", pc, name, rd, ra),
         Op::SetFaultPc { handler_pc } => {
             format!("{:04}  {:<16} handler_pc={}", pc, name, handler_pc)

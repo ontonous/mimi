@@ -2037,6 +2037,31 @@ impl<'a> BytecodeVM<'a> {
                     self.set_reg(rd, shared);
                 }
 
+                Op::SharedSet { ra, rb } => {
+                    let val = self.get_reg(rb).clone();
+                    let target = self.get_reg(ra).clone();
+                    match target {
+                        Value::Shared(arc) | Value::Ref(arc) | Value::RefMut(arc) => {
+                            let mut guard = arc.write().map_err(|e| {
+                                InterpError::new(format!("shared write lock failed: {}", e))
+                            })?;
+                            *guard = val;
+                        }
+                        Value::LocalShared(rc) => {
+                            let mut guard = rc.lock().map_err(|e| {
+                                InterpError::new(format!("local_shared lock failed: {}", e))
+                            })?;
+                            *guard = val;
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "cannot write through non-shared reference: {}",
+                                other
+                            )))
+                        }
+                    }
+                }
+
                 Op::WeakNew { rd, ra } => {
                     let v = self.get_reg(ra).clone();
                     let weak = match v {
