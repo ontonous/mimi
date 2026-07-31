@@ -1448,7 +1448,7 @@ impl BytecodeCompiler {
             }
 
             Expr::OptionalChain(obj, field) => {
-                // obj?.field → if obj is None → None, else → obj.field
+                // obj?.field → if obj is None/Err → None, else → Some(obj.field)
                 let r_obj = self.compile_expr(fc, obj)?;
                 let rd = fc.proto.alloc_reg();
 
@@ -1460,7 +1460,7 @@ impl BytecodeCompiler {
                     ra: r_obj,
                     tag: none_tag,
                 });
-                let jmp_else = fc.emit(Op::JmpIfNot {
+                let jmp_not_none = fc.emit(Op::JmpIfNot {
                     offset: 0,
                     ra: r_is_none,
                 });
@@ -1469,15 +1469,37 @@ impl BytecodeCompiler {
                 fc.emit(Op::None { rd });
                 let jmp_end = fc.emit(Op::Jmp { offset: 0 });
 
-                // Some branch: rd = obj.field.
-                fc.proto.patch_jump(jmp_else);
+                // Not-None branch: check if obj is Err variant.
+                fc.proto.patch_jump(jmp_not_none);
+                let r_is_err = fc.proto.alloc_reg();
+                let err_tag = fc.proto.add_const(ConstValue::Str("Err".into()));
+                fc.emit(Op::IsVariant {
+                    rd: r_is_err,
+                    ra: r_obj,
+                    tag: err_tag,
+                });
+                let jmp_not_err = fc.emit(Op::JmpIfNot {
+                    offset: 0,
+                    ra: r_is_err,
+                });
+
+                // Err branch: rd = None.
+                fc.emit(Op::None { rd });
+                let jmp_end2 = fc.emit(Op::Jmp { offset: 0 });
+
+                // Some/Ok branch: rd = Some(obj.field).
+                fc.proto.patch_jump(jmp_not_err);
                 let field_idx = fc.proto.add_const(ConstValue::Str(field.clone()));
+                let r_field = fc.proto.alloc_reg();
                 fc.emit(Op::RecordGet {
-                    rd,
+                    rd: r_field,
                     ra: r_obj,
                     field: field_idx,
                 });
+                // Wrap the field value back in Some.
+                fc.emit(Op::Some { rd, ra: r_field });
                 fc.proto.patch_jump(jmp_end);
+                fc.proto.patch_jump(jmp_end2);
 
                 Ok(rd)
             }
