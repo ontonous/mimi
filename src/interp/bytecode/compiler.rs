@@ -54,6 +54,10 @@ pub struct BytecodeCompiler {
     actor_method_funcs: HashMap<(String, String), FuncIdx>,
     /// The original AST file (stored for actor worker threads).
     ast_file: Option<std::sync::Arc<File>>,
+    /// Default parameter values: function name → per-param default expr (None = required).
+    func_defaults: HashMap<String, Vec<Option<Expr>>>,
+    /// Parameter names: function name → ordered param names (for named arg reordering).
+    func_param_names: HashMap<String, Vec<String>>,
 }
 
 /// Per-function compilation state.
@@ -283,6 +287,8 @@ impl BytecodeCompiler {
             flow_fails_transitions: std::collections::HashSet::new(),
             actor_method_funcs: HashMap::new(),
             ast_file: None,
+            func_defaults: HashMap::new(),
+            func_param_names: HashMap::new(),
         }
     }
 
@@ -321,6 +327,18 @@ impl BytecodeCompiler {
             if let Item::Func(f) = item {
                 let idx = self.functions.len() as FuncIdx;
                 self.func_table.insert(f.name.clone(), idx);
+                // Collect default parameter values and param names for call-site handling.
+                let defaults: Vec<Option<Expr>> = f
+                    .params
+                    .iter()
+                    .map(|p| p.default_value.clone())
+                    .collect();
+                if defaults.iter().any(|d| d.is_some()) {
+                    self.func_defaults.insert(f.name.clone(), defaults);
+                }
+                let param_names: Vec<String> =
+                    f.params.iter().map(|p| p.name.clone()).collect();
+                self.func_param_names.insert(f.name.clone(), param_names);
                 // Push placeholder.
                 self.functions
                     .push(FunctionProto::new(f.name.clone(), f.params.len() as u16));
@@ -2032,12 +2050,61 @@ impl BytecodeCompiler {
             }
         }
 
+        // ── Named argument reordering + default parameter filling ──
+        // Resolve the effective argument list before compiling.
+        let effective_args: Vec<Expr> = if let Expr::Ident(name) = callee.unlocated() {
+            let has_named = args.iter().any(|a| matches!(a.unlocated(), Expr::NamedArg(_, _)));
+            let param_names = self.func_param_names.get(name.as_str());
+            let defaults = self.func_defaults.get(name.as_str());
+
+            if has_named || (defaults.is_some() && args.len() < param_names.map(|p| p.len()).unwrap_or(0)) {
+                if let Some(pnames) = param_names {
+                    let mut reordered: Vec<Option<Expr>> = vec![None; pnames.len()];
+                    // Place positional args first.
+                    let mut pos_idx = 0;
+                    for arg in args {
+                        match arg.unlocated() {
+                            Expr::NamedArg(arg_name, inner) => {
+                                if let Some(idx) = pnames.iter().position(|p| p == arg_name) {
+                                    reordered[idx] = Some(*inner.clone());
+                                }
+                            }
+                            _ => {
+                                if pos_idx < reordered.len() {
+                                    reordered[pos_idx] = Some(arg.clone());
+                                    pos_idx += 1;
+                                }
+                            }
+                        }
+                    }
+                    // Fill missing args with defaults.
+                    if let Some(defaults) = defaults {
+                        for (i, slot) in reordered.iter_mut().enumerate() {
+                            if slot.is_none() {
+                                if let Some(default_expr) = defaults.get(i).and_then(|d| d.clone()) {
+                                    *slot = Some(default_expr);
+                                }
+                            }
+                        }
+                    }
+                    // Collect filled args (stop at first None — trailing defaults only).
+                    reordered.into_iter().filter_map(|a| a).collect()
+                } else {
+                    args.to_vec()
+                }
+            } else {
+                args.to_vec()
+            }
+        } else {
+            args.to_vec()
+        };
+
         let args_base = fc.proto.alloc_reg();
-        for _ in 1..args.len() {
+        for _ in 1..effective_args.len() {
             fc.proto.alloc_reg();
         }
 
-        for (i, arg) in args.iter().enumerate() {
+        for (i, arg) in effective_args.iter().enumerate() {
             let target = args_base + i as Reg;
             let r = self.compile_expr_into(fc, arg, target)?;
             if r != target {
@@ -2058,7 +2125,7 @@ impl BytecodeCompiler {
                     rd,
                     func: fidx,
                     args_base,
-                    argc: args.len() as u16,
+                    argc: effective_args.len() as u16,
                 });
                 return Ok(rd);
             }
@@ -2068,7 +2135,7 @@ impl BytecodeCompiler {
                     rd,
                     callee: callee_reg,
                     args_base,
-                    argc: args.len() as u16,
+                    argc: effective_args.len() as u16,
                 });
                 return Ok(rd);
             }
@@ -2078,7 +2145,7 @@ impl BytecodeCompiler {
                     rd,
                     builtin: bidx,
                     args_base,
-                    argc: args.len() as u16,
+                    argc: effective_args.len() as u16,
                 });
                 return Ok(rd);
             }
