@@ -223,7 +223,7 @@ func main() -> i32 {
     s
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -255,7 +255,7 @@ func main() -> i32 {
     a
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -330,7 +330,7 @@ func main() -> i32 {
     s
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -404,7 +404,7 @@ func main() -> i32 {
     }
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(
         result.is_ok(),
         "Some(42) should be Copy (all args are Copy): {:?}",
