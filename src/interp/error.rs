@@ -23,35 +23,35 @@ pub struct ErrorContext {
 #[derive(Debug, Clone)]
 pub enum InterpError {
     /// Generic runtime error (E0800).
-    Generic(ErrorContext),
+    Generic(Box<ErrorContext>),
     /// Division by zero at runtime (E0801).
-    DivisionByZero(ErrorContext),
+    DivisionByZero(Box<ErrorContext>),
     /// Integer overflow at runtime (E0802).
-    IntegerOverflow(ErrorContext),
+    IntegerOverflow(Box<ErrorContext>),
     /// Index out of bounds at runtime (E0803).
-    IndexOutOfBounds(ErrorContext),
+    IndexOutOfBounds(Box<ErrorContext>),
     /// Wrong argument count at runtime (E0804).
-    WrongArgCount(ErrorContext),
+    WrongArgCount(Box<ErrorContext>),
     /// Non-exhaustive match at runtime (E0805).
-    NonExhaustiveMatch(ErrorContext),
+    NonExhaustiveMatch(Box<ErrorContext>),
     /// Concurrent lock error (E0806).
-    LockError(ErrorContext),
+    LockError(Box<ErrorContext>),
     /// Arena escape at runtime (E0807).
-    ArenaEscape(ErrorContext),
+    ArenaEscape(Box<ErrorContext>),
     /// Contract violation (requires/ensures) at runtime (E0808).
-    ContractViolation(ErrorContext),
+    ContractViolation(Box<ErrorContext>),
     /// Field not found at runtime (E0809).
-    FieldNotFound(ErrorContext),
+    FieldNotFound(Box<ErrorContext>),
     /// Runtime I/O error (E0810).
-    IoError(ErrorContext),
+    IoError(Box<ErrorContext>),
     /// Builtin function runtime error (E0811).
-    BuiltinError(ErrorContext),
+    BuiltinError(Box<ErrorContext>),
     /// Type mismatch at runtime (E0812).
-    TypeMismatch(ErrorContext),
+    TypeMismatch(Box<ErrorContext>),
     /// Floating-point error (NaN, infinity) at runtime (E0813).
-    FloatError(ErrorContext),
+    FloatError(Box<ErrorContext>),
     /// Slice out of bounds at runtime (E0814).
-    SliceError(ErrorContext),
+    SliceError(Box<ErrorContext>),
 }
 
 impl InterpError {
@@ -125,26 +125,26 @@ impl InterpError {
 
     /// Create a generic runtime error (code E0800).
     pub fn new(msg: impl Into<String>) -> Self {
-        Self::Generic(ErrorContext {
+        Self::Generic(Box::new(ErrorContext {
             msg: msg.into(),
             function: None,
             operation: None,
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 
     /// Create a generic runtime error with an operation context.
     pub fn with_op(msg: impl Into<String>, operation: impl Into<String>) -> Self {
-        Self::Generic(ErrorContext {
+        Self::Generic(Box::new(ErrorContext {
             msg: msg.into(),
             function: None,
             operation: Some(operation.into()),
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 
     /// Set the function context.
@@ -181,170 +181,170 @@ impl InterpError {
 
     /// Create a division-by-zero error (E0801).
     pub fn div_by_zero() -> Self {
-        Self::DivisionByZero(ErrorContext {
+        Self::DivisionByZero(Box::new(ErrorContext {
             msg: "division by zero".into(),
             function: None,
             operation: None,
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 
     /// Create an integer overflow error (E0802).
     pub fn integer_overflow(msg: impl Into<String>) -> Self {
-        Self::IntegerOverflow(ErrorContext {
+        Self::IntegerOverflow(Box::new(ErrorContext {
             msg: msg.into(),
             function: None,
             operation: None,
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 
     /// Create an index-out-of-bounds error (E0803).
     pub fn index_out_of_bounds(msg: impl Into<String>) -> Self {
-        Self::IndexOutOfBounds(ErrorContext {
+        Self::IndexOutOfBounds(Box::new(ErrorContext {
             msg: msg.into(),
             function: None,
             operation: None,
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 
     /// Create a wrong-argument-count error (E0804).
     pub fn wrong_arg_count(msg: impl Into<String>) -> Self {
-        Self::WrongArgCount(ErrorContext {
+        Self::WrongArgCount(Box::new(ErrorContext {
             msg: msg.into(),
             function: None,
             operation: None,
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 
     /// Create a non-exhaustive-match error (E0805).
     pub fn non_exhaustive_match(msg: impl Into<String>) -> Self {
-        Self::NonExhaustiveMatch(ErrorContext {
+        Self::NonExhaustiveMatch(Box::new(ErrorContext {
             msg: msg.into(),
             function: None,
             operation: None,
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 
     /// Create a lock error (E0806).
     pub fn lock_error(msg: impl Into<String>) -> Self {
-        Self::LockError(ErrorContext {
+        Self::LockError(Box::new(ErrorContext {
             msg: msg.into(),
             function: None,
             operation: None,
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 
     /// Create an arena escape error (E0807).
     pub fn arena_escape(msg: impl Into<String>) -> Self {
-        Self::ArenaEscape(ErrorContext {
+        Self::ArenaEscape(Box::new(ErrorContext {
             msg: msg.into(),
             function: None,
             operation: None,
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 
     /// Create a contract violation error (E0808).
     pub fn contract_violation(msg: impl Into<String>) -> Self {
-        Self::ContractViolation(ErrorContext {
+        Self::ContractViolation(Box::new(ErrorContext {
             msg: msg.into(),
             function: None,
             operation: None,
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 
     /// Create a field-not-found error (E0809).
     pub fn field_not_found(msg: impl Into<String>) -> Self {
-        Self::FieldNotFound(ErrorContext {
+        Self::FieldNotFound(Box::new(ErrorContext {
             msg: msg.into(),
             function: None,
             operation: None,
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 
     /// Create a runtime I/O error (E0810).
     pub fn io_error(msg: impl Into<String>) -> Self {
-        Self::IoError(ErrorContext {
+        Self::IoError(Box::new(ErrorContext {
             msg: msg.into(),
             function: None,
             operation: None,
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 
     /// Create a builtin function runtime error (E0811).
     pub fn builtin_error(msg: impl Into<String>) -> Self {
-        Self::BuiltinError(ErrorContext {
+        Self::BuiltinError(Box::new(ErrorContext {
             msg: msg.into(),
             function: None,
             operation: None,
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 
     /// Create a runtime type mismatch error (E0812).
     pub fn type_mismatch(msg: impl Into<String>) -> Self {
-        Self::TypeMismatch(ErrorContext {
+        Self::TypeMismatch(Box::new(ErrorContext {
             msg: msg.into(),
             function: None,
             operation: None,
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 
     /// Create a floating-point error (NaN, infinity) (E0813).
     pub fn float_error(msg: impl Into<String>) -> Self {
-        Self::FloatError(ErrorContext {
+        Self::FloatError(Box::new(ErrorContext {
             msg: msg.into(),
             function: None,
             operation: None,
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 
     /// Create a slice error (E0814).
     pub fn slice_error(msg: impl Into<String>) -> Self {
-        Self::SliceError(ErrorContext {
+        Self::SliceError(Box::new(ErrorContext {
             msg: msg.into(),
             function: None,
             operation: None,
             help: None,
             call_stack: Vec::new(),
             line: None,
-        })
+        }))
     }
 }
 

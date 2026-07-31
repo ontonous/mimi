@@ -269,7 +269,7 @@ impl<'a> Interpreter<'a> {
             Stmt::Invariant(..) => true,
             Stmt::If { then_, else_, .. } => {
                 Self::block_has_invariants(then_)
-                    || else_.as_ref().map_or(false, |b| Self::block_has_invariants(b))
+                    || else_.as_ref().is_some_and(Self::block_has_invariants)
             }
             Stmt::While { body, .. } | Stmt::Loop(body) | Stmt::For { body, .. } => {
                 Self::block_has_invariants(body)

@@ -2,6 +2,14 @@
 
 ## [Unreleased] — 0.1.3-dev
 
+### 查缺补漏：clippy/fmt 债务清零
+
+- **refactor(interp): InterpError 变体内容 Box<ErrorContext>**：`InterpError` 15 个 variant 从直接持有 `ErrorContext`（~128 字节）改为 `Box<ErrorContext>`（8 字节）。`Result<Value, InterpError>` 在解释器热路径上的复制成本大幅下降；消灭 ~672 个 `result_large_err` clippy warning。工厂方法（`InterpError::new`/`div_by_zero` 等）签名不变，调用点零改动。`src/interp/error.rs`、`src/interp/value.rs`。
+- **fix(interp): bytecode VM/compiler 39 处 `unwrap()` 清零**：VM 新增 `cur_frame()`/`cur_frame_mut()` 不变量 helper（`mimi_debug_assert!` + ICE `unreachable!`），替换 `exec_loop`/寄存器访问/`do_ret` 中 22 处 `stack.last().unwrap()`；FuncCompiler 新增 `vars_mut`/`break_jumps_mut`/`continue_jumps_mut`/`defer_scopes_mut`/`on_failure_scopes_mut` helper，替换 17 处作用域栈 unwrap（`src/interp/bytecode/vm.rs`、`compiler.rs`）。
+- **fix(interp): 剩余 10 个 clippy warning 清零**：`cloned_ref_to_slice_refs`（hof.rs `from_ref`）、`new_without_default`（BytecodeCompiler/BuiltinRegistry）、`option_map_unit_fn`（compiler.rs 2 处）、`manual_map`（compiler.rs 4 处）、`redundant_closure`（stmt.rs）。
+- **门禁状态**：`cargo clippy --all-targets -- -D warnings` 从 711 errors / 672 warnings → **0 errors / 0 warnings**（CI 门禁 2 恢复全绿）。4511 lib 测试全绿，零行为变化。
+- **fmt 状态**：HEAD 既有 1080 fmt diff（`src/interp/` 与 `src/runtime/mod.rs`，0.33 冲刺遗留）登记为已知债务，本次提交不混入无关格式化改动。
+
 ### Soundness 收尾：审计遗留项修复
 
 - **fix(codegen): B9 逃逸闭包 env 泄漏（0.33 收尾审计遗留）**：

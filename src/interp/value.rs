@@ -563,7 +563,7 @@ impl SharedList {
     pub fn set(&self, index: usize, value: Value) -> Result<(), InterpError> {
         let mut list = self.0.borrow_mut();
         if index >= list.len() {
-            return Err(InterpError::IndexOutOfBounds(ErrorContext {
+            return Err(InterpError::IndexOutOfBounds(Box::new(ErrorContext {
                 msg: format!(
                     "index {} out of bounds for list of length {}",
                     index,
@@ -574,7 +574,7 @@ impl SharedList {
                 help: None,
                 call_stack: vec![],
                 line: None,
-            }));
+            })));
         }
         list[index] = value;
         Ok(())
