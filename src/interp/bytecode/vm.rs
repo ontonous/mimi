@@ -192,7 +192,8 @@ impl<'a> BytecodeVM<'a> {
             )));
         }
 
-        let mut regs = args;
+        let mut regs = Vec::with_capacity(reg_count);
+        regs.extend(args);
         regs.resize(reg_count, Value::Unit);
 
         self.stack.push(Frame {
@@ -265,313 +266,545 @@ impl<'a> BytecodeVM<'a> {
                 // ── Constants & moves ──────────────────────────
                 Op::LoadConst { rd, idx } => {
                     let val = self.load_const(proto, idx);
-                    self.set_reg(rd, val);
+                    self.cur_frame_mut().regs[rd as usize] = val;
                 }
-                Op::LoadUnit { rd } => self.set_reg(rd, Value::Unit),
-                Op::LoadTrue { rd } => self.set_reg(rd, Value::Bool(true)),
-                Op::LoadFalse { rd } => self.set_reg(rd, Value::Bool(false)),
+                Op::LoadUnit { rd } => self.cur_frame_mut().regs[rd as usize] = Value::Unit,
+                Op::LoadTrue { rd } => self.cur_frame_mut().regs[rd as usize] = Value::Bool(true),
+                Op::LoadFalse { rd } => self.cur_frame_mut().regs[rd as usize] = Value::Bool(false),
                 Op::Mov { rd, rs } => {
-                    let v = self.get_reg(rs).clone();
-                    self.set_reg(rd, v);
+                    if rd != rs {
+                        let frame = self.cur_frame_mut();
+                        frame.regs[rd as usize] = frame.regs[rs as usize].clone();
+                    }
                 }
 
                 // ── Integer arithmetic ─────────────────────────
                 // Fast path: both Int (common case in loops). Fallback: Float/String.
+                // Single frame borrow per op: reads + write happen inside one
+                // last_mut region to cut per-op boundary checks.
                 Op::AddInt { rd, ra, rb } => {
-                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
-                        let r = a.checked_add(*b).ok_or_else(|| {
-                            InterpError::integer_overflow("integer addition overflow")
-                        })?;
-                        self.set_reg(rd, Value::Int(r));
-                    } else if matches!(self.get_reg(ra), Value::String(_))
-                        && matches!(self.get_reg(rb), Value::String(_))
-                    {
-                        let result = format!("{}{}", self.get_reg(ra), self.get_reg(rb));
-                        self.set_reg(rd, Value::String(result));
-                    } else {
-                        let (af, bf) = (
-                            value_to_f64(self.get_reg(ra))?,
-                            value_to_f64(self.get_reg(rb))?,
-                        );
-                        let r = af + bf;
-                        self.check_float(r, "+")?;
-                        self.set_reg(rd, Value::Float(r));
-                    }
+                    let frame = self.cur_frame_mut();
+                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            Value::Int(a.checked_add(*b).ok_or_else(|| {
+                                InterpError::integer_overflow("integer addition overflow")
+                            })?)
+                        }
+                        (Value::String(a), Value::String(b)) => Value::String(format!("{a}{b}")),
+                        _ => {
+                            let af = value_to_f64(&frame.regs[ra as usize])?;
+                            let bf = value_to_f64(&frame.regs[rb as usize])?;
+                            let r = af + bf;
+                            if r.is_nan() || r.is_infinite() {
+                                return Err(InterpError::float_error(
+                                    "invalid floating-point result from +",
+                                ));
+                            }
+                            Value::Float(r)
+                        }
+                    };
+                    frame.regs[rd as usize] = result;
                 }
                 Op::SubInt { rd, ra, rb } => {
-                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
-                        let r = a.checked_sub(*b).ok_or_else(|| {
-                            InterpError::integer_overflow("integer subtraction overflow")
-                        })?;
-                        self.set_reg(rd, Value::Int(r));
-                    } else {
-                        let (af, bf) = (
-                            value_to_f64(self.get_reg(ra))?,
-                            value_to_f64(self.get_reg(rb))?,
-                        );
-                        let r = af - bf;
-                        self.check_float(r, "-")?;
-                        self.set_reg(rd, Value::Float(r));
-                    }
+                    let frame = self.cur_frame_mut();
+                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            Value::Int(a.checked_sub(*b).ok_or_else(|| {
+                                InterpError::integer_overflow("integer subtraction overflow")
+                            })?)
+                        }
+                        _ => {
+                            let af = value_to_f64(&frame.regs[ra as usize])?;
+                            let bf = value_to_f64(&frame.regs[rb as usize])?;
+                            let r = af - bf;
+                            if r.is_nan() || r.is_infinite() {
+                                return Err(InterpError::float_error(
+                                    "invalid floating-point result from -",
+                                ));
+                            }
+                            Value::Float(r)
+                        }
+                    };
+                    frame.regs[rd as usize] = result;
                 }
                 Op::MulInt { rd, ra, rb } => {
-                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
-                        let r = a.checked_mul(*b).ok_or_else(|| {
-                            InterpError::integer_overflow("integer multiplication overflow")
-                        })?;
-                        self.set_reg(rd, Value::Int(r));
-                    } else {
-                        let (af, bf) = (
-                            value_to_f64(self.get_reg(ra))?,
-                            value_to_f64(self.get_reg(rb))?,
-                        );
-                        let r = af * bf;
-                        self.check_float(r, "*")?;
-                        self.set_reg(rd, Value::Float(r));
-                    }
+                    let frame = self.cur_frame_mut();
+                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            Value::Int(a.checked_mul(*b).ok_or_else(|| {
+                                InterpError::integer_overflow("integer multiplication overflow")
+                            })?)
+                        }
+                        _ => {
+                            let af = value_to_f64(&frame.regs[ra as usize])?;
+                            let bf = value_to_f64(&frame.regs[rb as usize])?;
+                            let r = af * bf;
+                            if r.is_nan() || r.is_infinite() {
+                                return Err(InterpError::float_error(
+                                    "invalid floating-point result from *",
+                                ));
+                            }
+                            Value::Float(r)
+                        }
+                    };
+                    frame.regs[rd as usize] = result;
                 }
                 Op::DivInt { rd, ra, rb } => {
-                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
-                        if *b == 0 {
-                            return Err(InterpError::div_by_zero());
+                    let frame = self.cur_frame_mut();
+                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            if *b == 0 {
+                                return Err(InterpError::div_by_zero());
+                            }
+                            Value::Int(a.checked_div(*b).ok_or_else(|| {
+                                InterpError::integer_overflow("integer division overflow")
+                            })?)
                         }
-                        let r = a.checked_div(*b).ok_or_else(|| {
-                            InterpError::integer_overflow("integer division overflow")
-                        })?;
-                        self.set_reg(rd, Value::Int(r));
-                    } else {
-                        let (af, bf) = (
-                            value_to_f64(self.get_reg(ra))?,
-                            value_to_f64(self.get_reg(rb))?,
-                        );
-                        if bf == 0.0 {
-                            return Err(InterpError::div_by_zero());
+                        _ => {
+                            let af = value_to_f64(&frame.regs[ra as usize])?;
+                            let bf = value_to_f64(&frame.regs[rb as usize])?;
+                            if bf == 0.0 {
+                                return Err(InterpError::div_by_zero());
+                            }
+                            let r = af / bf;
+                            if r.is_nan() || r.is_infinite() {
+                                return Err(InterpError::float_error(
+                                    "invalid floating-point result from /",
+                                ));
+                            }
+                            Value::Float(r)
                         }
-                        let r = af / bf;
-                        self.check_float(r, "/")?;
-                        self.set_reg(rd, Value::Float(r));
-                    }
+                    };
+                    frame.regs[rd as usize] = result;
                 }
                 Op::ModInt { rd, ra, rb } => {
-                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
-                        if *b == 0 {
-                            return Err(InterpError::div_by_zero());
+                    let frame = self.cur_frame_mut();
+                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            if *b == 0 {
+                                return Err(InterpError::div_by_zero());
+                            }
+                            Value::Int(a.checked_rem(*b).ok_or_else(|| {
+                                InterpError::integer_overflow("integer remainder overflow")
+                            })?)
                         }
-                        let r = a.checked_rem(*b).ok_or_else(|| {
-                            InterpError::integer_overflow("integer remainder overflow")
-                        })?;
-                        self.set_reg(rd, Value::Int(r));
-                    } else {
-                        let a = value_to_f64(self.get_reg(ra))?;
-                        let b = value_to_f64(self.get_reg(rb))?;
-                        if b == 0.0 {
-                            return Err(InterpError::div_by_zero());
+                        _ => {
+                            let a = value_to_f64(&frame.regs[ra as usize])?;
+                            let b = value_to_f64(&frame.regs[rb as usize])?;
+                            if b == 0.0 {
+                                return Err(InterpError::div_by_zero());
+                            }
+                            Value::Float(a % b)
                         }
-                        self.set_reg(rd, Value::Float(a % b));
-                    }
+                    };
+                    frame.regs[rd as usize] = result;
                 }
                 Op::NegInt { rd, ra } => {
-                    if matches!(self.get_reg(ra), Value::Float(_)) {
-                        let a = self.get_float(ra)?;
-                        let r = -a;
-                        self.check_float(r, "neg")?;
-                        self.set_reg(rd, Value::Float(r));
-                    } else {
-                        let a = self.get_int(ra)?;
-                        let r = a.checked_neg().ok_or_else(|| {
-                            InterpError::integer_overflow("integer negation overflow")
-                        })?;
-                        self.set_reg(rd, Value::Int(r));
-                    }
+                    let frame = self.cur_frame_mut();
+                    let result = match &frame.regs[ra as usize] {
+                        Value::Float(a) => {
+                            let r = -*a;
+                            if r.is_nan() || r.is_infinite() {
+                                return Err(InterpError::float_error(
+                                    "invalid floating-point result from neg",
+                                ));
+                            }
+                            Value::Float(r)
+                        }
+                        other => {
+                            let a = match other {
+                                Value::Int(v) => *v,
+                                other => {
+                                    return Err(InterpError::new(format!(
+                                        "expected number, found {}",
+                                        other
+                                    )))
+                                }
+                            };
+                            Value::Int(a.checked_neg().ok_or_else(|| {
+                                InterpError::integer_overflow("integer negation overflow")
+                            })?)
+                        }
+                    };
+                    frame.regs[rd as usize] = result;
                 }
 
                 // ── Float arithmetic ───────────────────────────
                 Op::AddFloat { rd, ra, rb } => {
-                    let (a, b) = self.get_float2(ra, rb)?;
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Float(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Float, got {}", other)))
+                        }
+                    };
+                    let b = match &frame.regs[rb as usize] {
+                        Value::Float(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Float, got {}", other)))
+                        }
+                    };
                     let r = a + b;
-                    self.check_float(r, "+")?;
-                    self.set_reg(rd, Value::Float(r));
+                    if r.is_nan() || r.is_infinite() {
+                        return Err(InterpError::float_error(
+                            "invalid floating-point result from +",
+                        ));
+                    }
+                    frame.regs[rd as usize] = Value::Float(r);
                 }
                 Op::SubFloat { rd, ra, rb } => {
-                    let (a, b) = self.get_float2(ra, rb)?;
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Float(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Float, got {}", other)))
+                        }
+                    };
+                    let b = match &frame.regs[rb as usize] {
+                        Value::Float(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Float, got {}", other)))
+                        }
+                    };
                     let r = a - b;
-                    self.check_float(r, "-")?;
-                    self.set_reg(rd, Value::Float(r));
+                    if r.is_nan() || r.is_infinite() {
+                        return Err(InterpError::float_error(
+                            "invalid floating-point result from -",
+                        ));
+                    }
+                    frame.regs[rd as usize] = Value::Float(r);
                 }
                 Op::MulFloat { rd, ra, rb } => {
-                    let (a, b) = self.get_float2(ra, rb)?;
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Float(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Float, got {}", other)))
+                        }
+                    };
+                    let b = match &frame.regs[rb as usize] {
+                        Value::Float(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Float, got {}", other)))
+                        }
+                    };
                     let r = a * b;
-                    self.check_float(r, "*")?;
-                    self.set_reg(rd, Value::Float(r));
+                    if r.is_nan() || r.is_infinite() {
+                        return Err(InterpError::float_error(
+                            "invalid floating-point result from *",
+                        ));
+                    }
+                    frame.regs[rd as usize] = Value::Float(r);
                 }
                 Op::DivFloat { rd, ra, rb } => {
-                    let (a, b) = self.get_float2(ra, rb)?;
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Float(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Float, got {}", other)))
+                        }
+                    };
+                    let b = match &frame.regs[rb as usize] {
+                        Value::Float(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Float, got {}", other)))
+                        }
+                    };
                     if b == 0.0 {
                         return Err(InterpError::div_by_zero());
                     }
                     let r = a / b;
-                    self.check_float(r, "/")?;
-                    self.set_reg(rd, Value::Float(r));
+                    if r.is_nan() || r.is_infinite() {
+                        return Err(InterpError::float_error(
+                            "invalid floating-point result from /",
+                        ));
+                    }
+                    frame.regs[rd as usize] = Value::Float(r);
                 }
                 Op::NegFloat { rd, ra } => {
-                    let a = self.get_float(ra)?;
-                    self.set_reg(rd, Value::Float(-a));
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Float(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Float, got {}", other)))
+                        }
+                    };
+                    frame.regs[rd as usize] = Value::Float(-a);
                 }
                 Op::IntToFloat { rd, ra } => {
-                    let a = self.get_int(ra)?;
-                    self.set_reg(rd, Value::Float(a as f64));
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Int(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                        }
+                    };
+                    frame.regs[rd as usize] = Value::Float(a as f64);
                 }
 
                 // ── Comparison ─────────────────────────────────
                 Op::EqInt { rd, ra, rb } => {
-                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
-                        self.set_reg(rd, Value::Bool(a == b));
-                    } else {
-                        let result =
-                            crate::interp::values_equal(self.get_reg(ra), self.get_reg(rb));
-                        self.set_reg(rd, Value::Bool(result));
-                    }
+                    let frame = self.cur_frame_mut();
+                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Int(a), Value::Int(b)) => a == b,
+                        (a, b) => crate::interp::values_equal(a, b),
+                    };
+                    frame.regs[rd as usize] = Value::Bool(result);
                 }
                 Op::NeInt { rd, ra, rb } => {
-                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
-                        self.set_reg(rd, Value::Bool(a != b));
-                    } else {
-                        let result =
-                            !crate::interp::values_equal(self.get_reg(ra), self.get_reg(rb));
-                        self.set_reg(rd, Value::Bool(result));
-                    }
+                    let frame = self.cur_frame_mut();
+                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Int(a), Value::Int(b)) => a != b,
+                        (a, b) => !crate::interp::values_equal(a, b),
+                    };
+                    frame.regs[rd as usize] = Value::Bool(result);
                 }
                 Op::LtInt { rd, ra, rb } => {
-                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
-                        self.set_reg(rd, Value::Bool(a < b));
-                    } else {
-                        let result = match (self.get_reg(ra), self.get_reg(rb)) {
-                            (Value::String(a), Value::String(b)) => a < b,
-                            (a, b) => a.to_string() < b.to_string(),
-                        };
-                        self.set_reg(rd, Value::Bool(result));
-                    }
+                    let frame = self.cur_frame_mut();
+                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Int(a), Value::Int(b)) => a < b,
+                        (Value::String(a), Value::String(b)) => a < b,
+                        (a, b) => a.to_string() < b.to_string(),
+                    };
+                    frame.regs[rd as usize] = Value::Bool(result);
                 }
                 Op::GtInt { rd, ra, rb } => {
-                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
-                        self.set_reg(rd, Value::Bool(a > b));
-                    } else {
-                        let result = match (self.get_reg(ra), self.get_reg(rb)) {
-                            (Value::String(a), Value::String(b)) => a > b,
-                            (a, b) => a.to_string() > b.to_string(),
-                        };
-                        self.set_reg(rd, Value::Bool(result));
-                    }
+                    let frame = self.cur_frame_mut();
+                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Int(a), Value::Int(b)) => a > b,
+                        (Value::String(a), Value::String(b)) => a > b,
+                        (a, b) => a.to_string() > b.to_string(),
+                    };
+                    frame.regs[rd as usize] = Value::Bool(result);
                 }
                 Op::LeInt { rd, ra, rb } => {
-                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
-                        self.set_reg(rd, Value::Bool(a <= b));
-                    } else {
-                        let result = match (self.get_reg(ra), self.get_reg(rb)) {
-                            (Value::String(a), Value::String(b)) => a <= b,
-                            (a, b) => a.to_string() <= b.to_string(),
-                        };
-                        self.set_reg(rd, Value::Bool(result));
-                    }
+                    let frame = self.cur_frame_mut();
+                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Int(a), Value::Int(b)) => a <= b,
+                        (Value::String(a), Value::String(b)) => a <= b,
+                        (a, b) => a.to_string() <= b.to_string(),
+                    };
+                    frame.regs[rd as usize] = Value::Bool(result);
                 }
                 Op::GeInt { rd, ra, rb } => {
-                    if let (Value::Int(a), Value::Int(b)) = (self.get_reg(ra), self.get_reg(rb)) {
-                        self.set_reg(rd, Value::Bool(a >= b));
-                    } else {
-                        let result = match (self.get_reg(ra), self.get_reg(rb)) {
-                            (Value::String(a), Value::String(b)) => a >= b,
-                            (a, b) => a.to_string() >= b.to_string(),
-                        };
-                        self.set_reg(rd, Value::Bool(result));
-                    }
+                    let frame = self.cur_frame_mut();
+                    let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Int(a), Value::Int(b)) => a >= b,
+                        (Value::String(a), Value::String(b)) => a >= b,
+                        (a, b) => a.to_string() >= b.to_string(),
+                    };
+                    frame.regs[rd as usize] = Value::Bool(result);
                 }
                 Op::EqFloat { rd, ra, rb } => {
-                    let (a, b) = self.get_float2(ra, rb)?;
-                    self.set_reg(rd, Value::Bool(a == b));
+                    let frame = self.cur_frame_mut();
+                    let (a, b) = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Float(a), Value::Float(b)) => (*a, *b),
+                        (a, b) => {
+                            return Err(InterpError::new(format!(
+                                "expected Float, got {} and {}",
+                                a, b
+                            )))
+                        }
+                    };
+                    frame.regs[rd as usize] = Value::Bool(a == b);
                 }
                 Op::LtFloat { rd, ra, rb } => {
-                    let (a, b) = self.get_float2(ra, rb)?;
-                    self.set_reg(rd, Value::Bool(a < b));
+                    let frame = self.cur_frame_mut();
+                    let (a, b) = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Float(a), Value::Float(b)) => (*a, *b),
+                        (a, b) => {
+                            return Err(InterpError::new(format!(
+                                "expected Float, got {} and {}",
+                                a, b
+                            )))
+                        }
+                    };
+                    frame.regs[rd as usize] = Value::Bool(a < b);
                 }
                 Op::GtFloat { rd, ra, rb } => {
-                    let (a, b) = self.get_float2(ra, rb)?;
-                    self.set_reg(rd, Value::Bool(a > b));
+                    let frame = self.cur_frame_mut();
+                    let (a, b) = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Float(a), Value::Float(b)) => (*a, *b),
+                        (a, b) => {
+                            return Err(InterpError::new(format!(
+                                "expected Float, got {} and {}",
+                                a, b
+                            )))
+                        }
+                    };
+                    frame.regs[rd as usize] = Value::Bool(a > b);
                 }
                 Op::LeFloat { rd, ra, rb } => {
-                    let (a, b) = self.get_float2(ra, rb)?;
-                    self.set_reg(rd, Value::Bool(a <= b));
+                    let frame = self.cur_frame_mut();
+                    let (a, b) = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Float(a), Value::Float(b)) => (*a, *b),
+                        (a, b) => {
+                            return Err(InterpError::new(format!(
+                                "expected Float, got {} and {}",
+                                a, b
+                            )))
+                        }
+                    };
+                    frame.regs[rd as usize] = Value::Bool(a <= b);
                 }
                 Op::GeFloat { rd, ra, rb } => {
-                    let (a, b) = self.get_float2(ra, rb)?;
-                    self.set_reg(rd, Value::Bool(a >= b));
+                    let frame = self.cur_frame_mut();
+                    let (a, b) = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
+                        (Value::Float(a), Value::Float(b)) => (*a, *b),
+                        (a, b) => {
+                            return Err(InterpError::new(format!(
+                                "expected Float, got {} and {}",
+                                a, b
+                            )))
+                        }
+                    };
+                    frame.regs[rd as usize] = Value::Bool(a >= b);
                 }
                 Op::Eq { rd, ra, rb } => {
-                    let result = crate::interp::values_equal(self.get_reg(ra), self.get_reg(rb));
-                    self.set_reg(rd, Value::Bool(result));
+                    let frame = self.cur_frame_mut();
+                    let result = crate::interp::values_equal(
+                        &frame.regs[ra as usize],
+                        &frame.regs[rb as usize],
+                    );
+                    frame.regs[rd as usize] = Value::Bool(result);
                 }
                 Op::Ne { rd, ra, rb } => {
-                    let result = !crate::interp::values_equal(self.get_reg(ra), self.get_reg(rb));
-                    self.set_reg(rd, Value::Bool(result));
+                    let frame = self.cur_frame_mut();
+                    let result = !crate::interp::values_equal(
+                        &frame.regs[ra as usize],
+                        &frame.regs[rb as usize],
+                    );
+                    frame.regs[rd as usize] = Value::Bool(result);
                 }
 
                 // ── Bitwise ────────────────────────────────────
                 Op::BitAnd { rd, ra, rb } => {
-                    let (a, b) = self.get_int2(ra, rb)?;
-                    self.set_reg(rd, Value::Int(a & b));
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Int(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                        }
+                    };
+                    let b = match &frame.regs[rb as usize] {
+                        Value::Int(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                        }
+                    };
+                    frame.regs[rd as usize] = Value::Int(a & b);
                 }
                 Op::BitOr { rd, ra, rb } => {
-                    let (a, b) = self.get_int2(ra, rb)?;
-                    self.set_reg(rd, Value::Int(a | b));
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Int(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                        }
+                    };
+                    let b = match &frame.regs[rb as usize] {
+                        Value::Int(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                        }
+                    };
+                    frame.regs[rd as usize] = Value::Int(a | b);
                 }
                 Op::BitXor { rd, ra, rb } => {
-                    let (a, b) = self.get_int2(ra, rb)?;
-                    self.set_reg(rd, Value::Int(a ^ b));
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Int(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                        }
+                    };
+                    let b = match &frame.regs[rb as usize] {
+                        Value::Int(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                        }
+                    };
+                    frame.regs[rd as usize] = Value::Int(a ^ b);
                 }
                 Op::Shl { rd, ra, rb } => {
-                    let (a, b) = self.get_int2(ra, rb)?;
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Int(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                        }
+                    };
+                    let b = match &frame.regs[rb as usize] {
+                        Value::Int(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                        }
+                    };
                     let r = u32::try_from(b)
                         .ok()
                         .and_then(|s| a.checked_shl(s))
                         .ok_or_else(|| InterpError::integer_overflow("shift overflow in <<"))?;
-                    self.set_reg(rd, Value::Int(r));
+                    frame.regs[rd as usize] = Value::Int(r);
                 }
                 Op::Shr { rd, ra, rb } => {
-                    let (a, b) = self.get_int2(ra, rb)?;
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Int(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                        }
+                    };
+                    let b = match &frame.regs[rb as usize] {
+                        Value::Int(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                        }
+                    };
                     let r = u32::try_from(b)
                         .ok()
                         .and_then(|s| a.checked_shr(s))
                         .ok_or_else(|| InterpError::integer_overflow("shift overflow in >>"))?;
-                    self.set_reg(rd, Value::Int(r));
+                    frame.regs[rd as usize] = Value::Int(r);
                 }
                 Op::BitNot { rd, ra } => {
-                    let a = self.get_int(ra)?;
-                    self.set_reg(rd, Value::Int(!a));
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Int(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                        }
+                    };
+                    frame.regs[rd as usize] = Value::Int(!a);
                 }
                 Op::Not { rd, ra } => {
-                    let v = self.get_reg(ra);
-                    self.set_reg(rd, Value::Bool(!crate::interp::is_truthy(v)));
+                    let frame = self.cur_frame_mut();
+                    let v = &frame.regs[ra as usize];
+                    frame.regs[rd as usize] = Value::Bool(!crate::interp::is_truthy(v));
                 }
                 Op::And { rd, ra, rb } => {
-                    if crate::interp::is_truthy(self.get_reg(ra)) {
-                        let b = crate::interp::is_truthy(self.get_reg(rb));
-                        self.set_reg(rd, Value::Bool(b));
+                    let frame = self.cur_frame_mut();
+                    if crate::interp::is_truthy(&frame.regs[ra as usize]) {
+                        let b = crate::interp::is_truthy(&frame.regs[rb as usize]);
+                        frame.regs[rd as usize] = Value::Bool(b);
                     } else {
-                        self.set_reg(rd, Value::Bool(false));
+                        frame.regs[rd as usize] = Value::Bool(false);
                     }
                 }
                 Op::Or { rd, ra, rb } => {
-                    if crate::interp::is_truthy(self.get_reg(ra)) {
-                        self.set_reg(rd, Value::Bool(true));
+                    let frame = self.cur_frame_mut();
+                    if crate::interp::is_truthy(&frame.regs[ra as usize]) {
+                        frame.regs[rd as usize] = Value::Bool(true);
                     } else {
-                        let b = crate::interp::is_truthy(self.get_reg(rb));
-                        self.set_reg(rd, Value::Bool(b));
+                        let b = crate::interp::is_truthy(&frame.regs[rb as usize]);
+                        frame.regs[rd as usize] = Value::Bool(b);
                     }
                 }
 
                 // ── String ─────────────────────────────────────
                 Op::ConcatStr { rd, ra, rb } => {
-                    let result = format!("{}{}", self.get_reg(ra), self.get_reg(rb));
-                    self.set_reg(rd, Value::String(result));
+                    let frame = self.cur_frame_mut();
+                    let result = format!("{}{}", frame.regs[ra as usize], frame.regs[rb as usize]);
+                    frame.regs[rd as usize] = Value::String(result);
                 }
                 Op::StrAppend { ra, rb } => {
                     let suffix = self.get_reg(rb).to_string();
@@ -587,7 +820,8 @@ impl<'a> BytecodeVM<'a> {
 
                 // ── Control flow ───────────────────────────────
                 Op::Jmp { offset } => {
-                    let pc = self.cur_frame().pc as i32;
+                    let frame = self.cur_frame_mut();
+                    let pc = frame.pc as i32;
                     let new_pc = pc + offset;
                     if new_pc < 0 {
                         return Err(InterpError::new(format!(
@@ -595,11 +829,12 @@ impl<'a> BytecodeVM<'a> {
                             pc, offset
                         )));
                     }
-                    self.cur_frame_mut().pc = new_pc as usize;
+                    frame.pc = new_pc as usize;
                 }
                 Op::JmpIf { offset, ra } => {
                     if crate::interp::is_truthy(self.get_reg(ra)) {
-                        let pc = self.cur_frame().pc as i32;
+                        let frame = self.cur_frame_mut();
+                        let pc = frame.pc as i32;
                         let new_pc = pc + offset;
                         if new_pc < 0 {
                             return Err(InterpError::new(format!(
@@ -607,12 +842,13 @@ impl<'a> BytecodeVM<'a> {
                                 pc, offset
                             )));
                         }
-                        self.cur_frame_mut().pc = new_pc as usize;
+                        frame.pc = new_pc as usize;
                     }
                 }
                 Op::JmpIfNot { offset, ra } => {
                     if !crate::interp::is_truthy(self.get_reg(ra)) {
-                        let pc = self.cur_frame().pc as i32;
+                        let frame = self.cur_frame_mut();
+                        let pc = frame.pc as i32;
                         let new_pc = pc + offset;
                         if new_pc < 0 {
                             return Err(InterpError::new(format!(
@@ -620,7 +856,7 @@ impl<'a> BytecodeVM<'a> {
                                 pc, offset
                             )));
                         }
-                        self.cur_frame_mut().pc = new_pc as usize;
+                        frame.pc = new_pc as usize;
                     }
                 }
 

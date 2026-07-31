@@ -928,6 +928,44 @@ impl BytecodeCompiler {
     }
 
     /// Compile an expression, returning the register holding the result.
+    /// Compile an expression directly into a pre-assigned register.
+    ///
+    /// Simple, side-effect-free expression shapes (literals, arithmetic,
+    /// unary ops) emit their result straight into `target`, eliminating the
+    /// `Op::Mov` that `compile_expr` + a copy would otherwise produce.
+    /// Anything else falls back to `compile_expr` + `Op::Mov` (safe, no
+    /// reordering of side effects).
+    fn compile_expr_into(
+        &mut self,
+        fc: &mut FuncCompiler,
+        expr: &Expr,
+        target: Reg,
+    ) -> Result<Reg, InterpError> {
+        fc.set_line_from_meta(expr.meta());
+        match expr.unlocated() {
+            Expr::Literal(lit) => {
+                if matches!(lit, Lit::FString(_)) {
+                    let r = self.compile_literal(fc, lit)?;
+                    return self.copy_into(fc, r, target);
+                }
+                return self.compile_literal_into(fc, lit, target);
+            }
+            Expr::Binary(op, l, r) => self.compile_binary_into(fc, *op, l, r, target),
+            Expr::Unary(op, e) => self.compile_unary_into(fc, *op, e, target),
+            _ => {
+                let r = self.compile_expr(fc, expr)?;
+                self.copy_into(fc, r, target)
+            }
+        }
+    }
+
+    fn copy_into(&mut self, fc: &mut FuncCompiler, rs: Reg, rd: Reg) -> Result<Reg, InterpError> {
+        if rs != rd {
+            fc.emit(Op::Mov { rd, rs });
+        }
+        Ok(rd)
+    }
+
     fn compile_expr(&mut self, fc: &mut FuncCompiler, expr: &Expr) -> Result<Reg, InterpError> {
         // Track source line for error context (D12).
         fc.set_line_from_meta(expr.meta());
@@ -1525,7 +1563,6 @@ impl BytecodeCompiler {
                 fc.emit(Op::LoadUnit { rd });
             }
             Lit::FString(parts) => {
-                // Concatenate all f-string parts.
                 let mut prev = None;
                 for part in parts {
                     let r_part = match part {
@@ -1571,12 +1608,72 @@ impl BytecodeCompiler {
         Ok(rd)
     }
 
+    fn compile_literal_into(
+        &mut self,
+        fc: &mut FuncCompiler,
+        lit: &Lit,
+        rd: Reg,
+    ) -> Result<Reg, InterpError> {
+        match lit {
+            Lit::Int(v) => {
+                let idx = fc.proto.add_const(ConstValue::Int(*v));
+                fc.emit(Op::LoadConst { rd, idx });
+            }
+            Lit::Float(v) => {
+                let idx = fc.proto.add_const(ConstValue::Float(*v));
+                fc.emit(Op::LoadConst { rd, idx });
+            }
+            Lit::Bool(true) => {
+                fc.emit(Op::LoadTrue { rd });
+            }
+            Lit::Bool(false) => {
+                fc.emit(Op::LoadFalse { rd });
+            }
+            Lit::String(s) => {
+                let idx = fc.proto.add_const(ConstValue::Str(s.clone()));
+                fc.emit(Op::LoadConst { rd, idx });
+            }
+            Lit::Unit => {
+                fc.emit(Op::LoadUnit { rd });
+            }
+            Lit::FString(_) => {
+                return Err(InterpError::new(
+                    "compile_literal_into: FString must be compiled via compile_expr",
+                ));
+            }
+        }
+        Ok(rd)
+    }
+
     fn compile_binary(
         &mut self,
         fc: &mut FuncCompiler,
         op: BinOp,
         l: &Expr,
         r: &Expr,
+    ) -> Result<Reg, InterpError> {
+        self.compile_binary_hinted(fc, op, l, r, None)
+    }
+
+    fn compile_binary_into(
+        &mut self,
+        fc: &mut FuncCompiler,
+        op: BinOp,
+        l: &Expr,
+        r: &Expr,
+        target: Reg,
+    ) -> Result<Reg, InterpError> {
+        self.compile_binary_hinted(fc, op, l, r, Some(target))
+    }
+
+    /// Shared implementation: `hint` pins the result register when provided.
+    fn compile_binary_hinted(
+        &mut self,
+        fc: &mut FuncCompiler,
+        op: BinOp,
+        l: &Expr,
+        r: &Expr,
+        hint: Option<Reg>,
     ) -> Result<Reg, InterpError> {
         // Short-circuit for && and ||.
         if matches!(op, BinOp::And | BinOp::Or) {
@@ -1593,13 +1690,17 @@ impl BytecodeCompiler {
         // Constant folding: if both operands are literals, compute at compile time.
         if let (Expr::Literal(l_lit), Expr::Literal(r_lit)) = (l.unlocated(), r.unlocated()) {
             if let Some(folded) = self.fold_constants(op, l_lit, r_lit) {
-                return self.compile_literal(fc, &folded);
+                let folded = self.compile_literal(fc, &folded)?;
+                return self.copy_into(fc, folded, hint.unwrap_or(folded));
             }
         }
 
         let ra = self.compile_expr(fc, l)?;
         let rb = self.compile_expr(fc, r)?;
-        let rd = fc.proto.alloc_reg();
+        let rd = match hint {
+            Some(t) => t,
+            None => fc.proto.alloc_reg(),
+        };
 
         // Determine if this is an int or float operation based on the AST.
         // In the full compiler, we'd use CheckedProgram types. For now,
@@ -1744,8 +1845,31 @@ impl BytecodeCompiler {
         op: UnOp,
         e: &Expr,
     ) -> Result<Reg, InterpError> {
+        self.compile_unary_hinted(fc, op, e, None)
+    }
+
+    fn compile_unary_into(
+        &mut self,
+        fc: &mut FuncCompiler,
+        op: UnOp,
+        e: &Expr,
+        target: Reg,
+    ) -> Result<Reg, InterpError> {
+        self.compile_unary_hinted(fc, op, e, Some(target))
+    }
+
+    fn compile_unary_hinted(
+        &mut self,
+        fc: &mut FuncCompiler,
+        op: UnOp,
+        e: &Expr,
+        hint: Option<Reg>,
+    ) -> Result<Reg, InterpError> {
         let ra = self.compile_expr(fc, e)?;
-        let rd = fc.proto.alloc_reg();
+        let rd = match hint {
+            Some(t) => t,
+            None => fc.proto.alloc_reg(),
+        };
         match op {
             UnOp::Neg => {
                 // Determine int vs float.
@@ -1866,8 +1990,8 @@ impl BytecodeCompiler {
         }
 
         for (i, arg) in args.iter().enumerate() {
-            let r = self.compile_expr(fc, arg)?;
             let target = args_base + i as Reg;
+            let r = self.compile_expr_into(fc, arg, target)?;
             if r != target {
                 fc.emit(Op::Mov { rd: target, rs: r });
             }
