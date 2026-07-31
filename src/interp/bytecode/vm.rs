@@ -1846,7 +1846,7 @@ impl<'a> BytecodeVM<'a> {
                                     // Split combined cap into tuple of individual caps.
                                     if components.len() <= 1 {
                                         Err(InterpError::new(
-                                            "cannot split a simple capability (no combined parts)",
+                                            "split() requires a combined capability (e.g., cap FullAccess = Read + Write)",
                                         ))
                                     } else {
                                         let parts: Vec<Value> = components
