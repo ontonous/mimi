@@ -1258,7 +1258,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// back into `vars` (used for statement-position `if`). When `false`, the value
     /// of the branches is merged with a phi node and returned (used for
     /// `compile_block_last_val`).
-    fn compile_if_stmt(
+    pub(in crate::codegen) fn compile_if_stmt(
         &mut self,
         cond: &Expr,
         then_: &Block,
@@ -1268,7 +1268,21 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
         let cond_val = self.compile_expr(cond, vars)?;
         let cond_bool = if let BasicValueEnum::IntValue(iv) = cond_val {
-            iv
+            // Builtin predicates return i64 booleans; normalize to i1 so the
+            // branch instruction is well-typed (br i64 crashes instruction
+            // selection and is invalid IR per the verifier).
+            if iv.get_type().get_bit_width() == 1 {
+                iv
+            } else {
+                self.builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        iv,
+                        self.context.i64_type().const_int(0, false),
+                        "cond_bool",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("cond normalize: {}", e)))?
+            }
         } else {
             let function = self.current_function().ok_or_else(|| {
                 CompileError::LlvmError("codegen: no current function for if block".to_string())

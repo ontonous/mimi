@@ -1519,9 +1519,22 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// + null-init is added by a future refactor (the existing Ptr→PtrSlot
     ///   transition is partially in place for the slot-load based consumers).
     pub(super) fn register_heap_alloc(&self, ptr: inkwell::values::PointerValue<'ctx>) {
+        // Materialize the pointer into an entry-block alloca: cleanup may be
+        // emitted in a later basic block (merge block, function return), and
+        // free(ptr) on a branch-local SSA value would violate SSA dominance
+        // (LLVM crashes under O1). The slot dominates all uses; frees load it.
+        let slot = self
+            .build_entry_alloca(
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                "heap_alloc_slot",
+            )
+            .unwrap_or(ptr);
+        if slot != ptr {
+            let _ = self.build_store(slot, ptr);
+        }
         let mut guard = self.heap_allocs.borrow_mut();
         if let Some(stack) = guard.last_mut() {
-            stack.push(HeapEntry::Ptr(ptr));
+            stack.push(HeapEntry::Ptr(slot));
         } else {
             // audit (MEDIUM): no active scope — create one as a safety net
             // so the allocation does not leak silently. The caller may have
@@ -1532,7 +1545,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "[mimi codegen] warning: register_heap_alloc with no active scope \
                  (codegen ordering bug); creating recovery scope"
             );
-            guard.push(vec![HeapEntry::Ptr(ptr)]);
+            guard.push(vec![HeapEntry::Ptr(slot)]);
         }
     }
 
@@ -1770,7 +1783,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         for entry in entries {
             let ptr = match entry {
-                HeapEntry::Ptr(p) => p,
+                HeapEntry::Ptr(slot) => {
+                    // register_heap_alloc stores the pointer into an
+                    // entry-block alloca; load it so the free uses a value
+                    // that dominates this block (SSA dominance).
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    self.builder
+                        .build_load(ptr_ty, slot, "heap_slot")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("heap slot load error: {}", e))
+                        })?
+                        .into_pointer_value()
+                }
                 HeapEntry::Slot(base, struct_ty, field) => {
                     let gep = self
                         .gep()
@@ -1838,7 +1862,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .ok_or_else(|| CompileError::LlvmError("free not declared".to_string()))?;
             for entry in scope {
                 let ptr = match entry {
-                    HeapEntry::Ptr(p) => p,
+                    HeapEntry::Ptr(slot) => {
+                        // Load from the entry-block alloca (see register_heap_alloc).
+                        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        self.builder
+                            .build_load(ptr_ty, slot, "heap_slot")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("heap slot load error: {}", e))
+                            })?
+                            .into_pointer_value()
+                    }
                     HeapEntry::Slot(base, struct_ty, field) => {
                         let gep = self
                             .gep()
@@ -2747,7 +2780,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if self.optimize {
             let options = inkwell::passes::PassBuilderOptions::create();
             self.module
-                .run_passes("default<O2>", tm, options)
+                .run_passes("default<O1>", tm, options)
                 .map_err(|e| CompileError::LlvmError(format!("optimization failed: {}", e)))?;
         }
 

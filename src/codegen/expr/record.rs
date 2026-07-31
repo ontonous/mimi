@@ -266,6 +266,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     field_tys.push(BasicTypeEnum::StructType(string_struct_ty));
                     continue;
                 }
+                // List<T> variables are stored as pointers to the list struct
+                // ({len, data}); a tuple of lists must hold the struct value.
+                let tname = self.infer_object_type(e, vars);
+                if self.is_list_type_name(&tname) {
+                    let list_ty = self.list_struct_basic_type();
+                    let loaded = self.build_load(list_ty, pv, "tuple_list")?;
+                    field_vals.push(loaded);
+                    field_tys.push(loaded.get_type());
+                    continue;
+                }
             }
             field_tys.push(val.get_type());
             field_vals.push(val);
