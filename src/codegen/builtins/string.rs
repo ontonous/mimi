@@ -380,7 +380,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub(super) fn compile_to_int(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
@@ -388,9 +388,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "to_int expects 1 argument".to_string(),
             ));
         }
+        self.pending_to_number_is_any = false;
         let i64_ty = self.context.i64_type();
         match &args[0] {
-            BasicMetadataValueEnum::IntValue(iv) => return Ok((*iv).into()),
+            BasicMetadataValueEnum::IntValue(iv) => {
+                // `Any` (map_get value) is an untyped i64 handle at LLVM level:
+                // it may be a heap pointer to a C string, and we cannot
+                // distinguish it from a plain integer statically (no local var
+                // type directory in CheckedProgram). Route ALL i64 arguments
+                // through the runtime heuristic: small integers (<1MB) pass
+                // through without syscalls; string handles are parsed; large
+                // even integers fall through mincore-miss to their own value.
+                // Same design as `to_string`'s mimi_any_to_string path.
+                return self.emit_any_to_int(*iv);
+            }
             BasicMetadataValueEnum::FloatValue(fv) => {
                 let iv = self
                     .builder
@@ -407,8 +418,72 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(value.into())
     }
 
+    /// Emit a call to `mimi_any_to_int(value: i64) -> i64` (runtime heuristic:
+    /// string handles are parsed via strtol, integers pass through).
+    fn emit_any_to_int(
+        &mut self,
+        iv: inkwell::values::IntValue<'ctx>,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let any_fn_ty = i64_ty.fn_type(&[BasicMetadataTypeEnum::IntType(i64_ty)], false);
+        let fn_any = self
+            .module
+            .get_function("mimi_any_to_int")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_any_to_int",
+                    any_fn_ty,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let result = self
+            .builder
+            .build_call(
+                fn_any,
+                &[BasicMetadataValueEnum::IntValue(iv)],
+                "any_to_int",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("any_to_int: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_any_to_int returned void")?
+            .into_int_value();
+        Ok(result.into())
+    }
+
+    /// Emit a call to `mimi_any_to_float(value: i64) -> f64`.
+    fn emit_any_to_float(
+        &mut self,
+        iv: inkwell::values::IntValue<'ctx>,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let f64_ty = self.context.f64_type();
+        let any_fn_ty = f64_ty.fn_type(&[BasicMetadataTypeEnum::IntType(i64_ty)], false);
+        let fn_any = self
+            .module
+            .get_function("mimi_any_to_float")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_any_to_float",
+                    any_fn_ty,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let result = self
+            .builder
+            .build_call(
+                fn_any,
+                &[BasicMetadataValueEnum::IntValue(iv)],
+                "any_to_float",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("any_to_float: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_any_to_float returned void")?
+            .into_float_value();
+        Ok(result.into())
+    }
+
     pub(super) fn compile_str_parse_int(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
@@ -416,11 +491,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_parse_int expects 1 argument".to_string(),
             ));
         }
+        self.pending_to_number_is_any = false;
         let i64_ty = self.context.i64_type();
         let true_val = self.context.bool_type().const_int(1, false);
         match &args[0] {
             BasicMetadataValueEnum::IntValue(iv) => {
-                return self.build_parse_int_tuple(true_val, *iv);
+                // See compile_to_int: i64 arguments may be Any handles (map
+                // values), so route through the runtime heuristic.
+                let v = self.emit_any_to_int(*iv)?.into_int_value();
+                return self.build_parse_int_tuple(true_val, v);
             }
             BasicMetadataValueEnum::FloatValue(fv) => {
                 let iv = self
@@ -547,7 +626,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub(super) fn compile_to_float(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
@@ -555,17 +634,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "to_float expects 1 argument".to_string(),
             ));
         }
-        let f64_ty = self.context.f64_type();
         match &args[0] {
             BasicMetadataValueEnum::FloatValue(fv) => return Ok((*fv).into()),
             BasicMetadataValueEnum::IntValue(iv) => {
-                let fv = self
-                    .builder
-                    .build_signed_int_to_float(*iv, f64_ty, "to_float_i")
-                    .map_err(|e| {
-                        CompileError::LlvmError(format!("to_float int->float error: {}", e))
-                    })?;
-                return Ok(fv.into());
+                // See compile_to_int: i64 arguments may be Any string handles.
+                return self.emit_any_to_float(*iv);
             }
             _ => {}
         }
@@ -575,7 +648,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub(super) fn compile_str_parse_float(
-        &self,
+        &mut self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
         if args.len() != 1 {
@@ -583,19 +656,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_parse_float expects 1 argument".to_string(),
             ));
         }
-        let f64_ty = self.context.f64_type();
         let true_val = self.context.bool_type().const_int(1, false);
         match &args[0] {
             BasicMetadataValueEnum::FloatValue(fv) => {
                 return self.build_parse_float_tuple(true_val, *fv);
             }
             BasicMetadataValueEnum::IntValue(iv) => {
-                let fv = self
-                    .builder
-                    .build_signed_int_to_float(*iv, f64_ty, "to_float_i")
-                    .map_err(|e| {
-                        CompileError::LlvmError(format!("str_parse_float int->float error: {}", e))
-                    })?;
+                let fv = self.emit_any_to_float(*iv)?.into_float_value();
                 return self.build_parse_float_tuple(true_val, fv);
             }
             _ => {}

@@ -349,6 +349,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             let arg_type = self.infer_object_type(&args[0], vars);
             self.pending_to_string_is_any = arg_type == "Any" || arg_type == "any";
         }
+        if (name == "to_int" || name == "to_float") && args.len() == 1 {
+            let arg_type = self.infer_object_type(&args[0], vars);
+            self.pending_to_number_is_any = arg_type == "Any" || arg_type == "any";
+        }
+        if (name == "str_parse_int" || name == "str_parse_float") && args.len() == 1 {
+            let arg_type = self.infer_object_type(&args[0], vars);
+            self.pending_to_number_is_any = arg_type == "Any" || arg_type == "any";
+        }
         if name == "push" && args.len() == 2 {
             let list_type = self.infer_object_type(&args[0], vars);
             if let Some(elem_type) = Self::strip_list_element_type(&list_type) {

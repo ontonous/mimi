@@ -269,6 +269,12 @@ pub struct CodeGenerator<'ctx> {
     /// uniform layout before heap packing.
     pending_list_elem_type: Option<Type>,
     pending_to_string_is_any: bool,
+    /// Set when `to_int`/`to_float` receives an `Any`-typed argument (e.g. a
+    /// `map_get` value). `Any` is lowered to an untyped i64 handle at LLVM
+    /// level, so conversion builtins must route through the runtime
+    /// `mimi_any_to_int`/`mimi_any_to_float` heuristic instead of treating the
+    /// handle as a raw integer.
+    pending_to_number_is_any: bool,
     /// Cached result of MIMI_OPT env var check at codegen construction time.
     /// Avoids repeated env var queries within a single compile_to_object call.
     optimize: bool,
@@ -504,6 +510,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             pending_push_elem_type: None,
             pending_list_elem_type: None,
             pending_to_string_is_any: false,
+            pending_to_number_is_any: false,
             optimize: std::env::var("MIMI_OPT")
                 .map(|v| v == "1" || v == "true")
                 .unwrap_or(false),
