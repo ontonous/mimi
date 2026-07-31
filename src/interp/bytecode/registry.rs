@@ -99,6 +99,12 @@ impl BuiltinRegistry {
     }
 }
 
+impl Default for BuiltinRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Create a registry with all builtins registered.
 /// Single source of truth — compiler and VM both call this.
 pub fn create_registry() -> BuiltinRegistry {

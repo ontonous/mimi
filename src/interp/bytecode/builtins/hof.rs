@@ -35,7 +35,7 @@ pub(crate) fn builtin_filter_list(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Re
     let closure = &args[1];
     let mut result = Vec::new();
     for elem in list {
-        let ret = vm.call_closure(closure, &[elem.clone()])?;
+        let ret = vm.call_closure(closure, std::slice::from_ref(&elem))?;
         if crate::interp::is_truthy(&ret) {
             result.push(elem);
         }
