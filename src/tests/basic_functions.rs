@@ -496,13 +496,14 @@ func main() -> i32 {
 fn nan_is_falsy() {
     // audit (LOW): f64::NAN must be falsy in boolean context.
     // Use sqrt(-1.0) to produce NaN at runtime.
+    // SD-9: bytecode traps on NaN; tree-walker permits IEEE-754 NaN.
     let src = r#"
 func main() -> i32 {
     let nan = sqrt(-1.0)
     if nan { 1 } else { 42 }
 }
 "#;
-    let v = run_source(src);
+    let v = run_source_treewalker(src);
     assert_eq!(v, interp::Value::Int(42));
 }
 

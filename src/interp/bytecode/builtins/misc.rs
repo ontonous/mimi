@@ -65,7 +65,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
     // Testing / assertions
     reg.register(BuiltinDesc {
         name: "assert",
-        arity: 1,
+        arity: usize::MAX, // 1 or 2 args: assert(cond) or assert(cond, msg)
         category: BuiltinCategory::System,
         func: builtin_assert,
     });
@@ -727,7 +727,12 @@ fn builtin_base64_decode(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
 
 fn builtin_assert(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     if !crate::interp::is_truthy(&args[0]) {
-        return Err(InterpError::new("assertion failed"));
+        let msg = if args.len() >= 2 {
+            format!("assertion failed: {}", args[1])
+        } else {
+            "assertion failed".to_string()
+        };
+        return Err(InterpError::new(msg));
     }
     Ok(Value::Unit)
 }
