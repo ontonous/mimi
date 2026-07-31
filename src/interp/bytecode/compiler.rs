@@ -574,6 +574,105 @@ impl BytecodeCompiler {
         })
     }
 
+    /// Compile a file for comptime evaluation only.
+    /// Unlike `compile_file`, this does not require a `main` function.
+    /// Used by codegen to evaluate `comptime func` declarations.
+    pub fn compile_for_comptime(&mut self, file: &File) -> Result<BytecodeProgram, InterpError> {
+        // Store AST for actor worker threads.
+        self.ast_file = Some(std::sync::Arc::new(file.clone()));
+
+        // Pass 1: register all function names + collect variant/actor/flow names.
+        for item in &file.items {
+            if let Item::Func(f) = item {
+                let idx = self.functions.len() as FuncIdx;
+                self.func_table.insert(f.name.clone(), idx);
+                let defaults: Vec<Option<Expr>> = f
+                    .params
+                    .iter()
+                    .map(|p| p.default_value.clone())
+                    .collect();
+                if defaults.iter().any(|d| d.is_some()) {
+                    self.func_defaults.insert(f.name.clone(), defaults);
+                }
+                let param_names: Vec<String> =
+                    f.params.iter().map(|p| p.name.clone()).collect();
+                self.func_param_names.insert(f.name.clone(), param_names);
+                self.functions
+                    .push(FunctionProto::new(f.name.clone(), f.params.len() as u16));
+            }
+            if let Item::Type(td) = item {
+                match &td.kind {
+                    TypeDefKind::Enum(variants) => {
+                        for variant in variants {
+                            self.variant_names.insert(variant.name.clone());
+                        }
+                    }
+                    TypeDefKind::Newtype(_) => {
+                        self.newtype_names.insert(td.name.clone());
+                    }
+                    _ => {}
+                }
+            }
+            if let Item::Const { name, value, .. } = item {
+                self.constants.insert(name.clone(), value.clone());
+            }
+            if let Item::Cap(cap) = item {
+                self.cap_names.insert(cap.name.clone());
+                let components = if let Some(ref combined) = cap.combined_with {
+                    let parts: Vec<String> = combined
+                        .split(" + ")
+                        .map(|s| s.trim().to_string())
+                        .collect();
+                    if parts.len() > 1 { parts } else { vec![cap.name.clone(), combined.clone()] }
+                } else {
+                    vec![cap.name.clone()]
+                };
+                self.cap_components.insert(cap.name.clone(), components);
+            }
+        }
+
+        // Pass 1.5: register impl method names.
+        for item in &file.items {
+            if let Item::Impl(impl_def) = item {
+                if !self.impl_type_names.contains(&impl_def.type_name) {
+                    self.impl_type_names.push(impl_def.type_name.clone());
+                }
+            }
+        }
+
+        // Register builtins.
+        let registry = crate::interp::bytecode::registry::create_registry();
+        for name in registry.names() {
+            self.register_builtin(&name);
+        }
+
+        // Pass 2: compile function bodies.
+        for item in &file.items {
+            if let Item::Func(f) = item {
+                if let Some(&idx) = self.func_table.get(&f.name) {
+                    let proto = self.compile_func(f)?;
+                    self.functions[idx as usize] = proto;
+                }
+            }
+        }
+
+        // No main requirement for comptime compilation.
+        let entry = self.func_table.get("main").copied().unwrap_or(0);
+
+        Ok(BytecodeProgram {
+            functions: std::mem::take(&mut self.functions),
+            entry,
+            builtin_names: std::mem::take(&mut self.builtin_names),
+            actor_defs: std::mem::take(&mut self.actor_defs),
+            flow_defs: std::mem::take(&mut self.flow_defs),
+            flow_transition_funcs: std::mem::take(&mut self.flow_transition_funcs),
+            flow_fails_transitions: std::mem::take(&mut self.flow_fails_transitions),
+            actor_method_funcs: std::mem::take(&mut self.actor_method_funcs),
+            max_children: None,
+            ast: self.ast_file.clone(),
+        })
+    }
+
     fn register_builtin(&mut self, name: &str) {
         let idx = self.builtin_names.len() as BuiltinIdx;
         self.builtin_table.insert(name.to_string(), idx);
