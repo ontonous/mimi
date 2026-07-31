@@ -626,6 +626,33 @@ fn builtin_slice(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
 // ── Type reflection ─────────────────────────────────────
 
 fn builtin_type_name(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let name = crate::interp::type_name(&args[0]);
+    // Match tree-walker's value_type_name semantics (i32/f64, variant/record names).
+    let name = match &args[0] {
+        Value::Int(_) => "i32",
+        Value::Float(_) => "f64",
+        Value::Bool(_) => "bool",
+        Value::String(_) => "string",
+        Value::Unit => "unit",
+        Value::List(_) => "list",
+        Value::Set(_) => "set",
+        Value::Array(_) => "array",
+        Value::Tuple(_) => "tuple",
+        Value::Variant(tag, _) => return Ok(Value::String(tag.clone())),
+        Value::Record(Some(name), _) => return Ok(Value::String(name.clone())),
+        Value::Record(None, _) => "record",
+        Value::Error(_) => "error",
+        Value::Newtype(name, _) => return Ok(Value::String(name.clone())),
+        Value::Type(name) => return Ok(Value::String(name.clone())),
+        Value::Closure { .. } | Value::BytecodeClosure { .. } => "closure",
+        Value::Shared(_) => "shared",
+        Value::LocalShared(_) => "local_shared",
+        Value::Ref(_) => "ref",
+        Value::RefMut(_) => "ref_mut",
+        Value::Cap(_) => "cap",
+        Value::Actor(_) => "actor",
+        Value::CBuffer(_) => "cbuffer",
+        Value::DynTrait { .. } => "dyn_trait",
+        _ => "unknown",
+    };
     Ok(Value::String(name.to_string()))
 }

@@ -1659,8 +1659,26 @@ impl<'a> BytecodeVM<'a> {
                 }
                 Op::TypeOf { rd, ra } => {
                     let v = self.get_reg(ra);
-                    let name = crate::interp::type_name(v);
-                    self.set_reg(rd, Value::String(name.to_string()));
+                    // Match tree-walker's value_type_name semantics.
+                    let name = match v {
+                        Value::Int(_) => "i32".to_string(),
+                        Value::Float(_) => "f64".to_string(),
+                        Value::Bool(_) => "bool".to_string(),
+                        Value::String(_) => "string".to_string(),
+                        Value::Unit => "unit".to_string(),
+                        Value::List(_) => "list".to_string(),
+                        Value::Set(_) => "set".to_string(),
+                        Value::Array(_) => "array".to_string(),
+                        Value::Tuple(_) => "tuple".to_string(),
+                        Value::Variant(tag, _) => tag.clone(),
+                        Value::Record(Some(name), _) => name.clone(),
+                        Value::Record(None, _) => "record".to_string(),
+                        Value::Newtype(name, _) => name.clone(),
+                        Value::Shared(_) => "shared".to_string(),
+                        Value::Actor(_) => "actor".to_string(),
+                        _ => crate::interp::type_name(v).to_string(),
+                    };
+                    self.set_reg(rd, Value::String(name));
                 }
                 Op::Trap { msg } => {
                     let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
