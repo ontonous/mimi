@@ -65,6 +65,9 @@ pub struct BytecodeVM<'a> {
     pub cli_args: Vec<String>,
     /// When set, the VM should terminate with this exit code.
     exit_requested: Option<i64>,
+    /// Reusable register buffers (frame regs Vec capacity is preserved across
+    /// calls, so deep recursion does not re-malloc per frame).
+    free_regs: Vec<Vec<Value>>,
 }
 
 const MAX_DEPTH: usize = 768;
@@ -82,6 +85,7 @@ impl<'a> BytecodeVM<'a> {
             spawn_count: 0,
             cli_args: Vec::new(),
             exit_requested: None,
+            free_regs: Vec::new(),
         }
     }
 
@@ -89,6 +93,17 @@ impl<'a> BytecodeVM<'a> {
     /// Called by the `exit()` builtin.
     pub fn request_exit(&mut self, code: i64) {
         self.exit_requested = Some(code);
+    }
+
+    /// Pop the top frame, recycling its register buffer into the free pool.
+    fn pop_frame(&mut self) {
+        let frame = self
+            .stack
+            .pop()
+            .expect("bytecode: exec stack empty (VM invariant violated)");
+        if frame.regs.capacity() > 0 {
+            self.free_regs.push(frame.regs);
+        }
     }
 
     /// Top frame — VM invariant: the exec stack is non-empty while running.
@@ -192,9 +207,21 @@ impl<'a> BytecodeVM<'a> {
             )));
         }
 
-        let mut regs = Vec::with_capacity(reg_count);
-        regs.extend(args);
-        regs.resize(reg_count, Value::Unit);
+        let regs = match self.free_regs.pop() {
+            Some(mut buf) => {
+                buf.clear();
+                buf.reserve(reg_count);
+                buf.extend(args);
+                buf.resize(reg_count, Value::Unit);
+                buf
+            }
+            None => {
+                let mut buf = Vec::with_capacity(reg_count);
+                buf.extend(args);
+                buf.resize(reg_count, Value::Unit);
+                buf
+            }
+        };
 
         self.stack.push(Frame {
             regs,
@@ -243,7 +270,7 @@ impl<'a> BytecodeVM<'a> {
                 // Fell off the end — implicit return Unit.
                 let return_reg = frame.return_reg;
                 let wrap_ok = frame.wrap_ok;
-                self.stack.pop();
+                self.pop_frame();
                 self.depth -= 1;
                 let v = if wrap_ok {
                     Value::Variant("Ok".to_string(), vec![Value::Unit])
@@ -930,7 +957,7 @@ impl<'a> BytecodeVM<'a> {
                     } else {
                         Value::Unit
                     };
-                    self.stack.pop();
+                    self.pop_frame();
                     self.depth -= 1;
                     if self.stack.is_empty() || (stop > 0 && self.depth < stop) {
                         return Ok(v);
@@ -1841,7 +1868,7 @@ impl<'a> BytecodeVM<'a> {
                 v = Value::Variant("Ok".to_string(), vec![v]);
             }
         }
-        self.stack.pop();
+        self.pop_frame();
         self.depth -= 1;
         if self.stack.is_empty() || (stop > 0 && self.depth < stop) {
             return Ok(Some(v));
