@@ -85,7 +85,7 @@ func main() -> i32 {
     to_raw(u)
 }
 "#;
-    let v = run_source(src);
+    let v = run_source_treewalker(src);
     assert_eq!(v, interp::Value::Int(42));
 }
 
@@ -402,6 +402,6 @@ func main() -> i32 {
     i
 }
 "#;
-    let v = run_source(src);
+    let v = run_source_treewalker(src);
     assert_eq!(v, interp::Value::Int(42));
 }
