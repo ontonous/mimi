@@ -2,6 +2,19 @@
 
 ## [Unreleased] — 0.1.3-dev
 
+### Codegen O1 优化全量回归修复（MIMI_OPT=1 双后端全绿）
+
+- **fix(codegen): lambda 主体补全**：`emit_lambda_body` 新增 `Stmt::If`/`Assign`/`While`/`For`/`Block` 分支（此前仅参数/返回值，闭包回调全部产出 `ret i64 0`）；If 为值模式 + 返回类型宽度调整；`default_ret_value` 按 IntType 自身宽度（`count_val(xs, 2)` O0 0→1，O1 同）。
+- **fix(codegen): 泛型实参强转**：`coerce_args_to_param_types` 对泛型函数跳过 `llvm_type_for` 强转（未知泛型名 fallback i64 会把 `0.0` fptosi 成 i64 0），monomorph 调用点按具体形参类型重 coerce（`coerce_args_to_function`）。`sum_float` 经 `reduce_list` 求和修复。
+- **fix(codegen): reduce 内建 float 支持**：`compile_reduce_intrinsic` 重写（acc/elem/ret 类型携带、list 槽 i64 位模式 `bit_cast` 回 f64/f32、int↔float 转换）；`try_convert_loop_elem` 对 f32/f64 位模式恢复。
+- **fix(codegen): tuple 含 List 返回值**：`compile_tuple_expr` 对 List 字段按值 load（`partition` 返回 `{ptr,ptr}` 与结果类型 `{{i64,ptr},{i64,ptr}}` 不符，O1 verifier 报错）。
+- **fix(codegen): 分支/循环条件 i64→i1 归一化**：builtin 谓词（如 `str_starts_with`）返回 zext 的 i64，`compile_if_stmt`/`compile_while_stmt`/func.rs 第二处 if emitter 统一 `icmp ne` 归一（`br i64` 非法 IR）。
+- **fix(codegen): 分支 string 字面量值归一**：`normalize_block_last_string` 将裸 string 指针分支值包裹为 `{ptr,i64}`（`first_char` 的 `{ "" }` 分支）。
+- **fix(codegen): heap free 跨块 SSA 支配**：`register_heap_alloc` 将指针固化到 entry alloca 槽，两个 free 路径从槽 load（修复 `free(ptr %str_char_at_call)` 不支配 use → O1 指令选择 SIGSEGV）。`a1_verification.mimi` O1 全 10 项通过。
+- **fix(codegen): trait 方法调用 string 字面量实参**：`compile_self_method_call` 对 string 形参包裹 raw 指针为 `{ptr,i64}`（`str_index_of("ll")` 经 O1 inline 展开报 `extractvalue ptr` 类型错）。
+- **fix(codegen): actors.rs if-else 合并 phi 缺失 else 边默认值**（O1 verifier SIGSEGV）；**io.rs write/fopen Result 返回值修复**（上一轮遗留）。
+- 验证：`MIMI_OPT=1` 与 `MIMI_OPT=0` 双路径 4513 lib + real_world 28 + real_world_cli 1 全绿，clippy/fmt 门禁全过。
+
 ### INTERP 性能深度优化 III（寄存器缓冲池化 + L1 Any 转换修复）
 
 - **fix(codegen): L1 双后端断裂——`to_int`/`to_float` 对 `Any`（map_get 值）返回裸堆指针**：`map_get` 的值在 LLVM 层是未类型化的 i64 handle（字符串存堆指针）。codegen 的 `to_int`/`to_float`/`str_parse_int`/`str_parse_float` IntValue 分支把 handle 当整数直接返回（`to_int("3000")` → 指针值 591434576），interp 正确解析为 3000。修复：新增 runtime `mimi_any_to_int`/`mimi_any_to_float`（复用 `safe_c_string_from_handle` 启发式：<1MB 整数直通、映射页 + NUL 终止 → strtol/strtod 解析），四个 builtin 的 i64 参数统一经 runtime 判定（与既有 `to_string` Any 路径同设计；CheckedProgram 无局部变量类型目录，静态区分不可行）。`parse_c_decimal_i64` 自实现 strtol 语义（runtime libc feature 无 strtol/strtod），含 i64::MIN 饱和边界。
