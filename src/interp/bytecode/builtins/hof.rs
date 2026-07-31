@@ -42,6 +42,19 @@ pub(crate) fn builtin_map_list(
     vm: &mut BytecodeVM<'_>,
     args: &[Value],
 ) -> Result<Value, InterpError> {
+    // Option/Result .map() method dispatch.
+    if let Value::Variant(tag, payload) = &args[0] {
+        let closure = &args[1];
+        return match tag.as_str() {
+            "Some" | "Ok" => {
+                let arg = payload.first().cloned().unwrap_or(Value::Unit);
+                let mapped = vm.call_closure(closure, &[arg])?;
+                Ok(Value::Variant(tag.clone(), vec![mapped]))
+            }
+            "None" | "Err" => Ok(args[0].clone()),
+            _ => Err(InterpError::new(format!("map: unsupported variant '{}'", tag))),
+        };
+    }
     let list = match &args[0] {
         Value::List(l) => l.clone(),
         _ => return Err(InterpError::new("map_list: first argument must be a list")),
