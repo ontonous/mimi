@@ -2352,6 +2352,65 @@ impl<'a> BytecodeVM<'a> {
 
     // ── Actor spawn helper ───────────────────────────────────
 
+    /// Evaluate a simple init expression for actor field initialization.
+    /// Handles literals, negative literals, lists, tuples, records, and common builtins.
+    fn eval_init_expr(expr: &crate::ast::Expr) -> Option<Value> {
+        use crate::ast::{Expr, Lit, UnOp};
+        match expr {
+            Expr::Literal(Lit::Int(n)) => Some(Value::Int(*n)),
+            Expr::Literal(Lit::Float(f)) => Some(Value::Float(*f)),
+            Expr::Literal(Lit::Bool(b)) => Some(Value::Bool(*b)),
+            Expr::Literal(Lit::String(s)) => Some(Value::String(s.clone())),
+            Expr::Literal(Lit::Unit) => Some(Value::Unit),
+            // Negative literals: -42, -3.14
+            Expr::Unary(UnOp::Neg, inner) => {
+                match Self::eval_init_expr(inner.unlocated())? {
+                    Value::Int(n) => Some(Value::Int(-n)),
+                    Value::Float(f) => Some(Value::Float(-f)),
+                    _ => None,
+                }
+            }
+            // List literal: [expr, expr, ...]
+            Expr::List(elems) => {
+                let mut items = Vec::new();
+                for elem in elems {
+                    items.push(Self::eval_init_expr(elem.unlocated())?);
+                }
+                Some(Value::List(items))
+            }
+            // Tuple literal: (expr, expr, ...)
+            Expr::Tuple(elems) => {
+                let mut items = Vec::new();
+                for elem in elems {
+                    items.push(Self::eval_init_expr(elem.unlocated())?);
+                }
+                Some(Value::Tuple(items))
+            }
+            // Record literal: Type { field: expr, ... }
+            Expr::Record { ty, fields } => {
+                let mut map = std::collections::HashMap::new();
+                for field in fields {
+                    let val = Self::eval_init_expr(field.value.unlocated())?;
+                    map.insert(field.name.clone(), val);
+                }
+                Some(Value::Record(ty.clone(), map))
+            }
+            // Common builtin calls: map_new(), set_new(), etc.
+            Expr::Call(callee, args) if args.is_empty() => {
+                if let Expr::Ident(name) = callee.unlocated() {
+                    match name.as_str() {
+                        "map_new" => Some(Value::Record(None, std::collections::HashMap::new())),
+                        "set_new" => Some(Value::Set(Vec::new())),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None, // complex init: not supported
+        }
+    }
+
     /// Spawn an actor by name, reusing the ActorHandle infrastructure.
     /// The actor's worker thread uses BytecodeVM internally (v0.33 migration).
     /// Main program and actor workers both run on bytecode.
@@ -2382,27 +2441,16 @@ impl<'a> BytecodeVM<'a> {
                 crate::ast::Type::Name(n, _) if n == "f64" => Value::Float(0.0),
                 crate::ast::Type::Name(n, _) if n == "bool" => Value::Bool(false),
                 crate::ast::Type::Name(n, _) if n == "string" => Value::String(String::new()),
+                crate::ast::Type::Name(n, _) if n == "List" || n == "Vec" => Value::List(Vec::new()),
+                crate::ast::Type::Name(n, _) if n == "Map" => {
+                    Value::Record(None, std::collections::HashMap::new())
+                }
+                crate::ast::Type::Name(n, _) if n == "Set" => Value::Set(Vec::new()),
                 _ => Value::Unit,
             };
             // If there's an init expression that's a simple literal, evaluate it.
             let value = if let Some(init) = &field.init {
-                match init.unlocated() {
-                    crate::ast::Expr::Literal(crate::ast::Lit::Int(n)) => Value::Int(*n),
-                    crate::ast::Expr::Literal(crate::ast::Lit::Float(f)) => Value::Float(*f),
-                    crate::ast::Expr::Literal(crate::ast::Lit::Bool(b)) => Value::Bool(*b),
-                    crate::ast::Expr::Literal(crate::ast::Lit::String(s)) => {
-                        Value::String(s.clone())
-                    }
-                    // Negative literals: -42, -3.14
-                    crate::ast::Expr::Unary(crate::ast::UnOp::Neg, inner) => {
-                        match inner.unlocated() {
-                            crate::ast::Expr::Literal(crate::ast::Lit::Int(n)) => Value::Int(-n),
-                            crate::ast::Expr::Literal(crate::ast::Lit::Float(f)) => Value::Float(-f),
-                            _ => value,
-                        }
-                    }
-                    _ => value, // complex init: use default (tree-walker eval not available)
-                }
+                Self::eval_init_expr(init.unlocated()).unwrap_or(value)
             } else {
                 value
             };
