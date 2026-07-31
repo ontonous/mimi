@@ -346,22 +346,31 @@ pub(crate) fn parse(src: &str) -> crate::ast::File {
         .expect("src/tests/mod.rs:145 unwrap failed")
 }
 
+/// Run source via the Bytecode VM (default backend since 0.33).
+/// Panics on compile or runtime error.
 pub(crate) fn run_source(src: &str) -> interp::Value {
     let file = parse(src);
-    let mut interp = interp::Interpreter::new(&file);
-    interp.run().expect("src/tests/mod.rs:151 unwrap failed")
+    let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    let prog = compiler
+        .compile_file(&file)
+        .expect("bytecode compile failed in run_source");
+    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    vm.run_value().expect("bytecode run_value failed in run_source")
 }
 
-/// TC-C1: run interpreter with stdout capture enabled.
+/// TC-C1: run Bytecode VM with stdout capture enabled.
 /// Returns `(main return value, captured stdout)`.
 pub(crate) fn run_source_with_stdout(src: &str) -> (interp::Value, String) {
     let file = parse(src);
-    let mut interp = interp::Interpreter::new(&file);
-    interp.enable_stdout_capture();
-    let val = interp
-        .run()
-        .expect("src/tests/mod.rs: run_source_with_stdout failed");
-    let stdout = interp.take_stdout();
+    let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    let prog = compiler
+        .compile_file(&file)
+        .expect("bytecode compile failed in run_source_with_stdout");
+    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    let val = vm
+        .run_value()
+        .expect("bytecode run_value failed in run_source_with_stdout");
+    let stdout = vm.take_stdout();
     (val, stdout)
 }
 
@@ -379,7 +388,47 @@ pub(crate) fn run_with_stdlib(stdlib_name: &str, src: &str) -> interp::Value {
     run_source(&combined)
 }
 
+/// Run source via the Bytecode VM, returning Result.
 pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
+    let tokens = lexer::Lexer::new(src).tokenize()?;
+    let file = parser::Parser::new(tokens)
+        .parse_file()
+        .map_err(|e| e.message)?;
+    let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    let prog = compiler.compile_file(&file).map_err(|e| e.to_string())?;
+    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    vm.run_value().map_err(|e| e.message().to_string())
+}
+
+/// Bytecode VM has no fork isolation; this is an alias for run_source_result.
+/// Kept for API compatibility with FFI tests that will be migrated in Phase D'.
+pub(crate) fn run_source_result_no_fork(src: &str) -> Result<interp::Value, String> {
+    run_source_result(src)
+}
+
+// ===================== Tree-walker fallback helpers (0.33 retirement) =====================
+// These keep the tree-walker path available for tests that bytecode doesn't
+// support yet (FFI extern calls, quote!, etc.). They will be deleted in Phase X.
+
+/// Run source via the legacy tree-walker interpreter. Fallback for FFI/quote tests.
+pub(crate) fn run_source_treewalker(src: &str) -> interp::Value {
+    let file = parse(src);
+    let mut interp = interp::Interpreter::new(&file);
+    interp.run().expect("tree-walker run failed")
+}
+
+/// Tree-walker with stdout capture. Fallback for FFI tests.
+pub(crate) fn run_source_treewalker_with_stdout(src: &str) -> (interp::Value, String) {
+    let file = parse(src);
+    let mut interp = interp::Interpreter::new(&file);
+    interp.enable_stdout_capture();
+    let val = interp.run().expect("tree-walker run failed");
+    let stdout = interp.take_stdout();
+    (val, stdout)
+}
+
+/// Tree-walker returning Result. Fallback for FFI tests.
+pub(crate) fn run_source_treewalker_result(src: &str) -> Result<interp::Value, String> {
     let tokens = lexer::Lexer::new(src).tokenize()?;
     let file = parser::Parser::new(tokens)
         .parse_file()
@@ -389,11 +438,8 @@ pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
     interp.run().map_err(|e| e.message().to_string())
 }
 
-/// Like `run_source_result` but with fork isolation disabled.
-/// Needed for FFI tests that return pointers (raw_string, string, Json)
-/// or use callbacks, which are incompatible with fork isolation
-/// (child-process heap is not accessible from the parent).
-pub(crate) fn run_source_result_no_fork(src: &str) -> Result<interp::Value, String> {
+/// Tree-walker with fork isolation disabled. Fallback for FFI pointer-return tests.
+pub(crate) fn run_source_treewalker_result_no_fork(src: &str) -> Result<interp::Value, String> {
     let tokens = lexer::Lexer::new(src).tokenize()?;
     let file = parser::Parser::new(tokens)
         .parse_file()
@@ -421,20 +467,22 @@ pub(crate) fn check_source_warnings(src: &str) -> Vec<crate::diagnostic::Diagnos
     checker.warnings
 }
 
-/// H3: Run checker + interpreter. Catches checker bugs that `run_source_result`
+/// H3: Run checker + Bytecode VM. Catches checker bugs that `run_source_result`
 /// silently bypasses (e.g. E0255 false positives for become/stay).
 pub(crate) fn checked_run_source_result(src: &str) -> Result<interp::Value, String> {
     let file = parse(src);
-    core::check(&file).map_err(|diags| {
+    let program = core::check_program(&file).map_err(|diags| {
         diags
             .iter()
             .map(|d| format!("{}", d))
             .collect::<Vec<_>>()
             .join("\n")
     })?;
-    let mut interp = interp::Interpreter::new(&file);
-    interp.verify_contracts = true;
-    interp.run().map_err(|e| e.message().to_string())
+    let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    compiler.install_checked_program(&program);
+    let prog = compiler.compile_file(&file).map_err(|e| e.to_string())?;
+    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    vm.run_value().map_err(|e| e.message().to_string())
 }
 
 /// H3: Run checker + codegen + native execution. Catches checker bugs that

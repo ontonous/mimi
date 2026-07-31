@@ -47,11 +47,11 @@ fn net_echo_server() {
     let server_src = SERVER_ECHO.replace("PORT", &ECHO_PORT.to_string());
     let client_src = CLIENT_ECHO.replace("PORT", &ECHO_PORT.to_string());
 
-    let server = std::thread::spawn(move || run_source(&server_src));
+    let server = std::thread::spawn(move || run_source_treewalker(&server_src));
 
     std::thread::sleep(Duration::from_millis(100));
 
-    let client_result = run_source(&client_src);
+    let client_result = run_source_treewalker(&client_src);
     let server_result = server.join().unwrap();
 
     assert_eq!(
@@ -110,11 +110,11 @@ func main() -> string {
 "#
     .replace("PORT", &MULTI_PORT.to_string());
 
-    let server = std::thread::spawn(move || run_source(&server_src));
+    let server = std::thread::spawn(move || run_source_treewalker(&server_src));
 
     std::thread::sleep(Duration::from_millis(100));
 
-    let client_result = run_source(&client_src);
+    let client_result = run_source_treewalker(&client_src);
     let server_result = server.join().unwrap();
 
     assert_eq!(
@@ -167,11 +167,11 @@ func main() -> string {
 "#
     .replace("PORT", &WRAP_PORT.to_string());
 
-    let server = std::thread::spawn(move || run_source(&server_src));
+    let server = std::thread::spawn(move || run_source_treewalker(&server_src));
 
     std::thread::sleep(Duration::from_millis(100));
 
-    let client_result = run_source(&client_src);
+    let client_result = run_source_treewalker(&client_src);
     let server_result = server.join().unwrap();
 
     assert_eq!(
@@ -235,7 +235,7 @@ func main() -> i32 {
 fn net_http_server_demo() {
     let server_src = HTTP_SERVER.replace("PORT", &HTTP_PORT.to_string());
 
-    let server = std::thread::spawn(move || run_source(&server_src));
+    let server = std::thread::spawn(move || run_source_treewalker(&server_src));
 
     std::thread::sleep(Duration::from_millis(200));
 
@@ -323,7 +323,7 @@ fn dual_net_tcp_client_echo() {
         let echo_server = start_echo_server(DUAL_PORT as u16);
         std::thread::sleep(Duration::from_millis(200));
         let src = TCP_CLIENT_PROG.replace("PORT", &DUAL_PORT.to_string());
-        let interp_result = run_source(&src);
+        let interp_result = run_source_treewalker(&src);
         assert_eq!(
             interp_result,
             interp::Value::Int(0),

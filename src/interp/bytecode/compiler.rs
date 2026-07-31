@@ -1498,6 +1498,10 @@ impl BytecodeCompiler {
                     BinOp::BitXor => a ^ b,
                     BinOp::Shl => a.checked_shl(*b as u32)?,
                     BinOp::Shr => a.checked_shr(*b as u32)?,
+                    BinOp::Pow => {
+                        let exp = u32::try_from(*b).ok()?;
+                        a.checked_pow(exp)?
+                    }
                     _ => return None,
                 };
                 Some(Lit::Int(result))
@@ -1519,6 +1523,7 @@ impl BytecodeCompiler {
                     BinOp::Gt => return Some(Lit::Bool(a > b)),
                     BinOp::Le => return Some(Lit::Bool(a <= b)),
                     BinOp::Ge => return Some(Lit::Bool(a >= b)),
+                    BinOp::Pow => a.powf(*b),
                     _ => return None,
                 };
                 // Don't fold NaN/Inf results.
@@ -1763,6 +1768,7 @@ impl BytecodeCompiler {
             BinOp::BitXor => Op::BitXor { rd, ra, rb },
             BinOp::Shl => Op::Shl { rd, ra, rb },
             BinOp::Shr => Op::Shr { rd, ra, rb },
+            BinOp::Pow => Op::PowInt { rd, ra, rb },
             _ => {
                 return Err(InterpError::new(format!(
                     "bytecode: unsupported int binary op {:?}",
@@ -1793,6 +1799,7 @@ impl BytecodeCompiler {
             BinOp::Ge => Op::GeFloat { rd, ra, rb },
             BinOp::EqCmp => Op::Eq { rd, ra, rb },
             BinOp::NeCmp => Op::Ne { rd, ra, rb },
+            BinOp::Pow => Op::PowFloat { rd, ra, rb },
             _ => {
                 return Err(InterpError::new(format!(
                     "bytecode: unsupported float binary op {:?}",
