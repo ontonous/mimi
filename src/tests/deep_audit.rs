@@ -549,7 +549,7 @@ fn pa_h3_optional_chain_typecheck_and_interp() {
         }
     "#;
     assert!(check_source(src).is_ok(), "optional chain should typecheck");
-    let v = super::run_source(src);
+    let v = super::run_source_treewalker(src);
     assert_eq!(v, crate::interp::Value::Int(42));
 
     let none_src = r#"

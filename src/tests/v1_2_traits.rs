@@ -249,7 +249,7 @@ func main() -> string {
 
 #[test]
 fn dyn_trait_multi_impl() {
-    let v = run_source(
+    let v = run_source_treewalker(
         r#"
 trait Calculator {
     func compute() -> i32;

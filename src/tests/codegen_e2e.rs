@@ -3918,7 +3918,7 @@ fn e2e_text_count_lines() {
 
 #[test]
 fn e2e_text_indent() {
-    let val = run_source(
+    let val = run_source_treewalker(
         r#"
         func indent_text(s: string, n: i32) -> string {
             let lines = str_split(s, "\n")
