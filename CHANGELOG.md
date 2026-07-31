@@ -2,6 +2,15 @@
 
 ## [Unreleased] — 0.1.3-dev
 
+### INTERP 性能深度优化 II（exec_loop 单借用重写）
+
+- **perf(bytecode): exec_loop 热分支单借用重写**：常量/整数/浮点/比较/位运算/字符串/跳转 ~40 个 opcode 重写为「单次 `last_mut` 借用内完成读+算+写」，消除每 op 2-3 次 `get_reg`/`set_reg` 的边界检查与 `debug_assert` 开销（debug 构建下 slice/Vec 访问检查约占 40% 执行时间）。`get_int`/`get_float`/`get_float2`/`get_int2` 内联进热分支，错误消息语义逐分支保持（`expected Int/Float, got {}`）；`check_float` 内联为 `is_nan`/`is_infinite` 检查（静态 op 字符串不再 `format!`）。
+- **perf(bytecode): CALL 参数寄存器提示**：`compile_expr_into`/`compile_binary_into`/`compile_unary_into`/`compile_literal_into`——CALL 参数表达式直接编译到参数槽寄存器，消除每调用点冗余 `Op::Mov`（fib 每帧 15 op → 13 op，寄存器 12 → 10）；非简单表达式安全回退 `compile_expr` + `Mov`（副作用顺序不变）。
+- **perf(bytecode): push_frame 预分配**：`Vec::with_capacity(register_count)` 一次分配到位，消除 resize 的 realloc + memmove。
+- **perf(bytecode): Op::Mov 同寄存器短路**：`rd == rs` 跳过克隆。
+- **基准 (debug build, 本机)**：fib(30) 3.67s → **3.10s**（-15.5%）；for-range 1M 0.92s → **0.79s**（-14%）；list 循环 1M 0.96s → **0.79s**（-18%）；map 3000×2 3.80s → 3.66s（map_set 值语义深克隆主导，O(n) 克隆为语言语义固有）。
+- 验证：4511 lib 全绿 + real_world 28 + real_world_cli 1 + clippy/fmt 门禁全过。
+
 ### 查缺补漏：clippy/fmt 债务清零
 
 - **refactor(interp): InterpError 变体内容 Box<ErrorContext>**：`InterpError` 15 个 variant 从直接持有 `ErrorContext`（~128 字节）改为 `Box<ErrorContext>`（8 字节）。`Result<Value, InterpError>` 在解释器热路径上的复制成本大幅下降；消灭 ~672 个 `result_large_err` clippy warning。工厂方法（`InterpError::new`/`div_by_zero` 等）签名不变，调用点零改动。`src/interp/error.rs`、`src/interp/value.rs`。
