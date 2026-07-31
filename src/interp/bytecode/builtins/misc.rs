@@ -451,7 +451,7 @@ fn builtin_from_json(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
 /// from_json_typed: parse JSON string into a Mimi Value, coerced to target type.
 /// Called by the compiler when `from_json::<T>(s)` is used with a type parameter.
 /// args[0] = JSON string, args[1] = type string (e.g. "List<(i32, i32)>").
-fn builtin_from_json_typed(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+fn builtin_from_json_typed(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let json_str = match &args[0] {
         Value::String(s) => s.clone(),
         _ => return Err(InterpError::new("from_json::<T> expects a string")),
@@ -462,7 +462,8 @@ fn builtin_from_json_typed(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
     // If a type string is provided, coerce the value to the target type.
     if args.len() >= 2 {
         if let Value::String(type_str) = &args[1] {
-            return coerce_json_to_type(val, type_str);
+            let record_fields = &vm.program().record_fields;
+            return coerce_json_to_type(val, type_str, record_fields);
         }
     }
     Ok(val)
@@ -470,7 +471,12 @@ fn builtin_from_json_typed(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
 
 /// Coerce a generic JSON value to a target type specified as a string.
 /// Handles: scalars, List<T>, Option<T>, Result<T,E>, Set<T>, tuples, records.
-fn coerce_json_to_type(val: Value, type_str: &str) -> Result<Value, InterpError> {
+/// `record_fields` provides field type info for user-defined record types.
+fn coerce_json_to_type(
+    val: Value,
+    type_str: &str,
+    record_fields: &std::collections::HashMap<String, Vec<(String, String)>>,
+) -> Result<Value, InterpError> {
     let type_str = type_str.trim();
     match type_str {
         // Scalars
@@ -500,7 +506,7 @@ fn coerce_json_to_type(val: Value, type_str: &str) -> Result<Value, InterpError>
                     Value::List(items) => {
                         let converted: Result<Vec<Value>, _> = items
                             .into_iter()
-                            .map(|item| coerce_json_to_type(item, inner))
+                            .map(|item| coerce_json_to_type(item, inner, record_fields))
                             .collect();
                         Ok(Value::List(converted?))
                     }
@@ -516,7 +522,7 @@ fn coerce_json_to_type(val: Value, type_str: &str) -> Result<Value, InterpError>
                         Value::Record(name, fields) => {
                             let mut out = std::collections::HashMap::new();
                             for (k, v) in fields {
-                                out.insert(k, coerce_json_to_type(v, val_type)?);
+                                out.insert(k, coerce_json_to_type(v, val_type, record_fields)?);
                             }
                             Ok(Value::Record(name, out))
                         }
@@ -529,7 +535,7 @@ fn coerce_json_to_type(val: Value, type_str: &str) -> Result<Value, InterpError>
                 match val {
                     Value::Unit => Ok(Value::Variant("None".into(), vec![])),
                     val => {
-                        let inner_val = coerce_json_to_type(val, inner)?;
+                        let inner_val = coerce_json_to_type(val, inner, record_fields)?;
                         Ok(Value::Variant("Some".into(), vec![inner_val]))
                     }
                 }
@@ -542,30 +548,30 @@ fn coerce_json_to_type(val: Value, type_str: &str) -> Result<Value, InterpError>
                     match val {
                         Value::Variant(name, payload) if name == "Ok" => {
                             let converted = payload.into_iter()
-                                .map(|v| coerce_json_to_type(v, ok_type))
+                                .map(|v| coerce_json_to_type(v, ok_type, record_fields))
                                 .collect::<Result<Vec<_>, _>>()?;
                             Ok(Value::Variant("Ok".into(), converted))
                         }
                         Value::Variant(name, payload) if name == "Err" => {
                             let converted = payload.into_iter()
-                                .map(|v| coerce_json_to_type(v, err_type))
+                                .map(|v| coerce_json_to_type(v, err_type, record_fields))
                                 .collect::<Result<Vec<_>, _>>()?;
                             Ok(Value::Variant("Err".into(), converted))
                         }
                         Value::Record(_, ref fields) if fields.len() == 1 => {
                             if let Some(v) = fields.get("Ok") {
-                                let ok_val = coerce_json_to_type(v.clone(), ok_type)?;
+                                let ok_val = coerce_json_to_type(v.clone(), ok_type, record_fields)?;
                                 Ok(Value::Variant("Ok".into(), vec![ok_val]))
                             } else if let Some(v) = fields.get("Err") {
-                                let err_val = coerce_json_to_type(v.clone(), err_type)?;
+                                let err_val = coerce_json_to_type(v.clone(), err_type, record_fields)?;
                                 Ok(Value::Variant("Err".into(), vec![err_val]))
                             } else {
-                                let ok_val = coerce_json_to_type(val, ok_type)?;
+                                let ok_val = coerce_json_to_type(val, ok_type, record_fields)?;
                                 Ok(Value::Variant("Ok".into(), vec![ok_val]))
                             }
                         }
                         other => {
-                            let ok_val = coerce_json_to_type(other, ok_type)?;
+                            let ok_val = coerce_json_to_type(other, ok_type, record_fields)?;
                             Ok(Value::Variant("Ok".into(), vec![ok_val]))
                         }
                     }
@@ -577,7 +583,7 @@ fn coerce_json_to_type(val: Value, type_str: &str) -> Result<Value, InterpError>
                     Value::List(items) | Value::Set(items) => {
                         let mut out = Vec::new();
                         for item in items {
-                            let v = coerce_json_to_type(item, inner)?;
+                            let v = coerce_json_to_type(item, inner, record_fields)?;
                             if !out.iter().any(|e: &Value| crate::interp::value::values_equal(e, &v)) {
                                 out.push(v);
                             }
@@ -594,14 +600,14 @@ fn coerce_json_to_type(val: Value, type_str: &str) -> Result<Value, InterpError>
                     Value::List(items) if items.len() == parts.len() => {
                         let converted: Result<Vec<Value>, _> = items.into_iter()
                             .zip(parts.iter())
-                            .map(|(item, ty)| coerce_json_to_type(item, ty))
+                            .map(|(item, ty)| coerce_json_to_type(item, ty, record_fields))
                             .collect();
                         Ok(Value::Tuple(converted?))
                     }
                     Value::Tuple(items) if items.len() == parts.len() => {
                         let converted: Result<Vec<Value>, _> = items.into_iter()
                             .zip(parts.iter())
-                            .map(|(item, ty)| coerce_json_to_type(item, ty))
+                            .map(|(item, ty)| coerce_json_to_type(item, ty, record_fields))
                             .collect();
                         Ok(Value::Tuple(converted?))
                     }
@@ -611,11 +617,19 @@ fn coerce_json_to_type(val: Value, type_str: &str) -> Result<Value, InterpError>
                     ))),
                 }
             } else {
-                // User-defined type (record/enum): tag the Record with the type name.
-                // Without field type information, we can't recursively coerce fields,
-                // but we can at least set the type name for Display/matching.
+                // User-defined type (record/enum): tag the Record with the type name
+                // and recursively coerce fields using record_fields type info.
                 match val {
-                    Value::Record(_, fields) => {
+                    Value::Record(_, mut fields) => {
+                        // If we have field type info, coerce each field.
+                        if let Some(field_types) = record_fields.get(type_str) {
+                            for (fname, ftype) in field_types {
+                                if let Some(fval) = fields.remove(fname) {
+                                    let coerced = coerce_json_to_type(fval, ftype, record_fields)?;
+                                    fields.insert(fname.clone(), coerced);
+                                }
+                            }
+                        }
                         Ok(Value::Record(Some(type_str.to_string()), fields))
                     }
                     // Enum unit variant: JSON string → Variant(tag, []).

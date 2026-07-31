@@ -51,6 +51,7 @@ mod tests {
             actor_method_funcs: std::collections::HashMap::new(),
             max_children: None,
             ast: None,
+            record_fields: std::collections::HashMap::new(),
         };
         assert_eq!(run_program(&prog), Ok(42));
     }
@@ -100,6 +101,7 @@ mod tests {
             actor_method_funcs: std::collections::HashMap::new(),
             max_children: None,
             ast: None,
+            record_fields: std::collections::HashMap::new(),
         };
         assert_eq!(run_program(&prog), Ok(50));
     }
@@ -153,6 +155,7 @@ mod tests {
             actor_method_funcs: std::collections::HashMap::new(),
             max_children: None,
             ast: None,
+            record_fields: std::collections::HashMap::new(),
         };
         assert_eq!(run_program(&prog), Ok(7));
     }
@@ -268,6 +271,7 @@ mod tests {
             actor_method_funcs: std::collections::HashMap::new(),
             max_children: None,
             ast: None,
+            record_fields: std::collections::HashMap::new(),
         };
         // fib(10) = 55
         assert_eq!(run_program(&prog), Ok(55));
@@ -350,6 +354,7 @@ mod tests {
             actor_method_funcs: std::collections::HashMap::new(),
             max_children: None,
             ast: None,
+            record_fields: std::collections::HashMap::new(),
         };
         // sum(0..99) = 4950
         assert_eq!(run_program(&prog), Ok(4950));

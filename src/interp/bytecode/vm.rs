@@ -89,6 +89,11 @@ impl<'a> BytecodeVM<'a> {
         }
     }
 
+    /// Access the compiled program (for builtins that need type info).
+    pub fn program(&self) -> &'a BytecodeProgram {
+        self.program
+    }
+
     /// Request the VM to terminate with the given exit code.
     /// Called by the `exit()` builtin.
     pub fn request_exit(&mut self, code: i64) {
