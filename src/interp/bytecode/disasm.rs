@@ -76,6 +76,8 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::BitXor { .. } => "BIT_XOR",
         Op::Shl { .. } => "SHL",
         Op::Shr { .. } => "SHR",
+        Op::PowInt { .. } => "POW_INT",
+        Op::PowFloat { .. } => "POW_FLOAT",
         Op::BitNot { .. } => "BIT_NOT",
         Op::Not { .. } => "NOT",
         Op::And { .. } => "AND",
@@ -184,6 +186,8 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         | Op::BitXor { rd, ra, rb }
         | Op::Shl { rd, ra, rb }
         | Op::Shr { rd, ra, rb }
+        | Op::PowInt { rd, ra, rb }
+        | Op::PowFloat { rd, ra, rb }
         | Op::And { rd, ra, rb }
         | Op::Or { rd, ra, rb }
         | Op::ConcatStr { rd, ra, rb } => {

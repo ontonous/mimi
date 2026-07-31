@@ -238,6 +238,18 @@ pub enum Op {
         ra: Reg,
         rb: Reg,
     },
+    /// rd = ra ** rb (integer power, checked overflow)
+    PowInt {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    /// rd = ra ** rb (float power via powf)
+    PowFloat {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
     BitNot {
         rd: Reg,
         ra: Reg,

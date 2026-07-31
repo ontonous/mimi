@@ -793,6 +793,46 @@ impl<'a> BytecodeVM<'a> {
                         .ok_or_else(|| InterpError::integer_overflow("shift overflow in >>"))?;
                     frame.regs[rd as usize] = Value::Int(r);
                 }
+                Op::PowInt { rd, ra, rb } => {
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Int(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                        }
+                    };
+                    let b = match &frame.regs[rb as usize] {
+                        Value::Int(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                        }
+                    };
+                    let exp = u32::try_from(b).map_err(|_| {
+                        InterpError::new(format!("negative exponent {} in integer power", b))
+                    })?;
+                    let r = a
+                        .checked_pow(exp)
+                        .ok_or_else(|| InterpError::integer_overflow("integer power overflow"))?;
+                    frame.regs[rd as usize] = Value::Int(r);
+                }
+                Op::PowFloat { rd, ra, rb } => {
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Float(v) => *v,
+                        Value::Int(v) => *v as f64,
+                        other => {
+                            return Err(InterpError::new(format!("expected Float, got {}", other)))
+                        }
+                    };
+                    let b = match &frame.regs[rb as usize] {
+                        Value::Float(v) => *v,
+                        Value::Int(v) => *v as f64,
+                        other => {
+                            return Err(InterpError::new(format!("expected Float, got {}", other)))
+                        }
+                    };
+                    frame.regs[rd as usize] = Value::Float(a.powf(b));
+                }
                 Op::BitNot { rd, ra } => {
                     let frame = self.cur_frame_mut();
                     let a = match &frame.regs[ra as usize] {
@@ -1013,32 +1053,55 @@ impl<'a> BytecodeVM<'a> {
                             l[idx].clone()
                         }
                         Value::String(s) => {
-                            let bytes = s.as_bytes();
+                            let chars: Vec<char> = s.chars().collect();
                             let idx = if idx_raw < 0 {
-                                let wrapped = bytes.len() as i64 + idx_raw;
+                                let wrapped = chars.len() as i64 + idx_raw;
                                 if wrapped < 0 {
                                     return Err(InterpError::new(format!(
                                         "string index {} out of bounds (len {})",
                                         idx_raw,
-                                        bytes.len()
+                                        chars.len()
                                     )));
                                 }
                                 wrapped as usize
                             } else {
                                 idx_raw as usize
                             };
-                            if idx >= bytes.len() {
+                            if idx >= chars.len() {
                                 return Err(InterpError::new(format!(
                                     "string index {} out of bounds (len {})",
                                     idx_raw,
-                                    bytes.len()
+                                    chars.len()
                                 )));
                             }
-                            Value::Int(bytes[idx] as i64)
+                            Value::String(chars[idx].to_string())
+                        }
+                        Value::Set(s) => {
+                            let idx = if idx_raw < 0 {
+                                let wrapped = s.len() as i64 + idx_raw;
+                                if wrapped < 0 {
+                                    return Err(InterpError::new(format!(
+                                        "set index {} out of bounds (len {})",
+                                        idx_raw,
+                                        s.len()
+                                    )));
+                                }
+                                wrapped as usize
+                            } else {
+                                idx_raw as usize
+                            };
+                            if idx >= s.len() {
+                                return Err(InterpError::new(format!(
+                                    "set index {} out of bounds (len {})",
+                                    idx_raw,
+                                    s.len()
+                                )));
+                            }
+                            s[idx].clone()
                         }
                         other => {
                             return Err(InterpError::new(format!(
-                                "index: expected List or String, got {}",
+                                "index: expected List, String, or Set, got {}",
                                 other
                             )))
                         }
@@ -1079,8 +1142,10 @@ impl<'a> BytecodeVM<'a> {
                     let v = self.get_reg(ra);
                     let len = match v {
                         Value::List(l) => l.len(),
-                        Value::String(s) => s.len(),
+                        Value::String(s) => s.chars().count(),
                         Value::Tuple(t) => t.len(),
+                        Value::Set(s) => s.len(),
+                        Value::Record(_, fields) => fields.len(),
                         other => {
                             return Err(InterpError::new(format!(
                                 "len: unsupported type {}",
