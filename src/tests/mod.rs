@@ -367,6 +367,7 @@ pub(crate) fn run_source_with_stdout(src: &str) -> (interp::Value, String) {
         .compile_file(&file)
         .expect("bytecode compile failed in run_source_with_stdout");
     let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    vm.enable_stdout_capture();
     let val = vm
         .run_value()
         .expect("bytecode run_value failed in run_source_with_stdout");
@@ -562,6 +563,7 @@ pub(crate) fn run_source_bytecode_with_stdout(src: &str) -> (interp::Value, Stri
         .compile_file(&file)
         .expect("bytecode compile failed");
     let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    vm.enable_stdout_capture();
     let val = vm.run_value().expect("bytecode run_value failed");
     let stdout = vm.take_stdout();
     (val, stdout)

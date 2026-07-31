@@ -929,6 +929,8 @@ pub struct ActorHandle {
     /// v0.33: compiled bytecode program for actor worker threads.
     /// When set, the worker thread uses BytecodeVM instead of tree-walker.
     pub bytecode_program: Option<std::sync::Arc<crate::interp::bytecode::BytecodeProgram>>,
+    /// v0.33: shared stdout capture buffer for actor worker threads.
+    pub stdout_buf: Option<std::sync::Arc<std::sync::Mutex<String>>>,
 }
 
 // SAFETY: ActorHandle is Send because all fields are Send: Arc<RwLock<ActorInstance>>
@@ -983,6 +985,7 @@ impl WeakActorEntry {
             program: self.program.upgrade()?,
             bp: self.bp.upgrade()?,
             bytecode_program: None,
+            stdout_buf: None,
         })
     }
 }
@@ -1218,6 +1221,7 @@ impl ActorHandle {
                             program: worker_program.clone(),
                             bp: worker_bp.clone(),
                             bytecode_program: None,
+                            stdout_buf: None,
                         });
                         interp.push_scope();
                         if let Err(e) = interp.bind("self", self_val) {
@@ -1351,6 +1355,7 @@ impl ActorHandle {
             program,
             bp,
             bytecode_program: None,
+            stdout_buf: None,
         };
         // v0.29.20: register weak entry for PeerFault peer resolution (R-C9).
         // Also prune dead weak entries so the registry does not grow unboundedly
@@ -1378,6 +1383,7 @@ impl ActorHandle {
         instance: ActorInstance,
         program: std::sync::Arc<crate::ast::File>,
         bytecode_prog: std::sync::Arc<crate::interp::bytecode::BytecodeProgram>,
+        stdout_buf: Option<std::sync::Arc<std::sync::Mutex<String>>>,
     ) -> Self {
         let id = ACTOR_HANDLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let (mailbox_tx, mailbox_rx) = std::sync::mpsc::channel::<ActorMailboxMsg>();
@@ -1389,6 +1395,7 @@ impl ActorHandle {
         let worker_bc = bytecode_prog.clone();
         let mailbox_tx_clone = mailbox_tx.clone();
         let worker_program = program.clone();
+        let worker_stdout = stdout_buf.clone();
 
         let _ = std::thread::Builder::new()
             .name(format!("actor-{}", id))
@@ -1446,6 +1453,9 @@ impl ActorHandle {
                                 let mut args = vec![current_state.clone()];
                                 args.extend(msg.args);
                                 let mut vm = crate::interp::bytecode::BytecodeVM::new(&worker_bc);
+                                if let Some(ref buf) = worker_stdout {
+                                    vm.set_stdout_buf(buf.clone());
+                                }
                                 // Use wrap_ok for fails transitions so Op::Ret
                                 // wraps the body value in Ok/Err Variant matching
                                 // tree-walker's eval_flow_transition convention.
@@ -1515,10 +1525,14 @@ impl ActorHandle {
                                     program: worker_program.clone(),
                                     bp: worker_bp.clone(),
                                     bytecode_program: Some(worker_bc.clone()),
+                                    stdout_buf: worker_stdout.clone(),
                                 });
                                 let mut args = vec![self_val];
                                 args.extend(msg.args);
                                 let mut vm = crate::interp::bytecode::BytecodeVM::new(&worker_bc);
+                                if let Some(ref buf) = worker_stdout {
+                                    vm.set_stdout_buf(buf.clone());
+                                }
                                 vm.call_function(func_idx, &args)
                             }
                             None => Err(InterpError::new(format!(
@@ -1538,6 +1552,7 @@ impl ActorHandle {
             program,
             bp,
             bytecode_program: Some(bytecode_prog),
+            stdout_buf,
         };
         if let Ok(mut map) = actor_handles().lock() {
             map.retain(|_, e| e.upgrade().is_some());
