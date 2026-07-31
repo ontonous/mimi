@@ -5,6 +5,22 @@ use crate::interp::bytecode::vm::BytecodeVM;
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
 
+/// Display for print/println: auto-deref Shared/LocalShared so dual-backend
+/// matches codegen (which loads the payload, not the wrapper tag).
+fn print_display(v: &Value) -> String {
+    match v {
+        Value::Shared(arc) => match arc.read() {
+            Ok(inner) => print_display(&inner),
+            Err(_) => "shared(<poisoned>)".to_string(),
+        },
+        Value::LocalShared(rc) => {
+            let inner = rc.lock().unwrap_or_else(|e| e.into_inner());
+            print_display(&inner)
+        }
+        other => other.to_string(),
+    }
+}
+
 pub fn register(reg: &mut BuiltinRegistry) {
     reg.register(BuiltinDesc {
         name: "println",
@@ -41,7 +57,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
 fn builtin_println(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let s = args
         .iter()
-        .map(|a| a.to_string())
+        .map(print_display)
         .collect::<Vec<_>>()
         .join(" ");
     vm.append_stdout(&s);
@@ -53,7 +69,7 @@ fn builtin_println(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
 fn builtin_print(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let s = args
         .iter()
-        .map(|a| a.to_string())
+        .map(print_display)
         .collect::<Vec<_>>()
         .join(" ");
     vm.append_stdout(&s);
