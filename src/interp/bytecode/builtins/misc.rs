@@ -600,8 +600,19 @@ fn coerce_json_to_type(val: Value, type_str: &str) -> Result<Value, InterpError>
                     ))),
                 }
             } else {
-                // Unknown type — return value as-is (best effort).
-                Ok(val)
+                // User-defined type (record/enum): tag the Record with the type name.
+                // Without field type information, we can't recursively coerce fields,
+                // but we can at least set the type name for Display/matching.
+                match val {
+                    Value::Record(_, fields) => {
+                        Ok(Value::Record(Some(type_str.to_string()), fields))
+                    }
+                    // Enum unit variant: JSON string → Variant(tag, []).
+                    Value::String(s) => {
+                        Ok(Value::Variant(s, vec![]))
+                    }
+                    _ => Ok(val),
+                }
             }
         }
     }
