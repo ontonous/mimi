@@ -5888,7 +5888,7 @@ func main() -> i32 {
     s1.count
 }
 "#;
-    let result = checked_run_source_result(src);
+    let result = checked_run_source_treewalker_result(src);
     assert_eq!(result, Ok(interp::Value::Int(42)));
 }
 
@@ -5909,7 +5909,7 @@ func main() -> i32 {
     0
 }
 "#;
-    let interp_result = checked_run_source_result(src);
+    let interp_result = checked_run_source_treewalker_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
     let native = checked_compile_and_run(src).expect("codegen stay");
     assert_eq!(native.trim(), "42");
