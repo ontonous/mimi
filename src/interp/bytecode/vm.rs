@@ -49,6 +49,10 @@ pub struct BytecodeVM<'a> {
     stack: Vec<Frame>,
     /// Captured stdout output (for testing).
     stdout: String,
+    /// Shared stdout capture buffer (for actor worker threads).
+    /// When set, append_stdout writes to this buffer instead of (or in addition to)
+    /// the local stdout field. Actor workers receive the spawning VM's buffer.
+    stdout_capture: Option<std::sync::Arc<std::sync::Mutex<String>>>,
     /// Recursion depth guard.
     depth: usize,
     /// When > 0, exec_loop returns when depth drops below this value.
@@ -78,6 +82,7 @@ impl<'a> BytecodeVM<'a> {
             program,
             stack: Vec::with_capacity(64),
             stdout: String::new(),
+            stdout_capture: None,
             depth: 0,
             stop_depth: 0,
             registry: registry::create_registry(),
@@ -165,7 +170,15 @@ impl<'a> BytecodeVM<'a> {
     }
 
     /// Take captured stdout (consumes the buffer, leaves empty string).
+    /// If a shared stdout_capture buffer is set, reads from it.
     pub fn take_stdout(&mut self) -> String {
+        if let Some(buf) = &self.stdout_capture {
+            if let Ok(mut g) = buf.lock() {
+                let result = g.clone();
+                g.clear();
+                return result;
+            }
+        }
         std::mem::take(&mut self.stdout)
     }
 
@@ -2208,8 +2221,31 @@ impl<'a> BytecodeVM<'a> {
     }
 
     /// Append to captured stdout (used by builtin io functions).
+    /// If a shared stdout_capture buffer is set, writes there instead of local stdout.
     pub fn append_stdout(&mut self, s: &str) {
-        self.stdout.push_str(s);
+        if let Some(buf) = &self.stdout_capture {
+            if let Ok(mut g) = buf.lock() {
+                g.push_str(s);
+            }
+        } else {
+            self.stdout.push_str(s);
+        }
+    }
+
+    /// Enable stdout capture with a new shared buffer.
+    pub fn enable_stdout_capture(&mut self) {
+        self.stdout_capture = Some(std::sync::Arc::new(std::sync::Mutex::new(String::new())));
+    }
+
+    /// Set the stdout capture buffer directly. Actor workers receive the
+    /// spawning VM's buffer this way.
+    pub fn set_stdout_buf(&mut self, buf: std::sync::Arc<std::sync::Mutex<String>>) {
+        self.stdout_capture = Some(buf);
+    }
+
+    /// Get the stdout capture buffer (for passing to actor workers).
+    pub fn stdout_buf(&self) -> Option<std::sync::Arc<std::sync::Mutex<String>>> {
+        self.stdout_capture.clone()
     }
 
     /// Get captured stdout (for testing).
@@ -2442,7 +2478,7 @@ impl<'a> BytecodeVM<'a> {
             })
         });
         let bc_prog = std::sync::Arc::new(self.program.clone());
-        let handle = ActorHandle::new_bytecode(instance, program, bc_prog);
+        let handle = ActorHandle::new_bytecode(instance, program, bc_prog, self.stdout_buf());
         self.spawn_count += 1;
         Ok(Value::Actor(handle))
     }
