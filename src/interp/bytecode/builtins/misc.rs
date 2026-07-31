@@ -241,7 +241,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
     });
     reg.register(BuiltinDesc {
         name: "read_file_partial",
-        arity: 3,
+        arity: 2,
         category: BuiltinCategory::System,
         func: builtin_read_file_partial,
     });
@@ -1133,12 +1133,9 @@ fn builtin_read_file_bytes(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
         Value::String(path) => match std::fs::read(path) {
             Ok(bytes) => {
                 let s = String::from_utf8_lossy(&bytes).to_string();
-                Ok(Value::Variant("Ok".into(), vec![Value::String(s)]))
+                Ok(Value::String(s))
             }
-            Err(e) => Ok(Value::Variant(
-                "Err".into(),
-                vec![Value::String(e.to_string())],
-            )),
+            Err(e) => Err(InterpError::new(format!("read_file_bytes: {}", e))),
         },
         _ => Err(InterpError::new("read_file_bytes expects a string path")),
     }
@@ -1150,11 +1147,8 @@ fn builtin_write_file_bytes(
 ) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(path), Value::String(data)) => match std::fs::write(path, data.as_bytes()) {
-            Ok(()) => Ok(Value::Variant("Ok".into(), vec![Value::Unit])),
-            Err(e) => Ok(Value::Variant(
-                "Err".into(),
-                vec![Value::String(e.to_string())],
-            )),
+            Ok(()) => Ok(Value::Bool(true)),
+            Err(e) => Err(InterpError::new(format!("write_file_bytes: {}", e))),
         },
         _ => Err(InterpError::new(
             "write_file_bytes expects (string, string)",
@@ -1171,22 +1165,23 @@ fn builtin_read_file_partial(
     _vm: &mut BytecodeVM<'_>,
     args: &[Value],
 ) -> Result<Value, InterpError> {
-    match (&args[0], &args[1], &args[2]) {
-        (Value::String(path), Value::Int(offset), Value::Int(len)) => match std::fs::read(path) {
-            Ok(data) => {
-                let start = (*offset as usize).min(data.len());
-                let end = (start + *len as usize).min(data.len());
-                let slice = &data[start..end];
-                let content = String::from_utf8_lossy(slice).to_string();
-                Ok(Value::Variant("Ok".into(), vec![Value::String(content)]))
+    // Match tree-walker: read_file_partial(path, max_bytes) → String
+    match (&args[0], &args[1]) {
+        (Value::String(path), Value::Int(max)) => match std::fs::read(path) {
+            Ok(bytes) => {
+                let limit = (*max).max(0) as usize;
+                let slice = if limit > 0 && bytes.len() > limit {
+                    &bytes[..limit]
+                } else {
+                    &bytes
+                };
+                let s = String::from_utf8_lossy(slice).to_string();
+                Ok(Value::String(s))
             }
-            Err(e) => Ok(Value::Variant(
-                "Err".into(),
-                vec![Value::String(e.to_string())],
-            )),
+            Err(e) => Err(InterpError::new(format!("read_file_partial: {}", e))),
         },
         _ => Err(InterpError::new(
-            "read_file_partial expects (string, int, int)",
+            "read_file_partial expects (string, int)",
         )),
     }
 }
