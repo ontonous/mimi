@@ -11,6 +11,23 @@
 > Implementation: v0.30.0
 > Data sources: `src/lexer/`, `src/parser/`, `src/ast.rs`, `devdocs/pre-1.0/`
 
+> **⚠ 已过期（2026-08-01）**：本文件 Implementation 停留在 v0.30.0，至少 6 处状态标签与
+> parser 实况相反（`pinned(timeout)`/`actor runs Flow`/`fails E`/`do {}`/`stay`/state-level `invariant`，
+> 逐项见下方"已知差异"与 `devdocs/v0.34/golden-document.md` §8.3）。
+> **权威语法描述已迁移至 `devdocs/v0.34/golden/syntax-reference.golden.md`（parser 实况 EBNF）**。
+> 计划 0.34.5 以 golden 为源重新生成本文件；在此之前本文档仅作历史参考。
+
+## 0. 与 parser 实况的已知差异（2026-08-01，golden 为准）
+
+| 主题 | 本文档 | parser 实况 |
+|------|--------|-------------|
+| `pinned(timeout)` | :946 状态反转 | 已拒绝（parse_stmt.rs:184-195，条款 10） |
+| `actor runs Flow` | :849 [not-yet-implemented] | 已实现（top_level.rs:616-621） |
+| `fails E` | :803 [not-yet-implemented] | 已实现且有语料（top_level.rs:1358-1364） |
+| `do {}` | :797 [removed] | 仍解析且是语料主流（parse_stmt.rs:121-127） |
+| `stay` | :924 [not-yet-implemented] | 已解析+求值（parse_stmt.rs:134-138） |
+| state-level `invariant` | :776 | 未实现（仅块内 invariant 子句） |
+
 ## 1. 词法
 
 ### 1.1 注释

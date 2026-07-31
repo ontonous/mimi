@@ -1,7 +1,11 @@
 # Mimi implementation evidence for the normative requirements in
 # docs/language-requirements.toml.
 schema_version = 1
-implementation_version = "0.1.1-dev (internal sprint 0.31.36)"
+implementation_version = "0.1.3-dev (internal sprint 0.33.X)"
+
+# ⚠ 2026-08-01：本文件内容停留在 0.31.36，落后两个发布；计划 0.34.5
+# 全量刷新（见 devdocs/v0.34/README.md Phase A）。与实现冲突时以
+# devdocs/v0.34/golden-document.md 与 golden/syntax-reference.golden.md 为准。
 
 # Every dimension uses:
 # unsupported | partial | complete | not_applicable

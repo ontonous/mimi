@@ -1243,6 +1243,41 @@ impl<'a> BytecodeVM<'a> {
                                 InterpError::new(format!("actor has no field '{}'", field_name))
                             })?
                         }
+                        // Auto-unwrap Shared/Ref/RefMut to access inner record.
+                        Value::Shared(inner) | Value::Ref(inner) | Value::RefMut(inner) => {
+                            let guard = inner.read().map_err(|e| {
+                                InterpError::new(format!("shared lock failed: {}", e))
+                            })?;
+                            match &*guard {
+                                Value::Record(_, fields) => {
+                                    fields.get(&field_name).cloned().ok_or_else(|| {
+                                        InterpError::new(format!("record has no field '{}'", field_name))
+                                    })?
+                                }
+                                other => {
+                                    return Err(InterpError::new(format!(
+                                        "record get: shared inner is not a Record, got {}",
+                                        other
+                                    )))
+                                }
+                            }
+                        }
+                        // Auto-unwrap Variant payload (Some(record), Ok(record)).
+                        Value::Variant(_, payload) if payload.len() == 1 => {
+                            match &payload[0] {
+                                Value::Record(_, fields) => {
+                                    fields.get(&field_name).cloned().ok_or_else(|| {
+                                        InterpError::new(format!("record has no field '{}'", field_name))
+                                    })?
+                                }
+                                other => {
+                                    return Err(InterpError::new(format!(
+                                        "record get: variant payload is not a Record, got {}",
+                                        other
+                                    )))
+                                }
+                            }
+                        }
                         other => {
                             return Err(InterpError::new(format!(
                                 "record get: expected Record or Actor, got {}",
@@ -1270,6 +1305,24 @@ impl<'a> BytecodeVM<'a> {
                                 .map_err(|e| InterpError::new(format!("actor lock failed: {}", e)))?
                                 .fields
                                 .insert(field_name, value);
+                        }
+                        // Auto-unwrap Shared/Ref/RefMut for field assignment.
+                        Value::Shared(inner) | Value::Ref(inner) | Value::RefMut(inner) => {
+                            let inner_clone = inner.clone();
+                            let mut guard = inner_clone.write().map_err(|e| {
+                                InterpError::new(format!("shared lock failed: {}", e))
+                            })?;
+                            match &mut *guard {
+                                Value::Record(_, fields) => {
+                                    fields.insert(field_name, value);
+                                }
+                                other => {
+                                    return Err(InterpError::new(format!(
+                                        "record set: shared inner is not a Record, got {}",
+                                        other
+                                    )))
+                                }
+                            }
                         }
                         other => {
                             return Err(InterpError::new(format!(

@@ -1,5 +1,9 @@
 # Mimi v0.31.x 路线图
 
+> **状态：历史版本路线图（已完成）** — 0.1.1（v0.31.8–v0.31.58 全 51 sprint）已发布。
+> 本文档保留为 0.1.1 施工记录与 requirement 追溯；**当前路线见 `devdocs/v0.33/README.md`（0.1.3）与 `devdocs/v0.34/README.md`（0.1.4）**。
+> 约束性修正案（13 条款 + 10 不变量 + 语义裁决 SD-1~12）仍在 `architecture-amendment-1.0.md`，当前有效。
+>
 > 状态：权威实施路线图
 > 目标范围：完整覆盖 Mimi Pre-1.0
 > 规范来源：`docs/language-spec.md`、`docs/spec/`、`docs/language-requirements.toml`
