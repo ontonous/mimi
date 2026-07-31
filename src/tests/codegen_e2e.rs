@@ -2071,6 +2071,46 @@ fn e2e_valgrind_recursion() {
 }
 
 #[test]
+fn e2e_valgrind_b9_closure_env() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !can_valgrind() {
+        eprintln!("SKIP: valgrind not available");
+        return;
+    }
+    // B9 (audit): escaping closure envs must be freed exactly once — never
+    // leaked (definitely-lost would trip --leak-check=full) and never
+    // double-freed (use-after-free would trip memcheck). Covers the
+    // multi-closure escape chain with an early nested return.
+    let stdout = compile_and_run_valgrind(
+        r#"
+        func make_adder(n: i32) -> func(i32) -> i32 {
+            fn(x: i32) -> i32 { x + n }
+        }
+        func pick(c: bool) -> func(i32) -> i32 {
+            let a = make_adder(5);
+            let b = make_adder(10);
+            if c {
+                return a;
+            }
+            return b;
+        }
+        func main() -> i32 {
+            let f = pick(true);
+            let g = pick(false);
+            println(f(37));
+            println(g(20));
+            0
+        }
+        "#,
+    )
+    .expect("src/tests/codegen_e2e.rs:1360 unwrap failed");
+    assert_eq!(stdout.trim(), "42\n30");
+}
+
+#[test]
 fn e2e_shared_var_copy() {
     if !can_link() {
         eprintln!("SKIP: cc not available");

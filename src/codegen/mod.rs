@@ -198,6 +198,17 @@ pub struct CodeGenerator<'ctx> {
     /// Stack of heap-allocated buffer pointers from builtins that need free on scope exit.
     /// Uses RefCell for interior mutability since builtins take &self.
     heap_allocs: std::cell::RefCell<Vec<Vec<HeapEntry<'ctx>>>>,
+    /// B9 (audit): env pointers of escaping closure returns. Populated by
+    /// `claim_returned_closure_env` at return sites; the immediately following
+    /// `free_heap_allocs` emits runtime guards so these envs survive scope
+    /// exit (the caller owns them). Cleared on every `free_heap_allocs` call.
+    claimed_returned_envs: std::cell::RefCell<Vec<inkwell::values::PointerValue<'ctx>>>,
+    /// B9: heap-scope depth at each function-like entry (legacy function,
+    /// generic instantiation, lambda body, actor method). Early-return
+    /// flushes (`flush_heap_scopes_to_boundary`) pop scopes down to the
+    /// innermost boundary so a callee compiled mid-caller (monomorphization,
+    /// nested lambda) never frees the caller's registrations.
+    heap_boundaries: std::cell::RefCell<Vec<usize>>,
     ensures_stmts: Vec<Expr>,
     old_snapshots: HashMap<String, VarEntry<'ctx>>,
     /// Names of comptime functions declared in the current file.
@@ -413,6 +424,7 @@ type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>)
 /// emitted from `base` in the current block. `base` must dominate the cleanup
 /// point; call sites therefore allocate it in the function entry block.
 /// The struct's ptr field is also null-initialized at the entry block.
+#[derive(Clone)]
 enum HeapEntry<'ctx> {
     Ptr(inkwell::values::PointerValue<'ctx>),
     Slot(
@@ -459,6 +471,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             weak_release_vars: vec![Vec::new()],
             shared_var_names: std::collections::HashSet::new(),
             heap_allocs: std::cell::RefCell::new(vec![Vec::new()]),
+            claimed_returned_envs: std::cell::RefCell::new(Vec::new()),
+            heap_boundaries: std::cell::RefCell::new(Vec::new()),
             ensures_stmts: Vec::new(),
             old_snapshots: HashMap::new(),
             comptime_func_names: std::collections::HashSet::new(),
@@ -1555,6 +1569,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         None
     }
 
+    /// B9 (audit): record an escaping closure env pointer so the next
+    /// `free_heap_allocs` skips it at scope exit. Ownership of the env
+    /// transfers to the caller, which registers it at its own call site
+    /// (see `track_closure_return_lifetime`).
+    pub(super) fn claim_closure_env(&self, env_ptr: inkwell::values::PointerValue<'ctx>) {
+        self.claimed_returned_envs.borrow_mut().push(env_ptr);
+    }
+
     /// Track the result type of `weak_var.upgrade()` for a `let` binding.
     /// `w.upgrade()` returns `Option<T>` where `T` is the inner type of the
     /// weak reference. Updating `var_type_names`/`var_types` lets downstream
@@ -1669,6 +1691,113 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.heap_allocs.borrow_mut().push(Vec::new());
     }
 
+    /// B9: begin a function-level heap scope. Records the current depth as a
+    /// boundary so early-return flushes (`flush_heap_scopes_to_boundary`)
+    /// stop here, preserving caller scopes when a callee is compiled
+    /// mid-caller (generic monomorphization, nested lambda bodies, actor
+    /// method calls). The matching `end_function_heap_scope` runs at the
+    /// function compile's exit.
+    pub(super) fn begin_function_heap_scope(&self) {
+        let depth = self.heap_allocs.borrow().len();
+        self.heap_boundaries.borrow_mut().push(depth);
+        self.push_heap_scope();
+    }
+
+    /// B9: pop the function-boundary marker and discard (without emitting)
+    /// every heap scope above it. The frees for each runtime path were
+    /// already emitted by the path's own `flush_heap_scopes_to_boundary`
+    /// call; this only balances the compile-time bookkeeping stack.
+    pub(super) fn end_function_heap_scope(&self) {
+        let boundary = match self.heap_boundaries.borrow_mut().pop() {
+            Some(b) => b,
+            None => {
+                mimi_debug_assert!(false, "end_function_heap_scope without begin");
+                return;
+            }
+        };
+        let mut scopes = self.heap_allocs.borrow_mut();
+        while scopes.len() > boundary {
+            scopes.pop();
+        }
+    }
+
+    /// B9: emit frees for every registered allocation in the scopes from the
+    /// top down to (but not including) the innermost function boundary,
+    /// skipping escaping closure envs claimed by the current return
+    /// (one-shot: claims are drained here, all guards are emitted in the
+    /// current block, so no cross-block SSA references are possible).
+    ///
+    /// The scopes are NOT popped and their entries are NOT removed — the
+    /// compile-time stack is shared across all control-flow paths, and each
+    /// return site must emit its own path-specific frees (e.g. the
+    /// if-fallthrough path frees the env that is dead on that path, while
+    /// the then-path's claim skips it there). Scope bookkeeping is balanced
+    /// by `end_function_heap_scope` at the end of the function compile.
+    ///
+    /// Early-return paths call this instead of `free_heap_allocs` so that
+    /// function-level registrations (e.g. closure env slots tracked at call
+    /// sites) are released on every exit path. Without an active boundary
+    /// (untracked path, e.g. async poll), falls back to today's single-scope
+    /// free emission.
+    pub(super) fn flush_heap_scopes_to_boundary(&mut self) -> Result<(), CompileError> {
+        let claimed = std::mem::take(&mut *self.claimed_returned_envs.borrow_mut());
+        let boundary = self
+            .heap_boundaries
+            .borrow()
+            .last()
+            .copied()
+            .unwrap_or_else(|| self.heap_allocs.borrow().len().saturating_sub(1));
+        let free_fn = self
+            .module
+            .get_function("free")
+            .ok_or_else(|| CompileError::LlvmError("free not declared".to_string()))?;
+        // Snapshot the entries in every scope at or above the boundary.
+        // The scopes themselves stay intact for the remaining paths.
+        let entries: Vec<HeapEntry<'ctx>> = {
+            let scopes = self.heap_allocs.borrow();
+            scopes
+                .iter()
+                .skip(boundary)
+                .flat_map(|scope| scope.iter().cloned())
+                .collect()
+        };
+        for entry in entries {
+            let ptr = match entry {
+                HeapEntry::Ptr(p) => p,
+                HeapEntry::Slot(base, struct_ty, field) => {
+                    let gep = self
+                        .gep()
+                        .build_struct_gep(struct_ty, base, field, "heap_slot_gep")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("heap slot gep error: {}", e))
+                        })?;
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    self.builder
+                        .build_load(ptr_ty, gep, "heap_slot")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("heap slot load error: {}", e))
+                        })?
+                        .into_pointer_value()
+                }
+            };
+            if claimed.is_empty() {
+                self.builder
+                    .build_call(
+                        free_fn,
+                        &[BasicMetadataValueEnum::PointerValue(ptr)],
+                        "free_heap",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+            } else {
+                // Value-exact runtime comparison: skip the free when the
+                // pointer is a claimed escaping closure env — ownership
+                // transferred to the caller.
+                self.emit_guarded_scope_free(free_fn, ptr, &claimed)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Pop the current heap scope WITHOUT freeing any allocations.
     /// Used by the resolved emitter when returning string values:
     /// the caller takes ownership of the heap data.
@@ -1683,7 +1812,19 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// cleanup point. The null guarantee ensures that `free` on a never-allocated
     /// path calls free(null), which is a C-library no-op.
     pub(super) fn free_heap_allocs(&mut self) -> Result<(), CompileError> {
-        if let Some(scope) = self.heap_allocs.borrow_mut().pop() {
+        // B9 (audit): claims persist across nested scope pops so an escaping
+        // closure env registered in an outer (function-level) scope stays
+        // guarded until that scope itself is popped. The seed scope pushed by
+        // the constructor marks the function boundary — when a pop returns the
+        // stack to it, the function's registrations are all gone and claims
+        // are no longer needed. Stale claims are harmless beyond that: they
+        // only suppress frees of pointers that can never equal them.
+        let claimed = std::mem::take(&mut *self.claimed_returned_envs.borrow_mut());
+        let scope = self.heap_allocs.borrow_mut().pop();
+        if self.heap_allocs.borrow().len() > 1 {
+            *self.claimed_returned_envs.borrow_mut() = claimed.clone();
+        }
+        if let Some(scope) = scope {
             let free_fn = self
                 .module
                 .get_function("free")
@@ -1707,15 +1848,68 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .into_pointer_value()
                     }
                 };
-                self.builder
-                    .build_call(
-                        free_fn,
-                        &[BasicMetadataValueEnum::PointerValue(ptr)],
-                        "free_heap",
-                    )
-                    .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+                if claimed.is_empty() {
+                    self.builder
+                        .build_call(
+                            free_fn,
+                            &[BasicMetadataValueEnum::PointerValue(ptr)],
+                            "free_heap",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+                } else {
+                    // B9 (audit): skip the free when the pointer is a claimed
+                    // escaping closure env — ownership transferred to the
+                    // caller. Value-exact runtime comparison replaces the old
+                    // positional pop (which misfired when unrelated
+                    // allocations followed the env registration).
+                    self.emit_guarded_scope_free(free_fn, ptr, &claimed)?;
+                }
             }
         }
+        Ok(())
+    }
+
+    /// Emit `if (ptr != claimed_0 && ptr != claimed_1 && ...) { free(ptr); }`.
+    /// Splits the current block; the insertion point is left at the merge
+    /// block so subsequent emission flows normally.
+    fn emit_guarded_scope_free(
+        &self,
+        free_fn: inkwell::values::FunctionValue<'ctx>,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        claimed: &[inkwell::values::PointerValue<'ctx>],
+    ) -> Result<(), CompileError> {
+        let i1_ty = self.context.bool_type();
+        let mut matched = i1_ty.const_int(0, false);
+        for env in claimed {
+            let eq = self
+                .builder
+                .build_int_compare(inkwell::IntPredicate::EQ, ptr, *env, "b9_env_eq")
+                .map_err(|e| CompileError::LlvmError(format!("b9 env compare error: {}", e)))?;
+            matched = self
+                .builder
+                .build_or(matched, eq, "b9_env_matched")
+                .map_err(|e| CompileError::LlvmError(format!("b9 env or error: {}", e)))?;
+        }
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| CompileError::LlvmError("guarded free outside function".into()))?;
+        let free_bb = self.context.append_basic_block(parent, "b9_free_env");
+        let skip_bb = self.context.append_basic_block(parent, "b9_skip_free");
+        self.build_cond_br(matched, skip_bb, free_bb)?;
+        self.builder.position_at_end(free_bb);
+        self.builder
+            .build_call(
+                free_fn,
+                &[BasicMetadataValueEnum::PointerValue(ptr)],
+                "free_heap",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+        self.builder
+            .build_unconditional_branch(skip_bb)
+            .map_err(|e| CompileError::LlvmError(format!("b9 free merge error: {}", e)))?;
+        self.builder.position_at_end(skip_bb);
         Ok(())
     }
 

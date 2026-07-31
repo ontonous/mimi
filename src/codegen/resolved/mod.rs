@@ -18,10 +18,10 @@ use crate::codegen::{CallSiteValueExt, CodeGenerator};
 use crate::core::ir::ResolvedFStringPart;
 use crate::core::ir::{ResolvedBinaryOp, ResolvedUnaryOp};
 use crate::core::{
-    CheckedConversion, CheckedConversionKind, CheckedProgram, NodeId, PrimitiveType, ResolvedBlock,
-    ResolvedBody, ResolvedCallee, ResolvedConstValue, ResolvedExpr, ResolvedExprKind,
-    ResolvedLiteral, ResolvedLocalId, ResolvedPattern, ResolvedPatternKind, ResolvedPlace,
-    ResolvedStmtKind, ResolvedType, ResolvedTypeId,
+    CheckedConversion, CheckedConversionKind, CheckedProgram, FunctionTypeAbi, NodeId,
+    PrimitiveType, ResolvedBlock, ResolvedBody, ResolvedCallee, ResolvedConstValue, ResolvedExpr,
+    ResolvedExprKind, ResolvedLiteral, ResolvedLocalId, ResolvedPattern, ResolvedPatternKind,
+    ResolvedPlace, ResolvedStmtKind, ResolvedType, ResolvedTypeId,
 };
 use crate::diagnostic::Diagnostic;
 use crate::error::CompileError;
@@ -1119,6 +1119,44 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 CompileError::LlvmError(format!(
                                     "resolved callee '{symbol}' returned void"
                                 ))
+                            })
+                            .and_then(|result| {
+                                // B9 (audit): when the callee returns a Mimi
+                                // closure, register its env so the caller's
+                                // scope exit releases it. The callee (legacy
+                                // or resolved emitter) already claimed the env
+                                // on its side — ownership transfers here.
+                                if !matches!(
+                                    self.program.resolved_types().get(&call.result),
+                                    Some(ResolvedType::Function {
+                                        abi: FunctionTypeAbi::Mimi,
+                                        ..
+                                    })
+                                ) {
+                                    return Ok(result);
+                                }
+                                let sv = match result {
+                                    BasicValueEnum::StructValue(sv) => sv,
+                                    other => return Ok(other),
+                                };
+                                let fields = sv.get_type().get_field_types();
+                                let is_closure_struct = fields.len() == 2
+                                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                                    && matches!(fields[1], BasicTypeEnum::PointerType(_));
+                                if !is_closure_struct {
+                                    return Ok(sv.into());
+                                }
+                                if let BasicValueEnum::PointerValue(env) = self
+                                    .generator
+                                    .build_extract_value(sv.into(), 1, "resolved_closure_env")?
+                                {
+                                    // Registered as a raw Ptr: freed at scope
+                                    // exit; if the closure is returned, the
+                                    // resolved emitter drains the whole scope
+                                    // (caller takes ownership).
+                                    self.generator.register_heap_alloc(env);
+                                }
+                                Ok(result)
                             })
                     }
                     ResolvedCallee::Builtin(builtin_id) => {

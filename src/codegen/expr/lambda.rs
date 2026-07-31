@@ -171,7 +171,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         ret_type: BasicTypeEnum<'ctx>,
         lambda_vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> Result<(), CompileError> {
-        self.push_heap_scope();
+        self.begin_function_heap_scope();
         let mut last_val = default_ret_value(self.context, ret_type);
         let mut last_expr: Option<&Expr> = None;
         let mut returned = false;
@@ -188,13 +188,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // doesn't free them before the caller receives them.
                     let claimed =
                         self.claim_string_return_value(v, ret_type, Some(e), lambda_vars)?;
-                    self.free_heap_allocs()?;
+                    self.flush_heap_scopes_to_boundary()?;
                     self.build_return(Some(&claimed))?;
                     returned = true;
                     break;
                 }
                 Stmt::Return(None) => {
-                    self.free_heap_allocs()?;
+                    self.flush_heap_scopes_to_boundary()?;
                     self.build_return(None)?;
                     returned = true;
                     break;
@@ -218,13 +218,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             let last_val = self.load_return_value_if_needed(last_val)?;
             let claimed =
                 self.claim_string_return_value(last_val, ret_type, last_expr, lambda_vars)?;
-            self.free_heap_allocs()?;
+            self.flush_heap_scopes_to_boundary()?;
             self.build_return(Some(&claimed))?;
         } else if !returned {
             // block_has_terminator but not via return (e.g. panic macro)
-            // Still need to pop the heap scope
-            let _ = self.heap_allocs.borrow_mut().pop();
+            // Still need to pop the heap scopes — bookkeeping only, since
+            // the block is terminated (unreachable) and no free calls can
+            // be emitted after the terminator.
+            let boundary = self
+                .heap_boundaries
+                .borrow()
+                .last()
+                .copied()
+                .unwrap_or(self.heap_allocs.borrow().len().saturating_sub(1));
+            while self.heap_allocs.borrow().len() > boundary {
+                self.heap_allocs.borrow_mut().pop();
+            }
         }
+        self.end_function_heap_scope();
         Ok(())
     }
 
