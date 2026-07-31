@@ -1829,6 +1829,40 @@ impl<'a> BytecodeVM<'a> {
                             })?;
                             self.set_reg(rd, inner.clone());
                         }
+                        // Set built-in methods (remove, insert, is_empty, contains, size, to_list).
+                        Value::Set(items) => {
+                            let result: Result<Value, InterpError> = match method_name.as_str() {
+                                "remove" => {
+                                    let elem = self.get_reg(args_base + 1).clone();
+                                    let new_set: Vec<Value> = items.iter()
+                                        .filter(|v| !crate::interp::values_equal(v, &elem))
+                                        .cloned().collect();
+                                    Ok(Value::Set(new_set))
+                                }
+                                "insert" => {
+                                    let elem = self.get_reg(args_base + 1).clone();
+                                    let mut new_set = items.clone();
+                                    if !new_set.iter().any(|v| crate::interp::values_equal(v, &elem)) {
+                                        new_set.push(elem);
+                                    }
+                                    Ok(Value::Set(new_set))
+                                }
+                                "is_empty" => Ok(Value::Bool(items.is_empty())),
+                                "contains" => {
+                                    let elem = self.get_reg(args_base + 1).clone();
+                                    Ok(Value::Bool(items.iter().any(|v| crate::interp::values_equal(v, &elem))))
+                                }
+                                "size" | "len" => Ok(Value::Int(items.len() as i64)),
+                                "to_list" => Ok(Value::List(items.clone())),
+                                _ => {
+                                    return Err(InterpError::new(format!(
+                                        "cannot call method '{}' on Set",
+                                        method_name
+                                    )));
+                                }
+                            };
+                            self.set_reg(rd, result?);
+                        }
                         // Option/Result built-in methods (matches tree-walker call.rs:1178+).
                         Value::Variant(tag, payload) => {
                             let result = match (tag.as_str(), method_name.as_str()) {
