@@ -715,8 +715,11 @@ impl BytecodeCompiler {
                 }
                 Stmt::Block(b) => {
                     fc.push_scope();
-                    self.compile_block(fc, b)?;
+                    let r = self.compile_block(fc, b)?;
                     fc.pop_scope();
+                    if is_last {
+                        last_reg = r;
+                    }
                 }
                 Stmt::Break(val) => {
                     if fc.break_jumps.is_empty() {
