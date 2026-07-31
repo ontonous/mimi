@@ -1989,6 +1989,14 @@ impl<'a> BytecodeVM<'a> {
                                 ("None" | "Err", "unwrap_or") => {
                                     Ok(self.get_reg(args_base + 1).clone())
                                 }
+                                // ok_or: Option → Result (Some(v) → Ok(v), None → Err(e))
+                                ("Some", "ok_or") => {
+                                    Ok(Value::Variant("Ok".into(), payload.clone()))
+                                }
+                                ("None", "ok_or") => {
+                                    let err_val = self.get_reg(args_base + 1).clone();
+                                    Ok(Value::Variant("Err".into(), vec![err_val]))
+                                }
                                 _ => {
                                     return Err(InterpError::new(format!(
                                         "cannot call method '{}' on {}",
