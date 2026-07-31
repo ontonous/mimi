@@ -373,6 +373,22 @@ fn value_to_json(v: &Value) -> serde_json::Value {
             serde_json::Value::Object(map)
         }
         Value::Tuple(t) => serde_json::Value::Array(t.iter().map(value_to_json).collect()),
+        Value::Set(s) => serde_json::Value::Array(s.iter().map(value_to_json).collect()),
+        Value::Variant(tag, payload) => {
+            // Serialize as {"Tag": [payload...]} for variants with payload,
+            // or "Tag" for nullary variants. Matches codegen JSON encoding.
+            if payload.is_empty() {
+                serde_json::Value::String(tag.clone())
+            } else {
+                let mut map = serde_json::Map::new();
+                map.insert(
+                    tag.clone(),
+                    serde_json::Value::Array(payload.iter().map(value_to_json).collect()),
+                );
+                serde_json::Value::Object(map)
+            }
+        }
+        Value::Newtype(_, inner) => value_to_json(inner),
         _ => serde_json::Value::String(v.to_string()),
     }
 }
