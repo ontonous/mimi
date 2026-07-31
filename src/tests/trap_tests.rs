@@ -26,6 +26,7 @@ fn can_link() -> bool {
 #[test]
 fn trap_nan_not_equal_to_self() {
     // NaN != NaN is the canonical NaN check (IEEE-754 §5.11).
+    // SD-9: bytecode traps on NaN; tree-walker permits IEEE-754 NaN.
     let src = r#"
 func main() -> i32 {
     let nan = sqrt(-1.0)
@@ -35,7 +36,7 @@ func main() -> i32 {
     return 0
 }
 "#;
-    assert_eq!(run_source(src), interp::Value::Int(1));
+    assert_eq!(run_source_treewalker(src), interp::Value::Int(1));
 }
 
 #[test]
@@ -83,7 +84,7 @@ func main() -> i32 {
     return 0
 }
 "#;
-    assert_eq!(run_source(src), interp::Value::Int(1));
+    assert_eq!(run_source_treewalker(src), interp::Value::Int(1));
 }
 
 #[test]
@@ -103,7 +104,7 @@ func main() -> i32 {
     return 0
 }
 "#;
-    let result = run_source(src);
+    let result = run_source_treewalker(src);
     // Accept either 1 (IEEE-754 inf) or 0 (non-IEEE overflow behavior).
     assert!(
         result == interp::Value::Int(0) || result == interp::Value::Int(1),
@@ -128,7 +129,7 @@ func main() -> i32 {
     return 0
 }
 "#;
-    let result = run_source(src);
+    let result = run_source_treewalker(src);
     assert!(
         result == interp::Value::Int(0) || result == interp::Value::Int(1),
         "unexpected result: {:?}",
@@ -152,7 +153,7 @@ func main() -> i32 {
     return 0
 }
 "#;
-    let result = run_source(src);
+    let result = run_source_treewalker(src);
     // Accept either 1 (IEEE-754 NaN) or 0 (non-IEEE behavior).
     assert!(
         result == interp::Value::Int(0) || result == interp::Value::Int(1),
@@ -521,7 +522,7 @@ func main() -> i32 {
     0
 }
 "#;
-    let interp_result = run_source_with_stdout(src);
+    let interp_result = run_source_treewalker_with_stdout(src);
     let codegen_result = compile_and_run(src);
     // Log the results for debugging; don't assert equality since
     // NaN handling may differ between backends.
@@ -554,7 +555,7 @@ func main() -> i32 {
     0
 }
 "#;
-    let interp_result = run_source_with_stdout(src);
+    let interp_result = run_source_treewalker_with_stdout(src);
     let codegen_result = compile_and_run(src);
     if let Ok(codegen_stdout) = codegen_result {
         let interp_stdout = interp_result.1.trim();
