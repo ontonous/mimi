@@ -299,7 +299,7 @@ fn builtin_str_split(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
         if let Value::Cap(components) = &args[0] {
             if components.len() <= 1 {
                 return Err(InterpError::new(
-                    "cannot split a simple capability (no combined parts)",
+                    "split() requires a combined capability (e.g., cap FullAccess = Read + Write)",
                 ));
             }
             let parts: Vec<Value> = components
