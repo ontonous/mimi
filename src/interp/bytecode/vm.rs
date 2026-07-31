@@ -2326,6 +2326,14 @@ impl<'a> BytecodeVM<'a> {
                     crate::ast::Expr::Literal(crate::ast::Lit::String(s)) => {
                         Value::String(s.clone())
                     }
+                    // Negative literals: -42, -3.14
+                    crate::ast::Expr::Unary(crate::ast::UnOp::Neg, inner) => {
+                        match inner.unlocated() {
+                            crate::ast::Expr::Literal(crate::ast::Lit::Int(n)) => Value::Int(-n),
+                            crate::ast::Expr::Literal(crate::ast::Lit::Float(f)) => Value::Float(-f),
+                            _ => value,
+                        }
+                    }
                     _ => value, // complex init: use default (tree-walker eval not available)
                 }
             } else {
