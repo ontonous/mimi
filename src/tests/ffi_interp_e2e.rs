@@ -16,7 +16,7 @@ fn interp_ffi_float_identity() {
     let _guard = FfiEnvLock::lock();
     let so_path = build_interp_ffi_so().expect("src/tests/ffi_interp_e2e.rs:11 unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result(
+    let result = run_source_treewalker_result(
         r#"
         extern "C" {
             func test_float_identity(x: f64) -> f64
@@ -43,7 +43,7 @@ fn interp_ffi_strlen_raw() {
     let _guard = FfiEnvLock::lock();
     let so_path = build_interp_ffi_so().expect("src/tests/ffi_interp_e2e.rs:33 unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result(
+    let result = run_source_treewalker_result(
         r#"
         extern "C" {
             func test_strlen(s: raw_string) -> i32
@@ -71,7 +71,7 @@ fn interp_ffi_greet_raw() {
     std::env::set_var("MIMI_FFI_LIB", &so_path);
     // Must disable fork isolation: raw_string return is a pointer from child's heap,
     // which is inaccessible after fork+_exit. The parent cannot read or free child's pointer.
-    let result = run_source_result_no_fork(
+    let result = run_source_treewalker_result_no_fork(
         r#"
         extern "C" {
             func test_greet(x: i32) -> raw_string
@@ -97,7 +97,7 @@ fn interp_ffi_nop() {
     let _guard = FfiEnvLock::lock();
     let so_path = build_interp_ffi_so().expect("src/tests/ffi_interp_e2e.rs:71 unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result(
+    let result = run_source_treewalker_result(
         r#"
         extern "C" {
             func test_nop()
@@ -124,7 +124,7 @@ fn interp_ffi_json_sum_list() {
     let _guard = FfiEnvLock::lock();
     let so_path = build_interp_ffi_so().expect("src/tests/ffi_interp_e2e.rs:90 unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result(
+    let result = run_source_treewalker_result(
         r#"
         extern "C" {
             func test_json_sum(json: List<i32>) -> i32
@@ -150,7 +150,7 @@ fn interp_ffi_callback() {
     let _guard = FfiEnvLock::lock();
     let so_path = build_interp_ffi_so().expect("src/tests/ffi_interp_e2e.rs:108 unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result(
+    let result = run_source_treewalker_result(
         r#"
         extern "C" {
             func test_callback(x: i32, cb: func(i32) -> i32) -> i32
@@ -182,7 +182,7 @@ fn interp_ffi_threaded_callback() {
     let so_path =
         build_interp_ffi_so().expect("src/tests/ffi_interp_e2e.rs:threaded unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result(
+    let result = run_source_treewalker_result(
         r#"
         extern "C" {
             func test_threaded_callback(x: i32, cb: func(i32) -> i32) -> i32
@@ -211,7 +211,7 @@ fn interp_ffi_parse_int_raw_string() {
     let _guard = FfiEnvLock::lock();
     let so_path = build_interp_ffi_so().expect("src/tests/ffi_interp_e2e.rs:128 unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result(
+    let result = run_source_treewalker_result(
         r#"
         extern "C" {
             func test_parse_int(s: raw_string) -> i32
@@ -239,7 +239,7 @@ fn interp_ffi_segfault_caught() {
     std::env::set_var("MIMI_FFI_LIB", &so_path);
     // Fork isolation is enabled by default; segfault in child should not crash the test
     // We test that the interpreter returns an error (the child was killed by signal)
-    let result = run_source_result(
+    let result = run_source_treewalker_result(
         r#"
         extern "C" {
             func test_segfault()
@@ -278,7 +278,7 @@ fn interp_ffi_no_panic_segfault_caught() {
         build_interp_ffi_so().expect("src/tests/ffi_interp_e2e.rs:no_panic_segv unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
     // Use no-fork mode to exercise call_ffi_no_panic (signal handler path)
-    let result = run_source_result_no_fork(
+    let result = run_source_treewalker_result_no_fork(
         r#"
         #[no_panic]
         extern "C" {
@@ -314,7 +314,7 @@ fn interp_ffi_no_panic_abort_caught() {
     let so_path =
         build_interp_ffi_so().expect("src/tests/ffi_interp_e2e.rs:no_panic_abort unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result_no_fork(
+    let result = run_source_treewalker_result_no_fork(
         r#"
         #[no_panic]
         extern "C" {
@@ -350,7 +350,7 @@ fn interp_ffi_no_panic_normal_call_succeeds() {
     let so_path =
         build_interp_ffi_so().expect("src/tests/ffi_interp_e2e.rs:no_panic_normal unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result_no_fork(
+    let result = run_source_treewalker_result_no_fork(
         r#"
         #[no_panic]
         extern "C" {
@@ -380,7 +380,7 @@ fn interp_ffi_no_panic_abort_fork_mode() {
     let so_path =
         build_interp_ffi_so().expect("src/tests/ffi_interp_e2e.rs:no_panic_fork unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result(
+    let result = run_source_treewalker_result(
         r#"
         #[no_panic]
         extern "C" {
@@ -405,7 +405,7 @@ fn interp_ffi_struct_by_value_i32() {
     let _guard = FfiEnvLock::lock();
     let so_path = build_interp_ffi_so().expect("ffi_interp_e2e.rs:struct_by_val unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result(
+    let result = run_source_treewalker_result(
         r#"
         #[repr(C)]
         type TestPoint { x: i32, y: i32 }
@@ -433,7 +433,7 @@ fn interp_ffi_struct_by_value_mixed() {
     let _guard = FfiEnvLock::lock();
     let so_path = build_interp_ffi_so().expect("ffi_interp_e2e.rs:mixed unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result(
+    let result = run_source_treewalker_result(
         r#"
         #[repr(C)]
         type MixedStruct { id: i32, value: f64, flag: i32 }
@@ -462,7 +462,7 @@ fn interp_ffi_struct_by_value_nested() {
     let _guard = FfiEnvLock::lock();
     let so_path = build_interp_ffi_so().expect("ffi_interp_e2e.rs:nested unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result(
+    let result = run_source_treewalker_result(
         r#"
         #[repr(C)]
         type Inner { a: i32, b: i32 }
@@ -492,7 +492,7 @@ fn interp_ffi_struct_by_value_i64() {
     let _guard = FfiEnvLock::lock();
     let so_path = build_interp_ffi_so().expect("ffi_interp_e2e.rs:i64 unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result(
+    let result = run_source_treewalker_result(
         r#"
         #[repr(C)]
         type Timespec { sec: i64, nsec: i64 }
@@ -520,7 +520,7 @@ fn interp_ffi_struct_return_by_value() {
     let _guard = FfiEnvLock::lock();
     let so_path = build_interp_ffi_so().expect("ffi_interp_e2e.rs:struct_ret unwrap failed");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result_no_fork(
+    let result = run_source_treewalker_result_no_fork(
         r#"
         #[repr(C)]
         type TestPoint { x: i32, y: i32 }
@@ -576,7 +576,7 @@ fn interp_ffi_no_panic_struct_ret_segfault_caught() {
         .unwrap();
     assert!(status.success(), "failed to compile struct crash .so");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result_no_fork(
+    let result = run_source_treewalker_result_no_fork(
         r#"
         #[repr(C)]
         type Point { x: i32, y: i32 }
@@ -640,7 +640,7 @@ fn interp_ffi_fork_isolation_struct_ret_segfault_caught() {
         .unwrap();
     assert!(status.success(), "failed to compile struct crash .so");
     std::env::set_var("MIMI_FFI_LIB", &so_path);
-    let result = run_source_result(
+    let result = run_source_treewalker_result(
         r#"
         #[repr(C)]
         type Point { x: i32, y: i32 }
