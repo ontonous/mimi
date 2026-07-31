@@ -461,12 +461,14 @@ impl<'a> BytecodeVM<'a> {
                     let frame = self.cur_frame_mut();
                     let a = match &frame.regs[ra as usize] {
                         Value::Float(v) => *v,
+                        Value::Int(v) => *v as f64,
                         other => {
                             return Err(InterpError::new(format!("expected Float, got {}", other)))
                         }
                     };
                     let b = match &frame.regs[rb as usize] {
                         Value::Float(v) => *v,
+                        Value::Int(v) => *v as f64,
                         other => {
                             return Err(InterpError::new(format!("expected Float, got {}", other)))
                         }
@@ -483,12 +485,14 @@ impl<'a> BytecodeVM<'a> {
                     let frame = self.cur_frame_mut();
                     let a = match &frame.regs[ra as usize] {
                         Value::Float(v) => *v,
+                        Value::Int(v) => *v as f64,
                         other => {
                             return Err(InterpError::new(format!("expected Float, got {}", other)))
                         }
                     };
                     let b = match &frame.regs[rb as usize] {
                         Value::Float(v) => *v,
+                        Value::Int(v) => *v as f64,
                         other => {
                             return Err(InterpError::new(format!("expected Float, got {}", other)))
                         }
@@ -505,12 +509,14 @@ impl<'a> BytecodeVM<'a> {
                     let frame = self.cur_frame_mut();
                     let a = match &frame.regs[ra as usize] {
                         Value::Float(v) => *v,
+                        Value::Int(v) => *v as f64,
                         other => {
                             return Err(InterpError::new(format!("expected Float, got {}", other)))
                         }
                     };
                     let b = match &frame.regs[rb as usize] {
                         Value::Float(v) => *v,
+                        Value::Int(v) => *v as f64,
                         other => {
                             return Err(InterpError::new(format!("expected Float, got {}", other)))
                         }
@@ -527,12 +533,14 @@ impl<'a> BytecodeVM<'a> {
                     let frame = self.cur_frame_mut();
                     let a = match &frame.regs[ra as usize] {
                         Value::Float(v) => *v,
+                        Value::Int(v) => *v as f64,
                         other => {
                             return Err(InterpError::new(format!("expected Float, got {}", other)))
                         }
                     };
                     let b = match &frame.regs[rb as usize] {
                         Value::Float(v) => *v,
+                        Value::Int(v) => *v as f64,
                         other => {
                             return Err(InterpError::new(format!("expected Float, got {}", other)))
                         }
@@ -552,6 +560,7 @@ impl<'a> BytecodeVM<'a> {
                     let frame = self.cur_frame_mut();
                     let a = match &frame.regs[ra as usize] {
                         Value::Float(v) => *v,
+                        Value::Int(v) => *v as f64,
                         other => {
                             return Err(InterpError::new(format!("expected Float, got {}", other)))
                         }
@@ -2234,6 +2243,7 @@ impl<'a> BytecodeVM<'a> {
     pub(crate) fn get_float(&self, r: Reg) -> Result<f64, InterpError> {
         match self.get_reg(r) {
             Value::Float(v) => Ok(*v),
+            Value::Int(v) => Ok(*v as f64), // Auto-coerce Int → Float
             other => Err(InterpError::new(format!("expected Float, got {}", other))),
         }
     }
