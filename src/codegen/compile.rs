@@ -1324,31 +1324,50 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// warnings so a single broken `comptime` declaration does not
     /// prevent the rest of the file from compiling. (This matches
     /// the v0.28.19 behaviour of warning-on-uncompilable-comptime.)
-    fn fold_comptime_items(&mut self, _file: &File) -> MimiResult<()> {
-        // Use the cloned file stored in self.comptime_file so the
-        // interpreter can be created without re-borrowing the caller's
-        // argument after `compile_file` has moved on.
+fn fold_comptime_items(&mut self, _file: &File) -> MimiResult<()> {
         let file_ref = match &self.comptime_file {
             Some(rc) => rc.as_ref(),
             None => return Ok(()),
         };
-        let mut interp = crate::interp::Interpreter::new(file_ref);
-        // Drive the same `eval_comptime_funcs` step `Interpreter::run`
-        // uses so we get a `comptime_results` map populated before any
-        // user-level `Expr::Comptime` block is asked to fold.
-        // H15-fix: comptime errors should be compile errors, not silent warnings.
-        // Previously downgraded to eprintln warning, which could cause generated
-        // code to use wrong constants. Now propagated as a CompileError.
-        if let Err(e) = interp.eval_comptime_block(&Vec::new()) {
-            return Err(CompileError::Generic(format!(
-                "comptime evaluation error: {}",
-                e
-            )));
+        // v0.33: try Bytecode VM first, fall back to tree-walker on failure.
+        let bytecode_result = (|| {
+            let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
+            let prog = compiler.compile_for_comptime(file_ref).map_err(|e| e.to_string())?;
+            let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
+            let mut results = std::collections::HashMap::new();
+            for item in &file_ref.items {
+                if let crate::ast::Item::Func(f) = item {
+                    if f.is_comptime && f.params.is_empty() {
+                        if let Some(fidx) = prog.function_index(&f.name) {
+                            let value = vm.call_function(fidx, &[]).map_err(|e| e.to_string())?;
+                            results.insert(f.name.clone(), value);
+                        }
+                    }
+                }
+            }
+            Ok::<_, String>(results)
+        })();
+        match bytecode_result {
+            Ok(results) => {
+                for (name, value) in results {
+                    self.comptime_values.insert(name, value);
+                }
+                Ok(())
+            }
+            Err(_) => {
+                // Fallback to tree-walker for files the bytecode compiler can't handle.
+                let mut interp = crate::interp::Interpreter::new(file_ref);
+                if let Err(e) = interp.eval_comptime_block(&Vec::new()) {
+                    return Err(CompileError::Generic(format!(
+                        "comptime evaluation error: {}",
+                        e
+                    )));
+                }
+                for (name, value) in interp.drain_comptime_results() {
+                    self.comptime_values.insert(name, value);
+                }
+                Ok(())
+            }
         }
-        // Drain every pre-computed comptime result into the codegen cache.
-        for (name, value) in interp.drain_comptime_results() {
-            self.comptime_values.insert(name, value);
-        }
-        Ok(())
     }
 }
