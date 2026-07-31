@@ -300,7 +300,7 @@ func main() -> i32 {
     return 0;
 }
 "#;
-    assert_eq!(run_source(src), interp::Value::Int(10));
+    assert_eq!(run_source_treewalker(src), interp::Value::Int(10));
 }
 
 #[test]
@@ -506,7 +506,7 @@ func main() -> i32 {
     return arr[0];
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err());
 }
 
@@ -697,7 +697,7 @@ func main() -> i32 {
     return 0;
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err());
 }
 
@@ -710,7 +710,7 @@ func main() -> i32 {
     return 0;
 }
 "#;
-    let result = run_source_result(src);
+    let result = run_source_treewalker_result(src);
     assert!(result.is_err());
 }
 
