@@ -1002,6 +1002,19 @@ impl BytecodeCompiler {
                     });
                     return Ok(rd);
                 }
+                // Nullary enum variant constructors: Yes, No, Done, etc.
+                if self.variant_names.contains(name.as_str()) {
+                    let rd = fc.proto.alloc_reg();
+                    let type_name_idx = fc.proto.add_const(ConstValue::Str(name.clone()));
+                    fc.emit(Op::NewVariant {
+                        rd,
+                        type_name: type_name_idx,
+                        variant: 0,
+                        base: 0,
+                        arity: 0,
+                    });
+                    return Ok(rd);
+                }
                 Err(InterpError::new(format!(
                     "undefined variable '{}' in bytecode",
                     name
@@ -2367,6 +2380,18 @@ impl BytecodeCompiler {
             PatternKind::Wildcard => Ok((None, Vec::new())),
 
             PatternKind::Variable(name) => {
+                // If the name is a known enum variant, treat as nullary constructor
+                // pattern (check variant tag) rather than a catch-all variable binding.
+                if self.variant_names.contains(name.as_str()) {
+                    let r_test = fc.proto.alloc_reg();
+                    let tag_idx = fc.proto.add_const(ConstValue::Str(name.clone()));
+                    fc.emit(Op::IsVariant {
+                        rd: r_test,
+                        ra: r_subject,
+                        tag: tag_idx,
+                    });
+                    return Ok((Some(r_test), Vec::new()));
+                }
                 // Always matches; bind the subject to the variable.
                 Ok((None, vec![(name.clone(), r_subject)]))
             }
