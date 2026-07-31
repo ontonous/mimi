@@ -767,3 +767,13 @@ pub struct BytecodeProgram {
     /// The original AST (for actor worker threads that use tree-walker internally).
     pub ast: Option<std::sync::Arc<crate::ast::File>>,
 }
+
+impl BytecodeProgram {
+    /// Look up a function index by name.
+    pub fn function_index(&self, name: &str) -> Option<FuncIdx> {
+        self.functions
+            .iter()
+            .position(|f| f.name == name)
+            .map(|i| i as FuncIdx)
+    }
+}
