@@ -463,6 +463,66 @@ pub(crate) fn run_source_with_trace(src: &str) -> (interp::Value, Vec<crate::tra
     (val, events)
 }
 
+// ===================== Bytecode VM test helpers (0.33 retirement) =====================
+
+/// Compile and run source via the Bytecode VM, returning the main Value.
+/// Panics on compile or runtime error (mirrors `run_source` semantics).
+pub(crate) fn run_source_bytecode(src: &str) -> interp::Value {
+    let file = parse(src);
+    let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    let prog = compiler
+        .compile_file(&file)
+        .expect("bytecode compile failed");
+    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    vm.run_value().expect("bytecode run_value failed")
+}
+
+/// Compile and run source via the Bytecode VM, returning Result.
+/// Mirrors `run_source_result` semantics (parse errors → Err, runtime errors → Err).
+pub(crate) fn run_source_bytecode_result(src: &str) -> Result<interp::Value, String> {
+    let tokens = lexer::Lexer::new(src).tokenize()?;
+    let file = parser::Parser::new(tokens)
+        .parse_file()
+        .map_err(|e| e.message)?;
+    let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    let prog = compiler.compile_file(&file).map_err(|e| e.to_string())?;
+    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    vm.run_value().map_err(|e| e.message().to_string())
+}
+
+/// Compile and run source via the Bytecode VM with stdout capture.
+/// Returns `(main return value, captured stdout)`.
+pub(crate) fn run_source_bytecode_with_stdout(src: &str) -> (interp::Value, String) {
+    let file = parse(src);
+    let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    let prog = compiler
+        .compile_file(&file)
+        .expect("bytecode compile failed");
+    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    let val = vm.run_value().expect("bytecode run_value failed");
+    let stdout = vm.take_stdout();
+    (val, stdout)
+}
+
+/// Compile and run source via the Bytecode VM with CheckedProgram integration.
+/// Runs the type checker first, installs CheckedProgram into the compiler,
+/// then compiles and runs. Mirrors `checked_run_source_result` semantics.
+pub(crate) fn checked_run_source_bytecode_result(src: &str) -> Result<interp::Value, String> {
+    let file = parse(src);
+    let program = core::check_program(&file).map_err(|diags| {
+        diags
+            .iter()
+            .map(|d| format!("{}", d))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    compiler.install_checked_program(&program);
+    let prog = compiler.compile_file(&file).map_err(|e| e.to_string())?;
+    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    vm.run_value().map_err(|e| e.message().to_string())
+}
+
 /// 0.31.45: Run the ResolvedInterpreter on a CheckedProgram.
 /// Returns Ok(value) on success, Err(message) on failure.
 /// "unsupported" errors are expected for programs using FFI/actors/flows.
@@ -1146,4 +1206,339 @@ pub fn main_doc(
     }
 
     Ok(())
+}
+
+// ===================== Bytecode VM equivalence smoke tests (0.33) =====================
+
+#[cfg(test)]
+mod bytecode_equiv_smoke {
+    use super::*;
+
+    #[test]
+    fn bc_smoke_int() {
+        let tw = run_source("func main() -> i32 { 42 }");
+        let bc = run_source_bytecode("func main() -> i32 { 42 }");
+        assert_eq!(tw, bc, "tree-walker vs bytecode mismatch");
+        assert_eq!(bc, interp::Value::Int(42));
+    }
+
+    #[test]
+    fn bc_smoke_arithmetic() {
+        let src = "func main() -> i32 { (10 + 20) * 3 }";
+        assert_eq!(run_source(src), run_source_bytecode(src));
+    }
+
+    #[test]
+    fn bc_smoke_string_concat() {
+        let src = r#"func main() -> string { "hello" + " " + "world" }"#;
+        assert_eq!(run_source(src), run_source_bytecode(src));
+    }
+
+    #[test]
+    fn bc_smoke_list_index() {
+        let src = "func main() -> i32 { let xs = [1,2,3]; xs[0] + xs[2] }";
+        assert_eq!(run_source(src), run_source_bytecode(src));
+    }
+
+    #[test]
+    fn bc_smoke_if_else() {
+        let src = "func main() -> i32 { if 10 > 5 { 1 } else { 0 } }";
+        assert_eq!(run_source(src), run_source_bytecode(src));
+    }
+
+    #[test]
+    fn bc_smoke_function_call() {
+        let src = "func add(a: i32, b: i32) -> i32 { a + b }
+                    func main() -> i32 { add(3, 4) }";
+        assert_eq!(run_source(src), run_source_bytecode(src));
+    }
+
+    #[test]
+    fn bc_smoke_recursion() {
+        let src = "func fib(n: i32) -> i32 { if n <= 1 { n } else { fib(n-1) + fib(n-2) } }
+                    func main() -> i32 { fib(10) }";
+        assert_eq!(run_source(src), run_source_bytecode(src));
+    }
+
+    #[test]
+    fn bc_smoke_stdout() {
+        let src = r#"func main() -> i32 { print("hi"); 0 }"#;
+        let (tw_val, tw_out) = run_source_with_stdout(src);
+        let (bc_val, bc_out) = run_source_bytecode_with_stdout(src);
+        assert_eq!(tw_val, bc_val, "return value mismatch");
+        assert_eq!(tw_out, bc_out, "stdout mismatch: tw={:?} bc={:?}", tw_out, bc_out);
+    }
+
+    #[test]
+    fn bc_smoke_result_variant() {
+        let src = r#"func main() -> i32 {
+            let r: Result<i32, string> = Ok(42)
+            match r { Ok(v) => v  Err(_) => 0 }
+        }"#;
+        assert_eq!(run_source(src), run_source_bytecode(src));
+    }
+
+    #[test]
+    fn bc_smoke_option_variant() {
+        let src = r#"func main() -> i32 {
+            let o: Option<i32> = Some(7)
+            match o { Some(v) => v  None => 0 }
+        }"#;
+        assert_eq!(run_source(src), run_source_bytecode(src));
+    }
+
+    #[test]
+    fn bc_smoke_record() {
+        let src = "type Point { x: i32, y: i32 }
+                    func main() -> i32 { let p = Point { x: 3, y: 4 }; p.x + p.y }";
+        assert_eq!(run_source(src), run_source_bytecode(src));
+    }
+
+    #[test]
+    fn bc_smoke_while_loop() {
+        let src = "func main() -> i32 {
+            let mut i = 0
+            let mut sum = 0
+            while i < 10 { sum = sum + i; i = i + 1 }
+            sum
+        }";
+        assert_eq!(run_source(src), run_source_bytecode(src));
+    }
+
+    #[test]
+    fn bc_smoke_for_range() {
+        let src = "func main() -> i32 {
+            let mut sum = 0
+            for i in 0..5 { sum = sum + i }
+            sum
+        }";
+        assert_eq!(run_source(src), run_source_bytecode(src));
+    }
+
+    #[test]
+    fn bc_smoke_closure() {
+        let src = "func main() -> i32 {
+            let add = fn(x: i32, y: i32) -> i32 { x + y }
+            add(3, 4)
+        }";
+        assert_eq!(run_source(src), run_source_bytecode(src));
+    }
+
+    #[test]
+    fn bc_smoke_tuple() {
+        let src = "func main() -> i32 { let t = (1, 2, 3); t.0 + t.1 + t.2 }";
+        assert_eq!(run_source(src), run_source_bytecode(src));
+    }
+
+    #[test]
+    fn bc_smoke_checked_path() {
+        let src = "func main() -> i32 { 42 }";
+        let r = checked_run_source_bytecode_result(src);
+        assert_eq!(r.unwrap(), interp::Value::Int(42));
+    }
+}
+
+/// Batch equivalence probe: run a curated set of programs through both
+/// tree-walker and bytecode, collecting ALL mismatches in one run.
+/// This reveals the full failure surface for the retirement plan.
+#[cfg(test)]
+mod bytecode_batch_probe {
+    use super::*;
+
+    /// Run a program through both backends. Returns Ok(()) if equivalent,
+    /// Err(description) if mismatched or one side fails.
+    fn probe(name: &str, src: &str) -> Result<(), String> {
+        let tw = std::panic::catch_unwind(|| run_source(src));
+        let bc = std::panic::catch_unwind(|| run_source_bytecode(src));
+        match (tw, bc) {
+            (Ok(tw_val), Ok(bc_val)) => {
+                if tw_val == bc_val {
+                    Ok(())
+                } else {
+                    Err(format!("{}: VALUE MISMATCH\n  tw={:?}\n  bc={:?}", name, tw_val, bc_val))
+                }
+            }
+            (Ok(tw_val), Err(_)) => Err(format!("{}: bytecode PANICKED, tw={:?}", name, tw_val)),
+            (Err(_), Ok(bc_val)) => Err(format!("{}: tree-walker PANICKED, bc={:?}", name, bc_val)),
+            (Err(_), Err(_)) => Ok(()), // both fail — acceptable (e.g. unsupported feature)
+        }
+    }
+
+    /// Run a program through both backends with stdout capture.
+    fn probe_stdout(name: &str, src: &str) -> Result<(), String> {
+        let tw = std::panic::catch_unwind(|| run_source_with_stdout(src));
+        let bc = std::panic::catch_unwind(|| run_source_bytecode_with_stdout(src));
+        match (tw, bc) {
+            (Ok((tw_val, tw_out)), Ok((bc_val, bc_out))) => {
+                let mut errs = Vec::new();
+                if tw_val != bc_val {
+                    errs.push(format!("  value: tw={:?} bc={:?}", tw_val, bc_val));
+                }
+                if tw_out != bc_out {
+                    errs.push(format!("  stdout: tw={:?} bc={:?}", tw_out, bc_out));
+                }
+                if errs.is_empty() { Ok(()) }
+                else { Err(format!("{}: MISMATCH\n{}", name, errs.join("\n"))) }
+            }
+            (Ok(_), Err(_)) => Err(format!("{}: bytecode PANICKED", name)),
+            (Err(_), Ok(_)) => Err(format!("{}: tree-walker PANICKED", name)),
+            (Err(_), Err(_)) => Ok(()),
+        }
+    }
+
+    #[test]
+    fn batch_equivalence_probe() {
+        let cases: Vec<(&str, &str)> = vec![
+            // === Scalars ===
+            ("int_literal", "func main() -> i32 { 42 }"),
+            ("float_literal", "func main() -> f64 { 3.14 }"),
+            ("bool_true", "func main() -> bool { true }"),
+            ("bool_false", "func main() -> bool { false }"),
+            ("string_literal", r#"func main() -> string { "hello" }"#),
+            ("unit_return", "func main() { }"),
+
+            // === Arithmetic ===
+            ("int_add", "func main() -> i32 { 10 + 20 }"),
+            ("int_sub", "func main() -> i32 { 50 - 8 }"),
+            ("int_mul", "func main() -> i32 { 6 * 7 }"),
+            ("int_div", "func main() -> i32 { 100 / 4 }"),
+            ("int_mod", "func main() -> i32 { 17 % 5 }"),
+            ("float_add", "func main() -> f64 { 1.5 + 2.5 }"),
+            ("float_mul", "func main() -> f64 { 2.0 * 3.0 }"),
+            ("neg_int", "func main() -> i32 { 0 - 42 }"),
+            ("neg_float", "func main() -> f64 { 0.0 - 1.5 }"),
+            ("paren_precedence", "func main() -> i32 { (2 + 3) * 4 }"),
+
+            // === Comparisons ===
+            ("eq_true", "func main() -> bool { 5 == 5 }"),
+            ("eq_false", "func main() -> bool { 5 == 6 }"),
+            ("ne_true", "func main() -> bool { 5 != 6 }"),
+            ("lt", "func main() -> bool { 3 < 5 }"),
+            ("gt", "func main() -> bool { 5 > 3 }"),
+            ("le", "func main() -> bool { 5 <= 5 }"),
+            ("ge", "func main() -> bool { 5 >= 6 }"),
+            ("and", "func main() -> bool { true && false }"),
+            ("or", "func main() -> bool { false || true }"),
+            ("not", "func main() -> bool { !true }"),
+
+            // === Let bindings ===
+            ("let_immutable", "func main() -> i32 { let x = 10\n x }"),
+            ("let_mutable", "func main() -> i32 { let mut x = 10\n x = 20\n x }"),
+            ("let_shadow", "func main() -> i32 { let x = 1\n let x = x + 1\n x }"),
+            ("let_typed", "func main() -> i32 { let x: i32 = 42\n x }"),
+
+            // === Control flow ===
+            ("if_true", "func main() -> i32 { if true { 1 } else { 0 } }"),
+            ("if_false", "func main() -> i32 { if false { 1 } else { 0 } }"),
+            ("if_chain", "func main() -> i32 { if false { 1 } else if true { 2 } else { 3 } }"),
+            ("while_loop", "func main() -> i32 {\n let mut i = 0\n let mut s = 0\n while i < 5 { s = s + i\n i = i + 1 }\n s }"),
+            ("for_range", "func main() -> i32 {\n let mut s = 0\n for i in 0..5 { s = s + i }\n s }"),
+            ("loop_break", "func main() -> i32 {\n let mut i = 0\n loop { i = i + 1\n if i >= 3 { break } }\n i }"),
+            ("loop_break_value", "func main() -> i32 { let v = loop { break 42 }\n v }"),
+            ("continue_in_while", "func main() -> i32 {\n let mut s = 0\n let mut i = 0\n while i < 10 { i = i + 1\n if i % 2 == 0 { continue }\n s = s + i }\n s }"),
+            ("early_return", "func main() -> i32 { return 42 }"),
+            ("return_in_if", "func f(x: i32) -> i32 {\n if x > 0 { return 1 }\n 0 }\nfunc main() -> i32 { f(5) + f(0 - 1) }"),
+
+            // === Functions ===
+            ("func_no_args", "func five() -> i32 { 5 }\nfunc main() -> i32 { five() }"),
+            ("func_two_args", "func add(a: i32, b: i32) -> i32 { a + b }\nfunc main() -> i32 { add(3, 4) }"),
+            ("func_recursion", "func fib(n: i32) -> i32 {\n if n <= 1 { n } else { fib(n-1) + fib(n-2) } }\nfunc main() -> i32 { fib(10) }"),
+            ("func_mutual", "func is_even(n: i32) -> bool {\n if n == 0 { true } else { is_odd(n - 1) } }\nfunc is_odd(n: i32) -> bool {\n if n == 0 { false } else { is_even(n - 1) } }\nfunc main() -> bool { is_even(10) }"),
+            ("func_nested_call", "func double(x: i32) -> i32 { x * 2 }\nfunc main() -> i32 { double(double(3)) }"),
+
+            // === Strings ===
+            ("string_concat", r#"func main() -> string { "a" + "b" + "c" }"#),
+            ("string_len", r#"func main() -> i32 { len("hello") }"#),
+            ("string_eq", r#"func main() -> bool { "abc" == "abc" }"#),
+            ("string_ne", r#"func main() -> bool { "abc" != "def" }"#),
+
+            // === Lists ===
+            ("list_create", "func main() -> i32 { let xs = [1,2,3]\n len(xs) }"),
+            ("list_index", "func main() -> i32 { let xs = [10,20,30]\n xs[1] }"),
+            ("list_empty", "func main() -> bool { let xs: List<i32> = []\n len(xs) == 0 }"),
+            ("list_nested", "func main() -> i32 { let xs = [[1,2],[3,4]]\n xs[1][0] }"),
+            ("list_eq", "func main() -> bool { [1,2,3] == [1,2,3] }"),
+
+            // === Tuples ===
+            ("tuple_create", "func main() -> i32 { let t = (1, 2, 3)\n t.0 }"),
+            ("tuple_access", "func main() -> i32 { let t = (10, 20)\n t.0 + t.1 }"),
+            ("tuple_nested", "func main() -> i32 { let t = ((1, 2), 3)\n t.0.1 + t.1 }"),
+
+            // === Records ===
+            ("record_create", "type P { x: i32, y: i32 }\nfunc main() -> i32 { let p = P { x: 3, y: 4 }\n p.x + p.y }"),
+            ("record_update", "type P { x: i32, y: i32 }\nfunc main() -> i32 { let mut p = P { x: 1, y: 2 }\n p.x = 10\n p.x + p.y }"),
+            ("record_nested", "type Inner { v: i32 }\ntype Outer { inner: Inner }\nfunc main() -> i32 { let o = Outer { inner: Inner { v: 42 } }\n o.inner.v }"),
+
+            // === Enums / Variants ===
+            ("option_some", "func main() -> i32 {\n let o: Option<i32> = Some(42)\n match o { Some(v) => v  None => 0 } }"),
+            ("option_none", "func main() -> i32 {\n let o: Option<i32> = None\n match o { Some(v) => v  None => 0 - 1 } }"),
+            ("result_ok", "func main() -> i32 {\n let r: Result<i32, string> = Ok(7)\n match r { Ok(v) => v  Err(_) => 0 } }"),
+            ("result_err", r#"func main() -> i32 {
+ let r: Result<i32, string> = Err("fail")
+ match r { Ok(v) => v  Err(_) => 0 - 1 } }"#),
+
+            // === Pattern matching ===
+            ("match_int", "func main() -> i32 { match 2 { 1 => 10  2 => 20  _ => 0 } }"),
+            ("match_wildcard", "func main() -> i32 { match 99 { 1 => 10  _ => 42 } }"),
+
+            // === Closures ===
+            ("closure_basic", "func main() -> i32 { let f = fn(x: i32) -> i32 { x * 2 }\n f(5) }"),
+            ("closure_capture", "func main() -> i32 { let offset = 10\n let f = fn(x: i32) -> i32 { x + offset }\n f(5) }"),
+
+            // === Builtins ===
+            ("builtin_len_list", "func main() -> i32 { len([1,2,3,4]) }"),
+            ("builtin_abs", "func main() -> i32 { abs(0 - 5) }"),
+            ("builtin_min", "func main() -> i32 { min(3, 7) }"),
+            ("builtin_max", "func main() -> i32 { max(3, 7) }"),
+            ("builtin_to_string", "func main() -> string { to_string(42) }"),
+
+            // === Type casts ===
+            ("cast_int_to_float", "func main() -> f64 { 42 as f64 }"),
+
+            // === Nested blocks ===
+            ("nested_blocks", "func main() -> i32 {\n let x = {\n let y = 10\n {\n let z = 20\n y + z\n }\n }\n x }"),
+            ("multi_stmt", "func main() -> i32 {\n let a = 1\n let b = 2\n let c = a + b\n c * 2 }"),
+
+            // === Comptime ===
+            ("comptime_block", "func main() -> i32 { let v = comptime { 21 * 2 }\n v }"),
+            ("comptime_func", "comptime func make_const() -> i32 { 21 * 2 }\nfunc main() -> i32 { comptime { make_const() } }"),
+
+            // === Error handling ===
+            ("try_result", "func safe_div(a: i32, b: i32) -> Result<i32, string> {\n if b == 0 { Err(\"div by zero\") } else { Ok(a / b) } }\nfunc main() -> i32 {\n match safe_div(10, 2) { Ok(v) => v  Err(_) => 0 - 1 } }"),
+        ];
+
+        let mut failures: Vec<String> = Vec::new();
+        let mut passes = 0;
+
+        for (name, src) in &cases {
+            match probe(name, src) {
+                Ok(()) => passes += 1,
+                Err(e) => failures.push(e),
+            }
+        }
+
+        // Stdout probes
+        let stdout_cases: Vec<(&str, &str)> = vec![
+            ("stdout_print", r#"func main() -> i32 { print("hello"); 0 }"#),
+            ("stdout_print_int", "func main() -> i32 { print(42); 0 }"),
+            ("stdout_multi", r#"func main() -> i32 { print("a"); print("b"); 0 }"#),
+        ];
+        for (name, src) in &stdout_cases {
+            match probe_stdout(name, src) {
+                Ok(()) => passes += 1,
+                Err(e) => failures.push(e),
+            }
+        }
+
+        if !failures.is_empty() {
+            panic!(
+                "\n\n===== BYTECODE EQUIVALENCE PROBE =====\n\
+                 PASS: {}  FAIL: {}\n\n{}\n\
+                 =====================================\n",
+                passes,
+                failures.len(),
+                failures.join("\n\n")
+            );
+        }
+    }
 }
