@@ -495,6 +495,25 @@ fn coerce_json_to_type(val: Value, type_str: &str) -> Result<Value, InterpError>
                     }
                     _ => Err(InterpError::new(format!("expected list, got {}", val))),
                 }
+            } else if type_str.starts_with("Map<") {
+                // Map<K, V> — parse key and value types, coerce JSON object values.
+                let inner = &type_str[4..type_str.len()-1]; // strip "Map<" and ">"
+                let parts = split_type_args(inner);
+                if parts.len() == 2 {
+                    let val_type = &parts[1];
+                    match val {
+                        Value::Record(name, fields) => {
+                            let mut out = std::collections::HashMap::new();
+                            for (k, v) in fields {
+                                out.insert(k, coerce_json_to_type(v, val_type)?);
+                            }
+                            Ok(Value::Record(name, out))
+                        }
+                        _ => Err(InterpError::new(format!("expected object for Map, got {}", val))),
+                    }
+                } else {
+                    Ok(val)
+                }
             } else if let Some(inner) = type_str.strip_prefix("Option<").and_then(|s| s.strip_suffix('>')) {
                 match val {
                     Value::Unit => Ok(Value::Variant("None".into(), vec![])),
