@@ -452,18 +452,6 @@ pub(crate) fn checked_compile_and_run(src: &str) -> Result<String, String> {
     compile_and_run(src)
 }
 
-/// v0.31.15: Run interpreter with trace collection enabled.
-/// Returns (main return value, collected trace events).
-#[allow(dead_code)] // 0.31.18: infrastructure for dual-backend trace comparison (0.31.15 追加)
-pub(crate) fn run_source_with_trace(src: &str) -> (interp::Value, Vec<crate::trace::TraceEvent>) {
-    let file = parse(src);
-    let mut interp = interp::Interpreter::new(&file);
-    interp.trace_collector.enable();
-    let val = interp.run().expect("run_source_with_trace failed");
-    let events = interp.trace_collector.take_events();
-    (val, events)
-}
-
 // ===================== Bytecode VM test helpers (0.33 retirement) =====================
 
 /// Compile and run source via the Bytecode VM, returning the main Value.
@@ -523,222 +511,6 @@ pub(crate) fn checked_run_source_bytecode_result(src: &str) -> Result<interp::Va
     let prog = compiler.compile_file(&file).map_err(|e| e.to_string())?;
     let mut vm = interp::bytecode::BytecodeVM::new(&prog);
     vm.run_value().map_err(|e| e.message().to_string())
-}
-
-/// 0.31.45: Run the ResolvedInterpreter on a CheckedProgram.
-/// Returns Ok(value) on success, Err(message) on failure.
-/// "unsupported" errors are expected for programs using FFI/actors/flows.
-pub(crate) fn run_resolved(program: &core::CheckedProgram) -> Result<interp::Value, String> {
-    let mut interp = interp::resolved::ResolvedInterpreter::new(program);
-    interp.run_main().map_err(|e| e.message().to_string())
-}
-
-/// 0.31.45: Dual-path result comparing AST interpreter and ResolvedInterpreter.
-#[derive(Debug)]
-pub(crate) enum DualPathResult {
-    /// Both interpreters succeeded and produced equal results.
-    Match(interp::Value),
-    /// AST interpreter succeeded, ResolvedInterpreter returned "unsupported".
-    /// This is expected for programs using FFI/actors/flows.
-    ResolvedUnsupported {
-        ast_value: interp::Value,
-        reason: String,
-    },
-    /// AST interpreter succeeded, ResolvedInterpreter failed with a real error.
-    /// This indicates a ResolvedInterpreter bug (not an unsupported feature).
-    ResolvedFailed {
-        ast_value: interp::Value,
-        resolved_error: String,
-    },
-    /// Both interpreters failed (expected for invalid programs).
-    BothFailed {
-        ast_error: String,
-        resolved_error: String,
-    },
-    /// AST interpreter failed but ResolvedInterpreter succeeded (bug!).
-    AstFailedResolvedOk {
-        resolved_value: interp::Value,
-        ast_error: String,
-    },
-    /// Both succeeded but produced different results (bug!).
-    Mismatch {
-        ast_value: interp::Value,
-        resolved_value: interp::Value,
-    },
-}
-
-/// 0.31.45: Run both AST interpreter and ResolvedInterpreter, compare results.
-/// This is the core dual-path validation for the interpreter migration.
-pub(crate) fn run_dual_path(src: &str) -> DualPathResult {
-    let file = parse(src);
-    let program = match core::check_program(&file) {
-        Ok(program) => program,
-        Err(diags) => {
-            let msg = diags
-                .iter()
-                .map(|d| format!("{}", d))
-                .collect::<Vec<_>>()
-                .join("\n");
-            return DualPathResult::BothFailed {
-                ast_error: format!("type check failed: {}", msg),
-                resolved_error: format!("type check failed: {}", msg),
-            };
-        }
-    };
-
-    // Run AST interpreter
-    let mut ast_interp = interp::Interpreter::from_checked(&program);
-    ast_interp.verify_contracts = true;
-    let ast_result = ast_interp.run();
-
-    // Run ResolvedInterpreter
-    let resolved_result = run_resolved(&program);
-
-    match (ast_result, resolved_result) {
-        (Ok(ast_val), Ok(resolved_val)) => {
-            if values_equal_for_test(&ast_val, &resolved_val) {
-                DualPathResult::Match(ast_val)
-            } else {
-                DualPathResult::Mismatch {
-                    ast_value: ast_val,
-                    resolved_value: resolved_val,
-                }
-            }
-        }
-        (Ok(ast_val), Err(resolved_err)) => {
-            if resolved_err.contains("outside the typed scalar execution subset")
-                || resolved_err.contains("not yet in the typed scalar execution subset")
-                || resolved_err.contains("callable has no ResolvedBody")
-            {
-                DualPathResult::ResolvedUnsupported {
-                    ast_value: ast_val,
-                    reason: resolved_err,
-                }
-            } else {
-                // ResolvedInterpreter failed with a real error - this is a bug
-                DualPathResult::ResolvedFailed {
-                    ast_value: ast_val,
-                    resolved_error: resolved_err,
-                }
-            }
-        }
-        (Err(ast_err), Ok(resolved_val)) => DualPathResult::AstFailedResolvedOk {
-            resolved_value: resolved_val,
-            ast_error: ast_err.message().to_string(),
-        },
-        (Err(ast_err), Err(resolved_err)) => DualPathResult::BothFailed {
-            ast_error: ast_err.message().to_string(),
-            resolved_error: resolved_err,
-        },
-    }
-}
-
-/// 0.31.45: Compare two Values for equality in dual-path tests.
-/// Handles the common cases; falls back to debug format comparison.
-fn values_equal_for_test(a: &interp::Value, b: &interp::Value) -> bool {
-    use interp::Value;
-    match (a, b) {
-        (Value::Unit, Value::Unit) => true,
-        (Value::Int(x), Value::Int(y)) => x == y,
-        (Value::Float(x), Value::Float(y)) => (x - y).abs() < 1e-9,
-        (Value::Bool(x), Value::Bool(y)) => x == y,
-        (Value::String(x), Value::String(y)) => x == y,
-        (Value::List(xs), Value::List(ys)) => {
-            xs.len() == ys.len()
-                && xs
-                    .iter()
-                    .zip(ys.iter())
-                    .all(|(x, y)| values_equal_for_test(x, y))
-        }
-        (Value::Tuple(xs), Value::Tuple(ys)) => {
-            xs.len() == ys.len()
-                && xs
-                    .iter()
-                    .zip(ys.iter())
-                    .all(|(x, y)| values_equal_for_test(x, y))
-        }
-        (Value::Record(name_a, fields_a), Value::Record(name_b, fields_b)) => {
-            name_a == name_b
-                && fields_a.len() == fields_b.len()
-                && fields_a
-                    .iter()
-                    .zip(fields_b.iter())
-                    .all(|((ka, va), (kb, vb))| ka == kb && values_equal_for_test(va, vb))
-        }
-        (Value::Variant(name_a, args_a), Value::Variant(name_b, args_b)) => {
-            name_a == name_b
-                && args_a.len() == args_b.len()
-                && args_a
-                    .iter()
-                    .zip(args_b.iter())
-                    .all(|(x, y)| values_equal_for_test(x, y))
-        }
-        (Value::Newtype(id_a, val_a), Value::Newtype(id_b, val_b)) => {
-            id_a == id_b && values_equal_for_test(val_a, val_b)
-        }
-        (Value::Set(xs), Value::Set(ys)) => {
-            xs.len() == ys.len()
-                && xs
-                    .iter()
-                    .zip(ys.iter())
-                    .all(|(x, y)| values_equal_for_test(x, y))
-        }
-        (Value::Error(x), Value::Error(y)) => x == y,
-        // Fallback: compare debug representations
-        _ => format!("{:?}", a) == format!("{:?}", b),
-    }
-}
-
-/// 0.31.45: Assert that dual-path produces a match (both interpreters agree).
-/// Panics on mismatch or unexpected failure.
-#[allow(dead_code)]
-pub(crate) fn assert_dual_path_match(src: &str) -> interp::Value {
-    match run_dual_path(src) {
-        DualPathResult::Match(val) => val,
-        DualPathResult::ResolvedUnsupported { ast_value, reason } => {
-            // For plain function tests, unsupported is a failure
-            panic!(
-                "ResolvedInterpreter should support this program but returned unsupported: {}\nAST value: {:?}",
-                reason, ast_value
-            );
-        }
-        DualPathResult::Mismatch {
-            ast_value,
-            resolved_value,
-        } => {
-            panic!(
-                "Dual-path mismatch!\nAST:      {:?}\nResolved: {:?}",
-                ast_value, resolved_value
-            );
-        }
-        DualPathResult::AstFailedResolvedOk {
-            resolved_value,
-            ast_error,
-        } => {
-            panic!(
-                "AST interpreter failed but ResolvedInterpreter succeeded!\nAST error: {}\nResolved: {:?}",
-                ast_error, resolved_value
-            );
-        }
-        DualPathResult::ResolvedFailed {
-            ast_value,
-            resolved_error,
-        } => {
-            panic!(
-                "ResolvedInterpreter failed with a real error (not unsupported)!\nAST value: {:?}\nResolved error: {}",
-                ast_value, resolved_error
-            );
-        }
-        DualPathResult::BothFailed {
-            ast_error,
-            resolved_error,
-        } => {
-            panic!(
-                "Both interpreters failed!\nAST:      {}\nResolved: {}",
-                ast_error, resolved_error
-            );
-        }
-    }
 }
 
 /// End-to-end codegen test: compile Mimi source -> LLVM -> native binary -> execute -> return stdout
@@ -989,10 +761,16 @@ pub(crate) fn compile_only(src: &str) -> Result<std::path::PathBuf, String> {
 /// asserting both succeed. Does NOT compare stdout (contracts may
 /// produce different diagnostic output between backends).
 pub(crate) fn dual_assert_contract_ok(src: &str) {
+    // Bytecode VM with contract checking (0.33: replaces tree-walker).
     let file = parse(src);
-    let mut interp = interp::Interpreter::new(&file);
-    interp.verify_contracts = true;
-    interp.run().expect("interpreter contract run failed");
+    let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    let prog = compiler
+        .compile_file(&file)
+        .expect("bytecode compile failed in dual_assert_contract_ok");
+    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    vm.verify_contracts = true;
+    vm.run_value()
+        .expect("bytecode contract run failed in dual_assert_contract_ok");
     compile_and_verify_contracts(src).expect("codegen contract run failed");
 }
 
