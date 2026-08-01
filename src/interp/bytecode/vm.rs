@@ -1256,6 +1256,7 @@ impl<'a> BytecodeVM<'a> {
                         | Some(ConstValue::QuoteAst(_))
                         | Some(ConstValue::LambdaSpec { .. })
                         | Some(ConstValue::Pattern(_))
+                        | Some(ConstValue::StrVec(_))
                         | None => {
                             return Err(InterpError::new("QuotePushLit: constant is not a literal"))
                         }
@@ -1470,6 +1471,63 @@ impl<'a> BytecodeVM<'a> {
                             body,
                             captured,
                         });
+                }
+                Op::QuoteFor { var_idx } => {
+                    let var = self.const_str(var_idx)?.to_string();
+                    let body = self.quote_pop()?;
+                    let iter = self.quote_pop()?;
+                    self.quote_stack.push(crate::interp::value::QuotedAst::For(
+                        var,
+                        Box::new(iter),
+                        Box::new(body),
+                    ));
+                }
+                Op::QuoteAssign => {
+                    let value = self.quote_pop()?;
+                    let target = self.quote_pop()?;
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Assign(
+                            Box::new(target),
+                            Box::new(value),
+                        ));
+                }
+                Op::QuoteLoop => {
+                    let body = self.quote_pop()?;
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Loop(Box::new(body)));
+                }
+                Op::QuoteRecord {
+                    n,
+                    names_idx,
+                    ty_idx,
+                } => {
+                    let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
+                    let names = match proto.constants.get(names_idx as usize) {
+                        Some(ConstValue::StrVec(v)) => v.clone(),
+                        _ => {
+                            return Err(InterpError::new(
+                                "QuoteRecord: names constant is not a StrVec",
+                            ))
+                        }
+                    };
+                    let ty = match proto.constants.get(ty_idx as usize) {
+                        Some(ConstValue::Str(s)) if s.is_empty() => None,
+                        Some(ConstValue::Str(s)) => Some(s.clone()),
+                        _ => None,
+                    };
+                    let values = self.quote_pop_n(n)?;
+                    let fields: Vec<crate::interp::value::RecordFieldExprQuoted> = names
+                        .iter()
+                        .zip(values.into_iter())
+                        .map(
+                            |(name, value)| crate::interp::value::RecordFieldExprQuoted {
+                                name: name.clone(),
+                                value,
+                            },
+                        )
+                        .collect();
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Record { ty, fields });
                 }
                 Op::QuoteTry => {
                     let e = self.quote_pop()?;
@@ -3206,6 +3264,7 @@ impl<'a> BytecodeVM<'a> {
             ConstValue::QuoteAst(q) => Value::QuoteAst(q.clone()),
             ConstValue::LambdaSpec { .. } => Value::Unit,
             ConstValue::Pattern(_) => Value::Unit,
+            ConstValue::StrVec(_) => Value::Unit,
         }
     }
 
