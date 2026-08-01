@@ -140,6 +140,27 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::SharedSet { .. } => "SHARED_SET",
         Op::WeakNew { .. } => "WEAK_NEW",
         Op::CallExtern { .. } => "CALL_EXTERN",
+        Op::QuotePushLit { .. } => "QUOTE_PUSH_LIT",
+        Op::QuotePushIdent { .. } => "QUOTE_PUSH_IDENT",
+        Op::QuoteInterpPush { .. } => "QUOTE_INTERP_PUSH",
+        Op::QuoteAstPush { .. } => "QUOTE_AST_PUSH",
+        Op::QuoteCapture { .. } => "QUOTE_CAPTURE",
+        Op::QuoteBlock { .. } => "QUOTE_BLOCK",
+        Op::QuoteList { .. } => "QUOTE_LIST",
+        Op::QuoteTuple { .. } => "QUOTE_TUPLE",
+        Op::QuoteBinary { .. } => "QUOTE_BINARY",
+        Op::QuoteUnary { .. } => "QUOTE_UNARY",
+        Op::QuoteCall { .. } => "QUOTE_CALL",
+        Op::QuoteField { .. } => "QUOTE_FIELD",
+        Op::QuoteIndex => "QUOTE_INDEX",
+        Op::QuoteIf { .. } => "QUOTE_IF",
+        Op::QuoteLet { .. } => "QUOTE_LET",
+        Op::QuoteCast { .. } => "QUOTE_CAST",
+        Op::QuoteExprStmt => "QUOTE_EXPR_STMT",
+        Op::QuoteReturn { .. } => "QUOTE_RETURN",
+        Op::QuoteWhile => "QUOTE_WHILE",
+        Op::QuoteTry => "QUOTE_TRY",
+        Op::QuoteResult { .. } => "QUOTE_RESULT",
     }
 }
 
@@ -155,6 +176,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::Bool(v) => format!("{}", v),
                 ConstValue::Str(v) => format!("{:?}", v),
                 ConstValue::Unit => "unit".to_string(),
+                ConstValue::Type(t) => format!("type {:?}", t),
             };
             format!("{:04}  {:<16} r{} = {}", pc, name, rd, display)
         }
@@ -291,6 +313,70 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::Ret { ra } => format!("{:04}  {:<16} return r{}", pc, name, ra),
         Op::RetEarly { ra } => format!("{:04}  {:<16} ret_early r{}", pc, name, ra),
         Op::RetUnit => format!("{:04}  {:<16} return unit", pc, name),
+        Op::QuotePushLit { const_idx } => {
+            let val = &proto.constants[*const_idx as usize];
+            let display = match val {
+                ConstValue::Int(v) => format!("{}", v),
+                ConstValue::Float(v) => format!("{}", v),
+                ConstValue::Bool(v) => format!("{}", v),
+                ConstValue::Str(v) => format!("{:?}", v),
+                ConstValue::Unit => "unit".to_string(),
+                ConstValue::Type(t) => format!("type {:?}", t),
+            };
+            format!("{:04}  {:<16} push {:?} ({})", pc, name, val, display)
+        }
+        Op::QuotePushIdent { str_idx } | Op::QuoteField { str_idx } | Op::QuoteLet { str_idx } => {
+            let s = proto
+                .constants
+                .get(*str_idx as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.clone(),
+                    _ => "?".to_string(),
+                })
+                .unwrap_or_else(|| "?".to_string());
+            format!("{:04}  {:<16} {:?}", pc, name, s)
+        }
+        Op::QuoteInterpPush { rs } | Op::QuoteAstPush { rs } => {
+            format!("{:04}  {:<16} r{}", pc, name, rs)
+        }
+        Op::QuoteCapture { str_idx, reg } => {
+            let s = proto
+                .constants
+                .get(*str_idx as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.clone(),
+                    _ => "?".to_string(),
+                })
+                .unwrap_or_else(|| "?".to_string());
+            format!("{:04}  {:<16} {} = r{}", pc, name, s, reg)
+        }
+        Op::QuoteBlock { n }
+        | Op::QuoteList { n }
+        | Op::QuoteTuple { n }
+        | Op::QuoteCall { argc: n } => {
+            format!("{:04}  {:<16} n={}", pc, name, n)
+        }
+        Op::QuoteReturn { has_value } => {
+            format!("{:04}  {:<16} has_value={}", pc, name, has_value)
+        }
+        Op::QuoteBinary { op } => format!("{:04}  {:<16} {:?}", pc, name, op),
+        Op::QuoteUnary { op } => format!("{:04}  {:<16} {:?}", pc, name, op),
+        Op::QuoteIndex | Op::QuoteExprStmt | Op::QuoteWhile | Op::QuoteTry => {
+            format!("{:04}  {:<16}", pc, name)
+        }
+        Op::QuoteIf { has_else } => format!("{:04}  {:<16} has_else={}", pc, name, has_else),
+        Op::QuoteCast { type_idx } => {
+            let s = proto
+                .constants
+                .get(*type_idx as usize)
+                .map(|c| match c {
+                    ConstValue::Type(t) => format!("{:?}", t),
+                    _ => "?".to_string(),
+                })
+                .unwrap_or_else(|| "?".to_string());
+            format!("{:04}  {:<16} {}", pc, name, s)
+        }
+        Op::QuoteResult { rd } => format!("{:04}  {:<16} r{}", pc, name, rd),
         Op::NewList { rd, capacity } => {
             format!("{:04}  {:<16} r{} = list(cap={})", pc, name, rd, capacity)
         }
@@ -568,6 +654,7 @@ pub fn disassemble(proto: &FunctionProto) -> String {
             ConstValue::Bool(v) => format!("{}", v),
             ConstValue::Str(v) => format!("{:?}", v),
             ConstValue::Unit => "unit".to_string(),
+            ConstValue::Type(t) => format!("type {:?}", t),
         };
         out.push_str(&format!(";   const[{}] = {}\n", i, display));
     }

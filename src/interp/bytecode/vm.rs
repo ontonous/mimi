@@ -8,6 +8,7 @@
 
 use super::instr::*;
 use super::registry::{self, BuiltinRegistry};
+use crate::ast::Lit;
 use crate::ffi::FfiContract;
 use crate::interp::error::InterpError;
 use crate::interp::ffi_runtime::{FfiClosureRunner, FfiRuntime};
@@ -77,6 +78,10 @@ pub struct BytecodeVM<'a> {
     /// Shared FFI execution context (0.33 Phase D FFI forwarding): extern
     /// function tables, loaded shared libraries, contract verification.
     ffi_runtime: FfiRuntime,
+    /// Quote assembly stack (0.33 Phase F): nodes pushed by Quote* ops.
+    quote_stack: Vec<crate::interp::value::QuotedAst>,
+    /// Variable captures collected by QuoteCapture, consumed by ast_eval.
+    pub(crate) quote_captures: std::collections::HashMap<String, Value>,
 }
 
 const MAX_DEPTH: usize = 768;
@@ -114,6 +119,8 @@ impl<'a> BytecodeVM<'a> {
                     std::collections::HashMap::new(),
                 ),
             },
+            quote_stack: Vec::new(),
+            quote_captures: std::collections::HashMap::new(),
         }
     }
 
@@ -1040,6 +1047,171 @@ impl<'a> BytecodeVM<'a> {
                     if let Some(v) = v {
                         return Ok(v);
                     }
+                }
+                // ── Quote assembly (0.33 Phase F) ──
+                Op::QuotePushLit { const_idx } => {
+                    let lit = match self.program.functions[self.cur_frame().proto_idx as usize]
+                        .constants
+                        .get(const_idx as usize)
+                    {
+                        Some(ConstValue::Int(v)) => Lit::Int(*v),
+                        Some(ConstValue::Float(v)) => Lit::Float(*v),
+                        Some(ConstValue::Bool(v)) => Lit::Bool(*v),
+                        Some(ConstValue::Str(v)) => Lit::String(v.clone()),
+                        Some(ConstValue::Unit) => Lit::Unit,
+                        Some(ConstValue::Type(_)) | None => {
+                            return Err(InterpError::new("QuotePushLit: constant is not a literal"))
+                        }
+                    };
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Literal(lit));
+                }
+                Op::QuotePushIdent { str_idx } => {
+                    let name = self.const_str(str_idx)?.to_string();
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Ident(name));
+                }
+                Op::QuoteInterpPush { rs } => {
+                    let v = self.get_reg(rs).clone();
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Interpolate(Box::new(v)));
+                }
+                Op::QuoteAstPush { rs } => {
+                    let v = self.get_reg(rs).clone();
+                    match v {
+                        Value::QuoteAst(q) => {
+                            self.quote_stack.push(*q);
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "QuoteAstPush: expected QuoteAst value, got {}",
+                                other
+                            )))
+                        }
+                    }
+                }
+                Op::QuoteCapture { str_idx, reg } => {
+                    let name = self.const_str(str_idx)?.to_string();
+                    self.quote_captures.insert(name, self.get_reg(reg).clone());
+                }
+                Op::QuoteBlock { n } => {
+                    let items = self.quote_pop_n(n)?;
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Block(items));
+                }
+                Op::QuoteList { n } => {
+                    let items = self.quote_pop_n(n)?;
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::List(items));
+                }
+                Op::QuoteTuple { n } => {
+                    let items = self.quote_pop_n(n)?;
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Tuple(items));
+                }
+                Op::QuoteBinary { op } => {
+                    let r = self.quote_pop()?;
+                    let l = self.quote_pop()?;
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Binary(
+                            op,
+                            Box::new(l),
+                            Box::new(r),
+                        ));
+                }
+                Op::QuoteUnary { op } => {
+                    let e = self.quote_pop()?;
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Unary(op, Box::new(e)));
+                }
+                Op::QuoteCall { argc } => {
+                    let args = self.quote_pop_n(argc)?;
+                    let callee = self.quote_pop()?;
+                    self.quote_stack.push(crate::interp::value::QuotedAst::Call(
+                        Box::new(callee),
+                        args,
+                    ));
+                }
+                Op::QuoteField { str_idx } => {
+                    let name = self.const_str(str_idx)?.to_string();
+                    let obj = self.quote_pop()?;
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Field(Box::new(obj), name));
+                }
+                Op::QuoteIndex => {
+                    let idx = self.quote_pop()?;
+                    let obj = self.quote_pop()?;
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Index(
+                            Box::new(obj),
+                            Box::new(idx),
+                        ));
+                }
+                Op::QuoteIf { has_else } => {
+                    let else_node = if has_else {
+                        Some(Box::new(self.quote_pop()?))
+                    } else {
+                        None
+                    };
+                    let then_node = self.quote_pop()?;
+                    let cond = self.quote_pop()?;
+                    self.quote_stack.push(crate::interp::value::QuotedAst::If(
+                        Box::new(cond),
+                        Box::new(then_node),
+                        else_node,
+                    ));
+                }
+                Op::QuoteLet { str_idx } => {
+                    let name = self.const_str(str_idx)?.to_string();
+                    let value = self.quote_pop()?;
+                    self.quote_stack.push(crate::interp::value::QuotedAst::Let {
+                        name,
+                        value: Box::new(value),
+                    });
+                }
+                Op::QuoteCast { type_idx } => {
+                    let ty = match self.program.functions[self.cur_frame().proto_idx as usize]
+                        .constants
+                        .get(type_idx as usize)
+                    {
+                        Some(ConstValue::Type(t)) => t.clone(),
+                        _ => return Err(InterpError::new("QuoteCast: constant is not a type")),
+                    };
+                    let inner = self.quote_pop()?;
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Cast(Box::new(inner), ty));
+                }
+                Op::QuoteExprStmt => {
+                    let e = self.quote_pop()?;
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::ExprStmt(Box::new(e)));
+                }
+                Op::QuoteReturn { has_value } => {
+                    let inner = if has_value {
+                        Some(Box::new(self.quote_pop()?))
+                    } else {
+                        None
+                    };
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Return(inner));
+                }
+                Op::QuoteWhile => {
+                    let body = self.quote_pop()?;
+                    let cond = self.quote_pop()?;
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::While(
+                            Box::new(cond),
+                            Box::new(body),
+                        ));
+                }
+                Op::QuoteTry => {
+                    let e = self.quote_pop()?;
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Try(Box::new(e)));
+                }
+                Op::QuoteResult { rd } => {
+                    let node = self.quote_pop()?;
+                    self.set_reg(rd, Value::QuoteAst(Box::new(node)));
                 }
                 Op::RetEarly { ra } => {
                     // Check fault handler before returning.
@@ -2415,6 +2587,37 @@ impl<'a> BytecodeVM<'a> {
         self.cur_frame_mut().regs[idx] = v;
     }
 
+    /// Look up a Str constant of the current frame's prototype.
+    fn const_str(&self, idx: ConstIdx) -> Result<&str, InterpError> {
+        match self.program.functions[self.cur_frame().proto_idx as usize]
+            .constants
+            .get(idx as usize)
+        {
+            Some(ConstValue::Str(s)) => Ok(s),
+            _ => Err(InterpError::new("expected Str constant")),
+        }
+    }
+
+    /// Pop the top of the quote assembly stack.
+    fn quote_pop(&mut self) -> Result<crate::interp::value::QuotedAst, InterpError> {
+        self.quote_stack
+            .pop()
+            .ok_or_else(|| InterpError::new("quote assembly: stack underflow"))
+    }
+
+    /// Pop `n` nodes (top-first), leaving them in popped order.
+    fn quote_pop_n(&mut self, n: u16) -> Result<Vec<crate::interp::value::QuotedAst>, InterpError> {
+        if (n as usize) > self.quote_stack.len() {
+            return Err(InterpError::new(format!(
+                "quote assembly: stack underflow (need {}, have {})",
+                n,
+                self.quote_stack.len()
+            )));
+        }
+        let split = self.quote_stack.len() - n as usize;
+        Ok(self.quote_stack.split_off(split))
+    }
+
     pub(crate) fn get_int(&self, r: Reg) -> Result<i64, InterpError> {
         match self.get_reg(r) {
             Value::Int(v) => Ok(*v),
@@ -2476,6 +2679,7 @@ impl<'a> BytecodeVM<'a> {
             ConstValue::Bool(v) => Value::Bool(*v),
             ConstValue::Str(v) => Value::String(v.clone()),
             ConstValue::Unit => Value::Unit,
+            ConstValue::Type(t) => Value::String(format!("<type {:?}>", t)),
         }
     }
 

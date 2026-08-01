@@ -1660,9 +1660,14 @@ impl BytecodeCompiler {
                 self.eval_comptime_at_compile_time(fc, block)
             }
 
-            Expr::Quote(_) | Expr::QuoteInterpolate(_) => Err(InterpError::new(
-                "bytecode compiler: quote!/interpolation not yet supported (0.1.4)",
-            )),
+            Expr::Quote(block) => self.compile_quote_block_expr(fc, block),
+            Expr::QuoteInterpolate(inner) => {
+                let r = self.compile_expr(fc, inner)?;
+                fc.emit(Op::QuoteInterpPush { rs: r });
+                let rd = fc.proto.alloc_reg();
+                fc.emit(Op::QuoteResult { rd });
+                Ok(rd)
+            }
 
             Expr::Arena(block) => {
                 // Arena block: same semantics as a regular block expression.
@@ -1686,6 +1691,247 @@ impl BytecodeCompiler {
                 std::mem::discriminant(expr.unlocated())
             ))),
         }
+    }
+
+    /// Compile a `quote! { ... }` block expression (0.33 Phase F).
+    ///
+    /// Emits stack-machine ops that assemble a `QuotedAst` on
+    /// `BytecodeVM::quote_stack` at runtime, then `QuoteResult` into a
+    /// register. Interpolation points (`$(expr)`) are compiled as ordinary
+    /// expressions and embedded via `QuoteInterpPush`. Free identifiers are
+    /// captured from the current function scope via `QuoteCapture` so
+    /// `ast_eval` can resolve them in a temporary tree-walker env.
+    fn compile_quote_block_expr(
+        &mut self,
+        fc: &mut FuncCompiler,
+        block: &Block,
+    ) -> Result<Reg, InterpError> {
+        let mut shadowed = std::collections::HashSet::new();
+        self.compile_quote_block(fc, block, &mut shadowed)?;
+        fc.emit(Op::QuoteBlock {
+            n: block.len() as u16,
+        });
+        let rd = fc.proto.alloc_reg();
+        fc.emit(Op::QuoteResult { rd });
+        Ok(rd)
+    }
+
+    /// Compile a quote block's statements onto the quote stack.
+    fn compile_quote_block(
+        &mut self,
+        fc: &mut FuncCompiler,
+        block: &Block,
+        shadowed: &mut std::collections::HashSet<String>,
+    ) -> Result<(), InterpError> {
+        for stmt in block {
+            self.compile_quote_stmt(fc, stmt, shadowed)?;
+        }
+        Ok(())
+    }
+
+    /// Compile a single statement inside a quote. Unsupported statements are
+    /// skipped (mirroring the tree-walker's `quote_stmt -> None`).
+    fn compile_quote_stmt(
+        &mut self,
+        fc: &mut FuncCompiler,
+        stmt: &Stmt,
+        shadowed: &mut std::collections::HashSet<String>,
+    ) -> Result<(), InterpError> {
+        match stmt.unlocated() {
+            Stmt::Let { pat, init, .. } => {
+                let name = match &pat.kind {
+                    PatternKind::Variable(n) => n.clone(),
+                    _ => return Ok(()),
+                };
+                shadowed.insert(name.clone());
+                if let Some(e) = init {
+                    self.compile_quote_expr(fc, e, shadowed)?;
+                } else {
+                    let idx = fc.proto.add_const(ConstValue::Unit);
+                    fc.emit(Op::QuotePushLit { const_idx: idx });
+                }
+                let name_idx = fc.proto.add_const(ConstValue::Str(name));
+                fc.emit(Op::QuoteLet { str_idx: name_idx });
+            }
+            Stmt::Expr(e) => {
+                self.compile_quote_expr(fc, e, shadowed)?;
+                fc.emit(Op::QuoteExprStmt);
+            }
+            Stmt::Return(e) => {
+                if let Some(inner) = e {
+                    self.compile_quote_expr(fc, inner, shadowed)?;
+                    fc.emit(Op::QuoteReturn { has_value: true });
+                } else {
+                    fc.emit(Op::QuoteReturn { has_value: false });
+                }
+            }
+            Stmt::Block(inner) => {
+                self.compile_quote_block(fc, inner, shadowed)?;
+                fc.emit(Op::QuoteBlock {
+                    n: inner.len() as u16,
+                });
+            }
+            Stmt::If { cond, then_, else_ } => {
+                self.compile_quote_expr(fc, cond, shadowed)?;
+                self.compile_quote_block(fc, then_, shadowed)?;
+                fc.emit(Op::QuoteBlock {
+                    n: then_.len() as u16,
+                });
+                let has_else = else_.is_some();
+                if let Some(e) = else_ {
+                    self.compile_quote_block(fc, e, shadowed)?;
+                    fc.emit(Op::QuoteBlock { n: e.len() as u16 });
+                }
+                fc.emit(Op::QuoteIf { has_else });
+            }
+            Stmt::While { cond, body } => {
+                self.compile_quote_expr(fc, cond, shadowed)?;
+                self.compile_quote_block(fc, body, shadowed)?;
+                fc.emit(Op::QuoteBlock {
+                    n: body.len() as u16,
+                });
+                fc.emit(Op::QuoteWhile);
+            }
+            // Unsupported statements are skipped (tree-walker parity).
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Compile a quote expression onto the quote stack.
+    fn compile_quote_expr(
+        &mut self,
+        fc: &mut FuncCompiler,
+        expr: &Expr,
+        shadowed: &mut std::collections::HashSet<String>,
+    ) -> Result<(), InterpError> {
+        match expr.unlocated() {
+            Expr::Literal(l) => {
+                let idx = match l {
+                    Lit::Int(v) => fc.proto.add_const(ConstValue::Int(*v)),
+                    Lit::Float(v) => fc.proto.add_const(ConstValue::Float(*v)),
+                    Lit::Bool(v) => fc.proto.add_const(ConstValue::Bool(*v)),
+                    Lit::String(v) => fc.proto.add_const(ConstValue::Str(v.clone())),
+                    Lit::Unit => fc.proto.add_const(ConstValue::Unit),
+                    Lit::FString(_) => {
+                        return Err(InterpError::new(
+                            "bytecode quote: f-strings not supported in quote context",
+                        ))
+                    }
+                };
+                fc.emit(Op::QuotePushLit { const_idx: idx });
+            }
+            Expr::Ident(name) => {
+                if !shadowed.contains(name) {
+                    if let Some(reg) = fc.lookup_var(name) {
+                        let name_idx = fc.proto.add_const(ConstValue::Str(name.clone()));
+                        fc.emit(Op::QuoteCapture {
+                            str_idx: name_idx,
+                            reg,
+                        });
+                    }
+                }
+                let idx = fc.proto.add_const(ConstValue::Str(name.clone()));
+                fc.emit(Op::QuotePushIdent { str_idx: idx });
+            }
+            Expr::Binary(op, l, r) => {
+                self.compile_quote_expr(fc, l, shadowed)?;
+                self.compile_quote_expr(fc, r, shadowed)?;
+                fc.emit(Op::QuoteBinary { op: *op });
+            }
+            Expr::Unary(op, e) => {
+                self.compile_quote_expr(fc, e, shadowed)?;
+                fc.emit(Op::QuoteUnary { op: *op });
+            }
+            Expr::Call(callee, args) => {
+                self.compile_quote_expr(fc, callee, shadowed)?;
+                for a in args {
+                    self.compile_quote_expr(fc, a, shadowed)?;
+                }
+                fc.emit(Op::QuoteCall {
+                    argc: args.len() as u16,
+                });
+            }
+            Expr::Field(obj, field) => {
+                self.compile_quote_expr(fc, obj, shadowed)?;
+                let idx = fc.proto.add_const(ConstValue::Str(field.clone()));
+                fc.emit(Op::QuoteField { str_idx: idx });
+            }
+            Expr::Index(obj, idx_expr) => {
+                self.compile_quote_expr(fc, obj, shadowed)?;
+                self.compile_quote_expr(fc, idx_expr, shadowed)?;
+                fc.emit(Op::QuoteIndex);
+            }
+            Expr::Tuple(elems) => {
+                for e in elems {
+                    self.compile_quote_expr(fc, e, shadowed)?;
+                }
+                fc.emit(Op::QuoteTuple {
+                    n: elems.len() as u16,
+                });
+            }
+            Expr::List(elems) => {
+                for e in elems {
+                    self.compile_quote_expr(fc, e, shadowed)?;
+                }
+                fc.emit(Op::QuoteList {
+                    n: elems.len() as u16,
+                });
+            }
+            Expr::If { cond, then_, else_ } => {
+                self.compile_quote_expr(fc, cond, shadowed)?;
+                self.compile_quote_block(fc, then_, shadowed)?;
+                fc.emit(Op::QuoteBlock {
+                    n: then_.len() as u16,
+                });
+                let has_else = else_.is_some();
+                if let Some(e) = else_ {
+                    self.compile_quote_block(fc, e, shadowed)?;
+                    fc.emit(Op::QuoteBlock { n: e.len() as u16 });
+                }
+                fc.emit(Op::QuoteIf { has_else });
+            }
+            Expr::QuoteInterpolate(inner) | Expr::Old(inner) => {
+                let r = self.compile_expr(fc, inner)?;
+                fc.emit(Op::QuoteInterpPush { rs: r });
+            }
+            Expr::Quote(inner_block) => {
+                let mut inner_shadowed = std::collections::HashSet::new();
+                self.compile_quote_block(fc, inner_block, &mut inner_shadowed)?;
+                fc.emit(Op::QuoteBlock {
+                    n: inner_block.len() as u16,
+                });
+                let tmp = fc.proto.alloc_reg();
+                fc.emit(Op::QuoteResult { rd: tmp });
+                fc.emit(Op::QuoteAstPush { rs: tmp });
+            }
+            Expr::Cast(inner, ty) => {
+                self.compile_quote_expr(fc, inner, shadowed)?;
+                let idx = fc.proto.add_const(ConstValue::Type(ty.clone()));
+                fc.emit(Op::QuoteCast { type_idx: idx });
+            }
+            Expr::Try(e) => {
+                self.compile_quote_expr(fc, e, shadowed)?;
+                fc.emit(Op::QuoteTry);
+            }
+            Expr::Turbofish(name, _type_args, args) => {
+                let idx = fc.proto.add_const(ConstValue::Str(name.clone()));
+                fc.emit(Op::QuotePushIdent { str_idx: idx });
+                for a in args {
+                    self.compile_quote_expr(fc, a, shadowed)?;
+                }
+                fc.emit(Op::QuoteCall {
+                    argc: args.len() as u16,
+                });
+            }
+            other => {
+                return Err(InterpError::new(format!(
+                    "bytecode quote: expression {:?} not supported in quote context",
+                    std::mem::discriminant(other)
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Evaluate a `comptime { ... }` block at compile time.
@@ -1724,7 +1970,7 @@ impl BytecodeCompiler {
             flow_fails_transitions: std::collections::HashSet::new(),
             actor_method_funcs: std::collections::HashMap::new(),
             max_children: None,
-            ast: None,
+            ast: self.ast_file.clone(),
             record_fields: std::collections::HashMap::new(),
         };
 

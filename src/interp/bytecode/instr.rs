@@ -345,6 +345,90 @@ pub enum Op {
         args_base: Reg,
         argc: u16,
     },
+    // ═══════════════════════════════════════════════════════════
+    // Quote assembly (0.33 Phase F: quote!/interpolation)
+    // ═══════════════════════════════════════════════════════════
+    // `quote! { ... }` builds a QuotedAst value at runtime. The compiler
+    // emits these stack-machine ops against `BytecodeVM::quote_stack`;
+    // QuoteResult pops the finished node into a register. All field
+    // operands are Copy (Reg/u16/BinOp/UnOp/ConstIdx) so Op stays Copy.
+    /// push QuotedAst::Literal from constant pool (Int/Float/Bool/String/Unit)
+    QuotePushLit {
+        const_idx: ConstIdx,
+    },
+    /// push QuotedAst::Ident(name) — name is Str in the constant pool
+    QuotePushIdent {
+        str_idx: ConstIdx,
+    },
+    /// push QuotedAst::Interpolate(regs[rs])
+    QuoteInterpPush {
+        rs: Reg,
+    },
+    /// `rs` holds a QuoteAst value → push its inner QuotedAst (nested quote)
+    QuoteAstPush {
+        rs: Reg,
+    },
+    /// record (name ← reg) capture for ast_eval env; name is Str in constants
+    QuoteCapture {
+        str_idx: ConstIdx,
+        reg: Reg,
+    },
+    /// pop n nodes → push QuotedAst::Block
+    QuoteBlock {
+        n: u16,
+    },
+    /// pop n nodes → push QuotedAst::List
+    QuoteList {
+        n: u16,
+    },
+    /// pop n nodes → push QuotedAst::Tuple
+    QuoteTuple {
+        n: u16,
+    },
+    /// pop (rhs, lhs) → push QuotedAst::Binary(op, lhs, rhs)
+    QuoteBinary {
+        op: crate::ast::BinOp,
+    },
+    /// pop e → push QuotedAst::Unary(op, e)
+    QuoteUnary {
+        op: crate::ast::UnOp,
+    },
+    /// pop (argc args, callee) → push QuotedAst::Call(callee, args)
+    QuoteCall {
+        argc: u16,
+    },
+    /// pop obj → push QuotedAst::Field(obj, name)
+    QuoteField {
+        str_idx: ConstIdx,
+    },
+    /// pop (idx, obj) → push QuotedAst::Index(obj, idx)
+    QuoteIndex,
+    /// pop (else_node, then_node, cond) → push QuotedAst::If(cond, then, else_)
+    QuoteIf {
+        has_else: bool,
+    },
+    /// pop e → push QuotedAst::Try(e)
+    QuoteTry,
+    /// pop value → push QuotedAst::Let { name, value }
+    QuoteLet {
+        str_idx: ConstIdx,
+    },
+    /// pop inner → push QuotedAst::Cast(inner, ty); ty is ConstValue::Type
+    QuoteCast {
+        type_idx: ConstIdx,
+    },
+    /// pop e → push QuotedAst::ExprStmt(e)
+    QuoteExprStmt,
+    /// pop e → push QuotedAst::Return(Some(e)); or Return(None) when empty
+    QuoteReturn {
+        has_value: bool,
+    },
+    /// pop (body, cond) → push QuotedAst::While(cond, body)
+    QuoteWhile,
+    /// pop quote_stack top → rd
+    QuoteResult {
+        rd: Reg,
+    },
     /// Return from function: return ra
     Ret {
         ra: Reg,
@@ -683,6 +767,8 @@ pub enum ConstValue {
     Str(String),
     /// Unit constant (shared).
     Unit,
+    /// Type constant (quote Cast targets; 0.33 Phase F).
+    Type(crate::ast::Type),
 }
 
 impl FunctionProto {
