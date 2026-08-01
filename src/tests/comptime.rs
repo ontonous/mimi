@@ -12,7 +12,7 @@ func main() -> i32 {
 }
 "#;
     let _file = parse(src);
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(1));
 }
 
@@ -24,7 +24,7 @@ func main() {
     println(ast);
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Unit);
 }
 
@@ -37,7 +37,7 @@ func main() {
     println(ast);
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Unit);
 }
 
@@ -49,7 +49,7 @@ func main() {
     println(ast);
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Unit);
 }
 
@@ -62,7 +62,7 @@ func main() {
     println(dumped);
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Unit);
 }
 
@@ -74,7 +74,7 @@ func main() -> i32 {
     ast_eval(ast)
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(42));
 }
 
@@ -86,7 +86,7 @@ func main() -> i32 {
     ast_eval(ast)
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(30));
 }
 
@@ -99,7 +99,7 @@ func main() -> i32 {
     ast_eval(ast)
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(15));
 }
 
@@ -115,7 +115,7 @@ func main() -> i32 {
     ast_eval(ast)
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(30));
 }
 
@@ -128,7 +128,7 @@ func main() {
     println(result);
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Unit);
 }
 
@@ -142,7 +142,7 @@ func main() -> i32 {
     ast_eval(ast)
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(7));
 }
 
@@ -156,7 +156,7 @@ func main() -> i32 {
     add(2)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source(src), interp::Value::Int(42));
 }
 
 #[test]
@@ -166,7 +166,7 @@ func main() -> i32 {
     ast_eval(quote! { 41.9 as i32 }) + 1
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source(src), interp::Value::Int(42));
 }
 
 #[test]
@@ -186,7 +186,7 @@ func main() -> i32 {
     })
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source(src), interp::Value::Int(42));
 }
 
 #[test]
@@ -196,7 +196,7 @@ func main() -> i32 {
     ast_eval(quote! { match 1 { 1 => 42 _ => 0 } })
 }
 "#;
-    let err = run_source_treewalker_result(src).expect_err("quoted Match must be rejected");
+    let err = run_source_bytecode_result(src).expect_err("quoted Match must be rejected");
     assert!(
         err.contains("quoted AST node 'Match' is unsupported"),
         "unexpected error: {err}"
@@ -214,7 +214,7 @@ func main() -> i32 {
     42
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(42));
 }
 
@@ -229,7 +229,7 @@ func main() -> i32 {
     x * 2
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(10));
 }
 
@@ -245,7 +245,7 @@ func main() -> bool {
     true
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Bool(true));
 }
 
@@ -258,7 +258,7 @@ func main() -> i32 {
     42
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(42));
 }
 
@@ -273,7 +273,7 @@ func main() -> i32 {
     5
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(5));
 }
 
@@ -288,7 +288,7 @@ func main() -> i32 {
     15
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(15));
 }
 
@@ -305,7 +305,7 @@ func main() -> i32 {
     get_magic_number()
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(42));
 }
 
@@ -321,7 +321,7 @@ func main() -> i32 {
     size * 2
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(20));
 }
 
@@ -338,7 +338,7 @@ func main() -> i32 {
     compute()
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(15));
 }
 
@@ -359,7 +359,7 @@ func main() -> i32 {
 }
 "#;
     // run_source uses default verify_contracts=true, so contract violation is caught
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -387,7 +387,7 @@ func main() -> i32 {
 "#;
     // make_adder() itself goes through call_func → catches ensures violation.
     // But f(0) calls the generated closure via eval_quoted_ast → no contract check.
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     // make_adder() has ensures: result > 0 but returns a closure (not an i32)
     // This will fail at contract check time
     assert!(result.is_err());
@@ -407,7 +407,7 @@ func main() -> i32 {
     get_positive()
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(42));
 }
 
@@ -423,7 +423,7 @@ func main() -> i32 {
     validate(5)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(10));
+    assert_eq!(run_source(src), interp::Value::Int(10));
 }
 
 #[test]
@@ -438,7 +438,7 @@ func main() -> i32 {
     validate(-1)
 }
 "#;
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     assert!(result.is_err());
 }
 
@@ -450,7 +450,7 @@ func main() -> i32 {
     ast_eval(ast)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source(src), interp::Value::Int(42));
 }
 
 #[test]
@@ -462,7 +462,7 @@ func main() -> i32 {
     ast_eval(ast)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(15));
+    assert_eq!(run_source(src), interp::Value::Int(15));
 }
 
 #[test]
@@ -478,7 +478,7 @@ func main() -> i32 {
     ast_eval(ast)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(10));
+    assert_eq!(run_source(src), interp::Value::Int(10));
 }
 
 #[test]
@@ -495,7 +495,7 @@ func main() -> i32 {
     get_val() + 10
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(60));
+    assert_eq!(run_source(src), interp::Value::Int(60));
 }
 
 #[test]
@@ -514,7 +514,7 @@ func main() -> i32 {
     42
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(42));
+    assert_eq!(run_source(src), interp::Value::Int(42));
 }
 
 #[test]
@@ -526,5 +526,5 @@ func main() -> i32 {
     seed() + seed()
 }
 "#;
-    assert_eq!(run_source_treewalker(src), crate::interp::Value::Int(84));
+    assert_eq!(run_source(src), crate::interp::Value::Int(84));
 }

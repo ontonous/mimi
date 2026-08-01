@@ -72,7 +72,7 @@ func main() -> i32 {
     p.x
 }
 "#;
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     assert!(
         result.is_ok(),
         "module with type and method should work: {:?}",
