@@ -1421,8 +1421,41 @@ fn builtin_mms_parse(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
     Ok(Value::String(result))
 }
 
-fn builtin_ast_eval(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
-    Err(InterpError::new(
-        "ast_eval is not available in bytecode VM (use tree-walker interpreter)",
-    ))
+fn builtin_ast_eval(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    if args.len() != 1 {
+        return Err(InterpError::new(
+            "ast_eval expects 1 argument (a quoted AST)",
+        ));
+    }
+    let qa = match &args[0] {
+        Value::QuoteAst(q) => (**q).clone(),
+        other => {
+            return Err(InterpError::new(format!(
+                "ast_eval expects a QuoteAst, got {}",
+                other
+            )))
+        }
+    };
+    // 0.33 Phase F: evaluate the quoted AST with a temporary tree-walker
+    // interpreter whose env is seeded from the VM's QuoteCapture table
+    // (free identifiers of the quote!, e.g. `n` in `quote! { n * 2 }`).
+    let file = vm
+        .program()
+        .ast
+        .clone()
+        .ok_or_else(|| InterpError::new("ast_eval: no program AST in BytecodeVM"))?;
+    let mut interp = crate::interp::Interpreter::new(file.as_ref());
+    interp.verify_contracts = false;
+    // Clone (not drain): a quoted AST can be evaluated multiple times, and
+    // each eval must resolve its free identifiers the same way. Stale names
+    // are harmless (extra bindings are shadowed by fresh QuoteCapture).
+    for (name, value) in vm.quote_captures.clone() {
+        interp
+            .scope_env
+            .bind(&name, value)
+            .map_err(|e| InterpError::new(e.to_string()))?;
+    }
+    interp
+        .eval_quoted_ast(&qa)
+        .map_err(|e| InterpError::new(e.to_string()))
 }
