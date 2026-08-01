@@ -2990,36 +2990,18 @@ impl<'a> BytecodeVM<'a> {
     /// (same pattern as builtin_ast_eval).
     fn check_requires(&mut self, func_idx: FuncIdx, args: &[Value]) -> Result<(), InterpError> {
         let proto = &self.program.functions[func_idx as usize];
-        if !proto.has_requires {
+        if proto.requires_funcs.is_empty() {
             return Ok(());
         }
-        let file = match self.program.ast.as_ref() {
-            Some(f) => f.clone(),
-            None => return Ok(()),
-        };
-        let func = file.items.iter().find_map(|item| {
-            if let crate::ast::Item::Func(f) = item {
-                if f.name == proto.name {
-                    return Some(f);
-                }
-            }
-            None
-        });
-        let Some(func) = func else { return Ok(()) };
-        let mut interp = crate::interp::Interpreter::new(file.as_ref());
-        interp.verify_contracts = false;
-        for (name, val) in proto.param_names.iter().zip(args.iter()) {
-            let _ = interp.scope_env.bind(name, val.clone());
-        }
-        for stmt in &func.body {
-            if let crate::ast::Stmt::Requires(expr, _) = stmt.unlocated() {
-                let cond = interp.eval_expr(expr)?;
-                if !crate::interp::value::is_truthy(&cond) {
-                    return Err(InterpError::contract_violation(format!(
-                        "requires condition failed for '{}': {}",
-                        proto.name, cond
-                    )));
-                }
+        let name = proto.name.clone();
+        let contract_funcs = proto.requires_funcs.clone();
+        for cidx in contract_funcs {
+            let cond = self.call_function(cidx, args)?;
+            if !crate::interp::value::is_truthy(&cond) {
+                return Err(InterpError::contract_violation(format!(
+                    "requires condition failed for '{}': {}",
+                    name, cond
+                )));
             }
         }
         Ok(())
@@ -3030,47 +3012,25 @@ impl<'a> BytecodeVM<'a> {
         &mut self,
         func_idx: FuncIdx,
         args: &[Value],
-        old_snapshots: &[Value],
+        _old_snapshots: &[Value],
         result: &Value,
     ) -> Result<(), InterpError> {
         let proto = &self.program.functions[func_idx as usize];
-        if !proto.has_ensures {
+        if proto.ensures_funcs.is_empty() {
             return Ok(());
         }
-        let file = match self.program.ast.as_ref() {
-            Some(f) => f.clone(),
-            None => return Ok(()),
-        };
-        let func = file.items.iter().find_map(|item| {
-            if let crate::ast::Item::Func(f) = item {
-                if f.name == proto.name {
-                    return Some(f);
-                }
-            }
-            None
-        });
-        let Some(func) = func else { return Ok(()) };
-        let mut interp = crate::interp::Interpreter::new(file.as_ref());
-        interp.verify_contracts = false;
-        // Bind current parameter values (ensures can reference params directly).
-        for (name, val) in proto.param_names.iter().zip(args.iter()) {
-            let _ = interp.scope_env.bind(name, val.clone());
-        }
-        // Bind pre-call snapshots for old(x) access.
-        for (name, val) in proto.param_names.iter().zip(old_snapshots.iter()) {
-            let _ = interp.scope_env.bind(&format!("old_{}", name), val.clone());
-        }
-        // Bind result.
-        let _ = interp.scope_env.bind("result", result.clone());
-        for stmt in &func.body {
-            if let crate::ast::Stmt::Ensures(expr, _) = stmt.unlocated() {
-                let cond = interp.eval_expr(expr)?;
-                if !crate::interp::value::is_truthy(&cond) {
-                    return Err(InterpError::contract_violation(format!(
-                        "ensures condition failed for '{}': {}",
-                        proto.name, cond
-                    )));
-                }
+        let name = proto.name.clone();
+        let contract_funcs = proto.ensures_funcs.clone();
+        // Ensures mini-functions take params + result as the last argument.
+        let mut ensures_args = args.to_vec();
+        ensures_args.push(result.clone());
+        for cidx in contract_funcs {
+            let cond = self.call_function(cidx, &ensures_args)?;
+            if !crate::interp::value::is_truthy(&cond) {
+                return Err(InterpError::contract_violation(format!(
+                    "ensures condition failed for '{}': {}",
+                    name, cond
+                )));
             }
         }
         Ok(())

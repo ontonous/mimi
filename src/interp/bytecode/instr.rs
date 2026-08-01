@@ -814,6 +814,11 @@ pub struct FunctionProto {
     pub has_ensures: bool,
     /// Parameter names (for contract expression binding).
     pub param_names: Vec<String>,
+    /// Compiled contract expression function indices (0.33 Phase F: native contract eval).
+    /// Each entry is a mini-function that takes the parent's params (+ result for ensures)
+    /// and returns a bool. Empty vec if no contracts.
+    pub requires_funcs: Vec<FuncIdx>,
+    pub ensures_funcs: Vec<FuncIdx>,
 }
 
 /// Compile-time constant values stored in the constant pool.
@@ -858,6 +863,8 @@ impl FunctionProto {
             has_requires: false,
             has_ensures: false,
             param_names: Vec::new(),
+            requires_funcs: Vec::new(),
+            ensures_funcs: Vec::new(),
         }
     }
 
