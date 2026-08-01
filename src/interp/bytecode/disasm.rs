@@ -162,6 +162,10 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::QuoteExprStmt => "QUOTE_EXPR_STMT",
         Op::QuoteReturn { .. } => "QUOTE_RETURN",
         Op::QuoteWhile => "QUOTE_WHILE",
+        Op::QuoteWhileLet { .. } => "QUOTE_WHILE_LET",
+        Op::QuoteBreak { .. } => "QUOTE_BREAK",
+        Op::QuoteContinue => "QUOTE_CONTINUE",
+        Op::QuoteLambda { .. } => "QUOTE_LAMBDA",
         Op::QuoteTry => "QUOTE_TRY",
         Op::QuoteResult { .. } => "QUOTE_RESULT",
     }
@@ -181,6 +185,8 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::Unit => "unit".to_string(),
                 ConstValue::Type(t) => format!("type {:?}", t),
                 ConstValue::QuoteAst(q) => format!("quote {:?}", q),
+                ConstValue::LambdaSpec { .. } => "lambda_spec".to_string(),
+                ConstValue::Pattern(p) => format!("pattern {:?}", p),
             };
             format!("{:04}  {:<16} r{} = {}", pc, name, rd, display)
         }
@@ -335,6 +341,8 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::Unit => "unit".to_string(),
                 ConstValue::Type(t) => format!("type {:?}", t),
                 ConstValue::QuoteAst(q) => format!("quote {:?}", q),
+                ConstValue::LambdaSpec { .. } => "lambda_spec".to_string(),
+                ConstValue::Pattern(p) => format!("pattern {:?}", p),
             };
             format!("{:04}  {:<16} push {:?} ({})", pc, name, val, display)
         }
@@ -374,8 +382,17 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         }
         Op::QuoteBinary { op } => format!("{:04}  {:<16} {:?}", pc, name, op),
         Op::QuoteUnary { op } => format!("{:04}  {:<16} {:?}", pc, name, op),
-        Op::QuoteIndex | Op::QuoteExprStmt | Op::QuoteWhile | Op::QuoteTry => {
+        Op::QuoteIndex | Op::QuoteExprStmt | Op::QuoteWhile | Op::QuoteTry | Op::QuoteContinue => {
             format!("{:04}  {:<16}", pc, name)
+        }
+        Op::QuoteWhileLet { pat_idx } => {
+            format!("{:04}  {:<16} pat_idx={}", pc, name, pat_idx)
+        }
+        Op::QuoteBreak { has_value } => {
+            format!("{:04}  {:<16} has_value={}", pc, name, has_value)
+        }
+        Op::QuoteLambda { spec_idx } => {
+            format!("{:04}  {:<16} spec_idx={}", pc, name, spec_idx)
         }
         Op::QuoteIf { has_else } => format!("{:04}  {:<16} has_else={}", pc, name, has_else),
         Op::QuoteCast { type_idx } => {
@@ -680,6 +697,8 @@ pub fn disassemble(proto: &FunctionProto) -> String {
             ConstValue::Unit => "unit".to_string(),
             ConstValue::Type(t) => format!("type {:?}", t),
             ConstValue::QuoteAst(q) => format!("quote {:?}", q),
+            ConstValue::LambdaSpec { .. } => "lambda_spec".to_string(),
+            ConstValue::Pattern(p) => format!("pattern {:?}", p),
         };
         out.push_str(&format!(";   const[{}] = {}\n", i, display));
     }

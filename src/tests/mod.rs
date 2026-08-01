@@ -403,25 +403,14 @@ pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
 }
 
 // ===================== Tree-walker fallback helpers (0.33 retirement) =====================
-// These keep the tree-walker path available for tests that bytecode doesn't
-// support yet (FFI extern calls, quote!, etc.). They will be deleted in Phase X.
+// Net tests require tree-walker (bytecode TCP blocking behavior differs).
+// These will be deleted when bytecode net builtins are verified (Phase E).
 
-/// Run source via the legacy tree-walker interpreter. Fallback for FFI/quote tests.
+/// Run source via the legacy tree-walker interpreter. Fallback for net tests.
 pub(crate) fn run_source_treewalker(src: &str) -> interp::Value {
     let file = parse(src);
     let mut interp = interp::Interpreter::new(&file);
     interp.run().expect("tree-walker run failed")
-}
-
-/// Tree-walker returning Result. Fallback for FFI tests.
-pub(crate) fn run_source_treewalker_result(src: &str) -> Result<interp::Value, String> {
-    let tokens = lexer::Lexer::new(src).tokenize()?;
-    let file = parser::Parser::new(tokens)
-        .parse_file()
-        .map_err(|e| e.message)?;
-    let mut interp = interp::Interpreter::new(&file);
-    interp.verify_contracts = true;
-    interp.run().map_err(|e| e.message().to_string())
 }
 
 pub(crate) fn check_source(src: &str) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {

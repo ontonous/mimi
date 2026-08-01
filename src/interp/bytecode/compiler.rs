@@ -926,6 +926,11 @@ impl BytecodeCompiler {
 
         fc.has_mut_params(f);
 
+        // Contract metadata (0.33 Phase F: runtime contract checking).
+        fc.proto.has_requires = f.has_requires;
+        fc.proto.has_ensures = f.has_ensures;
+        fc.proto.param_names = f.params.iter().map(|p| p.name.clone()).collect();
+
         // Compile body statements.
         let last_reg = self.compile_block(&mut fc, &f.body)?;
 
@@ -1972,6 +1977,26 @@ impl BytecodeCompiler {
                 });
                 fc.emit(Op::QuoteWhile);
             }
+            Stmt::WhileLet { pat, init, body } => {
+                self.compile_quote_expr(fc, init, shadowed)?;
+                self.compile_quote_block(fc, body, shadowed)?;
+                fc.emit(Op::QuoteBlock {
+                    n: body.len() as u16,
+                });
+                let pat_idx = fc.proto.add_const(ConstValue::Pattern(pat.clone()));
+                fc.emit(Op::QuoteWhileLet { pat_idx });
+            }
+            Stmt::Break(e) => {
+                if let Some(inner) = e {
+                    self.compile_quote_expr(fc, inner, shadowed)?;
+                }
+                fc.emit(Op::QuoteBreak {
+                    has_value: e.is_some(),
+                });
+            }
+            Stmt::Continue => {
+                fc.emit(Op::QuoteContinue);
+            }
             // Unsupported statements are skipped (tree-walker parity).
             _ => {}
         }
@@ -2103,6 +2128,33 @@ impl BytecodeCompiler {
                 fc.emit(Op::QuoteCall {
                     argc: args.len() as u16,
                 });
+            }
+            Expr::Match(_, _) => {
+                return Err(InterpError::new(
+                    "quoted AST node 'Match' is unsupported by ABI v1",
+                ));
+            }
+            Expr::Lambda { params, ret, body } => {
+                // Emit QuoteCapture for free variables in the lambda body
+                // (tree-walker eval_lambda captures from current env).
+                let free_vars = self.collect_free_vars(body, params);
+                for name in &free_vars {
+                    if !shadowed.contains(name) {
+                        if let Some(reg) = fc.lookup_var(name) {
+                            let name_idx = fc.proto.add_const(ConstValue::Str(name.clone()));
+                            fc.emit(Op::QuoteCapture {
+                                str_idx: name_idx,
+                                reg,
+                            });
+                        }
+                    }
+                }
+                let spec_idx = fc.proto.add_const(ConstValue::LambdaSpec {
+                    params: params.clone(),
+                    ret: ret.clone(),
+                    body: body.clone(),
+                });
+                fc.emit(Op::QuoteLambda { spec_idx });
             }
             other => {
                 return Err(InterpError::new(format!(

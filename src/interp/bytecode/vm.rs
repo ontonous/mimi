@@ -106,6 +106,8 @@ pub struct BytecodeVM<'a> {
     quote_stack: Vec<crate::interp::value::QuotedAst>,
     /// Variable captures collected by QuoteCapture, consumed by ast_eval.
     pub(crate) quote_captures: std::collections::HashMap<String, Value>,
+    /// Runtime contract checking (requires/ensures). Default true (tree-walker parity).
+    pub verify_contracts: bool,
 }
 
 const MAX_DEPTH: usize = 768;
@@ -145,6 +147,7 @@ impl<'a> BytecodeVM<'a> {
             },
             quote_stack: Vec::new(),
             quote_captures: std::collections::HashMap::new(),
+            verify_contracts: true,
         }
     }
 
@@ -369,6 +372,11 @@ impl<'a> BytecodeVM<'a> {
                 proto.param_count,
                 args.len()
             )));
+        }
+
+        // Contract pre-condition check (0.33 Phase F).
+        if self.verify_contracts && proto.has_requires {
+            self.check_requires(func_idx, &args)?;
         }
 
         let regs = match self.free_regs.pop() {
@@ -1221,7 +1229,11 @@ impl<'a> BytecodeVM<'a> {
                         Some(ConstValue::Bool(v)) => Lit::Bool(*v),
                         Some(ConstValue::Str(v)) => Lit::String(v.clone()),
                         Some(ConstValue::Unit) => Lit::Unit,
-                        Some(ConstValue::Type(_)) | Some(ConstValue::QuoteAst(_)) | None => {
+                        Some(ConstValue::Type(_))
+                        | Some(ConstValue::QuoteAst(_))
+                        | Some(ConstValue::LambdaSpec { .. })
+                        | Some(ConstValue::Pattern(_))
+                        | None => {
                             return Err(InterpError::new("QuotePushLit: constant is not a literal"))
                         }
                     };
@@ -1365,6 +1377,66 @@ impl<'a> BytecodeVM<'a> {
                             Box::new(cond),
                             Box::new(body),
                         ));
+                }
+                Op::QuoteWhileLet { pat_idx } => {
+                    let pat = match self.program.functions[self.cur_frame().proto_idx as usize]
+                        .constants
+                        .get(pat_idx as usize)
+                    {
+                        Some(ConstValue::Pattern(p)) => p.clone(),
+                        _ => {
+                            return Err(InterpError::new(
+                                "QuoteWhileLet: constant is not a pattern",
+                            ))
+                        }
+                    };
+                    let body = self.quote_pop()?;
+                    let init = self.quote_pop()?;
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::WhileLet {
+                            pat,
+                            init: Box::new(init),
+                            body: Box::new(body),
+                        });
+                }
+                Op::QuoteBreak { has_value } => {
+                    let inner = if has_value {
+                        Some(Box::new(self.quote_pop()?))
+                    } else {
+                        None
+                    };
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Break(inner));
+                }
+                Op::QuoteContinue => {
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Continue);
+                }
+                Op::QuoteLambda { spec_idx } => {
+                    let (params, ret, body) = match self.program.functions
+                        [self.cur_frame().proto_idx as usize]
+                        .constants
+                        .get(spec_idx as usize)
+                    {
+                        Some(ConstValue::LambdaSpec { params, ret, body }) => {
+                            (params.clone(), ret.clone(), body.clone())
+                        }
+                        _ => {
+                            return Err(InterpError::new(
+                                "QuoteLambda: constant is not a lambda spec",
+                            ))
+                        }
+                    };
+                    // Capture free variables from quote_captures (populated by
+                    // QuoteCapture ops emitted during quote compilation).
+                    let captured = self.quote_captures.clone();
+                    self.quote_stack
+                        .push(crate::interp::value::QuotedAst::Lambda {
+                            params,
+                            ret,
+                            body,
+                            captured,
+                        });
                 }
                 Op::QuoteTry => {
                     let e = self.quote_pop()?;
@@ -1929,10 +2001,38 @@ impl<'a> BytecodeVM<'a> {
                             // Continue loop — new frame is now active.
                         }
                         other => {
-                            return Err(InterpError::new(format!(
-                                "call indirect: expected BytecodeClosure, got {}",
-                                other
-                            )))
+                            // Fallback: tree-walker Closure (from ast_eval / quote).
+                            // Evaluate via temporary interpreter (same pattern as builtin_ast_eval).
+                            if let Value::Closure {
+                                params,
+                                body,
+                                captured,
+                                ..
+                            } = &other
+                            {
+                                let args: Vec<Value> = (0..argc)
+                                    .map(|i| self.get_reg(args_base + i).clone())
+                                    .collect();
+                                let file = self.program.ast.clone().ok_or_else(|| {
+                                    InterpError::new("call indirect: no program AST for Closure")
+                                })?;
+                                let mut interp = crate::interp::Interpreter::new(file.as_ref());
+                                interp.verify_contracts = false;
+                                for (name, val) in captured.iter() {
+                                    let _ = interp.scope_env.bind(name, val.clone());
+                                }
+                                for (p, a) in params.iter().zip(args.iter()) {
+                                    let _ = interp.scope_env.bind(&p.name, a.clone());
+                                }
+                                let result = interp.eval_block(body)?;
+                                let v = result.unwrap_or(Value::Unit);
+                                self.set_reg(rd, v);
+                            } else {
+                                return Err(InterpError::new(format!(
+                                    "call indirect: expected BytecodeClosure, got {}",
+                                    other
+                                )));
+                            }
                         }
                     }
                 }
@@ -2729,6 +2829,21 @@ impl<'a> BytecodeVM<'a> {
                 v = Value::Variant("Ok".to_string(), vec![v]);
             }
         }
+
+        // Contract post-condition check (0.33 Phase F).
+        // Only for normal returns (not `?` early-return, not wrap_ok Ok-wrapping).
+        if self.verify_contracts && !is_early_return && !wrap_ok {
+            let frame = self.cur_frame();
+            let proto_idx = frame.proto_idx;
+            let proto = &self.program.functions[proto_idx as usize];
+            if proto.has_ensures {
+                let args: Vec<Value> = (0..proto.param_count as usize)
+                    .map(|i| frame.regs[i].clone())
+                    .collect();
+                self.check_ensures(proto_idx, &args, &v)?;
+            }
+        }
+
         self.pop_frame();
         self.depth -= 1;
         if self.stack.is_empty() || (stop > 0 && self.depth < stop) {
@@ -2741,6 +2856,96 @@ impl<'a> BytecodeVM<'a> {
             self.apply_mutate_writeback(&mut_param_vals);
         }
         Ok(None)
+    }
+
+    /// Check `requires` contracts for a function call (0.33 Phase F).
+    /// Uses a temporary tree-walker to evaluate contract expressions
+    /// (same pattern as builtin_ast_eval).
+    fn check_requires(&mut self, func_idx: FuncIdx, args: &[Value]) -> Result<(), InterpError> {
+        let proto = &self.program.functions[func_idx as usize];
+        if !proto.has_requires {
+            return Ok(());
+        }
+        let file = match self.program.ast.as_ref() {
+            Some(f) => f.clone(),
+            None => return Ok(()),
+        };
+        let func = file.items.iter().find_map(|item| {
+            if let crate::ast::Item::Func(f) = item {
+                if f.name == proto.name {
+                    return Some(f);
+                }
+            }
+            None
+        });
+        let Some(func) = func else { return Ok(()) };
+        let mut interp = crate::interp::Interpreter::new(file.as_ref());
+        interp.verify_contracts = false;
+        for (name, val) in proto.param_names.iter().zip(args.iter()) {
+            let _ = interp.scope_env.bind(name, val.clone());
+        }
+        for stmt in &func.body {
+            if let crate::ast::Stmt::Requires(expr, _) = stmt.unlocated() {
+                let cond = interp.eval_expr(expr)?;
+                if !crate::interp::value::is_truthy(&cond) {
+                    return Err(InterpError::contract_violation(format!(
+                        "requires condition failed for '{}': {}",
+                        proto.name, cond
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Check `ensures` contracts for a function return (0.33 Phase F).
+    fn check_ensures(
+        &mut self,
+        func_idx: FuncIdx,
+        args: &[Value],
+        result: &Value,
+    ) -> Result<(), InterpError> {
+        let proto = &self.program.functions[func_idx as usize];
+        if !proto.has_ensures {
+            return Ok(());
+        }
+        let file = match self.program.ast.as_ref() {
+            Some(f) => f.clone(),
+            None => return Ok(()),
+        };
+        let func = file.items.iter().find_map(|item| {
+            if let crate::ast::Item::Func(f) = item {
+                if f.name == proto.name {
+                    return Some(f);
+                }
+            }
+            None
+        });
+        let Some(func) = func else { return Ok(()) };
+        let mut interp = crate::interp::Interpreter::new(file.as_ref());
+        interp.verify_contracts = false;
+        // Bind current parameter values (ensures can reference params directly).
+        for (name, val) in proto.param_names.iter().zip(args.iter()) {
+            let _ = interp.scope_env.bind(name, val.clone());
+        }
+        // Bind old snapshots for old(x) access.
+        for (name, val) in proto.param_names.iter().zip(args.iter()) {
+            let _ = interp.scope_env.bind(&format!("old_{}", name), val.clone());
+        }
+        // Bind result.
+        let _ = interp.scope_env.bind("result", result.clone());
+        for stmt in &func.body {
+            if let crate::ast::Stmt::Ensures(expr, _) = stmt.unlocated() {
+                let cond = interp.eval_expr(expr)?;
+                if !crate::interp::value::is_truthy(&cond) {
+                    return Err(InterpError::contract_violation(format!(
+                        "ensures condition failed for '{}': {}",
+                        proto.name, cond
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Capture the current frame's final `mut` parameter values
@@ -2946,6 +3151,8 @@ impl<'a> BytecodeVM<'a> {
             ConstValue::Unit => Value::Unit,
             ConstValue::Type(t) => Value::String(format!("<type {:?}>", t)),
             ConstValue::QuoteAst(q) => Value::QuoteAst(q.clone()),
+            ConstValue::LambdaSpec { .. } => Value::Unit,
+            ConstValue::Pattern(_) => Value::Unit,
         }
     }
 

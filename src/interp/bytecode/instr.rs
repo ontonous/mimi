@@ -441,6 +441,20 @@ pub enum Op {
     },
     /// pop (body, cond) → push QuotedAst::While(cond, body)
     QuoteWhile,
+    /// pop (body, init) → push QuotedAst::WhileLet { pat, init, body }; pat is Pattern in constants
+    QuoteWhileLet {
+        pat_idx: ConstIdx,
+    },
+    /// pop value (if has_value) → push QuotedAst::Break
+    QuoteBreak {
+        has_value: bool,
+    },
+    /// push QuotedAst::Continue (no pop)
+    QuoteContinue,
+    /// push QuotedAst::Lambda from LambdaSpec constant + quote_captures
+    QuoteLambda {
+        spec_idx: ConstIdx,
+    },
     /// pop quote_stack top → rd
     QuoteResult {
         rd: Reg,
@@ -781,6 +795,11 @@ pub struct FunctionProto {
     pub line_table: Vec<u32>,
     /// Captured variable names (for closures). Index i corresponds to register param_count + i.
     pub capture_names: Vec<String>,
+    /// O(1) contract flags (0.33 Phase F: runtime contract checking).
+    pub has_requires: bool,
+    pub has_ensures: bool,
+    /// Parameter names (for contract expression binding).
+    pub param_names: Vec<String>,
 }
 
 /// Compile-time constant values stored in the constant pool.
@@ -796,6 +815,14 @@ pub enum ConstValue {
     Type(crate::ast::Type),
     /// Quoted AST constant (comptime quote! results inlined at compile time).
     QuoteAst(Box<crate::interp::value::QuotedAst>),
+    /// Lambda specification for quote context (params + ret + body).
+    LambdaSpec {
+        params: Vec<crate::ast::Param>,
+        ret: Option<crate::ast::Type>,
+        body: crate::ast::Block,
+    },
+    /// Pattern constant (for QuoteWhileLet).
+    Pattern(crate::ast::Pattern),
 }
 
 impl FunctionProto {
@@ -811,6 +838,9 @@ impl FunctionProto {
             code: Vec::new(),
             line_table: Vec::new(),
             capture_names: Vec::new(),
+            has_requires: false,
+            has_ensures: false,
+            param_names: Vec::new(),
         }
     }
 
