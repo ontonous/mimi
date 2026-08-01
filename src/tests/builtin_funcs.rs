@@ -734,7 +734,7 @@ func main() -> i32 {
     found.value_or(-1)
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(-1));
 }
 

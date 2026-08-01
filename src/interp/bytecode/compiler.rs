@@ -83,6 +83,10 @@ struct FuncCompiler {
     vars: Vec<HashMap<String, Reg>>,
     /// Variable name → known type tag (for int/float dispatch without CheckedProgram).
     var_types: HashMap<String, VarType>,
+    /// Variable name → mutability (immutable by default; `let mut` and
+    /// `mut` params are true). Mirrors tree-walker runtime check in
+    /// scope_env::assign (compile-time here).
+    var_mut: HashMap<String, bool>,
     /// Break jump sites for the current loop (patched on loop exit).
     break_jumps: Vec<Vec<usize>>,
     /// Continue jump sites for the current loop (patched to loop head/increment).
@@ -116,6 +120,9 @@ enum VarType {
     String,
     /// User-defined type (named), prevents fallback to Int operations.
     User(String),
+    /// `dyn Trait` receiver: method dispatch happens at runtime by the
+    /// concrete record type (tree-walker Value::DynTrait semantics).
+    Dyn(String),
     Unknown,
 }
 
@@ -125,6 +132,7 @@ impl FuncCompiler {
             proto: FunctionProto::new(name, param_count),
             vars: vec![HashMap::new()],
             var_types: HashMap::new(),
+            var_mut: HashMap::new(),
             break_jumps: Vec::new(),
             continue_jumps: Vec::new(),
             current_line: 0,
@@ -277,6 +285,24 @@ impl FuncCompiler {
     /// Check if a register is known to hold a string.
     fn reg_is_string(&self, name: &str) -> bool {
         self.var_types.get(name) == Some(&VarType::String)
+    }
+
+    /// Record mutability of a bound variable (`let mut` or `mut` param).
+    fn set_var_mut(&mut self, name: &str, is_mut: bool) {
+        self.var_mut.insert(name.to_string(), is_mut);
+    }
+
+    /// True when the variable is known mutable. Unknown → immutable
+    /// (tree-walker default is immutable unless explicitly `mut`).
+    fn var_is_mut(&self, name: &str) -> bool {
+        self.var_mut.get(name).copied().unwrap_or(false)
+    }
+
+    /// True when the variable holds a `dyn Trait` value. Method calls on
+    /// such receivers must dispatch at runtime by concrete type, not by
+    /// static impl-name prefix matching.
+    fn var_is_dyn(&self, name: &str) -> bool {
+        matches!(self.var_types.get(name), Some(VarType::Dyn(_)))
     }
 }
 
@@ -504,7 +530,10 @@ impl BytecodeCompiler {
                 for method in &impl_def.methods {
                     let mangled_name = format!("{}_{}", impl_def.type_name, method.name);
                     if let Some(&idx) = self.func_table.get(&mangled_name) {
-                        let proto = self.compile_func_impl(method)?;
+                        let mut proto = self.compile_func_impl(method)?;
+                        // Runtime dyn dispatch looks methods up by mangled
+                        // name ({Type}_{method}) via function_index.
+                        proto.name = mangled_name;
                         self.functions[idx as usize] = proto;
                     }
                 }
@@ -877,12 +906,14 @@ impl BytecodeCompiler {
         // Bind parameters to registers 0..param_count.
         for (i, param) in f.params.iter().enumerate() {
             fc.vars[0].insert(param.name.clone(), i as Reg);
+            fc.set_var_mut(&param.name, param.mut_);
             // Track parameter types for int/float dispatch.
             let ty = match param.ty.unlocated() {
                 Type::Name(n, _) if n == "f64" || n == "f32" => VarType::Float,
                 Type::Name(n, _) if n == "i32" || n == "i64" => VarType::Int,
                 Type::Name(n, _) if n == "bool" => VarType::Bool,
                 Type::Name(n, _) if n == "string" => VarType::String,
+                Type::DynTrait(names) => VarType::Dyn(names.join(" + ")),
                 Type::Name(n, _) => VarType::User(n.clone()),
                 _ => VarType::Unknown,
             };
@@ -920,11 +951,13 @@ impl BytecodeCompiler {
         // Bind explicit parameters to registers 1..param_count+1.
         for (i, param) in f.params.iter().enumerate() {
             fc.vars[0].insert(param.name.clone(), (i + 1) as Reg);
+            fc.set_var_mut(&param.name, param.mut_);
             let ty = match param.ty.unlocated() {
                 Type::Name(n, _) if n == "f64" || n == "f32" => VarType::Float,
                 Type::Name(n, _) if n == "i32" || n == "i64" => VarType::Int,
                 Type::Name(n, _) if n == "bool" => VarType::Bool,
                 Type::Name(n, _) if n == "string" => VarType::String,
+                Type::DynTrait(names) => VarType::Dyn(names.join(" + ")),
                 Type::Name(n, _) => VarType::User(n.clone()),
                 _ => VarType::Unknown,
             };
@@ -979,7 +1012,9 @@ impl BytecodeCompiler {
                         last_reg = Some(r);
                     }
                 }
-                Stmt::Let { pat, init, .. } => {
+                Stmt::Let {
+                    pat, init, mut_, ..
+                } => {
                     if let Some(init_expr) = init {
                         // Detect borrow: let x = &mut place / &place.
                         // Record alias so `*x = v` can write back to the place.
@@ -995,6 +1030,7 @@ impl BytecodeCompiler {
                         if let PatternKind::Variable(name) = &pat.kind {
                             let ty = self.infer_expr_type(fc, init_expr);
                             fc.set_reg_type(name, ty);
+                            fc.set_var_mut(name, *mut_);
                             // Copy to a new register so subsequent mutation of the
                             // original does not affect this binding (C-comp1/C-comp2).
                             let new_r = fc.proto.alloc_reg();
@@ -1007,6 +1043,7 @@ impl BytecodeCompiler {
                         // let x; → Unit
                         if let PatternKind::Variable(name) = &pat.kind {
                             let r = fc.bind_var(name);
+                            fc.set_var_mut(name, *mut_);
                             fc.emit(Op::LoadUnit { rd: r });
                         }
                     }
@@ -2519,7 +2556,9 @@ impl BytecodeCompiler {
                         return Ok(rd);
                     }
                 }
-                fc.emit(Op::Mov { rd, rs: ra });
+                // *x on shared values unwraps the inner value; plain values
+                // pass through unchanged (value semantics).
+                fc.emit(Op::DerefValue { rd, ra });
             }
             UnOp::Ref | UnOp::RefMut => {
                 fc.emit(Op::Mov { rd, rs: ra });
@@ -2545,11 +2584,13 @@ impl BytecodeCompiler {
                             ra: var_reg,
                             rb: elem_reg,
                         });
-                        // Return the mutated list value (same as tree-walker push
-                        // builtin return, before eval_call_dispatch overrides it to
-                        // Unit for mutate-parameter writeback).
+                        // Return Unit (tree-walker parity, eval/expr.rs):
+                        // `push(var, val)` writes back in place and returns
+                        // Unit, so push doesn't leak as a block value — which
+                        // would make a `for { push(...) }` body non-Unit and
+                        // terminate the loop as if it were a break-with-value.
                         let rd = fc.proto.alloc_reg();
-                        fc.emit(Op::Mov { rd, rs: var_reg });
+                        fc.emit(Op::LoadUnit { rd });
                         return Ok(rd);
                     }
                 }
@@ -2870,53 +2911,57 @@ impl BytecodeCompiler {
 
             let total_args = args.len() + 1;
 
-            // Option/Result built-in methods (handled via opcodes, not function calls).
-            match method.as_str() {
-                "is_some" | "is_ok" => {
-                    fc.emit(Op::IsSome { rd, ra: recv_reg });
-                    return Ok(rd);
-                }
-                "is_none" | "is_err" => {
-                    let r_tmp = fc.proto.alloc_reg();
-                    fc.emit(Op::IsSome {
-                        rd: r_tmp,
-                        ra: recv_reg,
-                    });
-                    fc.emit(Op::Not { rd, ra: r_tmp });
-                    return Ok(rd);
-                }
-                "unwrap" | "expect" => {
-                    fc.emit(Op::Unwrap { rd, ra: recv_reg });
-                    return Ok(rd);
-                }
-                "unwrap_or" => {
-                    // if is_some(recv) { unwrap(recv) } else { default }
-                    let r_test = fc.proto.alloc_reg();
-                    fc.emit(Op::IsSome {
-                        rd: r_test,
-                        ra: recv_reg,
-                    });
-                    let jmp_else = fc.emit(Op::JmpIfNot {
-                        offset: 0,
-                        ra: r_test,
-                    });
-                    fc.emit(Op::Unwrap { rd, ra: recv_reg });
-                    let jmp_end = fc.emit(Op::Jmp { offset: 0 });
-                    fc.proto.patch_jump(jmp_else);
-                    let r_default = self.compile_expr(fc, &args[0])?;
-                    fc.emit(Op::Mov { rd, rs: r_default });
-                    fc.proto.patch_jump(jmp_end);
-                    return Ok(rd);
-                }
-                _ => {}
-            }
-
-            // If the method matches a known actor method, use DynMethodCall
-            // (actor methods shadow builtins with the same name, e.g. `format`).
+            // Actor methods shadow builtin opcode shortcuts (e.g. an actor's
+            // own `unwrap` must not be compiled to Op::Unwrap).
             let is_actor_method = self
                 .actor_defs
                 .values()
                 .any(|a| a.methods.iter().any(|m| m.name == *method));
+            if !is_actor_method {
+                // Option/Result built-in methods (handled via opcodes, not function calls).
+                match method.as_str() {
+                    "is_some" | "is_ok" => {
+                        fc.emit(Op::IsSome { rd, ra: recv_reg });
+                        return Ok(rd);
+                    }
+                    "is_none" | "is_err" => {
+                        let r_tmp = fc.proto.alloc_reg();
+                        fc.emit(Op::IsSome {
+                            rd: r_tmp,
+                            ra: recv_reg,
+                        });
+                        fc.emit(Op::Not { rd, ra: r_tmp });
+                        return Ok(rd);
+                    }
+                    "unwrap" | "expect" => {
+                        fc.emit(Op::Unwrap { rd, ra: recv_reg });
+                        return Ok(rd);
+                    }
+                    "unwrap_or" => {
+                        // if is_some(recv) { unwrap(recv) } else { default }
+                        let r_test = fc.proto.alloc_reg();
+                        fc.emit(Op::IsSome {
+                            rd: r_test,
+                            ra: recv_reg,
+                        });
+                        let jmp_else = fc.emit(Op::JmpIfNot {
+                            offset: 0,
+                            ra: r_test,
+                        });
+                        fc.emit(Op::Unwrap { rd, ra: recv_reg });
+                        let jmp_end = fc.emit(Op::Jmp { offset: 0 });
+                        fc.proto.patch_jump(jmp_else);
+                        let r_default = self.compile_expr(fc, &args[0])?;
+                        fc.emit(Op::Mov { rd, rs: r_default });
+                        fc.proto.patch_jump(jmp_end);
+                        return Ok(rd);
+                    }
+                    _ => {}
+                }
+            }
+
+            // If the method matches a known actor method, use DynMethodCall
+            // (actor methods shadow builtins with the same name, e.g. `format`).
             if !is_actor_method {
                 // Try builtin methods (only if not an actor method).
                 if let Some(&bidx) = self.builtin_table.get(method.as_str()) {
@@ -2933,9 +2978,42 @@ impl BytecodeCompiler {
             // Try CheckedProgram method table (G1: precise dispatch).
             // The method_table maps (type_name, method_name) → mangled function name.
             // We try all known impl types as potential receivers.
-            for type_name in &self.impl_type_names.clone() {
-                if let Some(mangled) = self.method_table.get(&(type_name.clone(), method.clone())) {
-                    if let Some(&fidx) = self.func_table.get(mangled) {
+            // dyn receivers: skip static resolution entirely — the concrete
+            // type is only known at runtime (tree-walker DynTrait semantics).
+            let recv_is_dyn = matches!(
+                obj.unlocated(),
+                Expr::Ident(name) if fc.var_is_dyn(name)
+            );
+            if !recv_is_dyn {
+                for type_name in &self.impl_type_names.clone() {
+                    if let Some(mangled) =
+                        self.method_table.get(&(type_name.clone(), method.clone()))
+                    {
+                        if let Some(&fidx) = self.func_table.get(mangled) {
+                            fc.emit(Op::Call {
+                                rd,
+                                func: fidx,
+                                args_base: new_args_base,
+                                argc: total_args as u16,
+                            });
+                            return Ok(rd);
+                        }
+                    }
+                }
+
+                // Fallback: mangled names via string prefix matching.
+                let mut prefixes: Vec<&str> =
+                    self.impl_type_names.iter().map(|s| s.as_str()).collect();
+                for p in [
+                    "List", "list", "String", "string", "Map", "map", "Set", "set",
+                ] {
+                    if !prefixes.contains(&p) {
+                        prefixes.push(p);
+                    }
+                }
+                for prefix in &prefixes {
+                    let mangled = format!("{}_{}", prefix, method);
+                    if let Some(&fidx) = self.func_table.get(&mangled) {
                         fc.emit(Op::Call {
                             rd,
                             func: fidx,
@@ -2944,28 +3022,6 @@ impl BytecodeCompiler {
                         });
                         return Ok(rd);
                     }
-                }
-            }
-
-            // Fallback: mangled names via string prefix matching.
-            let mut prefixes: Vec<&str> = self.impl_type_names.iter().map(|s| s.as_str()).collect();
-            for p in [
-                "List", "list", "String", "string", "Map", "map", "Set", "set",
-            ] {
-                if !prefixes.contains(&p) {
-                    prefixes.push(p);
-                }
-            }
-            for prefix in &prefixes {
-                let mangled = format!("{}_{}", prefix, method);
-                if let Some(&fidx) = self.func_table.get(&mangled) {
-                    fc.emit(Op::Call {
-                        rd,
-                        func: fidx,
-                        args_base: new_args_base,
-                        argc: total_args as u16,
-                    });
-                    return Ok(rd);
                 }
             }
 
@@ -3422,6 +3478,11 @@ impl BytecodeCompiler {
                 }
 
                 // Match each fixed element (guarded by length check).
+                // skip_elems jumps past element binds AND the rest binding:
+                // it is patched to the end after the rest binding is emitted,
+                // so a failed length test (e.g. `[a, ..rest]` on an empty
+                // list) must not execute the rest slice (start = pats.len()
+                // would exceed len and __slice rejects it).
                 let skip_elems = test_reg.map(|r_test| {
                     fc.emit(Op::JmpIfNot {
                         offset: 0,
@@ -3456,10 +3517,6 @@ impl BytecodeCompiler {
                         }
                     }
                     bindings.extend(sub_bindings);
-                }
-
-                if let Some(skip_idx) = skip_elems {
-                    fc.proto.patch_jump(skip_idx);
                 }
 
                 // Bind rest pattern: rest = subject[pats.len()..]
@@ -3498,6 +3555,13 @@ impl BytecodeCompiler {
                         }
                         bindings.push((rest_name.clone(), r_rest));
                     }
+                }
+
+                // Patch the length-test jump to skip element binds AND the
+                // rest binding (emitted above). On a failed length test the
+                // pattern does not match; no binding registers are valid.
+                if let Some(skip_idx) = skip_elems {
+                    fc.proto.patch_jump(skip_idx);
                 }
 
                 Ok((test_reg, bindings))
@@ -3977,6 +4041,17 @@ impl BytecodeCompiler {
     ) -> Result<(), InterpError> {
         match target.unlocated() {
             Expr::Ident(name) => {
+                // Immutable assignment guard (tree-walker parity, scope_env::assign):
+                // `x = v` on a non-mut binding is a compile-time error here.
+                // Borrow aliases are write-through targets, not plain variables —
+                // check them first so `*alias = v` (compiled recursively to the
+                // original place) is unaffected.
+                if !fc.borrow_aliases.contains_key(name) && !fc.var_is_mut(name) {
+                    return Err(InterpError::new(format!(
+                        "cannot assign to immutable variable '{}' — use `let mut`",
+                        name
+                    )));
+                }
                 // Optimization: detect `s = s + expr` → StrAppend (in-place, avoids O(n²)).
                 // SAFETY: only when variable is known String type (prevents Int += Int miscompile).
                 if fc.reg_is_string(name) {
@@ -4015,6 +4090,19 @@ impl BytecodeCompiler {
                     ra: r_obj,
                     rb: r_idx,
                     rc: r_val,
+                });
+                Ok(())
+            }
+            Expr::TupleIndex(obj, idx) => {
+                // pair.1 = v → TupleSet (write-through works on tuples
+                // held by value in the variable register).
+                let r_obj = self.compile_expr(fc, obj)?;
+                let r_val = self.compile_expr(fc, value)?;
+                let field_idx = fc.proto.add_const(ConstValue::Str(idx.to_string()));
+                fc.emit(Op::TupleSet {
+                    ra: r_obj,
+                    idx: field_idx,
+                    rb: r_val,
                 });
                 Ok(())
             }
@@ -4068,11 +4156,20 @@ impl BytecodeCompiler {
                     InterpError::new(format!("undefined variable '{}' in field assign", name))
                 })?;
                 let field_idx = fc.proto.add_const(ConstValue::Str(field.to_string()));
-                fc.emit(Op::RecordSet {
-                    ra: r_obj,
-                    field: field_idx,
-                    rb: r_val,
-                });
+                // Numeric field (tuple element access): pair.1 = v → TupleSet.
+                if field.parse::<usize>().is_ok() {
+                    fc.emit(Op::TupleSet {
+                        ra: r_obj,
+                        idx: field_idx,
+                        rb: r_val,
+                    });
+                } else {
+                    fc.emit(Op::RecordSet {
+                        ra: r_obj,
+                        field: field_idx,
+                        rb: r_val,
+                    });
+                }
                 Ok(())
             }
             Expr::Field(parent, parent_field) => {
@@ -4384,6 +4481,19 @@ impl BytecodeCompiler {
                     self.bind_pattern(fc, p, r);
                 }
             }
+            PatternKind::Constructor(_name, pats) => {
+                // Newtype pattern: UserId(v) unwraps the inner value.
+                // TupleGet already unwraps Value::Newtype at idx 0.
+                if pats.len() == 1 {
+                    let r = fc.proto.alloc_reg();
+                    fc.emit(Op::TupleGet {
+                        rd: r,
+                        ra: reg,
+                        idx: 0,
+                    });
+                    self.bind_pattern(fc, &pats[0].1, r);
+                }
+            }
             PatternKind::Wildcard => {}
             _ => {}
         }
@@ -4508,6 +4618,12 @@ impl BytecodeCompiler {
             Stmt::Assign { target, value } => {
                 self.collect_free_vars_expr(target, local_vars, free_vars);
                 self.collect_free_vars_expr(value, local_vars, free_vars);
+            }
+            Stmt::Drop(e) => {
+                self.collect_free_vars_expr(e, local_vars, free_vars);
+            }
+            Stmt::Defer(block) | Stmt::Unsafe(block) | Stmt::Arena(block) => {
+                self.collect_free_vars_block(block, local_vars, free_vars);
             }
             _ => {}
         }

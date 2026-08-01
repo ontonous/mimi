@@ -320,6 +320,12 @@ pub enum Op {
         args_base: Reg,
         argc: u16,
     },
+    /// Unwrap a Shared/LocalShared/WeakShared value (`*x` on shared vars).
+    /// Other values pass through unchanged (value semantics).
+    DerefValue {
+        rd: Reg,
+        ra: Reg,
+    },
     /// Record mutate-parameter writeback targets for the next Call.
     /// `count` registers at [regs_base .. regs_base + count) hold the
     /// CALLER's register numbers of the `mut` arguments (one per
@@ -513,6 +519,12 @@ pub enum Op {
     RecordSet {
         ra: Reg,
         field: ConstIdx,
+        rb: Reg,
+    },
+    /// ra[idx] = rb — tuple element set (numeric field "0"/"1"/...)
+    TupleSet {
+        ra: Reg,
+        idx: ConstIdx,
         rb: Reg,
     },
 

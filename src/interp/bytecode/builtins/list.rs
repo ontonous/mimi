@@ -584,6 +584,8 @@ fn builtin_option_value_or(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<V
 /// __slice(target, start, end) → sublist or substring.
 /// Supports negative indices (Python-style: -1 = last element).
 /// start/end are already resolved by the compiler (defaults: 0 / len).
+/// Bounds are strict (tree-walker parity): start > len, end > len, and
+/// start > end are errors, not clamps.
 fn builtin_slice(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
     let target = &args[0];
     let start_raw = match &args[1] {
@@ -601,14 +603,23 @@ fn builtin_slice(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
             let start = if start_raw < 0 {
                 (len + start_raw).max(0)
             } else {
-                start_raw.min(len)
+                start_raw
             } as usize;
+            if start > len as usize {
+                return Err(InterpError::slice_error("slice start out of bounds"));
+            }
             let end = if end_raw < 0 {
                 (len + end_raw).max(0)
             } else {
-                end_raw.min(len)
+                end_raw
             } as usize;
-            if start >= end {
+            if end > len as usize {
+                return Err(InterpError::slice_error("slice end out of bounds"));
+            }
+            if start > end {
+                return Err(InterpError::slice_error("slice start > end"));
+            }
+            if start == end {
                 return Ok(Value::List(Vec::new()));
             }
             Ok(Value::List(l[start..end].to_vec()))
@@ -619,14 +630,23 @@ fn builtin_slice(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Inte
             let start = if start_raw < 0 {
                 (len + start_raw).max(0)
             } else {
-                start_raw.min(len)
+                start_raw
             } as usize;
+            if start > len as usize {
+                return Err(InterpError::slice_error("slice start out of bounds"));
+            }
             let end = if end_raw < 0 {
                 (len + end_raw).max(0)
             } else {
-                end_raw.min(len)
+                end_raw
             } as usize;
-            if start >= end {
+            if end > len as usize {
+                return Err(InterpError::slice_error("slice end out of bounds"));
+            }
+            if start > end {
+                return Err(InterpError::slice_error("slice start > end"));
+            }
+            if start == end {
                 return Ok(Value::String(String::new()));
             }
             Ok(Value::String(chars[start..end].iter().collect()))

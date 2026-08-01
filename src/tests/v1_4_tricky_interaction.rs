@@ -5,7 +5,7 @@
 use super::*;
 
 fn check(src: &str, expected: &str) {
-    let _ = run_source_treewalker(src);
+    let _ = run_source(src);
     let out = compile_and_run(src).expect("codegen failed");
     assert_eq!(out.trim(), expected, "mismatch\nsrc: {}", src);
 }

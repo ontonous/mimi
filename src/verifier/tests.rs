@@ -1784,6 +1784,24 @@ func main() -> i32 { 0 }
     );
 }
 
+#[test]
+fn solver_replacement_skips_pending_pop_and_reset_recovers() {
+    require_z3!();
+    let mut session = super::ctx::SolverSession::new(100).expect("solver init");
+
+    // A replacement starts at depth zero while callers still owe the old
+    // solver's pop. The pending pop must not touch the fresh solver.
+    session.replaced = true;
+    session.poisoned = true;
+    session.pop();
+
+    session.reset();
+    session.push();
+    session.pop();
+    assert!(!session.replaced);
+    assert!(!session.poisoned);
+}
+
 /// E2: Non-exhaustive match (no wildcard) — result is unconstrained, so
 /// ensures `result >= 0` should NOT be Verified because the fallback arm
 /// returns an unconstrained variable (not silently 0).

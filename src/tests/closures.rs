@@ -216,6 +216,8 @@ func main() -> i32 {
 
 #[test]
 fn move_semantics_string_use_after_move() {
+    // Strings are infrastructure primitives, not linear business state
+    // (SD-2): `let t = s` copies, so reusing `s` is legal value semantics.
     let src = r#"
 func main() -> i32 {
     let s = "hello";
@@ -223,13 +225,9 @@ func main() -> i32 {
     s
 }
 "#;
-    let result = run_source_treewalker_result(src);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(
-        err.contains("use of moved value"),
-        "Expected 'use of moved value' error, got: {}",
-        err
+    assert_eq!(
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("hello".to_string()))
     );
 }
 
@@ -248,6 +246,8 @@ func main() -> i32 {
 
 #[test]
 fn move_semantics_list_use_after_move() {
+    // Lists are infrastructure primitives, not linear business state
+    // (SD-2): `let b = a` copies, so reusing `a` is legal value semantics.
     let src = r#"
 func main() -> i32 {
     let a = [1, 2, 3];
@@ -255,13 +255,13 @@ func main() -> i32 {
     a
 }
 "#;
-    let result = run_source_treewalker_result(src);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(
-        err.contains("use of moved value"),
-        "Expected 'use of moved value' error, got: {}",
-        err
+    assert_eq!(
+        run_source_bytecode_result(src),
+        Ok(interp::Value::List(vec![
+            interp::Value::Int(1),
+            interp::Value::Int(2),
+            interp::Value::Int(3)
+        ]))
     );
 }
 
@@ -322,6 +322,8 @@ func main() -> i32 {
 
 #[test]
 fn move_semantics_assignment_use_after_move() {
+    // Strings are infrastructure primitives (SD-2): assignment copies,
+    // so reusing `s` after `t = s` is legal value semantics.
     let src = r#"
 func main() -> i32 {
     let s = "hello";
@@ -330,13 +332,9 @@ func main() -> i32 {
     s
 }
 "#;
-    let result = run_source_treewalker_result(src);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(
-        err.contains("use of moved value"),
-        "Expected 'use of moved value' error, got: {}",
-        err
+    assert_eq!(
+        run_source_bytecode_result(src),
+        Ok(interp::Value::String("hello".to_string()))
     );
 }
 
@@ -404,7 +402,7 @@ func main() -> i32 {
     }
 }
 "#;
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     assert!(
         result.is_ok(),
         "Some(42) should be Copy (all args are Copy): {:?}",
