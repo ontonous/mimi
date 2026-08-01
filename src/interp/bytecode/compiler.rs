@@ -941,7 +941,83 @@ impl BytecodeCompiler {
             fc.emit(Op::RetUnit);
         }
 
+        // Compile contract expressions as mini-functions (0.33 Phase F: native contract eval).
+        if f.has_requires || f.has_ensures {
+            self.compile_contract_funcs(&mut fc.proto, f)?;
+        }
+
         Ok(fc.proto)
+    }
+
+    /// Compile requires/ensures contract expressions as mini-functions (0.33 Phase F).
+    /// Each contract expression becomes a standalone function that takes the parent's
+    /// parameters (plus `result` for ensures) and returns a bool.
+    fn compile_contract_funcs(
+        &mut self,
+        proto: &mut FunctionProto,
+        f: &FuncDef,
+    ) -> Result<(), InterpError> {
+        for stmt in &f.body {
+            match stmt.unlocated() {
+                Stmt::Requires(expr, _) => {
+                    let idx = self.compile_contract_expr(expr, f, false)?;
+                    proto.requires_funcs.push(idx);
+                }
+                Stmt::Ensures(expr, _) => {
+                    let idx = self.compile_contract_expr(expr, f, true)?;
+                    proto.ensures_funcs.push(idx);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Compile a single contract expression as a mini-function.
+    /// Parameters: same as parent function. For ensures, adds `result` param.
+    /// Returns the FuncIdx of the compiled mini-function.
+    fn compile_contract_expr(
+        &mut self,
+        expr: &Expr,
+        f: &FuncDef,
+        is_ensures: bool,
+    ) -> Result<FuncIdx, InterpError> {
+        let param_count = f.params.len() as u16 + if is_ensures { 1 } else { 0 };
+        let name = format!(
+            "__contract_{}_{}",
+            f.name,
+            if is_ensures { "ensures" } else { "requires" }
+        );
+        let mut fc = FuncCompiler::new(name, param_count);
+
+        // Bind parent parameters to registers 0..N.
+        for (i, param) in f.params.iter().enumerate() {
+            fc.vars[0].insert(param.name.clone(), i as Reg);
+            let ty = match param.ty.unlocated() {
+                Type::Name(n, _) if n == "f64" || n == "f32" => VarType::Float,
+                Type::Name(n, _) if n == "i32" || n == "i64" => VarType::Int,
+                Type::Name(n, _) if n == "bool" => VarType::Bool,
+                Type::Name(n, _) if n == "string" => VarType::String,
+                _ => VarType::Unknown,
+            };
+            fc.set_reg_type(&param.name, ty);
+        }
+        // For ensures, bind `result` at register N.
+        if is_ensures {
+            let result_reg = f.params.len() as Reg;
+            fc.vars[0].insert("result".to_string(), result_reg);
+        }
+        while fc.proto.register_count < param_count {
+            fc.proto.alloc_reg();
+        }
+
+        // Compile the contract expression and return it.
+        let reg = self.compile_expr(&mut fc, expr)?;
+        fc.emit(Op::Ret { ra: reg });
+
+        let idx = self.functions.len() as FuncIdx;
+        self.functions.push(fc.proto);
+        Ok(idx)
     }
 
     /// Compile an impl method (has implicit `self` at register 0).
