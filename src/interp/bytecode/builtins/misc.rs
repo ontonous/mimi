@@ -1257,8 +1257,13 @@ fn builtin_write_file_bytes(
     }
 }
 
-fn builtin_close_fd(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
-    // No-op in the interpreter.
+fn builtin_close_fd(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    let fd = args[0]
+        .as_int()
+        .ok_or_else(|| InterpError::new("close_fd: fd must be i32"))? as i32;
+    if fd >= 0 {
+        unsafe { libc::close(fd) };
+    }
     Ok(Value::Unit)
 }
 

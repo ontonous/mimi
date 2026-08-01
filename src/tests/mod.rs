@@ -403,17 +403,6 @@ pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
     vm.run_value().map_err(|e| e.message().to_string())
 }
 
-// ===================== Tree-walker fallback helpers (0.33 retirement) =====================
-// Net tests require tree-walker (bytecode TCP blocking behavior differs).
-// These will be deleted when bytecode net builtins are verified (Phase E).
-
-/// Run source via the legacy tree-walker interpreter. Fallback for net tests.
-pub(crate) fn run_source_treewalker(src: &str) -> interp::Value {
-    let file = parse(src);
-    let mut interp = interp::Interpreter::new(&file);
-    interp.run().expect("tree-walker run failed")
-}
-
 pub(crate) fn check_source(src: &str) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
     let file = parse(src);
     core::check(&file)
