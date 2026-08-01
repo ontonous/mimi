@@ -5236,6 +5236,24 @@ fn resolve_stmt_interpolations(stmt: &Stmt) -> Stmt {
             then_: resolve_quote_interpolations(then_),
             else_: else_.as_ref().map(resolve_quote_interpolations),
         },
+        Stmt::While { cond, body } => Stmt::While {
+            cond: resolve_expr_interpolations(cond),
+            body: resolve_quote_interpolations(body),
+        },
+        Stmt::For {
+            var,
+            iterable,
+            body,
+        } => Stmt::For {
+            var: var.clone(),
+            iterable: resolve_expr_interpolations(iterable),
+            body: resolve_quote_interpolations(body),
+        },
+        Stmt::Block(block) => Stmt::Block(resolve_quote_interpolations(block)),
+        Stmt::Assign { target, value } => Stmt::Assign {
+            target: resolve_expr_interpolations(target),
+            value: resolve_expr_interpolations(value),
+        },
         Stmt::Return(expr) => Stmt::Return(expr.as_ref().map(resolve_expr_interpolations)),
         // Other statements pass through unchanged.
         _ => stmt.clone(),
@@ -5281,13 +5299,9 @@ fn resolve_expr_interpolations(expr: &Expr) -> Expr {
         // Recurse into block expr
         Expr::Block(block) => Expr::Block(resolve_quote_interpolations(block)),
         // Recurse into tuple
-        Expr::Tuple(elems) => Expr::Tuple(
-            elems.iter().map(resolve_expr_interpolations).collect(),
-        ),
+        Expr::Tuple(elems) => Expr::Tuple(elems.iter().map(resolve_expr_interpolations).collect()),
         // Recurse into list literal
-        Expr::List(elems) => Expr::List(
-            elems.iter().map(resolve_expr_interpolations).collect(),
-        ),
+        Expr::List(elems) => Expr::List(elems.iter().map(resolve_expr_interpolations).collect()),
         // Leaf nodes and everything else: pass through.
         _ => expr.clone(),
     }

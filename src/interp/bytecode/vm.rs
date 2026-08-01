@@ -3011,8 +3011,8 @@ impl<'a> BytecodeVM<'a> {
     fn check_ensures(
         &mut self,
         func_idx: FuncIdx,
-        args: &[Value],
-        _old_snapshots: &[Value],
+        _args: &[Value],
+        old_snapshots: &[Value],
         result: &Value,
     ) -> Result<(), InterpError> {
         let proto = &self.program.functions[func_idx as usize];
@@ -3021,8 +3021,11 @@ impl<'a> BytecodeVM<'a> {
         }
         let name = proto.name.clone();
         let contract_funcs = proto.ensures_funcs.clone();
-        // Ensures mini-functions take params + result as the last argument.
-        let mut ensures_args = args.to_vec();
+        // Ensures mini-functions take pre-call param snapshots + result.
+        // old(x) compiles to just evaluating x, so we pass old_snapshots
+        // (pre-call values) as the parameter arguments. This ensures old(x)
+        // resolves to the pre-call value even for mut parameters.
+        let mut ensures_args = old_snapshots.to_vec();
         ensures_args.push(result.clone());
         for cidx in contract_funcs {
             let cond = self.call_function(cidx, &ensures_args)?;
