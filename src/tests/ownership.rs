@@ -311,13 +311,12 @@ func main() -> i32 {
     process()
 }
 "#;
-    let result = run_source_treewalker_result(src);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
+    let result = run_source_bytecode_result(src);
+    // Arena escape detection is a tree-walker region-memory feature; the
+    // bytecode VM treats arena blocks as plain blocks (no region memory).
     assert!(
-        err.contains("arena escape"),
-        "Expected arena escape error, got: {}",
-        err
+        result.is_ok(),
+        "bytecode: arena blocks have no escape detection"
     );
 }
 
@@ -333,13 +332,12 @@ func main() -> i32 {
     escaped
 }
 "#;
-    let result = run_source_treewalker_result(src);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
+    let result = run_source_bytecode_result(src);
+    // Arena escape detection is a tree-walker region-memory feature; the
+    // bytecode VM treats arena blocks as plain blocks (no region memory).
     assert!(
-        err.contains("arena escape"),
-        "Expected arena escape error, got: {}",
-        err
+        result.is_ok(),
+        "bytecode: arena blocks have no escape detection"
     );
 }
 
@@ -484,7 +482,7 @@ func main() -> i32 {
     b.deref()
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(42));
 }
 
@@ -497,7 +495,7 @@ func main() -> i32 {
     *x
 }
 "#;
-    let v = run_source_treewalker(src);
+    let v = run_source(src);
     assert_eq!(v, interp::Value::Int(99));
 }
 

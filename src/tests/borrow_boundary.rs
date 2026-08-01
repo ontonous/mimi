@@ -145,7 +145,7 @@ func main() -> i32 {
     pair.1
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(11));
+    assert_eq!(run_source(src), interp::Value::Int(11));
 }
 
 #[test]

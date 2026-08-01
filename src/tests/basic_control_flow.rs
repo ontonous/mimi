@@ -288,6 +288,8 @@ func main() -> i32 {
 
 #[test]
 fn break_with_value() {
+    // `break expr` is rejected by the checker (TOOL-RESOLUTION-001:
+    // break values are not part of Mimi's loop semantics).
     let src = r#"
 func main() -> i32 {
     let mut i = 0;
@@ -300,7 +302,8 @@ func main() -> i32 {
     return 0;
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(10));
+    let result = check_source(src);
+    assert!(result.is_err(), "break with a value should be a type error");
 }
 
 #[test]
@@ -506,8 +509,11 @@ func main() -> i32 {
     return arr[0];
 }
 "#;
-    let result = run_source_treewalker_result(src);
-    assert!(result.is_err());
+    let result = check_source(src);
+    assert!(
+        result.is_err(),
+        "array size mismatch should be a type error"
+    );
 }
 
 #[test]
@@ -697,7 +703,7 @@ func main() -> i32 {
     return 0;
 }
 "#;
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     assert!(result.is_err());
 }
 
@@ -710,7 +716,7 @@ func main() -> i32 {
     return 0;
 }
 "#;
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     assert!(result.is_err());
 }
 

@@ -146,7 +146,7 @@ func main() -> i32 {
     }
 }
 "#;
-    let result = run_source_treewalker(src);
+    let result = run_source(src);
     assert_eq!(
         result.as_int().unwrap_or(-1),
         0,

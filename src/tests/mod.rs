@@ -413,16 +413,6 @@ pub(crate) fn run_source_treewalker(src: &str) -> interp::Value {
     interp.run().expect("tree-walker run failed")
 }
 
-/// Tree-walker with stdout capture. Fallback for FFI tests.
-pub(crate) fn run_source_treewalker_with_stdout(src: &str) -> (interp::Value, String) {
-    let file = parse(src);
-    let mut interp = interp::Interpreter::new(&file);
-    interp.enable_stdout_capture();
-    let val = interp.run().expect("tree-walker run failed");
-    let stdout = interp.take_stdout();
-    (val, stdout)
-}
-
 /// Tree-walker returning Result. Fallback for FFI tests.
 pub(crate) fn run_source_treewalker_result(src: &str) -> Result<interp::Value, String> {
     let tokens = lexer::Lexer::new(src).tokenize()?;

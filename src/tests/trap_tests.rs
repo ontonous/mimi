@@ -26,7 +26,8 @@ fn can_link() -> bool {
 #[test]
 fn trap_nan_not_equal_to_self() {
     // NaN != NaN is the canonical NaN check (IEEE-754 §5.11).
-    // SD-9: bytecode traps on NaN; tree-walker permits IEEE-754 NaN.
+    // SD-9: bytecode traps on NaN-producing operations (E0813, default);
+    // `ieee_float { }` is the explicit escape hatch.
     let src = r#"
 func main() -> i32 {
     let nan = sqrt(-1.0)
@@ -36,7 +37,8 @@ func main() -> i32 {
     return 0
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(1));
+    let result = run_source_bytecode_result(src);
+    assert!(result.is_err(), "SD-9: NaN should trap, got {:?}", result);
 }
 
 #[test]
@@ -84,7 +86,8 @@ func main() -> i32 {
     return 0
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::Int(1));
+    let result = run_source_bytecode_result(src);
+    assert!(result.is_err(), "SD-9: NaN should trap, got {:?}", result);
 }
 
 #[test]
@@ -104,13 +107,9 @@ func main() -> i32 {
     return 0
 }
 "#;
-    let result = run_source_treewalker(src);
-    // Accept either 1 (IEEE-754 inf) or 0 (non-IEEE overflow behavior).
-    assert!(
-        result == interp::Value::Int(0) || result == interp::Value::Int(1),
-        "unexpected result: {:?}",
-        result
-    );
+    let result = run_source_bytecode_result(src);
+    // SD-9: bytecode traps on Inf-producing operations (E0813).
+    assert!(result.is_err(), "SD-9: Inf should trap, got {:?}", result);
 }
 
 #[test]
@@ -129,12 +128,9 @@ func main() -> i32 {
     return 0
 }
 "#;
-    let result = run_source_treewalker(src);
-    assert!(
-        result == interp::Value::Int(0) || result == interp::Value::Int(1),
-        "unexpected result: {:?}",
-        result
-    );
+    let result = run_source_bytecode_result(src);
+    // SD-9: bytecode traps on Inf-producing operations (E0813).
+    assert!(result.is_err(), "SD-9: Inf should trap, got {:?}", result);
 }
 
 #[test]
@@ -153,11 +149,11 @@ func main() -> i32 {
     return 0
 }
 "#;
-    let result = run_source_treewalker(src);
-    // Accept either 1 (IEEE-754 NaN) or 0 (non-IEEE behavior).
+    let result = run_source_bytecode_result(src);
+    // SD-9: bytecode traps on Inf/NaN-producing operations (E0813).
     assert!(
-        result == interp::Value::Int(0) || result == interp::Value::Int(1),
-        "unexpected result: {:?}",
+        result.is_err(),
+        "SD-9: Inf - Inf should trap, got {:?}",
         result
     );
 }
@@ -511,8 +507,8 @@ fn trap_dual_nan_comparison() {
     if !can_link() {
         return;
     }
-    // Note: interpreter and codegen may handle NaN differently.
-    // This test documents the divergence.
+    // Note: interpreter (SD-9: traps on NaN) and codegen (IEEE-754) may
+    // handle NaN differently. This test documents the divergence.
     let src = r#"
 func main() -> i32 {
     let nan = sqrt(-1.0)
@@ -522,19 +518,25 @@ func main() -> i32 {
     0
 }
 "#;
-    let interp_result = run_source_treewalker_with_stdout(src);
+    let interp_result = run_source_bytecode_result(src);
     let codegen_result = compile_and_run(src);
     // Log the results for debugging; don't assert equality since
     // NaN handling may differ between backends.
-    if let Ok(codegen_stdout) = codegen_result {
-        let interp_stdout = interp_result.1.trim();
-        let codegen_stdout = codegen_stdout.trim();
-        if interp_stdout != codegen_stdout {
+    match (&interp_result, codegen_result) {
+        (Ok(_), Ok(codegen_stdout)) => {
             eprintln!(
-                "KNOWN DIVERGENCE: NaN comparison\n  interp: {:?}\n  codegen: {:?}",
-                interp_stdout, codegen_stdout
+                "KNOWN DIVERGENCE: NaN comparison\n  interp: ok\n  codegen: {:?}",
+                codegen_stdout.trim()
             );
         }
+        (Err(e), Ok(codegen_stdout)) => {
+            eprintln!(
+                "SD-9: interp traps on NaN ({}), codegen: {:?}",
+                e,
+                codegen_stdout.trim()
+            );
+        }
+        _ => {}
     }
 }
 
@@ -543,7 +545,8 @@ fn trap_dual_infinity_arithmetic() {
     if !can_link() {
         return;
     }
-    // Note: interpreter and codegen may handle Inf differently.
+    // Note: interpreter (SD-9: traps on Inf) and codegen (IEEE-754) may
+    // handle Inf differently.
     let src = r#"
 func main() -> i32 {
     let big = 1.0e308
@@ -555,17 +558,25 @@ func main() -> i32 {
     0
 }
 "#;
-    let interp_result = run_source_treewalker_with_stdout(src);
+    let interp_result = run_source_bytecode_result(src);
     let codegen_result = compile_and_run(src);
-    if let Ok(codegen_stdout) = codegen_result {
-        let interp_stdout = interp_result.1.trim();
-        let codegen_stdout = codegen_stdout.trim();
-        if interp_stdout != codegen_stdout {
+    // Log the results for debugging; don't assert equality since
+    // Inf handling may differ between backends.
+    match (&interp_result, codegen_result) {
+        (Ok(_), Ok(codegen_stdout)) => {
             eprintln!(
-                "KNOWN DIVERGENCE: Inf-Inf\n  interp: {:?}\n  codegen: {:?}",
-                interp_stdout, codegen_stdout
+                "KNOWN DIVERGENCE: Inf-Inf\n  interp: ok\n  codegen: {:?}",
+                codegen_stdout.trim()
             );
         }
+        (Err(e), Ok(codegen_stdout)) => {
+            eprintln!(
+                "SD-9: interp traps on Inf ({}), codegen: {:?}",
+                e,
+                codegen_stdout.trim()
+            );
+        }
+        _ => {}
     }
 }
 

@@ -432,7 +432,7 @@ func main() -> i32 {
 fn arena_escape_through_list_detected() {
     let src = r#"
 func main() -> i32 {
-    let r;
+    let mut r = [];
     arena {
         let ref x = 42;
         r = [x];
@@ -456,7 +456,7 @@ type Wrapper {
     val: i32
 }
 func main() -> i32 {
-    let r;
+    let mut r = Wrapper { val: 0 };
     arena {
         let ref x = 42;
         r = Wrapper { val: x };

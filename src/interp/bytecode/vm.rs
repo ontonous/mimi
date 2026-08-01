@@ -470,6 +470,34 @@ impl<'a> BytecodeVM<'a> {
                         frame.regs[rd as usize] = frame.regs[rs as usize].clone();
                     }
                 }
+                Op::DerefValue { rd, ra } => {
+                    let val = self.get_reg(ra).clone();
+                    let inner = match &val {
+                        Value::Shared(arc) => arc
+                            .read()
+                            .map_err(|e| {
+                                InterpError::new(format!("shared read lock failed: {}", e))
+                            })?
+                            .clone(),
+                        Value::LocalShared(rc) => {
+                            rc.lock().unwrap_or_else(|e| e.into_inner()).clone()
+                        }
+                        Value::WeakShared(weak) => {
+                            let strong = weak.upgrade();
+                            match &strong {
+                                Some(a) => a
+                                    .read()
+                                    .map_err(|e| {
+                                        InterpError::new(format!("shared read lock failed: {}", e))
+                                    })?
+                                    .clone(),
+                                None => Value::Unit,
+                            }
+                        }
+                        _ => val,
+                    };
+                    self.cur_frame_mut().regs[rd as usize] = inner;
+                }
 
                 // ── Integer arithmetic ─────────────────────────
                 // Fast path: both Int (common case in loops). Fallback: Float/String.
@@ -1727,6 +1755,37 @@ impl<'a> BytecodeVM<'a> {
                         }
                     }
                 }
+                Op::TupleSet { ra, idx, rb } => {
+                    let idx_name = match &proto.constants[idx as usize] {
+                        ConstValue::Str(s) => s.clone(),
+                        _ => String::new(),
+                    };
+                    let idx: usize = idx_name.parse().unwrap_or(usize::MAX);
+                    let value = self.get_reg(rb).clone();
+                    let tuple = self.get_reg_mut(ra);
+                    match tuple {
+                        Value::Tuple(t) => {
+                            if idx >= t.len() {
+                                return Err(InterpError::new(format!(
+                                    "tuple set: index {} out of bounds (len {})",
+                                    idx,
+                                    t.len()
+                                )));
+                            }
+                            t[idx] = value;
+                        }
+                        // Newtype inner set: `.0 = v`.
+                        Value::Newtype(_, inner) if idx == 0 => {
+                            **inner = value;
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "tuple set: expected Tuple, got {}",
+                                other
+                            )))
+                        }
+                    }
+                }
 
                 // ── Map / Set ────────────────────────────────
                 Op::NewMap { rd } => {
@@ -2321,6 +2380,25 @@ impl<'a> BytecodeVM<'a> {
                             self.set_reg(rd, result?);
                         }
                         // Option/Result built-in methods (matches tree-walker call.rs:1178+).
+                        // dyn Trait dispatch: method resolution by concrete
+                        // record type name (tree-walker Value::DynTrait arm).
+                        Value::Record(Some(concrete_type), _) => {
+                            let mangled = format!("{}_{}", concrete_type, method_name);
+                            if let Some(func_idx) = self.program.function_index(&mangled) {
+                                let args: Vec<Value> = (0..argc)
+                                    .map(|i| self.get_reg(args_base + i).clone())
+                                    .collect();
+                                let func_idx = func_idx as FuncIdx;
+                                self.push_frame(func_idx, args, Some(rd))
+                                    .map_err(|e| self.enrich_error(e))?;
+                                // Continue loop — new frame is now active.
+                            } else {
+                                return Err(InterpError::new(format!(
+                                    "cannot call method '{}' on record {} (no impl found)",
+                                    method_name, concrete_type
+                                )));
+                            }
+                        }
                         Value::Variant(tag, payload) => {
                             let result = match (tag.as_str(), method_name.as_str()) {
                                 // unwrap / expect
@@ -2381,11 +2459,11 @@ impl<'a> BytecodeVM<'a> {
                                     Ok(Value::Variant("Err".into(), vec![mapped]))
                                 }
                                 ("Ok", "map_err") | ("Some", "map_err") => Ok(receiver.clone()),
-                                // unwrap_or: return payload on Some/Ok, default on None/Err
-                                ("Some" | "Ok", "unwrap_or") => {
+                                // unwrap_or / value_or: payload on Some/Ok, default on None/Err
+                                ("Some" | "Ok", "unwrap_or") | ("Some" | "Ok", "value_or") => {
                                     Ok(payload.first().cloned().unwrap_or(Value::Unit))
                                 }
-                                ("None" | "Err", "unwrap_or") => {
+                                ("None" | "Err", "unwrap_or") | ("None" | "Err", "value_or") => {
                                     Ok(self.get_reg(args_base + 1).clone())
                                 }
                                 // ok_or: Option → Result (Some(v) → Ok(v), None → Err(e))

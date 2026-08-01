@@ -46,6 +46,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::LoadTrue { .. } => "LOAD_TRUE",
         Op::LoadFalse { .. } => "LOAD_FALSE",
         Op::Mov { .. } => "MOV",
+        Op::DerefValue { .. } => "DEREF_VALUE",
         Op::AddInt { .. } => "ADD_INT",
         Op::SubInt { .. } => "SUB_INT",
         Op::MulInt { .. } => "MUL_INT",
@@ -104,6 +105,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::NewRecord { .. } => "NEW_RECORD",
         Op::RecordGet { .. } => "RECORD_GET",
         Op::RecordSet { .. } => "RECORD_SET",
+        Op::TupleSet { .. } => "TUPLE_SET",
         Op::NewMap { .. } => "NEW_MAP",
         Op::NewSet { .. } => "NEW_SET",
         Op::MapGet { .. } => "MAP_GET",
@@ -186,6 +188,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::LoadTrue { rd } => format!("{:04}  {:<16} r{} = true", pc, name, rd),
         Op::LoadFalse { rd } => format!("{:04}  {:<16} r{} = false", pc, name, rd),
         Op::Mov { rd, rs } => format!("{:04}  {:<16} r{} = r{}", pc, name, rd, rs),
+        Op::DerefValue { rd, ra } => format!("{:04}  {:<16} r{} = *r{}", pc, name, rd, ra),
         Op::AddInt { rd, ra, rb }
         | Op::SubInt { rd, ra, rb }
         | Op::MulInt { rd, ra, rb }
@@ -450,6 +453,17 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 })
                 .unwrap_or("?");
             format!("{:04}  {:<16} r{}.{} = r{}", pc, name, ra, fname, rb)
+        }
+        Op::TupleSet { ra, idx, rb } => {
+            let iname = proto
+                .constants
+                .get(*idx as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.as_str(),
+                    _ => "?",
+                })
+                .unwrap_or("?");
+            format!("{:04}  {:<16} r{}.{} = r{}", pc, name, ra, iname, rb)
         }
         Op::NewMap { rd } => format!("{:04}  {:<16} r{} = map()", pc, name, rd),
         Op::NewSet { rd } => format!("{:04}  {:<16} r{} = set()", pc, name, rd),
