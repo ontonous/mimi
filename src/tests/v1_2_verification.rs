@@ -17,39 +17,23 @@ func main() -> i32 {
 }
 "#;
     // Without verify_contracts, requires is ignored
-    let tokens = crate::lexer::Lexer::new(src)
-        .tokenize()
-        .expect("src/tests/v1_2_verification.rs:20 unwrap failed");
-    let file = crate::parser::Parser::new(tokens)
-        .parse_file()
-        .expect("src/tests/v1_2_verification.rs:21 unwrap failed");
-    let mut interp = crate::interp::Interpreter::new(&file);
-    interp.verify_contracts = false;
-    let result = interp.run();
+    let result = bytecode_run_with_contracts(src, false);
     assert!(
         result.is_ok(),
         "without verify_contracts, requires should be ignored"
     );
 
     // With verify_contracts, requires is enforced
-    let tokens = crate::lexer::Lexer::new(src)
-        .tokenize()
-        .expect("src/tests/v1_2_verification.rs:28 unwrap failed");
-    let file = crate::parser::Parser::new(tokens)
-        .parse_file()
-        .expect("src/tests/v1_2_verification.rs:29 unwrap failed");
-    let mut interp = crate::interp::Interpreter::new(&file);
-    interp.verify_contracts = true;
-    let result = interp.run();
+    let result = bytecode_run_with_contracts(src, true);
     assert!(
         result.is_err(),
         "with verify_contracts, requires violation should error"
     );
     let err = result.unwrap_err();
     assert!(
-        err.message().contains("requires condition failed"),
+        err.contains("requires condition failed"),
         "Expected requires error, got: {}",
-        err.message()
+        err
     );
 }
 
@@ -66,39 +50,23 @@ func main() -> i32 {
 }
 "#;
     // Without verify_contracts, ensures is ignored
-    let tokens = crate::lexer::Lexer::new(src)
-        .tokenize()
-        .expect("src/tests/v1_2_verification.rs:51 unwrap failed");
-    let file = crate::parser::Parser::new(tokens)
-        .parse_file()
-        .expect("src/tests/v1_2_verification.rs:52 unwrap failed");
-    let mut interp = crate::interp::Interpreter::new(&file);
-    interp.verify_contracts = false;
-    let result = interp.run();
+    let result = bytecode_run_with_contracts(src, false);
     assert!(
         result.is_ok(),
         "without verify_contracts, ensures should be ignored"
     );
 
     // With verify_contracts, ensures is enforced
-    let tokens = crate::lexer::Lexer::new(src)
-        .tokenize()
-        .expect("src/tests/v1_2_verification.rs:59 unwrap failed");
-    let file = crate::parser::Parser::new(tokens)
-        .parse_file()
-        .expect("src/tests/v1_2_verification.rs:60 unwrap failed");
-    let mut interp = crate::interp::Interpreter::new(&file);
-    interp.verify_contracts = true;
-    let result = interp.run();
+    let result = bytecode_run_with_contracts(src, true);
     assert!(
         result.is_err(),
         "with verify_contracts, ensures violation should error"
     );
     let err = result.unwrap_err();
     assert!(
-        err.message().contains("ensures condition failed"),
+        err.contains("ensures condition failed"),
         "Expected ensures error, got: {}",
-        err.message()
+        err
     );
 }
 
@@ -116,23 +84,12 @@ func main() -> i32 {
 }
 "#;
     // With verify_contracts, valid contracts should pass
-    let tokens = crate::lexer::Lexer::new(src)
-        .tokenize()
-        .expect("src/tests/v1_2_verification.rs:83 unwrap failed");
-    let file = crate::parser::Parser::new(tokens)
-        .parse_file()
-        .expect("src/tests/v1_2_verification.rs:84 unwrap failed");
-    let mut interp = crate::interp::Interpreter::new(&file);
-    interp.verify_contracts = true;
-    let result = interp.run();
+    let result = bytecode_run_with_contracts(src, true);
     assert!(
         result.is_ok(),
         "valid contracts should pass with verify_contracts"
     );
-    assert_eq!(
-        result.expect("src/tests/v1_2_verification.rs:89 unwrap failed"),
-        crate::interp::Value::Int(3)
-    );
+    assert_eq!(result.unwrap(), crate::interp::Value::Int(3));
 }
 
 // ============================================================

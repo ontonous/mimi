@@ -19,7 +19,6 @@ pub(crate) mod target_parser;
 pub(crate) mod target_typechecker;
 pub(crate) mod target_typesoundness;
 
-use crate::interp;
 use crate::{lexer, parser};
 
 // ==============================
@@ -249,9 +248,12 @@ func main() -> i32 { process(5) }
     let file = parser::Parser::new(tokens)
         .parse_file()
         .expect("src/tests/fuzz/mod.rs:222 unwrap failed");
-    let mut interp = interp::Interpreter::new(&file);
-    interp.set_verify_ffi(true);
-    let _ = interp.run();
+    let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
+    if let Ok(prog) = compiler.compile_file(&file) {
+        let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
+        vm.set_verify_ffi(true);
+        let _ = vm.run_value();
+    }
 }
 
 // Helper wrappers

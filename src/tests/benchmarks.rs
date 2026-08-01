@@ -6,7 +6,7 @@
 //! For proper regression detection, add criterion (cargo add criterion --dev)
 //! and create `benches/*.rs` files with `harness = false`.
 
-use crate::interp::Interpreter;
+use crate::interp::bytecode::{BytecodeCompiler, BytecodeVM};
 use crate::{core, lexer, parser};
 use std::time::Instant;
 
@@ -184,8 +184,12 @@ fn bench_interp_simple() {
     )
     .parse_file()
     .expect("src/tests/benchmarks.rs:140 unwrap failed");
-    let mut interp = Interpreter::new(&file);
-    let _ = bench("interp_simple", 500, || interp.run());
+    let mut compiler = BytecodeCompiler::new();
+    let prog = compiler.compile_file(&file).expect("compile");
+    let _ = bench("bytecode_simple", 500, || {
+        let mut vm = BytecodeVM::new(&prog);
+        vm.run_value()
+    });
 }
 
 #[test]
@@ -203,6 +207,10 @@ func fib(n: i32) -> i32 {
     )
     .parse_file()
     .expect("src/tests/benchmarks.rs:153 unwrap failed");
-    let mut interp = Interpreter::new(&file);
-    let _ = bench("interp_fib_5", 50, || interp.run());
+    let mut compiler = BytecodeCompiler::new();
+    let prog = compiler.compile_file(&file).expect("compile");
+    let _ = bench("bytecode_fib_5", 50, || {
+        let mut vm = BytecodeVM::new(&prog);
+        vm.run_value()
+    });
 }

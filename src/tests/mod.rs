@@ -513,6 +513,47 @@ pub(crate) fn checked_run_source_bytecode_result(src: &str) -> Result<interp::Va
     vm.run_value().map_err(|e| e.message().to_string())
 }
 
+/// Compile source to bytecode and call a named function (test helper).
+/// Returns Result<Value, String>. Panics on parse/compile failure.
+/// Does NOT require type checking to pass (mirrors tree-walker's direct eval).
+pub(crate) fn bytecode_call_named(
+    src: &str,
+    func_name: &str,
+    args: Vec<interp::Value>,
+) -> Result<interp::Value, String> {
+    let file = parse(src);
+    let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    // Install CheckedProgram if type check passes (enables better dispatch),
+    // but don't fail if it doesn't (some tests intentionally use unchecked code).
+    if let Ok(program) = core::check_program(&file) {
+        compiler.install_checked_program(&program);
+    }
+    let prog = compiler
+        .compile_file(&file)
+        .expect("bytecode compile failed");
+    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    vm.call_named(func_name, args)
+        .map_err(|e| e.message().to_string())
+}
+
+/// Compile source to bytecode and run main with verify_contracts toggle.
+/// Returns Result<Value, String>.
+pub(crate) fn bytecode_run_with_contracts(
+    src: &str,
+    verify: bool,
+) -> Result<interp::Value, String> {
+    let file = parse(src);
+    let program = core::check_program(&file).expect("type check failed");
+    let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    compiler.install_checked_program(&program);
+    let prog = compiler
+        .compile_file(&file)
+        .expect("bytecode compile failed");
+    let mut vm = interp::bytecode::BytecodeVM::new(&prog);
+    vm.verify_contracts = verify;
+    vm.run_value().map_err(|e| e.message().to_string())
+}
+
 /// End-to-end codegen test: compile Mimi source -> LLVM -> native binary -> execute -> return stdout
 /// Requires `cc` and `ld` on PATH. Skips test if linker is unavailable.
 static E2E_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

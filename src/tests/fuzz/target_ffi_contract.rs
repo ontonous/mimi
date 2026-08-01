@@ -6,7 +6,7 @@
 //!
 //! Run: `cargo test fuzz::target_ffi_contract -- --nocapture --include-ignored`
 
-use crate::{core, interp, lexer, parser};
+use crate::{core, lexer, parser};
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
 
@@ -45,7 +45,7 @@ func main() -> i32 {{
     })
 }
 
-/// Run a program through the interpreter's FFI contract verification path.
+/// Run a program through the bytecode VM's FFI contract verification path.
 fn interp_ffi_verify(src: &str) -> Result<String, String> {
     let tokens = lexer::Lexer::new(src)
         .tokenize()
@@ -53,12 +53,12 @@ fn interp_ffi_verify(src: &str) -> Result<String, String> {
     let file = parser::Parser::new(tokens)
         .parse_file()
         .map_err(|e| e.message.clone())?;
-    let mut interp = interp::Interpreter::new(&file);
-    interp.set_verify_ffi(true);
-    interp.verify_contracts = true;
-    // Use no_fork because FFI returns pointers incompatible with fork isolation
-    interp
-        .run()
+    let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
+    let prog = compiler.compile_file(&file).map_err(|e| e.to_string())?;
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
+    vm.set_verify_ffi(true);
+    vm.verify_contracts = true;
+    vm.run_value()
         .map(|v| format!("{}", v))
         .map_err(|e| e.message().to_string())
 }
