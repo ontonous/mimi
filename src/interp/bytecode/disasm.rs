@@ -166,6 +166,10 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::QuoteBreak { .. } => "QUOTE_BREAK",
         Op::QuoteContinue => "QUOTE_CONTINUE",
         Op::QuoteLambda { .. } => "QUOTE_LAMBDA",
+        Op::QuoteFor { .. } => "QUOTE_FOR",
+        Op::QuoteAssign => "QUOTE_ASSIGN",
+        Op::QuoteLoop => "QUOTE_LOOP",
+        Op::QuoteRecord { .. } => "QUOTE_RECORD",
         Op::QuoteTry => "QUOTE_TRY",
         Op::QuoteResult { .. } => "QUOTE_RESULT",
     }
@@ -187,6 +191,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::QuoteAst(q) => format!("quote {:?}", q),
                 ConstValue::LambdaSpec { .. } => "lambda_spec".to_string(),
                 ConstValue::Pattern(p) => format!("pattern {:?}", p),
+                ConstValue::StrVec(v) => format!("strvec {:?}", v),
             };
             format!("{:04}  {:<16} r{} = {}", pc, name, rd, display)
         }
@@ -343,6 +348,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::QuoteAst(q) => format!("quote {:?}", q),
                 ConstValue::LambdaSpec { .. } => "lambda_spec".to_string(),
                 ConstValue::Pattern(p) => format!("pattern {:?}", p),
+                ConstValue::StrVec(v) => format!("strvec {:?}", v),
             };
             format!("{:04}  {:<16} push {:?} ({})", pc, name, val, display)
         }
@@ -382,7 +388,13 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         }
         Op::QuoteBinary { op } => format!("{:04}  {:<16} {:?}", pc, name, op),
         Op::QuoteUnary { op } => format!("{:04}  {:<16} {:?}", pc, name, op),
-        Op::QuoteIndex | Op::QuoteExprStmt | Op::QuoteWhile | Op::QuoteTry | Op::QuoteContinue => {
+        Op::QuoteIndex
+        | Op::QuoteExprStmt
+        | Op::QuoteWhile
+        | Op::QuoteTry
+        | Op::QuoteContinue
+        | Op::QuoteAssign
+        | Op::QuoteLoop => {
             format!("{:04}  {:<16}", pc, name)
         }
         Op::QuoteWhileLet { pat_idx } => {
@@ -393,6 +405,19 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         }
         Op::QuoteLambda { spec_idx } => {
             format!("{:04}  {:<16} spec_idx={}", pc, name, spec_idx)
+        }
+        Op::QuoteFor { var_idx } => {
+            format!("{:04}  {:<16} var_idx={}", pc, name, var_idx)
+        }
+        Op::QuoteRecord {
+            n,
+            names_idx,
+            ty_idx,
+        } => {
+            format!(
+                "{:04}  {:<16} n={} names_idx={} ty_idx={}",
+                pc, name, n, names_idx, ty_idx
+            )
         }
         Op::QuoteIf { has_else } => format!("{:04}  {:<16} has_else={}", pc, name, has_else),
         Op::QuoteCast { type_idx } => {
@@ -699,6 +724,7 @@ pub fn disassemble(proto: &FunctionProto) -> String {
             ConstValue::QuoteAst(q) => format!("quote {:?}", q),
             ConstValue::LambdaSpec { .. } => "lambda_spec".to_string(),
             ConstValue::Pattern(p) => format!("pattern {:?}", p),
+            ConstValue::StrVec(v) => format!("strvec {:?}", v),
         };
         out.push_str(&format!(";   const[{}] = {}\n", i, display));
     }

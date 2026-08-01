@@ -455,6 +455,20 @@ pub enum Op {
     QuoteLambda {
         spec_idx: ConstIdx,
     },
+    /// pop (body, iter) → push QuotedAst::For(var, iter, body); var is Str in constants
+    QuoteFor {
+        var_idx: ConstIdx,
+    },
+    /// pop (value, target) → push QuotedAst::Assign(target, value)
+    QuoteAssign,
+    /// pop body → push QuotedAst::Loop(body)
+    QuoteLoop,
+    /// pop n field values → push QuotedAst::Record; names from StrVec, ty from Str (empty=None)
+    QuoteRecord {
+        n: u16,
+        names_idx: ConstIdx,
+        ty_idx: ConstIdx,
+    },
     /// pop quote_stack top → rd
     QuoteResult {
         rd: Reg,
@@ -824,6 +838,8 @@ pub enum ConstValue {
     },
     /// Pattern constant (for QuoteWhileLet).
     Pattern(crate::ast::Pattern),
+    /// String vector constant (for QuoteRecord field names).
+    StrVec(Vec<String>),
 }
 
 impl FunctionProto {

@@ -1997,6 +1997,33 @@ impl BytecodeCompiler {
             Stmt::Continue => {
                 fc.emit(Op::QuoteContinue);
             }
+            Stmt::For {
+                var,
+                iterable,
+                body,
+            } => {
+                self.compile_quote_expr(fc, iterable, shadowed)?;
+                shadowed.insert(var.clone());
+                self.compile_quote_block(fc, body, shadowed)?;
+                fc.emit(Op::QuoteBlock {
+                    n: body.len() as u16,
+                });
+                shadowed.remove(var);
+                let var_idx = fc.proto.add_const(ConstValue::Str(var.clone()));
+                fc.emit(Op::QuoteFor { var_idx });
+            }
+            Stmt::Assign { target, value } => {
+                self.compile_quote_expr(fc, target, shadowed)?;
+                self.compile_quote_expr(fc, value, shadowed)?;
+                fc.emit(Op::QuoteAssign);
+            }
+            Stmt::Loop(body) => {
+                self.compile_quote_block(fc, body, shadowed)?;
+                fc.emit(Op::QuoteBlock {
+                    n: body.len() as u16,
+                });
+                fc.emit(Op::QuoteLoop);
+            }
             // 0.31.22 soundness: contracts in quote! must error, not silently skip.
             Stmt::Requires(_, span) => {
                 return Err(InterpError::new(format!(
@@ -2176,6 +2203,21 @@ impl BytecodeCompiler {
                     free_vars: free_vars.iter().cloned().collect(),
                 });
                 fc.emit(Op::QuoteLambda { spec_idx });
+            }
+            Expr::Record { ty, fields } => {
+                // Emit field values onto quote stack, then QuoteRecord.
+                for f in fields {
+                    self.compile_quote_expr(fc, &f.value, shadowed)?;
+                }
+                let names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+                let names_idx = fc.proto.add_const(ConstValue::StrVec(names));
+                let ty_str = ty.clone().unwrap_or_default();
+                let ty_idx = fc.proto.add_const(ConstValue::Str(ty_str));
+                fc.emit(Op::QuoteRecord {
+                    n: fields.len() as u16,
+                    names_idx,
+                    ty_idx,
+                });
             }
             other => {
                 return Err(InterpError::new(format!(
