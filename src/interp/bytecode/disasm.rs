@@ -139,6 +139,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::SharedNew { .. } => "SHARED_NEW",
         Op::SharedSet { .. } => "SHARED_SET",
         Op::WeakNew { .. } => "WEAK_NEW",
+        Op::CallExtern { .. } => "CALL_EXTERN",
     }
 }
 
@@ -251,6 +252,22 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 name,
                 rd,
                 builtin,
+                args_base,
+                *args_base as u16 + argc.saturating_sub(1)
+            )
+        }
+        Op::CallExtern {
+            rd,
+            extern_idx,
+            args_base,
+            argc,
+        } => {
+            format!(
+                "{:04}  {:<16} r{} = extern[{}](r{}..r{})",
+                pc,
+                name,
+                rd,
+                extern_idx,
                 args_base,
                 *args_base as u16 + argc.saturating_sub(1)
             )

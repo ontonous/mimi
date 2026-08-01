@@ -250,7 +250,7 @@ func main() -> i32 { process(5) }
         .parse_file()
         .expect("src/tests/fuzz/mod.rs:222 unwrap failed");
     let mut interp = interp::Interpreter::new(&file);
-    interp.verify_ffi = true;
+    interp.set_verify_ffi(true);
     let _ = interp.run();
 }
 

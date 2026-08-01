@@ -54,7 +54,7 @@ fn interp_ffi_verify(src: &str) -> Result<String, String> {
         .parse_file()
         .map_err(|e| e.message.clone())?;
     let mut interp = interp::Interpreter::new(&file);
-    interp.verify_ffi = true;
+    interp.set_verify_ffi(true);
     interp.verify_contracts = true;
     // Use no_fork because FFI returns pointers incompatible with fork isolation
     interp

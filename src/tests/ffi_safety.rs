@@ -8,7 +8,7 @@ fn ffi_lib_path() -> &'static str {
 }
 
 fn expect_ffi_safety_error(src: &str, expected_substring: &str) {
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
 
     assert!(
         result.is_err(),
@@ -32,7 +32,7 @@ fn expect_ffi_safety_error(src: &str, expected_substring: &str) {
 fn expect_symbol_not_found(src: &str) {
     let _guard = super::FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", ffi_lib_path());
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
 
     assert!(

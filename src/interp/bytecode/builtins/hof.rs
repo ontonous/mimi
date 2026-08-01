@@ -52,7 +52,10 @@ pub(crate) fn builtin_map_list(
                 Ok(Value::Variant(tag.clone(), vec![mapped]))
             }
             "None" | "Err" => Ok(args[0].clone()),
-            _ => Err(InterpError::new(format!("map: unsupported variant '{}'", tag))),
+            _ => Err(InterpError::new(format!(
+                "map: unsupported variant '{}'",
+                tag
+            ))),
         };
     }
     let list = match &args[0] {

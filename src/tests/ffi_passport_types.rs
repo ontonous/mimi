@@ -17,7 +17,7 @@ func main() -> i32 {
     // pass the argument conversion phase (which means c_shared accepted the shared value)
     let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
 
     // The error should be about symbol not found, not about argument conversion
@@ -45,7 +45,7 @@ func main() -> i32 {
 "#;
     let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
 
     assert!(result.is_err(), "should fail with symbol not found");
@@ -72,7 +72,7 @@ func main() -> i32 {
 "#;
     let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
 
     assert!(result.is_err(), "should fail with symbol not found");
@@ -99,7 +99,7 @@ func main() -> i32 {
 "#;
     let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
 
     assert!(result.is_err(), "should fail with symbol not found");
@@ -126,7 +126,7 @@ func main() -> i32 {
 "#;
     let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
 
     assert!(result.is_err(), "should fail with symbol not found");
@@ -155,7 +155,7 @@ func main() -> i32 {
 "#;
     let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
 
     // Cap handling should work, but the function doesn't exist
@@ -200,7 +200,7 @@ func main() -> i32 {
 "#;
     let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
 
     // raw_string conversion should work, but the function doesn't exist
@@ -228,7 +228,7 @@ func main() -> i32 {
     // Without verify_ffi, the precondition is not checked
     let _guard = FfiEnvLock::lock();
     std::env::set_var("MIMI_FFI_LIB", "/lib/x86_64-linux-gnu/libc.so.6");
-    let result = run_source_treewalker_result(src);
+    let result = run_source_bytecode_result(src);
     std::env::remove_var("MIMI_FFI_LIB");
 
     // Should fail with symbol not found (precondition not checked)

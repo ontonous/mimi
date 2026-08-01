@@ -1324,7 +1324,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// warnings so a single broken `comptime` declaration does not
     /// prevent the rest of the file from compiling. (This matches
     /// the v0.28.19 behaviour of warning-on-uncompilable-comptime.)
-fn fold_comptime_items(&mut self, _file: &File) -> MimiResult<()> {
+    fn fold_comptime_items(&mut self, _file: &File) -> MimiResult<()> {
         let file_ref = match &self.comptime_file {
             Some(rc) => rc.as_ref(),
             None => return Ok(()),
@@ -1332,7 +1332,9 @@ fn fold_comptime_items(&mut self, _file: &File) -> MimiResult<()> {
         // v0.33: try Bytecode VM first, fall back to tree-walker on failure.
         let bytecode_result = (|| {
             let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
-            let prog = compiler.compile_for_comptime(file_ref).map_err(|e| e.to_string())?;
+            let prog = compiler
+                .compile_for_comptime(file_ref)
+                .map_err(|e| e.to_string())?;
             let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
             let mut results = std::collections::HashMap::new();
             for item in &file_ref.items {

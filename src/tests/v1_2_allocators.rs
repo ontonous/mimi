@@ -130,7 +130,10 @@ func main() -> string {
     result
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::String("green".to_string()));
+    assert_eq!(
+        run_source_treewalker(src),
+        interp::Value::String("green".to_string())
+    );
 }
 
 #[test]
@@ -143,7 +146,10 @@ func main() -> string {
     }
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::String("system".to_string()));
+    assert_eq!(
+        run_source_treewalker(src),
+        interp::Value::String("system".to_string())
+    );
 }
 
 #[test]
@@ -156,7 +162,10 @@ func main() -> string {
     }
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::String("arena".to_string()));
+    assert_eq!(
+        run_source_treewalker(src),
+        interp::Value::String("arena".to_string())
+    );
 }
 
 #[test]
@@ -169,7 +178,10 @@ func main() -> string {
     }
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::String("bump".to_string()));
+    assert_eq!(
+        run_source_treewalker(src),
+        interp::Value::String("bump".to_string())
+    );
 }
 
 #[test]

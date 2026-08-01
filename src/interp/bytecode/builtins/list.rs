@@ -286,7 +286,9 @@ fn builtin_is_empty(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, I
         Value::String(s) => Ok(Value::Bool(s.is_empty())),
         Value::Record(_, f) => Ok(Value::Bool(f.is_empty())),
         Value::Set(s) => Ok(Value::Bool(s.is_empty())),
-        _ => Err(InterpError::new("is_empty: expected list, string, set, or map")),
+        _ => Err(InterpError::new(
+            "is_empty: expected list, string, set, or map",
+        )),
     }
 }
 
@@ -478,7 +480,9 @@ fn builtin_map_remove(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value,
                 .collect();
             Ok(Value::Set(new_set))
         }
-        _ => Err(InterpError::new("map_remove: expected (map, string key) or (set, value)")),
+        _ => Err(InterpError::new(
+            "map_remove: expected (map, string key) or (set, value)",
+        )),
     }
 }
 

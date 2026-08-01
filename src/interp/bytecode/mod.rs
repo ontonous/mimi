@@ -41,6 +41,7 @@ mod tests {
         main.emit(Op::Ret { ra: r0 });
 
         let prog = BytecodeProgram {
+            extern_names: Vec::new(),
             functions: vec![main],
             entry: 0,
             builtin_names: vec![],
@@ -91,6 +92,7 @@ mod tests {
         main.emit(Op::Ret { ra: r_result });
 
         let prog = BytecodeProgram {
+            extern_names: Vec::new(),
             functions: vec![main],
             entry: 0,
             builtin_names: vec![],
@@ -145,6 +147,7 @@ mod tests {
         main.emit(Op::Ret { ra: r_result });
 
         let prog = BytecodeProgram {
+            extern_names: Vec::new(),
             functions: vec![add_fn, main],
             entry: 1,
             builtin_names: vec![],
@@ -261,6 +264,7 @@ mod tests {
         main.emit(Op::Ret { ra: r_result });
 
         let prog = BytecodeProgram {
+            extern_names: Vec::new(),
             functions: vec![fib, main],
             entry: 1,
             builtin_names: vec![],
@@ -344,6 +348,7 @@ mod tests {
         main.patch_jump_to(jmp_loop, loop_start);
 
         let prog = BytecodeProgram {
+            extern_names: Vec::new(),
             functions: vec![main],
             entry: 0,
             builtin_names: vec![],

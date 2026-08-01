@@ -2257,7 +2257,10 @@ func main() -> i32 {
     0
 }
 "#;
-    assert_eq!(run_source_treewalker_result(src2), Ok(interp::Value::Int(1)));
+    assert_eq!(
+        run_source_treewalker_result(src2),
+        Ok(interp::Value::Int(1))
+    );
 }
 
 #[test]
