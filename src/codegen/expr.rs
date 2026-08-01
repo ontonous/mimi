@@ -1129,16 +1129,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ));
             }
         };
-        let mut interp = crate::interp::Interpreter::new(file_rc.as_ref());
-        // Pre-load any pre-computed `comptime func` results so calls
-        // inside the block resolve to the values already folded by
-        // `fold_comptime_items`.
-        for (name, value) in self.comptime_values.clone() {
-            interp.inject_comptime_result(name, value);
-        }
-        let result = interp
-            .eval_comptime_block(block)
-            .map_err(|e| CompileError::Generic(format!("comptime block fold failed: {}", e)))?;
+        let result = crate::interp::bytecode::compiler::eval_comptime_block_bytecode(
+            file_rc.as_ref(),
+            block,
+            &self.comptime_values,
+        )
+        .map_err(|e| CompileError::Generic(format!("comptime block fold failed: {}", e)))?;
         self.value_to_llvm_const(&result)
     }
 
@@ -1249,23 +1245,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ));
             }
         };
-        let mut interp = crate::interp::Interpreter::new(file_rc.as_ref());
-        for (name, value) in self.comptime_values.clone() {
-            interp.inject_comptime_result(name, value);
-        }
-        // Construct the QuotedAst from the block.
-        let qa = interp.quote_block(block).map_err(|e| {
-            CompileError::Generic(format!("quote! block construction failed: {}", e))
-        })?;
-        // Evaluate it. eval_quoted_ast will look up identifiers in the
-        // interpreter's own scope (which starts empty at this point but
-        // receives the seeded `comptime_results` above). Anything truly
-        // runtime-only will surface as an InterpError.
-        let result = interp.eval_quoted_ast(&qa).map_err(|e| {
+        // Use bytecode VM to evaluate the quote! block (0.33 Phase F).
+        let result = crate::interp::bytecode::compiler::eval_comptime_block_bytecode(
+            file_rc.as_ref(),
+            block,
+            &self.comptime_values,
+        )
+        .map_err(|e| {
             CompileError::Generic(format!(
-                "quote! block fold: ast_eval failed: {} \
-                 (v0.28.21 cannot yet lower this construct to a constant; \
-                  if all variables are comptime-known, refactor to \
+                "quote! block fold failed: {} \
+                 (if all variables are comptime-known, refactor to \
                   `comptime {{ ... }}` so the value can be folded directly)",
                 e
             ))
@@ -1291,13 +1280,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ));
             }
         };
-        let mut interp = crate::interp::Interpreter::new(file_rc.as_ref());
-        for (name, value) in self.comptime_values.clone() {
-            interp.inject_comptime_result(name, value);
-        }
-        let result = interp
-            .eval_expr(inner)
-            .map_err(|e| CompileError::Generic(format!("$() interpolation fold failed: {}", e)))?;
+        // Use bytecode VM to evaluate the $() interpolation (0.33 Phase F).
+        let result = crate::interp::bytecode::compiler::eval_expr_bytecode(
+            file_rc.as_ref(),
+            inner,
+            &self.comptime_values,
+        )
+        .map_err(|e| CompileError::Generic(format!("$() interpolation fold failed: {}", e)))?;
         self.value_to_llvm_const(&result)
     }
 
