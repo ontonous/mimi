@@ -1042,7 +1042,13 @@ impl<'a> BytecodeVM<'a> {
                             return Err(InterpError::new(format!("expected Float, got {}", other)))
                         }
                     };
-                    frame.regs[rd as usize] = Value::Float(a.powf(b));
+                    let r = a.powf(b);
+                    if r.is_nan() || r.is_infinite() {
+                        return Err(InterpError::float_error(
+                            "invalid floating-point result from pow",
+                        ));
+                    }
+                    frame.regs[rd as usize] = Value::Float(r);
                 }
                 Op::BitNot { rd, ra } => {
                     let frame = self.cur_frame_mut();
@@ -1413,23 +1419,33 @@ impl<'a> BytecodeVM<'a> {
                         .push(crate::interp::value::QuotedAst::Continue);
                 }
                 Op::QuoteLambda { spec_idx } => {
-                    let (params, ret, body) = match self.program.functions
+                    let (params, ret, body, free_vars) = match self.program.functions
                         [self.cur_frame().proto_idx as usize]
                         .constants
                         .get(spec_idx as usize)
                     {
-                        Some(ConstValue::LambdaSpec { params, ret, body }) => {
-                            (params.clone(), ret.clone(), body.clone())
-                        }
+                        Some(ConstValue::LambdaSpec {
+                            params,
+                            ret,
+                            body,
+                            free_vars,
+                        }) => (params.clone(), ret.clone(), body.clone(), free_vars.clone()),
                         _ => {
                             return Err(InterpError::new(
                                 "QuoteLambda: constant is not a lambda spec",
                             ))
                         }
                     };
-                    // Capture free variables from quote_captures (populated by
-                    // QuoteCapture ops emitted during quote compilation).
-                    let captured = self.quote_captures.clone();
+                    // Capture only the lambda's free variables from quote_captures
+                    // (prevents cross-quote contamination).
+                    let captured: std::collections::HashMap<String, Value> = free_vars
+                        .iter()
+                        .filter_map(|name| {
+                            self.quote_captures
+                                .get(name)
+                                .map(|v| (name.clone(), v.clone()))
+                        })
+                        .collect();
                     self.quote_stack
                         .push(crate::interp::value::QuotedAst::Lambda {
                             params,

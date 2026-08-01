@@ -815,11 +815,12 @@ pub enum ConstValue {
     Type(crate::ast::Type),
     /// Quoted AST constant (comptime quote! results inlined at compile time).
     QuoteAst(Box<crate::interp::value::QuotedAst>),
-    /// Lambda specification for quote context (params + ret + body).
+    /// Lambda specification for quote context (params + ret + body + free var names).
     LambdaSpec {
         params: Vec<crate::ast::Param>,
         ret: Option<crate::ast::Type>,
         body: crate::ast::Block,
+        free_vars: Vec<String>,
     },
     /// Pattern constant (for QuoteWhileLet).
     Pattern(crate::ast::Pattern),
