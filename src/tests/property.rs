@@ -253,8 +253,11 @@ proptest! {
         if let Ok(toks) = lexer.tokenize() {
             if let Ok(file) = crate::parser::Parser::new(toks).parse_file() {
                 if core::check(&file).is_ok() {
-                    let mut interp = crate::interp::Interpreter::new(&file);
-                    let _ = interp.run();
+                    let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
+                    if let Ok(prog) = compiler.compile_file(&file) {
+                        let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
+                        let _ = vm.run_value();
+                    }
                 }
             }
         }
@@ -268,8 +271,11 @@ proptest! {
         if let Ok(toks) = lexer.tokenize() {
             if let Ok(file) = crate::parser::Parser::new(toks).parse_file() {
                 if core::check(&file).is_ok() {
-                    let mut interp = crate::interp::Interpreter::new(&file);
-                    let _ = interp.run();
+                    let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
+                    if let Ok(prog) = compiler.compile_file(&file) {
+                        let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
+                        let _ = vm.run_value();
+                    }
                 }
             }
         }
@@ -734,8 +740,11 @@ proptest! {
         if let Ok(toks) = lexer.tokenize() {
             if let Ok(file) = crate::parser::Parser::new(toks).parse_file() {
                 if core::check(&file).is_ok() {
-                    let mut interp = crate::interp::Interpreter::new(&file);
-                    let _ = interp.run();
+                    let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
+                    if let Ok(prog) = compiler.compile_file(&file) {
+                        let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
+                        let _ = vm.run_value();
+                    }
                 }
             }
         }

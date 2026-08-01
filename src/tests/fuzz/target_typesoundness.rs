@@ -5,7 +5,7 @@
 //!
 //! Run: `cargo test fuzz::target_typesoundness -- --nocapture`
 
-use crate::{core, interp, lexer, parser};
+use crate::{core, lexer, parser};
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
 
@@ -65,7 +65,7 @@ fn typecheck(src: &str) -> Result<(), String> {
     })
 }
 
-/// Run a program in the interpreter, returning Ok(value_string) if it succeeds.
+/// Run a program in the bytecode VM, returning Ok(value_string) if it succeeds.
 fn interpret(src: &str) -> Result<String, String> {
     let tokens = lexer::Lexer::new(src)
         .tokenize()
@@ -73,9 +73,10 @@ fn interpret(src: &str) -> Result<String, String> {
     let file = parser::Parser::new(tokens)
         .parse_file()
         .map_err(|e| e.message.clone())?;
-    let mut interp = interp::Interpreter::new(&file);
-    interp
-        .run()
+    let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
+    let prog = compiler.compile_file(&file).map_err(|e| e.to_string())?;
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(&prog);
+    vm.run_value()
         .map(|v| format!("{}", v))
         .map_err(|e| e.message().to_string())
 }

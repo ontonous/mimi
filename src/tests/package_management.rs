@@ -261,11 +261,9 @@ fn test_framework_assert_eq_fails() {
         func test_fail() {
             assert_eq(1, 2)
         }
+        func main() -> i32 { 0 }
     "#;
-    let file = parse(src);
-    let mut interp = interp::Interpreter::new(&file);
-    interp.verify_contracts = true;
-    let result = interp.call_named("test_fail", vec![]);
+    let result = bytecode_call_named(src, "test_fail", vec![]);
     assert!(result.is_err(), "assert_eq should fail on unequal values");
 }
 
@@ -320,11 +318,9 @@ fn test_framework_assert_eq() {
         func test_addition() {
             assert_eq(1 + 1, 2)
         }
+        func main() -> i32 { 0 }
     "#;
-    let file = parse(src);
-    let mut interp = interp::Interpreter::new(&file);
-    interp.verify_contracts = true;
-    let result = interp.call_named("test_addition", vec![]);
+    let result = bytecode_call_named(src, "test_addition", vec![]);
     assert!(result.is_ok());
 }
 
@@ -334,11 +330,9 @@ fn test_framework_assert_ne() {
         func test_not_equal() {
             assert_ne(1, 2)
         }
+        func main() -> i32 { 0 }
     "#;
-    let file = parse(src);
-    let mut interp = interp::Interpreter::new(&file);
-    interp.verify_contracts = true;
-    let result = interp.call_named("test_not_equal", vec![]);
+    let result = bytecode_call_named(src, "test_not_equal", vec![]);
     assert!(result.is_ok());
 }
 
@@ -348,11 +342,9 @@ fn test_framework_assert_ne_fails() {
         func test_equal() {
             assert_ne(1, 1)
         }
+        func main() -> i32 { 0 }
     "#;
-    let file = parse(src);
-    let mut interp = interp::Interpreter::new(&file);
-    interp.verify_contracts = true;
-    let result = interp.call_named("test_equal", vec![]);
+    let result = bytecode_call_named(src, "test_equal", vec![]);
     assert!(result.is_err());
 }
 

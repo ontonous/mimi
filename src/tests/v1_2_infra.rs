@@ -47,9 +47,7 @@ func main() -> i32 {
     0
 }
 "#;
-    let file = parse(src);
-    let mut interp = interp::Interpreter::new(&file);
-    let result = interp.call_named("test_assert_eq_works", vec![]);
+    let result = bytecode_call_named(src, "test_assert_eq_works", vec![]);
     assert!(result.is_ok());
 }
 
@@ -65,9 +63,7 @@ func main() -> i32 {
     0
 }
 "#;
-    let file = parse(src);
-    let mut interp = interp::Interpreter::new(&file);
-    let result = interp.call_named("test_failing", vec![]);
+    let result = bytecode_call_named(src, "test_failing", vec![]);
     assert!(result.is_err());
 }
 

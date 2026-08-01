@@ -202,6 +202,11 @@ impl<'a> BytecodeVM<'a> {
         self
     }
 
+    /// Enable or disable FFI contract verification at runtime.
+    pub fn set_verify_ffi(&mut self, verify: bool) {
+        self.ffi_runtime.verify_ffi = verify;
+    }
+
     /// Run the program from the entry point. Returns the exit code.
     pub fn run(&mut self) -> Result<i64, InterpError> {
         let entry = self.program.entry;
@@ -2879,6 +2884,18 @@ impl<'a> BytecodeVM<'a> {
         let result = self.exec_loop();
         self.stop_depth = prev_stop;
         result.map_err(|e| self.enrich_error(e))
+    }
+
+    /// Call a function by name (convenience wrapper for tests).
+    /// Looks up the function index from the program's function table.
+    pub fn call_named(&mut self, name: &str, args: Vec<Value>) -> Result<Value, InterpError> {
+        let idx = self
+            .program
+            .functions
+            .iter()
+            .position(|f| f.name == name)
+            .ok_or_else(|| InterpError::new(format!("function '{}' not found", name)))?;
+        self.call_function(idx as FuncIdx, &args)
     }
 
     /// Call a function with wrap_ok semantics (for `fails` transitions).
