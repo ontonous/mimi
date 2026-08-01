@@ -623,7 +623,13 @@ impl<'a> BytecodeVM<'a> {
                             if b == 0.0 {
                                 return Err(InterpError::div_by_zero());
                             }
-                            Value::Float(a % b)
+                            let r = a % b;
+                            if r.is_nan() || r.is_infinite() {
+                                return Err(InterpError::float_error(
+                                    "invalid floating-point result from %",
+                                ));
+                            }
+                            Value::Float(r)
                         }
                     };
                     frame.regs[rd as usize] = result;
@@ -2029,6 +2035,13 @@ impl<'a> BytecodeVM<'a> {
                                 let args: Vec<Value> = (0..argc)
                                     .map(|i| self.get_reg(args_base + i).clone())
                                     .collect();
+                                if args.len() != params.len() {
+                                    return Err(InterpError::wrong_arg_count(format!(
+                                        "closure expects {} argument(s), got {}",
+                                        params.len(),
+                                        args.len()
+                                    )));
+                                }
                                 let file = self.program.ast.clone().ok_or_else(|| {
                                     InterpError::new("call indirect: no program AST for Closure")
                                 })?;
