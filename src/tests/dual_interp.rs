@@ -1,20 +1,15 @@
 // ============================================================
-// Dual-Interpreter Equivalence Tests (0.31.45)
+// Dual-Interpreter Equivalence Tests (0.33: bytecode correctness)
 //
-// Every test runs the SAME Mimi source through both the
-// AST interpreter and the ResolvedInterpreter, then asserts
-// the results are identical.
-//
-// This validates the ResolvedInterpreter as a production-ready
-// replacement for the AST interpreter (for plain functions).
+// Originally compared AST interpreter vs ResolvedInterpreter (0.31.45).
+// Now validates bytecode VM correctness for plain functions.
 // ============================================================
 
 use super::*;
 
-/// Run dual-path and assert both interpreters produce the same result.
-/// Returns the matched value.
+/// Run source via bytecode VM and return the result.
 fn dual_interp(src: &str) -> interp::Value {
-    assert_dual_path_match(src)
+    run_source(src)
 }
 
 // ============================================================
@@ -436,8 +431,7 @@ func main() -> i32 {
 
 #[test]
 fn dual_interp_ffi_unsupported() {
-    // FFI calls are not yet supported by ResolvedInterpreter.
-    // Use a function name that's definitely not a builtin.
+    // FFI extern calls fail at runtime in bytecode VM (no library loaded).
     let src = r#"
 extern "C" {
     func missing_func(x: i32) -> i32;
@@ -447,22 +441,13 @@ func main() -> i32 {
     return missing_func(42)
 }
 "#;
-    match run_dual_path(src) {
-        DualPathResult::ResolvedUnsupported { .. } => {
-            // Expected: AST succeeded, ResolvedInterpreter returned "unsupported"
-        }
-        DualPathResult::BothFailed { .. } => {
-            // Both failed - expected when FFI library is not available
-            // (AST fails with "MIMI_FFI_LIB not set", Resolved fails with
-            // "Extern callee not supported")
-        }
-        DualPathResult::ResolvedFailed { .. } => {
-            // AST succeeded but Resolved failed with a real error.
-            // This is acceptable: the ResolvedInterpreter correctly rejects
-            // Extern callees, just with a different error message.
-        }
-        other => panic!("Unexpected result: {:?}", other),
-    }
+    let result = run_source_bytecode_result(src);
+    // Bytecode VM should fail (extern not available without FFI library).
+    assert!(
+        result.is_err(),
+        "FFI extern call should fail without library, got: {:?}",
+        result
+    );
 }
 
 // ============================================================
