@@ -311,12 +311,12 @@ pub func filter_negatives(xs: List<i32>) -> List<i32> {
 
 // filter_evens: Filters xs to keep only even values.
 pub func filter_evens(xs: List<i32>) -> List<i32> {
-    filter(xs, fn(fe_x: i32) -> bool { is_even(fe_x) })
+    filter(xs, fn(fe_x: i32) -> bool { fe_x % 2 == 0 })
 }
 
 // filter_odds: Filters xs to keep only odd values.
 pub func filter_odds(xs: List<i32>) -> List<i32> {
-    filter(xs, fn(fo_x: i32) -> bool { is_odd(fo_x) })
+    filter(xs, fn(fo_x: i32) -> bool { fo_x % 2 != 0 })
 }
 
 // map_list: Applies f to each element of xs.
