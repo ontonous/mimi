@@ -5088,6 +5088,10 @@ pub fn eval_comptime_block_bytecode(
     use crate::ast::{AstNodeMeta, AstOrigin};
     use crate::span::Span;
 
+    // Pre-process: resolve QuoteInterpolate nodes by unwrapping them.
+    // In a compile-time evaluation context, $(expr) means "evaluate expr".
+    let resolved_block = resolve_quote_interpolations(block);
+
     // Build a synthetic file: original items + a wrapper function.
     let mut synth = file.clone();
     let wrapper = FuncDef {
@@ -5099,7 +5103,7 @@ pub fn eval_comptime_block_bytecode(
         pub_: false,
         params: vec![],
         ret: None,
-        body: block.clone(),
+        body: resolved_block,
         where_clause: vec![],
         generics: vec![],
         effects: vec![],
@@ -5110,7 +5114,7 @@ pub fn eval_comptime_block_bytecode(
         has_ensures: false,
         has_mutate_params: false,
     };
-    synth.items.push(Item::Func(wrapper));
+    synth.items.push(Item::Func(wrapper.clone()));
 
     // Inject pre-computed comptime values as constants.
     for (name, value) in comptime_values {
@@ -5128,9 +5132,48 @@ pub fn eval_comptime_block_bytecode(
     }
 
     let mut compiler = BytecodeCompiler::new();
-    let prog = compiler
-        .compile_file(&synth)
-        .map_err(|e| format!("comptime compile: {}", e))?;
+    let prog = match compiler.compile_file(&synth) {
+        Ok(p) => p,
+        Err(_) => {
+            // Retry with filtered file: only comptime funcs + types + consts.
+            // Non-comptime functions may have unsupported constructs (ast_eval, quote!).
+            let mut filtered = File {
+                sources: file.sources.clone(),
+                imports: Vec::new(),
+                items: Vec::new(),
+                implicit_single: file.implicit_single,
+            };
+            for item in &file.items {
+                match item {
+                    Item::Func(f) if f.is_comptime => filtered.items.push(item.clone()),
+                    Item::Type(_)
+                    | Item::Const { .. }
+                    | Item::Trait(_)
+                    | Item::Impl(_)
+                    | Item::Cap(_) => filtered.items.push(item.clone()),
+                    _ => {}
+                }
+            }
+            filtered.items.push(Item::Func(wrapper));
+            for (name, value) in comptime_values {
+                let const_expr = value_to_const_expr(value);
+                filtered.items.push(Item::Const {
+                    meta: AstNodeMeta::inherited(
+                        Span::UNKNOWN,
+                        AstOrigin::Desugared("bytecode.comptime_const"),
+                    ),
+                    name: name.clone(),
+                    ty: None,
+                    value: const_expr,
+                    pub_: false,
+                });
+            }
+            let mut compiler2 = BytecodeCompiler::new();
+            compiler2
+                .compile_file(&filtered)
+                .map_err(|e| format!("comptime compile (filtered): {}", e))?
+        }
+    };
     let fidx = prog
         .function_index("__comptime_eval")
         .ok_or_else(|| "comptime wrapper function not found".to_string())?;
@@ -5161,5 +5204,91 @@ fn value_to_const_expr(value: &crate::interp::Value) -> Expr {
         Value::Unit => Expr::Literal(Lit::Unit),
         // Complex values: encode as string literal (best-effort for comptime seeding).
         other => Expr::Literal(Lit::String(format!("{}", other))),
+    }
+}
+
+/// Resolve QuoteInterpolate nodes in a block by unwrapping them.
+/// In a compile-time evaluation context, `$(expr)` means "evaluate expr directly".
+/// This transforms `[$(seven() + 1)]` into `[seven() + 1]` so the bytecode
+/// compiler can evaluate it as a regular expression.
+fn resolve_quote_interpolations(block: &Block) -> Block {
+    block.iter().map(resolve_stmt_interpolations).collect()
+}
+
+fn resolve_stmt_interpolations(stmt: &Stmt) -> Stmt {
+    match stmt.unlocated() {
+        Stmt::Expr(expr) => Stmt::Expr(resolve_expr_interpolations(expr)),
+        Stmt::Let {
+            pat,
+            ty,
+            init,
+            mut_,
+            ref_,
+        } => Stmt::Let {
+            pat: pat.clone(),
+            ty: ty.clone(),
+            init: init.as_ref().map(resolve_expr_interpolations),
+            mut_: *mut_,
+            ref_: *ref_,
+        },
+        Stmt::If { cond, then_, else_ } => Stmt::If {
+            cond: resolve_expr_interpolations(cond),
+            then_: resolve_quote_interpolations(then_),
+            else_: else_.as_ref().map(resolve_quote_interpolations),
+        },
+        Stmt::Return(expr) => Stmt::Return(expr.as_ref().map(resolve_expr_interpolations)),
+        // Other statements pass through unchanged.
+        _ => stmt.clone(),
+    }
+}
+
+fn resolve_expr_interpolations(expr: &Expr) -> Expr {
+    match expr.unlocated() {
+        // Unwrap $(expr) → expr
+        Expr::QuoteInterpolate(inner) => resolve_expr_interpolations(inner),
+        // Recurse into binary ops
+        Expr::Binary(op, l, r) => Expr::Binary(
+            *op,
+            Box::new(resolve_expr_interpolations(l)),
+            Box::new(resolve_expr_interpolations(r)),
+        ),
+        // Recurse into unary ops
+        Expr::Unary(op, inner) => Expr::Unary(*op, Box::new(resolve_expr_interpolations(inner))),
+        // Recurse into function calls (callee is an Expr)
+        Expr::Call(callee, args) => Expr::Call(
+            Box::new(resolve_expr_interpolations(callee)),
+            args.iter().map(resolve_expr_interpolations).collect(),
+        ),
+        // Recurse into field access
+        Expr::Field(obj, field) => {
+            Expr::Field(Box::new(resolve_expr_interpolations(obj)), field.clone())
+        }
+        // Recurse into index
+        Expr::Index(obj, idx) => Expr::Index(
+            Box::new(resolve_expr_interpolations(obj)),
+            Box::new(resolve_expr_interpolations(idx)),
+        ),
+        // Recurse into cast
+        Expr::Cast(inner, ty) => {
+            Expr::Cast(Box::new(resolve_expr_interpolations(inner)), ty.clone())
+        }
+        // Recurse into if-expr
+        Expr::If { cond, then_, else_ } => Expr::If {
+            cond: Box::new(resolve_expr_interpolations(cond)),
+            then_: resolve_quote_interpolations(then_),
+            else_: else_.as_ref().map(resolve_quote_interpolations),
+        },
+        // Recurse into block expr
+        Expr::Block(block) => Expr::Block(resolve_quote_interpolations(block)),
+        // Recurse into tuple
+        Expr::Tuple(elems) => Expr::Tuple(
+            elems.iter().map(resolve_expr_interpolations).collect(),
+        ),
+        // Recurse into list literal
+        Expr::List(elems) => Expr::List(
+            elems.iter().map(resolve_expr_interpolations).collect(),
+        ),
+        // Leaf nodes and everything else: pass through.
+        _ => expr.clone(),
     }
 }
