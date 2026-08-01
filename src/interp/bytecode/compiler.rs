@@ -5072,3 +5072,94 @@ fn surface_type_to_var_type(ty: &Type) -> VarType {
         _ => VarType::Unknown,
     }
 }
+
+/// Evaluate a comptime block using the bytecode VM (0.33 Phase F: codegen comptime migration).
+///
+/// Wraps the block in a synthetic `func __comptime_eval() -> T { <block> }`,
+/// compiles the file, and runs the function. Pre-computed comptime values are
+/// injected as top-level constants so calls inside the block resolve correctly.
+///
+/// Used by codegen to replace the tree-walker dependency for inline comptime evaluation.
+pub fn eval_comptime_block_bytecode(
+    file: &File,
+    block: &Block,
+    comptime_values: &HashMap<String, crate::interp::Value>,
+) -> Result<crate::interp::Value, String> {
+    use crate::ast::{AstNodeMeta, AstOrigin};
+    use crate::span::Span;
+
+    // Build a synthetic file: original items + a wrapper function.
+    let mut synth = file.clone();
+    let wrapper = FuncDef {
+        meta: AstNodeMeta::inherited(
+            Span::UNKNOWN,
+            AstOrigin::Desugared("bytecode.comptime_eval"),
+        ),
+        name: "__comptime_eval".to_string(),
+        pub_: false,
+        params: vec![],
+        ret: None,
+        body: block.clone(),
+        where_clause: vec![],
+        generics: vec![],
+        effects: vec![],
+        is_comptime: false,
+        is_async: false,
+        extern_abi: None,
+        has_requires: false,
+        has_ensures: false,
+        has_mutate_params: false,
+    };
+    synth.items.push(Item::Func(wrapper));
+
+    // Inject pre-computed comptime values as constants.
+    for (name, value) in comptime_values {
+        let const_expr = value_to_const_expr(value);
+        synth.items.push(Item::Const {
+            meta: AstNodeMeta::inherited(
+                Span::UNKNOWN,
+                AstOrigin::Desugared("bytecode.comptime_const"),
+            ),
+            name: name.clone(),
+            ty: None,
+            value: const_expr,
+            pub_: false,
+        });
+    }
+
+    let mut compiler = BytecodeCompiler::new();
+    let prog = compiler
+        .compile_file(&synth)
+        .map_err(|e| format!("comptime compile: {}", e))?;
+    let fidx = prog
+        .function_index("__comptime_eval")
+        .ok_or_else(|| "comptime wrapper function not found".to_string())?;
+    let mut vm = super::vm::BytecodeVM::new(&prog);
+    vm.verify_contracts = false;
+    vm.call_function(fidx, &[])
+        .map_err(|e| format!("comptime eval: {}", e.message()))
+}
+
+/// Evaluate a single expression using the bytecode VM (for $() interpolation).
+pub fn eval_expr_bytecode(
+    file: &File,
+    expr: &Expr,
+    comptime_values: &HashMap<String, crate::interp::Value>,
+) -> Result<crate::interp::Value, String> {
+    let block: Block = vec![Stmt::Expr(expr.clone()).into()];
+    eval_comptime_block_bytecode(file, &block, comptime_values)
+}
+
+/// Convert a runtime Value back to a const Expr for injection as a top-level constant.
+fn value_to_const_expr(value: &crate::interp::Value) -> Expr {
+    use crate::interp::Value;
+    match value {
+        Value::Int(n) => Expr::Literal(Lit::Int(*n)),
+        Value::Float(f) => Expr::Literal(Lit::Float(*f)),
+        Value::Bool(b) => Expr::Literal(Lit::Bool(*b)),
+        Value::String(s) => Expr::Literal(Lit::String(s.clone())),
+        Value::Unit => Expr::Literal(Lit::Unit),
+        // Complex values: encode as string literal (best-effort for comptime seeding).
+        other => Expr::Literal(Lit::String(format!("{}", other))),
+    }
+}
