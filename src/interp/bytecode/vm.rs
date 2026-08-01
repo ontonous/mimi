@@ -49,6 +49,9 @@ struct Frame {
     /// Flow-transition context for this frame (None for ordinary calls).
     /// Used to absorb runtime panics into a Fault value (v0.29.12).
     flow_tx: Option<FlowTxCtx>,
+    /// Pre-call parameter snapshots for `old(x)` in ensures contracts.
+    /// Only populated when the function has_ensures (avoids allocation otherwise).
+    old_snapshots: Vec<Value>,
 }
 
 /// Context captured when a flow transition frame is entered. Used to
@@ -379,6 +382,13 @@ impl<'a> BytecodeVM<'a> {
             self.check_requires(func_idx, &args)?;
         }
 
+        // Snapshot params for old(x) in ensures (before args is consumed).
+        let old_snapshots = if self.verify_contracts && proto.has_ensures {
+            args.clone()
+        } else {
+            Vec::new()
+        };
+
         let regs = match self.free_regs.pop() {
             Some(mut buf) => {
                 buf.clear();
@@ -407,6 +417,7 @@ impl<'a> BytecodeVM<'a> {
             fault_reg: None,
             mutate_writebacks: None,
             flow_tx: None,
+            old_snapshots,
         });
         Ok(())
     }
@@ -2838,6 +2849,25 @@ impl<'a> BytecodeVM<'a> {
         is_early_return: bool,
         stop: usize,
     ) -> Result<Option<Value>, InterpError> {
+        // Collect contract args BEFORE mem::replace (ra may alias a param register).
+        let contract_args = if self.verify_contracts && !is_early_return {
+            let frame = self.cur_frame();
+            let proto = &self.program.functions[frame.proto_idx as usize];
+            if proto.has_ensures {
+                Some((
+                    frame.proto_idx,
+                    (0..proto.param_count as usize)
+                        .map(|i| frame.regs[i].clone())
+                        .collect::<Vec<_>>(),
+                    frame.old_snapshots.clone(),
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Move value out of register (frame is about to be popped — no clone needed).
         let mut v = std::mem::replace(self.get_reg_mut(ra), Value::Unit);
         let frame = self.cur_frame();
@@ -2860,16 +2890,9 @@ impl<'a> BytecodeVM<'a> {
         }
 
         // Contract post-condition check (0.33 Phase F).
-        // Only for normal returns (not `?` early-return, not wrap_ok Ok-wrapping).
-        if self.verify_contracts && !is_early_return && !wrap_ok {
-            let frame = self.cur_frame();
-            let proto_idx = frame.proto_idx;
-            let proto = &self.program.functions[proto_idx as usize];
-            if proto.has_ensures {
-                let args: Vec<Value> = (0..proto.param_count as usize)
-                    .map(|i| frame.regs[i].clone())
-                    .collect();
-                self.check_ensures(proto_idx, &args, &v)?;
+        if let Some((proto_idx, args, old_snapshots)) = contract_args {
+            if !wrap_ok {
+                self.check_ensures(proto_idx, &args, &old_snapshots, &v)?;
             }
         }
 
@@ -2932,6 +2955,7 @@ impl<'a> BytecodeVM<'a> {
         &mut self,
         func_idx: FuncIdx,
         args: &[Value],
+        old_snapshots: &[Value],
         result: &Value,
     ) -> Result<(), InterpError> {
         let proto = &self.program.functions[func_idx as usize];
@@ -2957,8 +2981,8 @@ impl<'a> BytecodeVM<'a> {
         for (name, val) in proto.param_names.iter().zip(args.iter()) {
             let _ = interp.scope_env.bind(name, val.clone());
         }
-        // Bind old snapshots for old(x) access.
-        for (name, val) in proto.param_names.iter().zip(args.iter()) {
+        // Bind pre-call snapshots for old(x) access.
+        for (name, val) in proto.param_names.iter().zip(old_snapshots.iter()) {
             let _ = interp.scope_env.bind(&format!("old_{}", name), val.clone());
         }
         // Bind result.

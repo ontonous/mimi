@@ -923,9 +923,15 @@ fn builtin_json_get_element(
             match serde_json::from_str::<serde_json::Value>(json_str) {
                 Ok(json) => match json.get(*idx as usize) {
                     Some(v) => Ok(Value::String(v.to_string())),
-                    None => Ok(Value::String(String::new())),
+                    None => Err(InterpError::new(format!(
+                        "json_get_element: index {} out of bounds",
+                        idx
+                    ))),
                 },
-                Err(_) => Ok(Value::String(String::new())),
+                Err(e) => Err(InterpError::new(format!(
+                    "json_get_element parse error: {}",
+                    e
+                ))),
             }
         }
         _ => Err(InterpError::new("json_get_element expects (string, int)")),
@@ -936,8 +942,8 @@ fn builtin_json_has_key(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Valu
     match (&args[0], &args[1]) {
         (Value::String(json_str), Value::String(key)) => {
             match serde_json::from_str::<serde_json::Value>(json_str) {
-                Ok(json) => Ok(Value::Bool(json.get(key).is_some())),
-                Err(_) => Ok(Value::Bool(false)),
+                Ok(json) => Ok(Value::Bool(json.get(key.as_str()).is_some())),
+                Err(e) => Err(InterpError::new(format!("json_has_key parse error: {}", e))),
             }
         }
         _ => Err(InterpError::new("json_has_key expects (string, string)")),
@@ -952,9 +958,12 @@ fn builtin_json_array_length(
         Value::String(json_str) => match serde_json::from_str::<serde_json::Value>(json_str) {
             Ok(json) => match json.as_array() {
                 Some(arr) => Ok(Value::Int(arr.len() as i64)),
-                None => Ok(Value::Int(0)),
+                None => Err(InterpError::new("json_array_length: value is not an array")),
             },
-            Err(_) => Ok(Value::Int(0)),
+            Err(e) => Err(InterpError::new(format!(
+                "json_array_length parse error: {}",
+                e
+            ))),
         },
         _ => Err(InterpError::new("json_array_length expects a string")),
     }

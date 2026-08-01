@@ -24,7 +24,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
         name: "substring",
         arity: 3,
         category: BuiltinCategory::String,
-        func: builtin_str_substring,
+        func: builtin_substring_method,
     });
     reg.register(BuiltinDesc {
         name: "str_split",
@@ -282,10 +282,29 @@ fn builtin_str_substring(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
     match (&args[0], &args[1], &args[2]) {
         (Value::String(s), Value::Int(start), Value::Int(end)) => {
             let chars: Vec<char> = s.chars().collect();
+            let si = (*start as usize).min(chars.len());
+            let ei = (*end as usize).min(chars.len());
+            if si > ei {
+                return Err(InterpError::new("str_substring: start > end"));
+            }
+            Ok(Value::String(chars[si..ei].iter().collect()))
+        }
+        _ => Err(InterpError::new("str_substring expects (string, int, int)")),
+    }
+}
+
+/// Method version: .substring() errors on out-of-bounds (tree-walker parity).
+fn builtin_substring_method(
+    _vm: &mut BytecodeVM<'_>,
+    args: &[Value],
+) -> Result<Value, InterpError> {
+    match (&args[0], &args[1], &args[2]) {
+        (Value::String(s), Value::Int(start), Value::Int(end)) => {
+            let chars: Vec<char> = s.chars().collect();
             let si = *start as usize;
             let ei = *end as usize;
             if si > ei {
-                return Err(InterpError::new("str_substring: start > end"));
+                return Err(InterpError::new("substring: start > end"));
             }
             if ei > chars.len() {
                 return Err(InterpError::new(format!(
@@ -296,7 +315,7 @@ fn builtin_str_substring(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
             }
             Ok(Value::String(chars[si..ei].iter().collect()))
         }
-        _ => Err(InterpError::new("str_substring expects (string, int, int)")),
+        _ => Err(InterpError::new("substring expects (string, int, int)")),
     }
 }
 
