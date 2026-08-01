@@ -35,6 +35,8 @@ pub struct BytecodeCompiler {
     actor_names: std::collections::HashSet<String>,
     /// Known extern function names (for clear error messages).
     extern_names: std::collections::HashSet<String>,
+    /// Ordered extern names for Op::CallExtern indexing (0.33 Phase D).
+    extern_name_order: Vec<String>,
     /// Known capability names (for cap value construction).
     cap_names: std::collections::HashSet<String>,
     /// Capability components: cap_name → [component_names] (for combined caps).
@@ -287,6 +289,7 @@ impl BytecodeCompiler {
             flow_names: std::collections::HashSet::new(),
             actor_names: std::collections::HashSet::new(),
             extern_names: std::collections::HashSet::new(),
+            extern_name_order: Vec::new(),
             cap_names: std::collections::HashSet::new(),
             cap_components: HashMap::new(),
             type_hints: HashMap::new(),
@@ -340,16 +343,12 @@ impl BytecodeCompiler {
                 let idx = self.functions.len() as FuncIdx;
                 self.func_table.insert(f.name.clone(), idx);
                 // Collect default parameter values and param names for call-site handling.
-                let defaults: Vec<Option<Expr>> = f
-                    .params
-                    .iter()
-                    .map(|p| p.default_value.clone())
-                    .collect();
+                let defaults: Vec<Option<Expr>> =
+                    f.params.iter().map(|p| p.default_value.clone()).collect();
                 if defaults.iter().any(|d| d.is_some()) {
                     self.func_defaults.insert(f.name.clone(), defaults);
                 }
-                let param_names: Vec<String> =
-                    f.params.iter().map(|p| p.name.clone()).collect();
+                let param_names: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
                 self.func_param_names.insert(f.name.clone(), param_names);
                 // Push placeholder.
                 self.functions
@@ -396,10 +395,12 @@ impl BytecodeCompiler {
                 self.actor_names.insert(a.name.clone());
                 self.actor_defs.insert(a.name.clone(), a.clone());
             }
-            // Collect extern function names (for clear error on call).
+            // Collect extern function names (for call dispatch + indexing).
             if let Item::ExternBlock(block) = item {
                 for f in &block.funcs {
-                    self.extern_names.insert(f.name.clone());
+                    if self.extern_names.insert(f.name.clone()) {
+                        self.extern_name_order.push(f.name.clone());
+                    }
                 }
             }
             // Collect capability names (for cap value construction).
@@ -583,6 +584,7 @@ impl BytecodeCompiler {
             functions: std::mem::take(&mut self.functions),
             entry,
             builtin_names: std::mem::take(&mut self.builtin_names),
+            extern_names: std::mem::take(&mut self.extern_name_order),
             actor_defs: std::mem::take(&mut self.actor_defs),
             flow_defs: std::mem::take(&mut self.flow_defs),
             flow_transition_funcs: std::mem::take(&mut self.flow_transition_funcs),
@@ -623,12 +625,11 @@ impl BytecodeCompiler {
             }
             Type::Located { ty: inner, .. } => self.resolve_type(inner),
             Type::Option(inner) => Type::Option(Box::new(self.resolve_type(inner))),
-            Type::Result(ok, err) => {
-                Type::Result(Box::new(self.resolve_type(ok)), Box::new(self.resolve_type(err)))
-            }
-            Type::Tuple(elems) => {
-                Type::Tuple(elems.iter().map(|e| self.resolve_type(e)).collect())
-            }
+            Type::Result(ok, err) => Type::Result(
+                Box::new(self.resolve_type(ok)),
+                Box::new(self.resolve_type(err)),
+            ),
+            Type::Tuple(elems) => Type::Tuple(elems.iter().map(|e| self.resolve_type(e)).collect()),
             Type::Ref(lt, inner) => Type::Ref(lt.clone(), Box::new(self.resolve_type(inner))),
             Type::RefMut(lt, inner) => Type::RefMut(lt.clone(), Box::new(self.resolve_type(inner))),
             Type::Shared(inner) => Type::Shared(Box::new(self.resolve_type(inner))),
@@ -651,16 +652,12 @@ impl BytecodeCompiler {
             if let Item::Func(f) = item {
                 let idx = self.functions.len() as FuncIdx;
                 self.func_table.insert(f.name.clone(), idx);
-                let defaults: Vec<Option<Expr>> = f
-                    .params
-                    .iter()
-                    .map(|p| p.default_value.clone())
-                    .collect();
+                let defaults: Vec<Option<Expr>> =
+                    f.params.iter().map(|p| p.default_value.clone()).collect();
                 if defaults.iter().any(|d| d.is_some()) {
                     self.func_defaults.insert(f.name.clone(), defaults);
                 }
-                let param_names: Vec<String> =
-                    f.params.iter().map(|p| p.name.clone()).collect();
+                let param_names: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
                 self.func_param_names.insert(f.name.clone(), param_names);
                 self.functions
                     .push(FunctionProto::new(f.name.clone(), f.params.len() as u16));
@@ -688,7 +685,11 @@ impl BytecodeCompiler {
                         .split(" + ")
                         .map(|s| s.trim().to_string())
                         .collect();
-                    if parts.len() > 1 { parts } else { vec![cap.name.clone(), combined.clone()] }
+                    if parts.len() > 1 {
+                        parts
+                    } else {
+                        vec![cap.name.clone(), combined.clone()]
+                    }
                 } else {
                     vec![cap.name.clone()]
                 };
@@ -728,6 +729,7 @@ impl BytecodeCompiler {
             functions: std::mem::take(&mut self.functions),
             entry,
             builtin_names: std::mem::take(&mut self.builtin_names),
+            extern_names: std::mem::take(&mut self.extern_name_order),
             actor_defs: std::mem::take(&mut self.actor_defs),
             flow_defs: std::mem::take(&mut self.flow_defs),
             flow_transition_funcs: std::mem::take(&mut self.flow_transition_funcs),
@@ -891,7 +893,8 @@ impl BytecodeCompiler {
                 }
                 Stmt::Return(expr) => {
                     // Execute deferred blocks in LIFO order before returning.
-                    let defers: Vec<Block> = fc.defer_scopes.last().map_or(Vec::new(), |s| s.clone());
+                    let defers: Vec<Block> =
+                        fc.defer_scopes.last().map_or(Vec::new(), |s| s.clone());
                     if let Some(s) = fc.defer_scopes.last_mut() {
                         s.clear();
                     }
@@ -1236,7 +1239,9 @@ impl BytecodeCompiler {
                 if self.cap_names.contains(name.as_str()) {
                     let rd = fc.proto.alloc_reg();
                     // Store components as comma-separated string for VM to parse.
-                    let components = self.cap_components.get(name.as_str())
+                    let components = self
+                        .cap_components
+                        .get(name.as_str())
                         .map(|c| c.join(","))
                         .unwrap_or_else(|| name.clone());
                     let name_idx = fc.proto.add_const(ConstValue::Str(components));
@@ -1567,11 +1572,17 @@ impl BytecodeCompiler {
                     let r_type = fc.proto.alloc_reg();
                     // Move json arg into args_base (may already be there).
                     if r_json != args_base {
-                        fc.emit(Op::Mov { rd: args_base, rs: r_json });
+                        fc.emit(Op::Mov {
+                            rd: args_base,
+                            rs: r_json,
+                        });
                     }
                     // Load type string into r_type (args_base + 1).
                     let type_idx = fc.proto.add_const(ConstValue::Str(type_str));
-                    fc.emit(Op::LoadConst { rd: r_type, idx: type_idx });
+                    fc.emit(Op::LoadConst {
+                        rd: r_type,
+                        idx: type_idx,
+                    });
                     // Call from_json_typed(json_str, type_str).
                     let rd = fc.proto.alloc_reg();
                     if let Some(&bidx) = self.builtin_table.get("from_json_typed") {
@@ -1706,6 +1717,7 @@ impl BytecodeCompiler {
             functions: temp_functions,
             entry: temp_idx,
             builtin_names: self.builtin_names.clone(),
+            extern_names: self.extern_name_order.clone(),
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -2270,16 +2282,9 @@ impl BytecodeCompiler {
             let is_known = self.builtin_table.contains_key(name.as_str())
                 || self.func_table.contains_key(name.as_str())
                 || self.variant_names.contains(name.as_str())
+                || self.extern_names.contains(name.as_str())
                 || fc.lookup_var(name).is_some();
             if !is_known {
-                // Provide a specific error for extern functions.
-                if self.extern_names.contains(name.as_str()) {
-                    return Err(InterpError::new(format!(
-                        "extern function '{}' is not supported in bytecode VM \
-                         (FFI calls require the codegen backend: mimi build)",
-                        name
-                    )));
-                }
                 return Err(InterpError::new(format!("undefined function '{}'", name)));
             }
         }
@@ -2287,11 +2292,15 @@ impl BytecodeCompiler {
         // ── Named argument reordering + default parameter filling ──
         // Resolve the effective argument list before compiling.
         let effective_args: Vec<Expr> = if let Expr::Ident(name) = callee.unlocated() {
-            let has_named = args.iter().any(|a| matches!(a.unlocated(), Expr::NamedArg(_, _)));
+            let has_named = args
+                .iter()
+                .any(|a| matches!(a.unlocated(), Expr::NamedArg(_, _)));
             let param_names = self.func_param_names.get(name.as_str());
             let defaults = self.func_defaults.get(name.as_str());
 
-            if has_named || (defaults.is_some() && args.len() < param_names.map(|p| p.len()).unwrap_or(0)) {
+            if has_named
+                || (defaults.is_some() && args.len() < param_names.map(|p| p.len()).unwrap_or(0))
+            {
                 if let Some(pnames) = param_names {
                     let mut reordered: Vec<Option<Expr>> = vec![None; pnames.len()];
                     // Place positional args first.
@@ -2315,14 +2324,15 @@ impl BytecodeCompiler {
                     if let Some(defaults) = defaults {
                         for (i, slot) in reordered.iter_mut().enumerate() {
                             if slot.is_none() {
-                                if let Some(default_expr) = defaults.get(i).and_then(|d| d.clone()) {
+                                if let Some(default_expr) = defaults.get(i).and_then(|d| d.clone())
+                                {
                                     *slot = Some(default_expr);
                                 }
                             }
                         }
                     }
                     // Collect filled args (stop at first None — trailing defaults only).
-                    reordered.into_iter().filter_map(|a| a).collect()
+                    reordered.into_iter().flatten().collect()
                 } else {
                     args.to_vec()
                 }
@@ -2378,6 +2388,17 @@ impl BytecodeCompiler {
                 fc.emit(Op::CallBuiltin {
                     rd,
                     builtin: bidx,
+                    args_base,
+                    argc: effective_args.len() as u16,
+                });
+                return Ok(rd);
+            }
+            // Extern (FFI) function — resolved at runtime through the shared
+            // FfiRuntime (0.33 Phase D FFI forwarding).
+            if let Some(pos) = self.extern_name_order.iter().position(|n| n == name) {
+                fc.emit(Op::CallExtern {
+                    rd,
+                    extern_idx: pos as u16,
                     args_base,
                     argc: effective_args.len() as u16,
                 });
@@ -3616,7 +3637,10 @@ impl BytecodeCompiler {
                 // Compile the deref target.
                 let r_target = self.compile_expr(fc, inner)?;
                 // Emit SharedSet to write through the reference.
-                fc.emit(Op::SharedSet { ra: r_target, rb: r_val });
+                fc.emit(Op::SharedSet {
+                    ra: r_target,
+                    rb: r_val,
+                });
                 Ok(())
             }
             _ => Err(InterpError::new("bytecode: unsupported assignment target")),

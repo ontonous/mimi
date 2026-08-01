@@ -327,6 +327,16 @@ pub enum Op {
         args_base: Reg,
         argc: u16,
     },
+    /// Call extern (FFI) function: rd = extern(idx)(args[0..argc]).
+    /// The index refers to BytecodeProgram::extern_names; the name is
+    /// resolved against the shared `FfiRuntime` table at runtime
+    /// (0.33 Phase D: FFI forwarding).
+    CallExtern {
+        rd: Reg,
+        extern_idx: u16,
+        args_base: Reg,
+        argc: u16,
+    },
     /// Indirect call through a closure value in register `callee`:
     /// rd = ra(args[0..argc])
     CallIndirect {
@@ -757,6 +767,9 @@ pub struct BytecodeProgram {
     pub entry: FuncIdx,
     /// Builtin function name → BuiltinIdx mapping.
     pub builtin_names: Vec<String>,
+    /// Extern (FFI) function names, indexed by Op::CallExtern::extern_idx
+    /// (0.33 Phase D FFI forwarding).
+    pub extern_names: Vec<String>,
     /// Actor definitions (for spawn at runtime).
     pub actor_defs: std::collections::HashMap<String, crate::ast::ActorDef>,
     /// Flow definitions (for transition dispatch).

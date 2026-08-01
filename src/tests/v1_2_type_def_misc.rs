@@ -22,7 +22,10 @@ func main() -> string {
     }
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::String("hello".to_string()));
+    assert_eq!(
+        run_source_treewalker(src),
+        interp::Value::String("hello".to_string())
+    );
 }
 
 #[test]
@@ -48,7 +51,10 @@ func main() -> string {
     type_name(x)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::String("i32".to_string()));
+    assert_eq!(
+        run_source_treewalker(src),
+        interp::Value::String("i32".to_string())
+    );
 }
 
 #[test]
@@ -59,7 +65,10 @@ func main() -> string {
     type_name(x)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::String("bool".to_string()));
+    assert_eq!(
+        run_source_treewalker(src),
+        interp::Value::String("bool".to_string())
+    );
 }
 
 #[test]
@@ -70,7 +79,10 @@ func main() -> string {
     type_name(x)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::String("string".to_string()));
+    assert_eq!(
+        run_source_treewalker(src),
+        interp::Value::String("string".to_string())
+    );
 }
 
 #[test]
@@ -81,7 +93,10 @@ func main() -> string {
     type_name(x)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::String("list".to_string()));
+    assert_eq!(
+        run_source_treewalker(src),
+        interp::Value::String("list".to_string())
+    );
 }
 
 #[test]
@@ -94,7 +109,10 @@ func main() -> string {
     type_name(x)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::String("Red".to_string()));
+    assert_eq!(
+        run_source_treewalker(src),
+        interp::Value::String("Red".to_string())
+    );
 }
 
 #[test]
@@ -110,7 +128,10 @@ func main() -> string {
     type_name(p)
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::String("Point".to_string()));
+    assert_eq!(
+        run_source_treewalker(src),
+        interp::Value::String("Point".to_string())
+    );
 }
 
 #[test]
@@ -182,7 +203,10 @@ func main() -> string {
     }
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::String("i32".to_string()));
+    assert_eq!(
+        run_source_treewalker(src),
+        interp::Value::String("i32".to_string())
+    );
 }
 
 #[test]
@@ -369,7 +393,10 @@ func main() -> string {
     greeting()
 }
 "#;
-    assert_eq!(run_source_treewalker(src), interp::Value::String("hello".to_string()));
+    assert_eq!(
+        run_source_treewalker(src),
+        interp::Value::String("hello".to_string())
+    );
 }
 
 // === T403: Derive Macro Tests ===

@@ -8,7 +8,9 @@
 
 use super::instr::*;
 use super::registry::{self, BuiltinRegistry};
+use crate::ffi::FfiContract;
 use crate::interp::error::InterpError;
+use crate::interp::ffi_runtime::{FfiClosureRunner, FfiRuntime};
 use crate::interp::value::Value;
 
 /// A single function activation frame.
@@ -72,6 +74,9 @@ pub struct BytecodeVM<'a> {
     /// Reusable register buffers (frame regs Vec capacity is preserved across
     /// calls, so deep recursion does not re-malloc per frame).
     free_regs: Vec<Vec<Value>>,
+    /// Shared FFI execution context (0.33 Phase D FFI forwarding): extern
+    /// function tables, loaded shared libraries, contract verification.
+    ffi_runtime: FfiRuntime,
 }
 
 const MAX_DEPTH: usize = 768;
@@ -91,6 +96,24 @@ impl<'a> BytecodeVM<'a> {
             cli_args: Vec::new(),
             exit_requested: None,
             free_regs: Vec::new(),
+            // Shared FFI execution context (0.33 Phase D FFI forwarding).
+            // Built from the program AST when available (the compiler always
+            // stores it); hand-assembled test programs fall back to empty
+            // tables. Contract verification is disabled until the bytecode
+            // engine implements contract-expression eval (see
+            // FfiClosureRunner::eval_contract_expr).
+            ffi_runtime: match program.ast.as_ref() {
+                Some(file) => {
+                    let mut rt = FfiRuntime::from_file(file);
+                    rt.verify_ffi = false;
+                    rt
+                }
+                None => FfiRuntime::from_parts(
+                    std::collections::HashMap::new(),
+                    std::collections::HashMap::new(),
+                    std::collections::HashMap::new(),
+                ),
+            },
         }
     }
 
@@ -989,6 +1012,29 @@ impl<'a> BytecodeVM<'a> {
                         }
                     }
                 }
+                Op::CallExtern {
+                    rd,
+                    extern_idx,
+                    args_base,
+                    argc,
+                } => {
+                    let args: Vec<Value> = (0..argc)
+                        .map(|i| self.get_reg(args_base + i).clone())
+                        .collect();
+                    let result = self.call_extern_idx(extern_idx, args);
+                    match result {
+                        Ok(v) => self.set_reg(rd, v),
+                        Err(e) => {
+                            if let Some(handler_pc) =
+                                self.stack.last_mut().and_then(|f| f.fault_pc.take())
+                            {
+                                self.cur_frame_mut().pc = handler_pc;
+                            } else {
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
                 Op::Ret { ra } => {
                     let v = self.do_return(ra, false, stop)?;
                     if let Some(v) = v {
@@ -1286,7 +1332,10 @@ impl<'a> BytecodeVM<'a> {
                             match &*guard {
                                 Value::Record(_, fields) => {
                                     fields.get(&field_name).cloned().ok_or_else(|| {
-                                        InterpError::new(format!("record has no field '{}'", field_name))
+                                        InterpError::new(format!(
+                                            "record has no field '{}'",
+                                            field_name
+                                        ))
                                     })?
                                 }
                                 other => {
@@ -1298,21 +1347,22 @@ impl<'a> BytecodeVM<'a> {
                             }
                         }
                         // Auto-unwrap Variant payload (Some(record), Ok(record)).
-                        Value::Variant(_, payload) if payload.len() == 1 => {
-                            match &payload[0] {
-                                Value::Record(_, fields) => {
-                                    fields.get(&field_name).cloned().ok_or_else(|| {
-                                        InterpError::new(format!("record has no field '{}'", field_name))
-                                    })?
-                                }
-                                other => {
-                                    return Err(InterpError::new(format!(
-                                        "record get: variant payload is not a Record, got {}",
-                                        other
-                                    )))
-                                }
+                        Value::Variant(_, payload) if payload.len() == 1 => match &payload[0] {
+                            Value::Record(_, fields) => {
+                                fields.get(&field_name).cloned().ok_or_else(|| {
+                                    InterpError::new(format!(
+                                        "record has no field '{}'",
+                                        field_name
+                                    ))
+                                })?
                             }
-                        }
+                            other => {
+                                return Err(InterpError::new(format!(
+                                    "record get: variant payload is not a Record, got {}",
+                                    other
+                                )))
+                            }
+                        },
                         other => {
                             return Err(InterpError::new(format!(
                                 "record get: expected Record or Actor, got {}",
@@ -1625,7 +1675,8 @@ impl<'a> BytecodeVM<'a> {
                         _ => "unknown_cap".to_string(),
                     };
                     // Components stored as comma-separated string.
-                    let components: Vec<String> = cap_str.split(',').map(|s| s.to_string()).collect();
+                    let components: Vec<String> =
+                        cap_str.split(',').map(|s| s.to_string()).collect();
                     self.set_reg(rd, Value::Cap(components));
                 }
                 Op::Ok { rd, ra } => {
@@ -1906,15 +1957,20 @@ impl<'a> BytecodeVM<'a> {
                             let result: Result<Value, InterpError> = match method_name.as_str() {
                                 "remove" => {
                                     let elem = self.get_reg(args_base + 1).clone();
-                                    let new_set: Vec<Value> = items.iter()
+                                    let new_set: Vec<Value> = items
+                                        .iter()
                                         .filter(|v| !crate::interp::values_equal(v, &elem))
-                                        .cloned().collect();
+                                        .cloned()
+                                        .collect();
                                     Ok(Value::Set(new_set))
                                 }
                                 "insert" => {
                                     let elem = self.get_reg(args_base + 1).clone();
                                     let mut new_set = items.clone();
-                                    if !new_set.iter().any(|v| crate::interp::values_equal(v, &elem)) {
+                                    if !new_set
+                                        .iter()
+                                        .any(|v| crate::interp::values_equal(v, &elem))
+                                    {
                                         new_set.push(elem);
                                     }
                                     Ok(Value::Set(new_set))
@@ -1922,7 +1978,9 @@ impl<'a> BytecodeVM<'a> {
                                 "is_empty" => Ok(Value::Bool(items.is_empty())),
                                 "contains" => {
                                     let elem = self.get_reg(args_base + 1).clone();
-                                    Ok(Value::Bool(items.iter().any(|v| crate::interp::values_equal(v, &elem))))
+                                    Ok(Value::Bool(
+                                        items.iter().any(|v| crate::interp::values_equal(v, &elem)),
+                                    ))
                                 }
                                 "size" | "len" => Ok(Value::Int(items.len() as i64)),
                                 "to_list" => Ok(Value::List(items.clone())),
@@ -1946,7 +2004,8 @@ impl<'a> BytecodeVM<'a> {
                                     Err(InterpError::new("called unwrap() on None"))
                                 }
                                 ("Err", "unwrap") | ("Err", "expect") => {
-                                    let msg = payload.first()
+                                    let msg = payload
+                                        .first()
                                         .map(|v| format!("called unwrap() on Err({})", v))
                                         .unwrap_or_else(|| "called unwrap() on Err".to_string());
                                     Err(InterpError::new(msg))
@@ -2157,6 +2216,51 @@ impl<'a> BytecodeVM<'a> {
             }
             _ => Err(InterpError::new("call_closure: expected BytecodeClosure")),
         }
+    }
+
+    // ── FFI forwarding (0.33 Phase D) ────────────────────────
+
+    /// Execute an extern (FFI) function call through the shared FfiRuntime.
+    /// The VM itself acts as the closure-execution engine (`self_as_runner`).
+    fn call_extern_idx(&mut self, extern_idx: u16, args: Vec<Value>) -> Result<Value, InterpError> {
+        let name = self
+            .program
+            .extern_names
+            .get(extern_idx as usize)
+            .cloned()
+            .ok_or_else(|| InterpError::new(format!("extern index {} out of range", extern_idx)))?;
+        let extern_func = self
+            .ffi_runtime
+            .extern_funcs
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| InterpError::new(format!("extern function '{}' not found", name)))?;
+        let contract = self
+            .ffi_runtime
+            .ffi_contracts
+            .get(&name)
+            .cloned()
+            .unwrap_or_else(|| FfiContract::from_extern(&extern_func));
+        let runner_ptr = Self::vm_as_runner(self);
+        self.ffi_runtime
+            .call_extern_with_runner_ptr(&extern_func, &contract, args, runner_ptr)
+            .map_err(|e| InterpError::new(e.to_string()))
+    }
+
+    /// Convert `&mut self` into the raw engine pointer used by `FfiRuntime`.
+    ///
+    /// SAFETY: the returned pointer erases the `'a` lifetime to `'static`.
+    /// Sound ONLY because the pointer is used synchronously inside a single
+    /// C call that completes before `self`'s borrow ends (CRITICAL #4
+    /// analysis in ffi_runtime.rs). Never stored or dereferenced after
+    /// `call_extern_with_runner_ptr` returns. Isolated in this function so
+    /// no borrow of `self` escapes into `self.ffi_runtime`.
+    fn vm_as_runner(this: &mut Self) -> *mut (dyn FfiClosureRunner + 'static) {
+        let runner: &mut (dyn FfiClosureRunner + '_) = this;
+        let ptr: *mut (dyn FfiClosureRunner + '_) = runner as *mut (dyn FfiClosureRunner + '_);
+        // SAFETY: same-size transmute (fat pointer to fat pointer); lifetime
+        // erasure is sound per the function-level SAFETY contract.
+        unsafe { std::mem::transmute(ptr) }
     }
 
     /// Call a function by index with the given arguments.
@@ -2388,13 +2492,11 @@ impl<'a> BytecodeVM<'a> {
             Expr::Literal(Lit::String(s)) => Some(Value::String(s.clone())),
             Expr::Literal(Lit::Unit) => Some(Value::Unit),
             // Negative literals: -42, -3.14
-            Expr::Unary(UnOp::Neg, inner) => {
-                match Self::eval_init_expr(inner.unlocated())? {
-                    Value::Int(n) => Some(Value::Int(-n)),
-                    Value::Float(f) => Some(Value::Float(-f)),
-                    _ => None,
-                }
-            }
+            Expr::Unary(UnOp::Neg, inner) => match Self::eval_init_expr(inner.unlocated())? {
+                Value::Int(n) => Some(Value::Int(-n)),
+                Value::Float(f) => Some(Value::Float(-f)),
+                _ => None,
+            },
             // List literal: [expr, expr, ...]
             Expr::List(elems) => {
                 let mut items = Vec::new();
@@ -2466,7 +2568,9 @@ impl<'a> BytecodeVM<'a> {
                 crate::ast::Type::Name(n, _) if n == "f64" => Value::Float(0.0),
                 crate::ast::Type::Name(n, _) if n == "bool" => Value::Bool(false),
                 crate::ast::Type::Name(n, _) if n == "string" => Value::String(String::new()),
-                crate::ast::Type::Name(n, _) if n == "List" || n == "Vec" => Value::List(Vec::new()),
+                crate::ast::Type::Name(n, _) if n == "List" || n == "Vec" => {
+                    Value::List(Vec::new())
+                }
                 crate::ast::Type::Name(n, _) if n == "Map" => {
                     Value::Record(None, std::collections::HashMap::new())
                 }
@@ -2566,5 +2670,39 @@ fn value_to_f64(v: &Value) -> Result<f64, InterpError> {
             "value_to_f64: expected numeric type, got {:?}",
             other
         ))),
+    }
+}
+
+/// FfiClosureRunner implementation: the bytecode VM can execute Mimi
+/// closures (BytecodeClosure) from C callback trampolines, and provides the
+/// program File for cross-thread callback evaluation.
+impl<'a> FfiClosureRunner for BytecodeVM<'a> {
+    fn ffi_file(&self) -> &crate::ast::File {
+        self.program
+            .ast
+            .as_ref()
+            .map(|f| f.as_ref() as &crate::ast::File)
+            .expect("BytecodeVM FFI: program AST is required (compiler always sets it)")
+    }
+
+    fn apply_closure_ffi(&mut self, closure: &Value, args: Vec<Value>) -> Result<Value, String> {
+        self.call_closure(closure, &args).map_err(|e| e.to_string())
+    }
+
+    fn ffi_bytecode_program(
+        &self,
+    ) -> Option<*const crate::interp::bytecode::instr::BytecodeProgram> {
+        Some(self.program as *const crate::interp::bytecode::instr::BytecodeProgram)
+    }
+
+    fn eval_contract_expr(
+        &mut self,
+        _expr: &crate::ast::Expr,
+        _result_binding: Option<&Value>,
+    ) -> Result<Value, String> {
+        Err(
+            "FFI contract evaluation is not supported in the bytecode VM yet (0.33 Phase D+)"
+                .to_string(),
+        )
     }
 }

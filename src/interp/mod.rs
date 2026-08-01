@@ -9,6 +9,7 @@ pub mod error;
 mod eval;
 mod ffi;
 mod ffi_call;
+pub(crate) mod ffi_runtime;
 mod ops;
 mod pattern;
 pub(crate) mod pool;
@@ -103,8 +104,6 @@ pub struct Interpreter<'a> {
     arena_depth: usize,
     /// Whether to verify contracts at runtime
     pub verify_contracts: bool,
-    /// Whether to verify FFI contracts (requires/ensures) at runtime
-    pub verify_ffi: bool,
     /// Trait definitions: trait_name -> TraitDef
     trait_defs: HashMap<String, TraitDef>,
     /// Trait implementations: type_name -> trait_name -> list of FuncDef methods
@@ -113,10 +112,9 @@ pub struct Interpreter<'a> {
     /// Normal source input is rejected during parsing; this prevents the
     /// interpreter's derive expansion from becoming a second fail-open path.
     derive_expansion_error: Option<InterpError>,
-    /// Extern function declarations: func_name -> ExternFunc
-    extern_funcs: HashMap<String, ExternFunc>,
-    /// Pre-computed FFI contracts for extern functions.
-    ffi_contracts: HashMap<String, FfiContract>,
+    /// Extern function declarations + FFI execution context (shared with the
+    /// bytecode VM since 0.33 Phase D: see `ffi_runtime.rs`).
+    pub(crate) ffi_runtime: ffi_runtime::FfiRuntime,
     /// Type definitions for reflection: type_name -> (fields, variants)
     type_defs: HashMap<String, TypeDef>,
     /// Pre-computed results for comptime functions (no-arg functions evaluated at startup)
@@ -130,8 +128,6 @@ pub struct Interpreter<'a> {
     /// 0.31.24: Current function's return type for error conversion via From protocol.
     /// Used by eval_try to determine if error type conversion is needed.
     current_return_type: Option<Type>,
-    /// Loaded shared libraries: (lib_path, Library handle)
-    loaded_libs: Vec<(String, libloading::Library)>,
     /// Default allocator kind (set by --allocator CLI flag)
     pub default_allocator: AllocatorKind,
     /// Current loop control flow action (break/continue signal)
@@ -785,6 +781,11 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Test/diagnostic access to CheckedProgram function directory.
+    /// Enable/disable FFI contract verification (tests, fuzz harness).
+    pub(crate) fn set_verify_ffi(&mut self, verify: bool) {
+        self.ffi_runtime.verify_ffi = verify;
+    }
+
     pub(crate) fn resolved_function_arity(&self, qualified_name: &str) -> Option<usize> {
         self.resolved_functions
             .as_ref()
@@ -1288,7 +1289,7 @@ impl<'a> Interpreter<'a> {
                 &mut variant_field_positions,
                 &mut failure_variants,
             );
-            Self::collect_caps(item, &mut cap_defs);
+            ffi_runtime::FfiRuntime::collect_caps(item, &mut cap_defs);
         }
         // Register built-in Result/Option constructors
         constructors.insert("Ok".to_string(), 1);
@@ -1305,11 +1306,11 @@ impl<'a> Interpreter<'a> {
         let mut type_defs: HashMap<String, TypeDef> = HashMap::new();
         for item in &file.items {
             Self::collect_traits(item, &mut trait_defs, &mut type_impls);
-            Self::collect_type_defs(item, &mut type_defs);
+            ffi_runtime::FfiRuntime::collect_type_defs(item, &mut type_defs);
         }
         // Build contracts after type_defs are populated so record type names are known
         for item in &file.items {
-            Self::collect_extern_funcs(
+            ffi_runtime::FfiRuntime::collect_extern_funcs(
                 item,
                 &mut extern_funcs,
                 &mut ffi_contracts,
@@ -1317,6 +1318,8 @@ impl<'a> Interpreter<'a> {
                 &type_defs,
             );
         }
+        let ffi_runtime =
+            ffi_runtime::FfiRuntime::from_parts(extern_funcs, ffi_contracts, type_defs.clone());
         // Expand built-in derive macros. Source-parsed files have already been
         // validated, but programmatically constructed ASTs must also fail closed.
         let derive_expansion_error =
@@ -1353,18 +1356,15 @@ impl<'a> Interpreter<'a> {
             arenas: Vec::new(),
             arena_depth: 0,
             verify_contracts: true,
-            verify_ffi: true,
             trait_defs,
             type_impls,
             derive_expansion_error,
-            extern_funcs,
-            ffi_contracts,
+            ffi_runtime,
             type_defs,
             comptime_results: HashMap::new(),
             in_comptime: false,
             gensym_counter: 0,
             current_return_type: None,
-            loaded_libs: Vec::new(),
             default_allocator: AllocatorKind::System,
             loop_action: None,
             early_return: None,
@@ -1692,93 +1692,6 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn collect_extern_funcs(
-        item: &Item,
-        out: &mut HashMap<String, ExternFunc>,
-        contracts: &mut HashMap<String, FfiContract>,
-        cap_defs: &HashMap<String, Vec<String>>,
-        type_defs: &HashMap<String, TypeDef>,
-    ) {
-        let cap_names: std::collections::HashSet<String> = cap_defs.keys().cloned().collect();
-        let record_type_names: std::collections::HashSet<String> = type_defs
-            .iter()
-            .filter(|(_, td)| matches!(td.kind, TypeDefKind::Record(_)))
-            .map(|(name, _)| name.clone())
-            .collect();
-        let repr_c_record_names: std::collections::HashSet<String> = type_defs
-            .iter()
-            .filter(|(_, td)| td.attributes.contains(&TypeAttribute::ReprC))
-            .map(|(name, _)| name.clone())
-            .collect();
-        match item {
-            Item::ExternBlock(block) => {
-                let no_panic = block.no_panic;
-                for func in &block.funcs {
-                    let mut f = func.clone();
-                    // Propagate block-level no_panic to each function
-                    if no_panic {
-                        f.no_panic = true;
-                    }
-                    out.insert(f.name.clone(), f);
-                    contracts.insert(
-                        func.name.clone(),
-                        FfiContract::from_extern_with_caps_repr(
-                            func,
-                            &cap_names,
-                            &record_type_names,
-                            &repr_c_record_names,
-                        ),
-                    );
-                }
-            }
-            Item::Module(m) => {
-                for inner in &m.items {
-                    Self::collect_extern_funcs(inner, out, contracts, cap_defs, type_defs);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn collect_type_defs(item: &Item, out: &mut HashMap<String, TypeDef>) {
-        match item {
-            Item::Type(t) => {
-                out.insert(t.name.clone(), t.clone());
-            }
-            Item::Actor(actor) => {
-                let actor_type_def = TypeDef {
-                    meta: AstNodeMeta::inherited(
-                        actor.meta.span,
-                        AstOrigin::RuntimeSystem("interp.actor_type"),
-                    ),
-                    name: actor.name.clone(),
-                    pub_: actor.pub_,
-                    kind: TypeDefKind::Record(
-                        actor
-                            .fields
-                            .iter()
-                            .map(|f| Field {
-                                meta: f.meta,
-                                name: f.name.clone(),
-                                ty: f.ty.clone(),
-                            })
-                            .collect(),
-                    ),
-                    generics: Vec::new(),
-                    derives: Vec::new(),
-                    attributes: Vec::new(),
-                };
-                out.insert(actor.name.clone(), actor_type_def);
-            }
-            Item::Module(m) => {
-                for inner in &m.items {
-                    Self::collect_type_defs(inner, out);
-                }
-            }
-            _ => {}
-        }
-    }
-
     /// Expand built-in derive macros for types
     fn expand_derives(
         type_defs: &HashMap<String, TypeDef>,
@@ -1925,34 +1838,6 @@ impl<'a> Interpreter<'a> {
             Item::Module(m) => {
                 for inner in &m.items {
                     Self::collect_traits(inner, trait_defs, type_impls);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn collect_caps(item: &Item, out: &mut HashMap<String, Vec<String>>) {
-        match item {
-            Item::Cap(cap) => {
-                let components = if let Some(ref combined) = cap.combined_with {
-                    // Parse "A + B" format
-                    let parts: Vec<String> = combined
-                        .split(" + ")
-                        .map(|s| s.trim().to_string())
-                        .collect();
-                    if parts.len() > 1 {
-                        parts
-                    } else {
-                        vec![cap.name.clone(), combined.clone()]
-                    }
-                } else {
-                    vec![cap.name.clone()]
-                };
-                out.insert(cap.name.clone(), components);
-            }
-            Item::Module(m) => {
-                for inner in &m.items {
-                    Self::collect_caps(inner, out);
                 }
             }
             _ => {}
@@ -2306,6 +2191,33 @@ impl<'a> Interpreter<'a> {
 
     fn pop_scope(&mut self) {
         self.scope_env.pop_scope();
+    }
+
+    /// Evaluate a contract expression (FFI requires/ensures) on behalf of the
+    /// shared `FfiRuntime`. Used via the `FfiClosureRunner` trait so the
+    /// Bytecode VM can forward the same contract evaluation through its own
+    /// engine. `result_binding` (ensures) binds `result` in a fresh scope.
+    pub(in crate::interp) fn eval_contract_expr(
+        &mut self,
+        expr: &Expr,
+        result_binding: Option<&Value>,
+    ) -> Result<Value, String> {
+        if let Some(result) = result_binding {
+            self.scope_env.push_scope();
+            let r = self
+                .scope_env
+                .env
+                .last_mut()
+                .map(|env| {
+                    env.insert("result".to_string(), result.clone());
+                })
+                .ok_or_else(|| "no scope after push (impossible)".to_string())
+                .and_then(|_| self.eval_expr(expr).map_err(|e| e.to_string()));
+            self.scope_env.pop_scope();
+            r
+        } else {
+            self.eval_expr(expr).map_err(|e| e.to_string())
+        }
     }
 
     /// Run a closure inside a freshly pushed scope, guaranteeing that the

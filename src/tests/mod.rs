@@ -355,7 +355,8 @@ pub(crate) fn run_source(src: &str) -> interp::Value {
         .compile_file(&file)
         .expect("bytecode compile failed in run_source");
     let mut vm = interp::bytecode::BytecodeVM::new(&prog);
-    vm.run_value().expect("bytecode run_value failed in run_source")
+    vm.run_value()
+        .expect("bytecode run_value failed in run_source")
 }
 
 /// TC-C1: run Bytecode VM with stdout capture enabled.
@@ -401,12 +402,6 @@ pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
     vm.run_value().map_err(|e| e.message().to_string())
 }
 
-/// Bytecode VM has no fork isolation; this is an alias for run_source_result.
-/// Kept for API compatibility with FFI tests that will be migrated in Phase D'.
-pub(crate) fn run_source_result_no_fork(src: &str) -> Result<interp::Value, String> {
-    run_source_result(src)
-}
-
 // ===================== Tree-walker fallback helpers (0.33 retirement) =====================
 // These keep the tree-walker path available for tests that bytecode doesn't
 // support yet (FFI extern calls, quote!, etc.). They will be deleted in Phase X.
@@ -435,18 +430,6 @@ pub(crate) fn run_source_treewalker_result(src: &str) -> Result<interp::Value, S
         .parse_file()
         .map_err(|e| e.message)?;
     let mut interp = interp::Interpreter::new(&file);
-    interp.verify_contracts = true;
-    interp.run().map_err(|e| e.message().to_string())
-}
-
-/// Tree-walker with fork isolation disabled. Fallback for FFI pointer-return tests.
-pub(crate) fn run_source_treewalker_result_no_fork(src: &str) -> Result<interp::Value, String> {
-    let tokens = lexer::Lexer::new(src).tokenize()?;
-    let file = parser::Parser::new(tokens)
-        .parse_file()
-        .map_err(|e| e.message)?;
-    let mut interp = interp::Interpreter::new(&file);
-    interp.verify_ffi = false;
     interp.verify_contracts = true;
     interp.run().map_err(|e| e.message().to_string())
 }
@@ -1331,7 +1314,11 @@ mod bytecode_equiv_smoke {
         let (tw_val, tw_out) = run_source_with_stdout(src);
         let (bc_val, bc_out) = run_source_bytecode_with_stdout(src);
         assert_eq!(tw_val, bc_val, "return value mismatch");
-        assert_eq!(tw_out, bc_out, "stdout mismatch: tw={:?} bc={:?}", tw_out, bc_out);
+        assert_eq!(
+            tw_out, bc_out,
+            "stdout mismatch: tw={:?} bc={:?}",
+            tw_out, bc_out
+        );
     }
 
     #[test]
@@ -1420,7 +1407,10 @@ mod bytecode_batch_probe {
                 if tw_val == bc_val {
                     Ok(())
                 } else {
-                    Err(format!("{}: VALUE MISMATCH\n  tw={:?}\n  bc={:?}", name, tw_val, bc_val))
+                    Err(format!(
+                        "{}: VALUE MISMATCH\n  tw={:?}\n  bc={:?}",
+                        name, tw_val, bc_val
+                    ))
                 }
             }
             (Ok(tw_val), Err(_)) => Err(format!("{}: bytecode PANICKED, tw={:?}", name, tw_val)),
@@ -1442,8 +1432,11 @@ mod bytecode_batch_probe {
                 if tw_out != bc_out {
                     errs.push(format!("  stdout: tw={:?} bc={:?}", tw_out, bc_out));
                 }
-                if errs.is_empty() { Ok(()) }
-                else { Err(format!("{}: MISMATCH\n{}", name, errs.join("\n"))) }
+                if errs.is_empty() {
+                    Ok(())
+                } else {
+                    Err(format!("{}: MISMATCH\n{}", name, errs.join("\n")))
+                }
             }
             (Ok(_), Err(_)) => Err(format!("{}: bytecode PANICKED", name)),
             (Err(_), Ok(_)) => Err(format!("{}: tree-walker PANICKED", name)),
@@ -1584,9 +1577,15 @@ mod bytecode_batch_probe {
 
         // Stdout probes
         let stdout_cases: Vec<(&str, &str)> = vec![
-            ("stdout_print", r#"func main() -> i32 { print("hello"); 0 }"#),
+            (
+                "stdout_print",
+                r#"func main() -> i32 { print("hello"); 0 }"#,
+            ),
             ("stdout_print_int", "func main() -> i32 { print(42); 0 }"),
-            ("stdout_multi", r#"func main() -> i32 { print("a"); print("b"); 0 }"#),
+            (
+                "stdout_multi",
+                r#"func main() -> i32 { print("a"); print("b"); 0 }"#,
+            ),
         ];
         for (name, src) in &stdout_cases {
             match probe_stdout(name, src) {

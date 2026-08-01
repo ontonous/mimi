@@ -377,9 +377,9 @@ fn value_to_json(v: &Value) -> serde_json::Value {
             // Sort elements for deterministic JSON output (matches Display ordering).
             let mut sorted: Vec<String> = s.iter().map(|v| format!("{}", v)).collect();
             sorted.sort();
-            let json_elems: Vec<serde_json::Value> = s.iter().map(value_to_json).collect();
             // Re-order JSON elements to match sorted Display order.
-            let mut indexed: Vec<(String, serde_json::Value)> = s.iter()
+            let mut indexed: Vec<(String, serde_json::Value)> = s
+                .iter()
                 .map(|v| (format!("{}", v), value_to_json(v)))
                 .collect();
             indexed.sort_by(|a, b| a.0.cmp(&b.0));
@@ -501,7 +501,10 @@ fn coerce_json_to_type(
         "unit" | "()" => Ok(Value::Unit),
         _ => {
             // Parameterized types: List<T>, Option<T>, Result<T,E>, Set<T>, (T1,T2,...)
-            if let Some(inner) = type_str.strip_prefix("List<").and_then(|s| s.strip_suffix('>')) {
+            if let Some(inner) = type_str
+                .strip_prefix("List<")
+                .and_then(|s| s.strip_suffix('>'))
+            {
                 match val {
                     Value::List(items) => {
                         let converted: Result<Vec<Value>, _> = items
@@ -514,7 +517,7 @@ fn coerce_json_to_type(
                 }
             } else if type_str.starts_with("Map<") {
                 // Map<K, V> — parse key and value types, coerce JSON object values.
-                let inner = &type_str[4..type_str.len()-1]; // strip "Map<" and ">"
+                let inner = &type_str[4..type_str.len() - 1]; // strip "Map<" and ">"
                 let parts = split_type_args(inner);
                 if parts.len() == 2 {
                     let val_type = &parts[1];
@@ -526,12 +529,18 @@ fn coerce_json_to_type(
                             }
                             Ok(Value::Record(name, out))
                         }
-                        _ => Err(InterpError::new(format!("expected object for Map, got {}", val))),
+                        _ => Err(InterpError::new(format!(
+                            "expected object for Map, got {}",
+                            val
+                        ))),
                     }
                 } else {
                     Ok(val)
                 }
-            } else if let Some(inner) = type_str.strip_prefix("Option<").and_then(|s| s.strip_suffix('>')) {
+            } else if let Some(inner) = type_str
+                .strip_prefix("Option<")
+                .and_then(|s| s.strip_suffix('>'))
+            {
                 match val {
                     Value::Unit => Ok(Value::Variant("None".into(), vec![])),
                     val => {
@@ -541,29 +550,33 @@ fn coerce_json_to_type(
                 }
             } else if type_str.starts_with("Result<") {
                 // Parse Result<T, E>
-                let inner = &type_str[7..type_str.len()-1]; // strip "Result<" and ">"
+                let inner = &type_str[7..type_str.len() - 1]; // strip "Result<" and ">"
                 let parts = split_type_args(inner);
                 if parts.len() == 2 {
                     let (ok_type, err_type) = (&parts[0], &parts[1]);
                     match val {
                         Value::Variant(name, payload) if name == "Ok" => {
-                            let converted = payload.into_iter()
+                            let converted = payload
+                                .into_iter()
                                 .map(|v| coerce_json_to_type(v, ok_type, record_fields))
                                 .collect::<Result<Vec<_>, _>>()?;
                             Ok(Value::Variant("Ok".into(), converted))
                         }
                         Value::Variant(name, payload) if name == "Err" => {
-                            let converted = payload.into_iter()
+                            let converted = payload
+                                .into_iter()
                                 .map(|v| coerce_json_to_type(v, err_type, record_fields))
                                 .collect::<Result<Vec<_>, _>>()?;
                             Ok(Value::Variant("Err".into(), converted))
                         }
                         Value::Record(_, ref fields) if fields.len() == 1 => {
                             if let Some(v) = fields.get("Ok") {
-                                let ok_val = coerce_json_to_type(v.clone(), ok_type, record_fields)?;
+                                let ok_val =
+                                    coerce_json_to_type(v.clone(), ok_type, record_fields)?;
                                 Ok(Value::Variant("Ok".into(), vec![ok_val]))
                             } else if let Some(v) = fields.get("Err") {
-                                let err_val = coerce_json_to_type(v.clone(), err_type, record_fields)?;
+                                let err_val =
+                                    coerce_json_to_type(v.clone(), err_type, record_fields)?;
                                 Ok(Value::Variant("Err".into(), vec![err_val]))
                             } else {
                                 let ok_val = coerce_json_to_type(val, ok_type, record_fields)?;
@@ -578,34 +591,45 @@ fn coerce_json_to_type(
                 } else {
                     Ok(val) // can't parse, return as-is
                 }
-            } else if let Some(inner) = type_str.strip_prefix("Set<").and_then(|s| s.strip_suffix('>')) {
+            } else if let Some(inner) = type_str
+                .strip_prefix("Set<")
+                .and_then(|s| s.strip_suffix('>'))
+            {
                 match val {
                     Value::List(items) | Value::Set(items) => {
                         let mut out = Vec::new();
                         for item in items {
                             let v = coerce_json_to_type(item, inner, record_fields)?;
-                            if !out.iter().any(|e: &Value| crate::interp::value::values_equal(e, &v)) {
+                            if !out
+                                .iter()
+                                .any(|e: &Value| crate::interp::value::values_equal(e, &v))
+                            {
                                 out.push(v);
                             }
                         }
                         Ok(Value::Set(out))
                     }
-                    other => Err(InterpError::new(format!("expected list/set for Set, got {}", other))),
+                    other => Err(InterpError::new(format!(
+                        "expected list/set for Set, got {}",
+                        other
+                    ))),
                 }
             } else if type_str.starts_with('(') && type_str.ends_with(')') {
                 // Tuple type: (T1, T2, ...)
-                let inner = &type_str[1..type_str.len()-1];
+                let inner = &type_str[1..type_str.len() - 1];
                 let parts = split_type_args(inner);
                 match val {
                     Value::List(items) if items.len() == parts.len() => {
-                        let converted: Result<Vec<Value>, _> = items.into_iter()
+                        let converted: Result<Vec<Value>, _> = items
+                            .into_iter()
                             .zip(parts.iter())
                             .map(|(item, ty)| coerce_json_to_type(item, ty, record_fields))
                             .collect();
                         Ok(Value::Tuple(converted?))
                     }
                     Value::Tuple(items) if items.len() == parts.len() => {
-                        let converted: Result<Vec<Value>, _> = items.into_iter()
+                        let converted: Result<Vec<Value>, _> = items
+                            .into_iter()
                             .zip(parts.iter())
                             .map(|(item, ty)| coerce_json_to_type(item, ty, record_fields))
                             .collect();
@@ -613,7 +637,9 @@ fn coerce_json_to_type(
                     }
                     _ => Err(InterpError::new(format!(
                         "expected {}-element list/tuple for {}, got {}",
-                        parts.len(), type_str, val
+                        parts.len(),
+                        type_str,
+                        val
                     ))),
                 }
             } else {
@@ -633,9 +659,7 @@ fn coerce_json_to_type(
                         Ok(Value::Record(Some(type_str.to_string()), fields))
                     }
                     // Enum unit variant: JSON string → Variant(tag, []).
-                    Value::String(s) => {
-                        Ok(Value::Variant(s, vec![]))
-                    }
+                    Value::String(s) => Ok(Value::Variant(s, vec![])),
                     _ => Ok(val),
                 }
             }
@@ -650,8 +674,14 @@ fn split_type_args(s: &str) -> Vec<String> {
     let mut current = String::new();
     for ch in s.chars() {
         match ch {
-            '<' | '(' => { depth += 1; current.push(ch); }
-            '>' | ')' => { depth -= 1; current.push(ch); }
+            '<' | '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            '>' | ')' => {
+                depth -= 1;
+                current.push(ch);
+            }
             ',' if depth == 0 => {
                 parts.push(current.trim().to_string());
                 current = String::new();
@@ -1194,9 +1224,7 @@ fn builtin_read_file_partial(
             }
             Err(e) => Err(InterpError::new(format!("read_file_partial: {}", e))),
         },
-        _ => Err(InterpError::new(
-            "read_file_partial expects (string, int)",
-        )),
+        _ => Err(InterpError::new("read_file_partial expects (string, int)")),
     }
 }
 

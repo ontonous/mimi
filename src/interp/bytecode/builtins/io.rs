@@ -55,11 +55,7 @@ pub fn register(reg: &mut BuiltinRegistry) {
 }
 
 fn builtin_println(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let s = args
-        .iter()
-        .map(print_display)
-        .collect::<Vec<_>>()
-        .join(" ");
+    let s = args.iter().map(print_display).collect::<Vec<_>>().join(" ");
     vm.append_stdout(&s);
     vm.append_stdout("\n");
     println!("{}", s);
@@ -67,11 +63,7 @@ fn builtin_println(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, Int
 }
 
 fn builtin_print(vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
-    let s = args
-        .iter()
-        .map(print_display)
-        .collect::<Vec<_>>()
-        .join(" ");
+    let s = args.iter().map(print_display).collect::<Vec<_>>().join(" ");
     vm.append_stdout(&s);
     print!("{}", s);
     Ok(Value::Unit)

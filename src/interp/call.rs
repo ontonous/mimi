@@ -2,6 +2,27 @@ use super::*;
 use crate::ffi::FfiContract;
 
 impl<'a> Interpreter<'a> {
+    /// Convert `&mut self` into the raw engine pointer used by `FfiRuntime`
+    /// for the duration of one synchronous extern call.
+    ///
+    /// SAFETY: the returned pointer erases the `'a` lifetime to `'static`.
+    /// This is sound ONLY because the pointer is used synchronously inside a
+    /// single C call that runs to completion before `self`'s borrow ends
+    /// (see CRITICAL #4 analysis in ffi_runtime.rs). The caller must never
+    /// store or dereference the pointer after `call_extern_with_runner_ptr`
+    /// returns. The cast is isolated in this function so no borrow of `self`
+    /// escapes into `self.ffi_runtime` (self-referential borrow).
+    fn self_as_runner(
+        this: &mut Self,
+    ) -> *mut (dyn crate::interp::ffi_runtime::FfiClosureRunner + 'static) {
+        let runner: &mut (dyn crate::interp::ffi_runtime::FfiClosureRunner + '_) = this;
+        let ptr: *mut (dyn crate::interp::ffi_runtime::FfiClosureRunner + '_) =
+            runner as *mut (dyn crate::interp::ffi_runtime::FfiClosureRunner + '_);
+        // SAFETY: same-size transmute (fat pointer to fat pointer); the
+        // lifetime erasure is sound per the function-level SAFETY contract.
+        unsafe { std::mem::transmute(ptr) }
+    }
+
     pub(crate) fn call_func(
         &mut self,
         func: &FuncDef,
@@ -292,21 +313,38 @@ impl<'a> Interpreter<'a> {
 
         // Handle extern function calls via their FFI contract (wrapper layer).
         if let Some(resolved) = self.resolved_extern_funcs.as_ref() {
-            if resolved.contains(name) && !self.extern_funcs.contains_key(name) {
+            if resolved.contains(name) && !self.ffi_runtime.extern_funcs.contains_key(name) {
                 return Err(InterpError::new(format!(
                     "extern function '{}' is present in CheckedProgram but missing from runtime FFI index",
                     name
                 )));
             }
         }
-        if let Some(extern_func) = self.extern_funcs.get(name).cloned() {
+        if let Some(extern_func) = self.ffi_runtime.extern_funcs.get(name).cloned() {
             let contract = self
+                .ffi_runtime
                 .ffi_contracts
                 .get(name)
                 .cloned()
                 .unwrap_or_else(|| FfiContract::from_extern(&extern_func));
+            // 0.31.23: Comptime FFI whitelist - FFI calls are forbidden during
+            // comptime evaluation (comptime must be pure).
+            if self.in_comptime {
+                return Err(InterpError::new(format!(
+                    "FFI call to extern function '{}' is forbidden during comptime evaluation.\n\
+                     Comptime functions must be pure and cannot call extern functions.\n\
+                     Move the FFI call to a runtime function.",
+                    name
+                )));
+            }
+            // SAFETY: self (the Interpreter) is the closure-execution engine
+            // for the synchronous C call that follows; it lives on this stack
+            // frame and the pointer is only valid inside call_extern (which
+            // clears it before returning). No dereference happens after.
+            let runner_ptr = Self::self_as_runner(self);
             return self
-                .call_extern(&extern_func, &contract, args)
+                .ffi_runtime
+                .call_extern_with_runner_ptr(&extern_func, &contract, args, runner_ptr)
                 .map_err(|e| InterpError::new(e.to_string()));
         }
 

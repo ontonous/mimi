@@ -308,7 +308,9 @@ fn builtin_str_split(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, 
                 .collect();
             return Ok(Value::Tuple(parts));
         }
-        return Err(InterpError::new("split with 1 argument expects a Cap value"));
+        return Err(InterpError::new(
+            "split with 1 argument expects a Cap value",
+        ));
     }
     // String split: split(string, delimiter).
     match (&args[0], &args[1]) {

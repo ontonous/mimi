@@ -1,9 +1,8 @@
+use super::super::ffi_runtime::FfiClosureRunner;
 use super::super::*;
-use super::helpers::{compute_arg_free_mask, compute_arg_kinds, FfiGuard};
 use crate::ast::*;
-use crate::ffi::{callback_table_register, callback_table_remove, Errno};
+use crate::ffi::callback_table_remove;
 use libffi::low::{self as ffi_low};
-use libffi::middle::{Cif, Type as FfiType};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,12 +29,13 @@ unsafe impl Sync for SendFilePtr {}
 // arg_free_mask[i] = true means callback arg i is a C-allocated string
 // that Mimi takes ownership of and must free after the callback returns.
 // arg_kinds[i] selects how to decode the raw C argument (IP-H4).
-// SAFETY: The interpreter pointer is only valid during the synchronous
-// FFI call on the same thread. The closure value is cloned from the
-// interpreter's environment and lives for the duration of the call.
+// SAFETY: The runner pointer (tree-walker Interpreter or Bytecode VM) is
+// only valid during the synchronous FFI call on the same thread. The closure
+// value is cloned from the runner's environment and lives for the duration
+// of the call.
 thread_local! {
     pub(in crate::interp) static FFI_CALLBACK_CTX: RefCell<FfiCallbackCtx> = RefCell::new(FfiCallbackCtx {
-        interp: std::ptr::null_mut(),
+        interp: None,
         entries: HashMap::new(),
         reentrancy_depth: 0,
     });
@@ -51,7 +51,9 @@ pub(in crate::interp) enum CallbackArgKind {
 }
 
 pub(in crate::interp) struct FfiCallbackCtx {
-    pub(in crate::interp) interp: *mut Interpreter<'static>,
+    /// Execution engine that can run a Mimi closure: either the tree-walker
+    /// interpreter or the bytecode VM (0.33 FFI forwarding).
+    pub(in crate::interp) interp: Option<*mut dyn super::super::ffi_runtime::FfiClosureRunner>,
     // (closure, ret_is_float, arg_free_mask, arg_kinds)
     pub(in crate::interp) entries: HashMap<i64, (Value, bool, Vec<bool>, Vec<CallbackArgKind>)>,
     /// Nested trampoline depth on this thread (IP-C5 soft mitigation).
@@ -67,23 +69,23 @@ use std::sync::Mutex;
 /// global store mutex and never move the trampoline across threads — only
 /// the function pointer is shared with C. Marking Send is required for
 /// the static Mutex map.
-struct CallbackTrampolineKeepalive {
-    _closure: Box<libffi::middle::Closure<'static>>,
-    _userdata: Box<i64>,
+pub(in crate::interp) struct CallbackTrampolineKeepalive {
+    pub(in crate::interp) _closure: Box<libffi::middle::Closure<'static>>,
+    pub(in crate::interp) _userdata: Box<i64>,
 }
 // SAFETY: trampoline memory is process-global and only dropped under the
 // store mutex after active callbacks drain; no concurrent free of Closure.
 unsafe impl Send for CallbackTrampolineKeepalive {}
 
 /// Global entry for a registered callback (Mimi closure + trampoline keepalive).
-struct GlobalCallbackEntry {
-    closure: Value,
-    ret_is_float: bool,
-    arg_free_mask: Vec<bool>,
-    arg_kinds: Vec<CallbackArgKind>,
-    active_count: Arc<AtomicUsize>,
+pub(in crate::interp) struct GlobalCallbackEntry {
+    pub(in crate::interp) closure: Value,
+    pub(in crate::interp) ret_is_float: bool,
+    pub(in crate::interp) arg_free_mask: Vec<bool>,
+    pub(in crate::interp) arg_kinds: Vec<CallbackArgKind>,
+    pub(in crate::interp) active_count: Arc<AtomicUsize>,
     /// R-C3: keeps the executable trampoline alive after the sync FFI call.
-    keepalive: Option<CallbackTrampolineKeepalive>,
+    pub(in crate::interp) keepalive: Option<CallbackTrampolineKeepalive>,
 }
 
 impl Clone for GlobalCallbackEntry {
@@ -114,7 +116,8 @@ impl Clone for GlobalCallbackEntry {
 static CALLBACK_GLOBAL_STORE: std::sync::OnceLock<Mutex<HashMap<i64, GlobalCallbackEntry>>> =
     std::sync::OnceLock::new();
 
-fn global_callback_store() -> &'static Mutex<HashMap<i64, GlobalCallbackEntry>> {
+pub(in crate::interp) fn global_callback_store() -> &'static Mutex<HashMap<i64, GlobalCallbackEntry>>
+{
     CALLBACK_GLOBAL_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -132,7 +135,7 @@ fn callback_file() -> &'static Mutex<Option<SendFilePtr>> {
 
 /// Leak a clone of the program File into the global callback store.
 /// Called from value_to_ffi_callback to enable cross-thread evaluation.
-fn ensure_callback_file(file: &File) {
+pub(in crate::interp) fn ensure_callback_file(file: &File) {
     let mut store = callback_file().lock().unwrap_or_else(|e| e.into_inner());
     if store.is_some() {
         return;
@@ -144,25 +147,34 @@ fn ensure_callback_file(file: &File) {
 /// Evaluate a Mimi closure from a cross-thread callback context.
 /// Creates a temporary Interpreter from the globally stored program file,
 /// evaluates the closure, and returns the result as an i64.
-fn evaluate_cross_thread_callback(
-    closure: &Value,
-    args: Vec<Value>,
-    ret_is_float: bool,
-) -> Result<i64, String> {
-    let file_ptr = {
-        let store = callback_file().lock().unwrap_or_else(|e| e.into_inner());
-        store.as_ref().map(|s| s.0).ok_or_else(|| {
-            "no program file registered for cross-thread callback evaluation".to_string()
-        })?
-    };
-    // SAFETY: The File was Box::leaked and is valid for 'static.
-    let file = unsafe { &*file_ptr };
-    let mut interp = Interpreter::new(file);
-    interp.verify_contracts = false;
-    interp.verify_ffi = false;
-    let result = interp
-        .apply_closure_ffi(closure, args)
-        .map_err(|e| format!("cross-thread callback evaluation error: {}", e))?;
+/// BytecodeProgram pointer for cross-thread BytecodeClosure evaluation
+/// (0.33 Phase D FFI forwarding).
+///
+/// SAFETY: registered by FfiRuntime while a synchronous extern call with
+/// callback parameters is on the stack; the owning BytecodeVM stays alive
+/// for the duration of that call (C libraries that invoke callbacks from
+/// worker threads join them before returning). The pointer is only read
+/// while that call is in progress.
+#[derive(Copy, Clone)]
+struct SendProgramPtr(*const crate::interp::bytecode::instr::BytecodeProgram);
+// SAFETY: same ownership contract as SendFilePtr — read-only access while
+// the owning VM's extern call is on the stack.
+unsafe impl Send for SendProgramPtr {}
+// SAFETY: read-only access; no mutation through this pointer.
+unsafe impl Sync for SendProgramPtr {}
+
+static CALLBACK_PROGRAM: std::sync::Mutex<Option<SendProgramPtr>> = std::sync::Mutex::new(None);
+
+/// Register the BytecodeProgram of the VM driving the current extern call.
+pub(in crate::interp) fn set_callback_program(
+    program: *const crate::interp::bytecode::instr::BytecodeProgram,
+) {
+    if let Ok(mut store) = CALLBACK_PROGRAM.lock() {
+        *store = Some(SendProgramPtr(program));
+    }
+}
+
+fn encode_callback_result(result: Value, ret_is_float: bool) -> Result<i64, String> {
     if ret_is_float {
         match result {
             Value::Float(f) => Ok(f.to_bits() as i64),
@@ -184,6 +196,44 @@ fn evaluate_cross_thread_callback(
             )),
         }
     }
+}
+
+fn evaluate_cross_thread_callback(
+    closure: &Value,
+    args: Vec<Value>,
+    ret_is_float: bool,
+) -> Result<i64, String> {
+    if matches!(closure, Value::BytecodeClosure { .. }) {
+        let prog_ptr = {
+            let store = CALLBACK_PROGRAM.lock().unwrap_or_else(|e| e.into_inner());
+            store.map(|s| s.0).ok_or_else(|| {
+                "no bytecode program registered for cross-thread callback evaluation".to_string()
+            })?
+        };
+        // SAFETY: the pointer is valid while the owning VM's extern call is
+        // on the stack; the C library joins worker threads before returning.
+        let program = unsafe { &*prog_ptr };
+        let mut vm = crate::interp::bytecode::vm::BytecodeVM::new(program);
+        let result = vm
+            .apply_closure_ffi(closure, args)
+            .map_err(|e| format!("cross-thread callback evaluation error: {}", e))?;
+        return encode_callback_result(result, ret_is_float);
+    }
+    let file_ptr = {
+        let store = callback_file().lock().unwrap_or_else(|e| e.into_inner());
+        store.as_ref().map(|s| s.0).ok_or_else(|| {
+            "no program file registered for cross-thread callback evaluation".to_string()
+        })?
+    };
+    // SAFETY: The File was Box::leaked and is valid for 'static.
+    let file = unsafe { &*file_ptr };
+    let mut interp = Interpreter::new(file);
+    interp.verify_contracts = false;
+    interp.ffi_runtime.verify_ffi = false;
+    let result = interp
+        .apply_closure_ffi(closure, args)
+        .map_err(|e| format!("cross-thread callback evaluation error: {}", e))?;
+    encode_callback_result(result, ret_is_float)
 }
 
 /// F3: C-ABI function to deregister an async callback and free its resources.
@@ -233,7 +283,7 @@ pub extern "C" fn mimi_callback_deregister(callback_id: i64) {
 // SAFETY: Called from C (extern "C" context) during a synchronous FFI call.
 // The entire body is wrapped in catch_unwind so no Rust panic can cross
 // the C-ABI boundary (which would be undefined behavior).
-unsafe extern "C" fn mimi_callback_trampoline_fn(
+pub(in crate::interp) unsafe extern "C" fn mimi_callback_trampoline_fn(
     cif: &ffi_low::ffi_cif,
     result: &mut i64,
     args: *const *const std::ffi::c_void,
@@ -398,22 +448,19 @@ unsafe fn callback_trampoline_inner(
         mimi_args.push(val);
     }
 
-    // Call the Mimi closure via interpreter
-    // P1-7 fix: Save interp pointer and clear it to prevent reentrancy UB.
+    // Call the Mimi closure via the runner (tree-walker Interpreter or Bytecode VM)
+    // P1-7 fix: Save runner pointer and clear it to prevent reentrancy UB.
     // If a nested callback (same thread) tries to re-enter during apply_closure_ffi,
-    // it will see a null interp and return gracefully instead of causing
-    // a mutable borrow conflict on the same Interpreter.
-    let interp_ptr = {
-        let mut interp_ptr_copy: *mut Interpreter<'static> = std::ptr::null_mut();
-        FFI_CALLBACK_CTX.with(|c| {
+    // it will see a null pointer and return gracefully instead of causing
+    // a mutable borrow conflict on the same engine.
+    let runner_ptr: Option<*mut dyn super::super::ffi_runtime::FfiClosureRunner> = FFI_CALLBACK_CTX
+        .with(|c| {
             let mut ctx = c.borrow_mut();
-            interp_ptr_copy = ctx.interp;
-            ctx.interp = std::ptr::null_mut(); // clear — prevents reentrancy
+            // take() reads the pointer AND clears it — prevents reentrancy UB.
+            ctx.interp.take()
         });
-        interp_ptr_copy
-    };
-    if interp_ptr.is_null() {
-        // Cross-thread / async callback: the TLS interpreter context has been
+    if runner_ptr.is_none() {
+        // Cross-thread / async callback: the TLS runner context has been
         // cleared. Try to evaluate using a temporary Interpreter from the
         // globally stored program file. If that also fails, return 0 (IP-C4).
         let xt_result = evaluate_cross_thread_callback(&closure, mimi_args, ret_is_float);
@@ -447,16 +494,21 @@ unsafe fn callback_trampoline_inner(
         }
         return;
     }
-    // SAFETY: interp_ptr was just read from FFI_CALLBACK_CTX, which stores a
-    // pointer to the Interpreter driving the synchronous FFI call. The pointer
-    // remains valid because that Interpreter is still alive on the original stack
+    // SAFETY: runner_ptr was just read from FFI_CALLBACK_CTX, which stores a
+    // pointer to the runner driving the synchronous FFI call. The pointer
+    // remains valid because that runner is still alive on the original stack
     // frame for the duration of this callback.
-    // SAFETY: interp_ptr is the current thread's FFI_CALLBACK_CTX pointer, valid for this synchronous callback.
-    let interp = unsafe { &mut *interp_ptr };
-    let closure_result = interp.apply_closure_ffi(&closure, mimi_args);
-    // Restore the interp pointer after the callback completes
+    // SAFETY: runner_ptr is the current thread's FFI_CALLBACK_CTX pointer, valid for this synchronous callback.
+    // None was checked above (early return), so the unwrap via match cannot fire.
+    let runner_ptr = match runner_ptr {
+        Some(p) => p,
+        None => return,
+    };
+    let runner = unsafe { &mut *runner_ptr };
+    let closure_result = runner.apply_closure_ffi(&closure, mimi_args);
+    // Restore the runner pointer after the callback completes
     FFI_CALLBACK_CTX.with(|c| {
-        c.borrow_mut().interp = interp_ptr;
+        c.borrow_mut().interp = Some(runner_ptr);
     });
     match closure_result {
         Ok(val) => {
@@ -509,15 +561,11 @@ unsafe fn callback_trampoline_inner(
     }
 }
 
-impl<'a> Interpreter<'a> {
+impl<'a> FfiClosureRunner for Interpreter<'a> {
     /// F8: Apply a Mimi closure value to arguments from within a C callback context.
     /// Mirrors `apply_closure` in call.rs but designed for &self usage from a
     /// C trampoline via raw pointer.
-    pub(crate) fn apply_closure_ffi(
-        &mut self,
-        closure: &Value,
-        args: Vec<Value>,
-    ) -> Result<Value, Errno> {
+    fn apply_closure_ffi(&mut self, closure: &Value, args: Vec<Value>) -> Result<Value, String> {
         match closure {
             Value::Closure {
                 params,
@@ -526,135 +574,20 @@ impl<'a> Interpreter<'a> {
                 ..
             } => self
                 .apply_closure_inner(params, body, captured, args)
-                .map_err(|e| Errno::from(e.to_string())),
-            _ => Err(Errno::Generic(format!(
-                "expected a closure, found {}",
-                closure
-            ))),
+                .map_err(|e| e.to_string()),
+            _ => Err(format!("expected a closure, found {}", closure)),
         }
     }
 
-    /// F8: Convert a Mimi closure value to a C-compatible callback function pointer.
-    /// Registers the closure with the global callback table and creates a
-    /// dynamically generated trampoline via libffi.
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::interp) fn value_to_ffi_callback(
-        &self,
-        arg: &Value,
-        param_types: &[Type],
-        ret_type: &Type,
-        _string_guards: &mut Vec<std::ffi::CString>,
-        _shared_handles: &mut Vec<std::sync::Arc<crate::ffi::runtime::SharedHandle>>,
-        ffi_guards: &mut Vec<FfiGuard>,
-        callback_ids: &mut Vec<i64>,
-    ) -> Result<i64, Errno> {
-        // Ensure the program File is stored for cross-thread callback evaluation.
-        ensure_callback_file(self.file);
-        match arg {
-            Value::Closure { .. } => {
-                let closure = arg.clone();
-                let ret_is_float =
-                    matches!(ret_type.unlocated(), Type::Name(name, _) if name == "f64");
+    fn ffi_file(&self) -> &File {
+        self.file
+    }
 
-                // Build CIF matching the callback signature
-                let mut cif_arg_types: Vec<FfiType> = Vec::with_capacity(param_types.len());
-                for pt in param_types {
-                    match pt.unlocated() {
-                        Type::Name(name, _) if name == "f64" => {
-                            cif_arg_types.push(FfiType::f64());
-                        }
-                        _ => {
-                            cif_arg_types.push(FfiType::i64());
-                        }
-                    }
-                }
-                let cif_ret = if ret_is_float {
-                    FfiType::f64()
-                } else {
-                    FfiType::i64()
-                };
-                let cif = Cif::new(cif_arg_types, cif_ret);
-
-                // Register with CALLBACK_TABLE so the trampoline can find it
-                // Use a dummy invoker (the real invocation is via thread-local ctx)
-                let cb_id = callback_table_register(
-                    Some(Box::new(|_id: i64, _args: &[i64]| -> i64 { 0 })),
-                );
-                callback_ids.push(cb_id);
-
-                // F3: Store the closure in BOTH the thread-local context (fast path
-                // for synchronous callbacks) and the global store (fallback for async/
-                // off-thread callbacks where TLS has been cleared).
-                let arg_free_mask = compute_arg_free_mask(param_types);
-                let arg_kinds = compute_arg_kinds(param_types);
-                // FFI-10: Per-callback active-call counter for deregister race prevention.
-                let active_count = Arc::new(AtomicUsize::new(0));
-                FFI_CALLBACK_CTX.with(|c| {
-                    let mut ctx = c.borrow_mut();
-                    ctx.entries.insert(
-                        cb_id,
-                        (
-                            closure.clone(),
-                            ret_is_float,
-                            arg_free_mask.clone(),
-                            arg_kinds.clone(),
-                        ),
-                    );
-                });
-
-                // Create a libffi Closure that generates a C-compatible function pointer.
-                // R-C3: userdata + Closure must outlive any delayed C callback —
-                // store them in CALLBACK_GLOBAL_STORE, not only FfiGuard.
-                let userdata = Box::new(cb_id);
-                let userdata_ptr = Box::into_raw(userdata);
-                // SAFETY: userdata_ptr from Box::into_raw; reclaimed into keepalive below.
-                let cb_ref_static: &'static i64 = unsafe { &*userdata_ptr };
-
-                let ffi_closure = libffi::middle::Closure::new(
-                    cif,
-                    mimi_callback_trampoline_fn as ffi_low::Callback<i64, i64>,
-                    cb_ref_static,
-                );
-
-                let code_ptr_ref = ffi_closure.code_ptr();
-                // SAFETY: code_ptr_ref points to the libffi-generated trampoline.
-                let fn_ptr_val: unsafe extern "C" fn() = *code_ptr_ref;
-                let fn_ptr = fn_ptr_val as usize as i64;
-
-                // SAFETY: reclaim userdata Box into keepalive alongside Closure.
-                let keepalive = CallbackTrampolineKeepalive {
-                    _closure: Box::new(ffi_closure),
-                    _userdata: unsafe { Box::from_raw(userdata_ptr) },
-                };
-
-                if let Ok(mut store) = global_callback_store().lock() {
-                    store.insert(
-                        cb_id,
-                        GlobalCallbackEntry {
-                            closure,
-                            ret_is_float,
-                            arg_free_mask,
-                            arg_kinds,
-                            active_count: Arc::clone(&active_count),
-                            keepalive: Some(keepalive),
-                        },
-                    );
-                }
-
-                // FfiGuard no longer owns the trampoline (global store does).
-                // Keep a no-op guard slot unused — callers still pass ffi_guards.
-                let _ = ffi_guards;
-
-                Ok(fn_ptr)
-            }
-            Value::Int(n) => {
-                // Already an opaque function pointer (passed through from a previous call)
-                Ok(*n)
-            }
-            other => Err(Errno::Generic(format!(
-                "FFI safety: expected a closure or function pointer for callback parameter, found {}",
-                other
-            ))),
-        }
+    fn eval_contract_expr(
+        &mut self,
+        expr: &crate::ast::Expr,
+        result_binding: Option<&Value>,
+    ) -> Result<Value, String> {
+        self.eval_contract_expr(expr, result_binding)
     }
 }
