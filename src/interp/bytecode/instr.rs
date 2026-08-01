@@ -320,6 +320,16 @@ pub enum Op {
         args_base: Reg,
         argc: u16,
     },
+    /// Record mutate-parameter writeback targets for the next Call.
+    /// `count` registers at [regs_base .. regs_base + count) hold the
+    /// CALLER's register numbers of the `mut` arguments (one per
+    /// function mut_param_indices entry, in the same order). On Ret,
+    /// the callee's final parameter values are written back to those
+    /// caller registers (mutate-parameter reference ABI, 0.33 Phase F).
+    MutateSetup {
+        regs_base: Reg,
+        count: u16,
+    },
     /// Call builtin: rd = builtin[idx](args[0..argc])
     CallBuiltin {
         rd: Reg,
@@ -746,6 +756,9 @@ pub struct FunctionProto {
     pub register_count: u16,
     /// Whether this function has `mut` parameters.
     pub has_mut_params: bool,
+    /// Parameter positions (indices into the arg list) that are `mut`,
+    /// in declaration order. Used for mutate-parameter writeback.
+    pub mut_param_indices: Vec<u16>,
     /// Whether this function is async.
     pub is_async: bool,
     /// Constant pool (literals, string names, type names).
@@ -778,6 +791,7 @@ impl FunctionProto {
             param_count,
             register_count: param_count,
             has_mut_params: false,
+            mut_param_indices: Vec::new(),
             is_async: false,
             constants: Vec::new(),
             code: Vec::new(),
@@ -868,6 +882,10 @@ pub struct BytecodeProgram {
     pub actor_method_funcs: std::collections::HashMap<(String, String), FuncIdx>,
     /// Global max_children limit extracted from flow @max_children annotations.
     pub max_children: Option<usize>,
+    /// Flow persistent fields: flow_name → field names (for Fault shadowing).
+    pub flow_persistent: std::collections::HashMap<String, Vec<String>>,
+    /// Flows whose root state is @transactional (rollback on fault).
+    pub flow_transactional: std::collections::HashSet<String>,
     /// The original AST (for actor worker threads that use tree-walker internally).
     pub ast: Option<std::sync::Arc<crate::ast::File>>,
     /// Record field types: type_name → [(field_name, field_type_str)].

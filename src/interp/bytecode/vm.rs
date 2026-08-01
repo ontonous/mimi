@@ -42,6 +42,30 @@ struct Frame {
     /// When fault_pc intercepts RetEarly, saves the error-value register
     /// so the fault handler can re-emit RetEarly after compensations.
     fault_reg: Option<Reg>,
+    /// Caller registers to write back `mut` parameter values to after the
+    /// callee returns. One entry per callee mut_param_indices entry, in the
+    /// same order (set by Op::MutateSetup).
+    mutate_writebacks: Option<Vec<Reg>>,
+    /// Flow-transition context for this frame (None for ordinary calls).
+    /// Used to absorb runtime panics into a Fault value (v0.29.12).
+    flow_tx: Option<FlowTxCtx>,
+}
+
+/// Context captured when a flow transition frame is entered. Used to
+/// convert runtime panics inside the transition body into a Fault value
+/// (with persistent-field shadowing / transactional rollback).
+struct FlowTxCtx {
+    /// Flow name (for diagnostics / persistent lookups).
+    flow_name: String,
+    /// From-state name (becomes Fault.last_state).
+    from_state: String,
+    /// The from-state payload as passed (pre-transition).
+    from_payload: Value,
+    /// Persistent field names declared on the flow.
+    persistent_fields: Vec<String>,
+    /// True when the flow is @transactional: roll back persistent fields
+    /// to the from-payload values on fault (WAL restore, v0.29.14).
+    transactional: bool,
 }
 
 /// The bytecode VM.
@@ -176,9 +200,17 @@ impl<'a> BytecodeVM<'a> {
     pub fn run(&mut self) -> Result<i64, InterpError> {
         let entry = self.program.entry;
         self.push_frame(entry, Vec::new(), None)?;
-        let result = self.exec_loop();
-        // Enrich errors with function name + line (D5/D12).
-        let result = result.map_err(|e| self.enrich_error(e));
+        let result = loop {
+            match self.exec_loop() {
+                Ok(v) => break Ok(v),
+                Err(e) => {
+                    if self.absorb_flow_fault(&e) {
+                        continue;
+                    }
+                    break Err(self.enrich_error(e));
+                }
+            }
+        };
         match result {
             Ok(Value::Int(code)) => Ok(code),
             Ok(Value::Unit) => Ok(0),
@@ -195,8 +227,92 @@ impl<'a> BytecodeVM<'a> {
     pub fn run_value(&mut self) -> Result<Value, InterpError> {
         let entry = self.program.entry;
         self.push_frame(entry, Vec::new(), None)?;
-        let result = self.exec_loop();
-        result.map_err(|e| self.enrich_error(e))
+        loop {
+            match self.exec_loop() {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    if self.absorb_flow_fault(&e) {
+                        continue;
+                    }
+                    return Err(self.enrich_error(e));
+                }
+            }
+        }
+    }
+
+    /// Flow fault absorption (v0.29.12): when a runtime panic escapes from a
+    /// flow transition body, convert it into a Fault value instead of an
+    /// error. The Fault is written into the transition frame's return
+    /// register and all frames up to and including the transition are
+    /// popped, so execution resumes at the caller with the Fault value.
+    ///
+    /// Returns false when the error should propagate:
+    /// - no flow transition on the stack
+    /// - the panic already happened in Fault (no re-absorption)
+    /// - the error is a programming error, not a runtime panic
+    fn absorb_flow_fault(&mut self, e: &InterpError) -> bool {
+        let Some(idx) = self.stack.iter().rposition(|f| f.flow_tx.is_some()) else {
+            return false;
+        };
+        let (from_state, from_payload, persistent, transactional) = {
+            let ctx = self.stack[idx].flow_tx.as_ref().expect("checked above");
+            if ctx.from_state == "Fault" {
+                return false;
+            }
+            (
+                ctx.from_state.clone(),
+                ctx.from_payload.clone(),
+                ctx.persistent_fields.clone(),
+                ctx.transactional,
+            )
+        };
+        if !is_runtime_panic(e) {
+            return false;
+        }
+        // Draft = the transition's `self` (register 0) — mutated in place by
+        // the body. @transactional rolls back to the from-payload snapshot.
+        let draft = self.stack[idx].regs.first().cloned().unwrap_or(Value::Unit);
+        let mut restored = if transactional {
+            from_payload.clone()
+        } else {
+            draft
+        };
+        // v0.29.13/14: recover degrades to reset when non-transactional
+        // persistent fields were dirtied during the turn that produced this
+        // Fault. Zero them in the Fault shadow so the injected recover verb
+        // restores defaults instead of the dirty draft.
+        if !transactional && !persistent.is_empty() {
+            let entry_fields = record_fields_of(&from_payload);
+            let draft_fields = record_fields_of(&restored);
+            let dirty = persistent.iter().any(|name| {
+                match (entry_fields.get(name), draft_fields.get(name)) {
+                    (Some(old), Some(cur)) => !crate::interp::value::values_equal(cur, old),
+                    _ => false,
+                }
+            });
+            if dirty {
+                if let Value::Record(_, fields) = &mut restored {
+                    for name in &persistent {
+                        if let Some(v) = fields.get_mut(name) {
+                            *v = default_value_for_runtime(v);
+                        }
+                    }
+                }
+            }
+        }
+        let event = format!("panic:{}", e.code());
+        let mut fault = crate::flow_matrix::make_fault_value(&from_state, &event, "");
+        shadow_persistent_into_fault(&mut fault, &restored, &persistent);
+        let return_reg = self.stack[idx].return_reg;
+        let popped = self.stack.len() - idx;
+        self.stack.truncate(idx);
+        self.depth = self.depth.saturating_sub(popped);
+        if let Some(rd) = return_reg {
+            if let Some(frame) = self.stack.last_mut() {
+                frame.regs[rd as usize] = fault;
+            }
+        }
+        true
     }
 
     /// Take captured stdout (consumes the buffer, leaves empty string).
@@ -281,6 +397,8 @@ impl<'a> BytecodeVM<'a> {
             early_return: false,
             fault_pc: None,
             fault_reg: None,
+            mutate_writebacks: None,
+            flow_tx: None,
         });
         Ok(())
     }
@@ -997,6 +1115,22 @@ impl<'a> BytecodeVM<'a> {
                     self.push_frame(func, args, Some(rd))?;
                     // Continue loop — new frame is now active.
                 }
+                Op::MutateSetup { regs_base, count } => {
+                    let mut targets = Vec::with_capacity(count as usize);
+                    for i in 0..count {
+                        match self.get_reg(regs_base + i) {
+                            Value::Int(reg) => targets.push(*reg as Reg),
+                            _ => {
+                                self.cur_frame_mut().mutate_writebacks = None;
+                                targets.clear();
+                                break;
+                            }
+                        }
+                    }
+                    if !targets.is_empty() {
+                        self.cur_frame_mut().mutate_writebacks = Some(targets);
+                    }
+                }
                 Op::CallBuiltin {
                     rd,
                     builtin,
@@ -1237,6 +1371,7 @@ impl<'a> BytecodeVM<'a> {
                     let frame = self.cur_frame();
                     let return_reg = frame.return_reg;
                     let wrap_ok = frame.wrap_ok;
+                    let mut_param_vals = self.collect_mut_param_vals();
                     let v = if wrap_ok {
                         Value::Variant("Ok".to_string(), vec![Value::Unit])
                     } else {
@@ -1249,6 +1384,9 @@ impl<'a> BytecodeVM<'a> {
                     }
                     if let Some(rd) = return_reg {
                         self.set_reg(rd, v);
+                    }
+                    if !mut_param_vals.is_empty() {
+                        self.apply_mutate_writeback(&mut_param_vals);
                     }
                 }
 
@@ -2012,6 +2150,9 @@ impl<'a> BytecodeVM<'a> {
                     let args: Vec<Value> = (0..argc)
                         .map(|i| self.get_reg(args_base + i).clone())
                         .collect();
+                    // From-state payload for fault shadowing (captured before
+                    // args is moved into the frame).
+                    let from_payload = args.first().cloned().unwrap_or(Value::Unit);
                     // Call the transition function.
                     // If the transition has a `fails` clause, wrap the result:
                     // success → Ok(result), failure → Err((source, error)).
@@ -2020,6 +2161,20 @@ impl<'a> BytecodeVM<'a> {
                         self.push_frame_wrap_ok(func_idx, args, Some(rd), state_val)?;
                     } else {
                         self.push_frame(func_idx, args, Some(rd))?;
+                    }
+                    // Record flow-transition context for fault absorption
+                    // (runtime panics → Fault value, v0.29.12).
+                    {
+                        let persistent = self.program.flow_persistent.get(&flow_name).cloned();
+                        let transactional = self.program.flow_transactional.contains(&flow_name);
+                        let frame = self.cur_frame_mut();
+                        frame.flow_tx = Some(FlowTxCtx {
+                            flow_name,
+                            from_state,
+                            from_payload,
+                            persistent_fields: persistent.unwrap_or_default(),
+                            transactional,
+                        });
                     }
                 }
 
@@ -2482,6 +2637,7 @@ impl<'a> BytecodeVM<'a> {
         let return_reg = frame.return_reg;
         let wrap_ok = frame.wrap_ok;
         let source_state = frame.flow_source_state.clone();
+        let mut_param_vals = self.collect_mut_param_vals();
         if wrap_ok {
             if is_early_return {
                 // `?` triggered rejection: unwrap Err(x) → Err((source, x))
@@ -2503,7 +2659,38 @@ impl<'a> BytecodeVM<'a> {
         if let Some(rd) = return_reg {
             self.set_reg(rd, v);
         }
+        if !mut_param_vals.is_empty() {
+            self.apply_mutate_writeback(&mut_param_vals);
+        }
         Ok(None)
+    }
+
+    /// Capture the current frame's final `mut` parameter values
+    /// (before the frame is destroyed by pop).
+    fn collect_mut_param_vals(&self) -> Vec<Value> {
+        let frame = self.cur_frame();
+        let proto = &self.program.functions[frame.proto_idx as usize];
+        if proto.mut_param_indices.is_empty() {
+            Vec::new()
+        } else {
+            proto
+                .mut_param_indices
+                .iter()
+                .map(|&i| frame.regs[i as usize].clone())
+                .collect()
+        }
+    }
+
+    /// Write captured `mut` parameter values back to the caller's
+    /// registered target registers (mutate-parameter reference ABI).
+    fn apply_mutate_writeback(&mut self, vals: &[Value]) {
+        if let Some(caller) = self.stack.last_mut() {
+            if let Some(targets) = caller.mutate_writebacks.take() {
+                for (val, &target) in vals.iter().zip(targets.iter()) {
+                    caller.regs[target as usize] = val.clone();
+                }
+            }
+        }
     }
 
     // ── Builtin dispatch (D1: registry, not giant match) ─────
@@ -2874,6 +3061,60 @@ fn value_to_f64(v: &Value) -> Result<f64, InterpError> {
             "value_to_f64: expected numeric type, got {:?}",
             other
         ))),
+    }
+}
+
+/// True when the error is a runtime panic (div-by-zero, overflow, OOB, …)
+/// that a flow transition absorbs into a Fault. Programming errors
+/// (undefined names, arity mismatches, …) always propagate.
+fn is_runtime_panic(e: &InterpError) -> bool {
+    matches!(
+        e,
+        InterpError::DivisionByZero(_)
+            | InterpError::IntegerOverflow(_)
+            | InterpError::IndexOutOfBounds(_)
+            | InterpError::NonExhaustiveMatch(_)
+            | InterpError::FloatError(_)
+            | InterpError::SliceError(_)
+            | InterpError::ContractViolation(_)
+    )
+}
+
+/// Copy persistent field values from `from` into the Fault record's fields
+/// (mirror of tree-walker shadow_persistent_into_fault).
+fn shadow_persistent_into_fault(fault: &mut Value, from: &Value, persistent: &[String]) {
+    if persistent.is_empty() {
+        return;
+    }
+    let (Value::Record(_, from_fields), Value::Record(_, fault_fields)) = (from, fault) else {
+        return;
+    };
+    for name in persistent {
+        if let Some(v) = from_fields.get(name) {
+            fault_fields.insert(name.clone(), v.clone());
+        }
+    }
+}
+
+/// Extract the field map of a Record value (empty map otherwise).
+fn record_fields_of(v: &Value) -> std::collections::HashMap<String, Value> {
+    match v {
+        Value::Record(_, fields) => fields.clone(),
+        _ => std::collections::HashMap::new(),
+    }
+}
+
+/// Default value for a runtime sample (mirror of tree-walker
+/// default_value_for_runtime).
+fn default_value_for_runtime(sample: &Value) -> Value {
+    match sample {
+        Value::Int(_) => Value::Int(0),
+        Value::Float(_) => Value::Float(0.0),
+        Value::Bool(_) => Value::Bool(false),
+        Value::String(_) => Value::String(String::new()),
+        Value::List(_) => Value::List(vec![]),
+        Value::Unit => Value::Unit,
+        other => other.clone(), // keep shape for complex types
     }
 }
 

@@ -31,6 +31,10 @@ pub struct BytecodeCompiler {
     constants: HashMap<String, Expr>,
     /// Known flow names (for transition call resolution).
     flow_names: std::collections::HashSet<String>,
+    /// Flow persistent field names: flow_name → fields (fault shadowing).
+    flow_persistent: std::collections::HashMap<String, Vec<String>>,
+    /// Flows with @transactional persistent fields (fault rollback).
+    flow_transactional: std::collections::HashSet<String>,
     /// Known actor names (for spawn resolution).
     actor_names: std::collections::HashSet<String>,
     /// Known extern function names (for clear error messages).
@@ -298,6 +302,8 @@ impl BytecodeCompiler {
             actor_defs: HashMap::new(),
             flow_transition_funcs: HashMap::new(),
             flow_fails_transitions: std::collections::HashSet::new(),
+            flow_persistent: HashMap::new(),
+            flow_transactional: std::collections::HashSet::new(),
             actor_method_funcs: HashMap::new(),
             ast_file: None,
             func_defaults: HashMap::new(),
@@ -353,6 +359,17 @@ impl BytecodeCompiler {
                 // Push placeholder.
                 self.functions
                     .push(FunctionProto::new(f.name.clone(), f.params.len() as u16));
+                // Fill mutate-param metadata now (call sites may reference
+                // this function before its body is compiled).
+                let proto = &mut self.functions[idx as usize];
+                proto.has_mut_params = f.params.iter().any(|p| p.mut_);
+                proto.mut_param_indices = f
+                    .params
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.mut_)
+                    .map(|(i, _)| i as u16)
+                    .collect();
             }
             // Collect enum variant names and newtype names for constructor resolution.
             if let Item::Type(td) = item {
@@ -389,6 +406,14 @@ impl BytecodeCompiler {
             if let Item::Flow(f) = item {
                 self.flow_names.insert(f.name.clone());
                 self.flow_defs.insert(f.name.clone(), f.clone());
+                // Fault shadowing metadata (v0.29.12/14).
+                if !f.persistent_fields.is_empty() {
+                    self.flow_persistent
+                        .insert(f.name.clone(), f.persistent_fields.clone());
+                }
+                if !f.transactional_fields.is_empty() {
+                    self.flow_transactional.insert(f.name.clone());
+                }
             }
             // Collect actor definitions.
             if let Item::Actor(a) = item {
@@ -591,6 +616,8 @@ impl BytecodeCompiler {
             flow_fails_transitions: std::mem::take(&mut self.flow_fails_transitions),
             actor_method_funcs: std::mem::take(&mut self.actor_method_funcs),
             max_children,
+            flow_persistent: std::mem::take(&mut self.flow_persistent),
+            flow_transactional: std::mem::take(&mut self.flow_transactional),
             ast: self.ast_file.clone(),
             record_fields: std::mem::take(&mut self.record_fields),
         })
@@ -736,6 +763,8 @@ impl BytecodeCompiler {
             flow_fails_transitions: std::mem::take(&mut self.flow_fails_transitions),
             actor_method_funcs: std::mem::take(&mut self.actor_method_funcs),
             max_children: None,
+            flow_persistent: std::mem::take(&mut self.flow_persistent),
+            flow_transactional: std::mem::take(&mut self.flow_transactional),
             ast: self.ast_file.clone(),
             record_fields: std::mem::take(&mut self.record_fields),
         })
@@ -1077,8 +1106,14 @@ impl BytecodeCompiler {
                 }
 
                 Stmt::Stay => {
-                    // stay — self-loop terminal (return Unit).
-                    fc.emit(Op::RetUnit);
+                    // stay — self-loop terminal: returns the source state (self)
+                    // unchanged (FLOW-TURN-001). In a transition body, `self`
+                    // lives at register 0.
+                    if let Some(self_reg) = fc.lookup_var("self") {
+                        fc.emit(Op::Ret { ra: self_reg });
+                    } else {
+                        fc.emit(Op::RetUnit);
+                    }
                 }
 
                 Stmt::Parasteps(block) => {
@@ -1970,6 +2005,8 @@ impl BytecodeCompiler {
             flow_fails_transitions: std::collections::HashSet::new(),
             actor_method_funcs: std::collections::HashMap::new(),
             max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_transactional: std::collections::HashSet::new(),
             ast: self.ast_file.clone(),
             record_fields: std::collections::HashMap::new(),
         };
@@ -2611,6 +2648,35 @@ impl BytecodeCompiler {
             // 3. Builtins
             // 4. Variant constructors
             if let Some(&fidx) = self.func_table.get(name.as_str()) {
+                let proto = &self.functions[fidx as usize];
+                let mut targets: Vec<Reg> = Vec::new();
+                for &pi in &proto.mut_param_indices {
+                    if let Some(Expr::Ident(var_name)) =
+                        effective_args.get(pi as usize).map(|a| a.unlocated())
+                    {
+                        if let Some(reg) = fc.lookup_var(var_name) {
+                            targets.push(reg);
+                        }
+                    }
+                }
+                if !targets.is_empty() {
+                    let base = fc.proto.alloc_reg();
+                    for _ in 1..targets.len() {
+                        fc.proto.alloc_reg();
+                    }
+                    for (i, t) in targets.iter().enumerate() {
+                        let target = base + i as Reg;
+                        let cidx = fc.proto.add_const(ConstValue::Int(*t as i64));
+                        fc.emit(Op::LoadConst {
+                            rd: target,
+                            idx: cidx,
+                        });
+                    }
+                    fc.emit(Op::MutateSetup {
+                        regs_base: base,
+                        count: targets.len() as u16,
+                    });
+                }
                 fc.emit(Op::Call {
                     rd,
                     func: fidx,
@@ -2666,8 +2732,22 @@ impl BytecodeCompiler {
 
         // Method call: obj.method(args) → method(obj, args)
         if let Expr::Field(obj, method) = callee.unlocated() {
-            // ── Flow transition call: FlowName::method(state, args) ──
+            // ── Actor spawn: ActorName.spawn() / ActorName.spawn_detached() ──
+            // Checked BEFORE flow transitions (tree-walker order): a flow and an
+            // actor may share a name (e.g. `flow W` + `actor W`); `W.spawn()`
+            // must resolve to the actor constructor, not a flow transition.
             if let Expr::Ident(flow_name) = obj.unlocated() {
+                if self.actor_names.contains(flow_name.as_str())
+                    && (method == "spawn" || method == "spawn_detached")
+                {
+                    let actor_idx = fc.proto.add_const(ConstValue::Str(flow_name.clone()));
+                    fc.emit(Op::ActorSpawn {
+                        rd,
+                        actor: actor_idx,
+                    });
+                    return Ok(rd);
+                }
+                // ── Flow transition call: FlowName::method(state, args) ──
                 if self.flow_names.contains(flow_name.as_str()) {
                     // Compile all args (first arg is the from-state value).
                     let flow_idx = fc.proto.add_const(ConstValue::Str(flow_name.clone()));
@@ -2678,17 +2758,6 @@ impl BytecodeCompiler {
                         method: method_idx,
                         args_base,
                         argc: args.len() as u16,
-                    });
-                    return Ok(rd);
-                }
-                // ── Actor spawn: ActorName.spawn() / ActorName.spawn_detached() ──
-                if self.actor_names.contains(flow_name.as_str())
-                    && (method == "spawn" || method == "spawn_detached")
-                {
-                    let actor_idx = fc.proto.add_const(ConstValue::Str(flow_name.clone()));
-                    fc.emit(Op::ActorSpawn {
-                        rd,
-                        actor: actor_idx,
                     });
                     return Ok(rd);
                 }
@@ -4511,6 +4580,13 @@ impl Default for BytecodeCompiler {
 impl FuncCompiler {
     fn has_mut_params(&mut self, f: &FuncDef) {
         self.proto.has_mut_params = f.params.iter().any(|p| p.mut_);
+        self.proto.mut_param_indices = f
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.mut_)
+            .map(|(i, _)| i as u16)
+            .collect();
     }
 }
 
