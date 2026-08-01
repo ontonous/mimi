@@ -798,11 +798,14 @@ fn builtin_base64_decode(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Val
 // ── Testing / assertions ────────────────────────────────
 
 fn builtin_assert(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    if args.is_empty() {
+        return Err(InterpError::new("assert expects at least 1 argument"));
+    }
     if !crate::interp::is_truthy(&args[0]) {
         let msg = if args.len() >= 2 {
             format!("assertion failed: {}", args[1])
         } else {
-            "assertion failed".to_string()
+            format!("assertion failed: {}", args[0])
         };
         return Err(InterpError::new(msg));
     }
@@ -899,10 +902,13 @@ fn builtin_input_bool(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value
 // ── Convert misc ────────────────────────────────────────
 
 fn builtin_from_int(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
+    // Tree-walker parity: from_int is identity on Int, errors on non-int.
     match &args[0] {
-        Value::Int(i) => Ok(Value::Float(*i as f64)),
-        Value::Float(f) => Ok(Value::Float(*f)),
-        _ => Err(InterpError::new("from_int expects a number")),
+        Value::Int(i) => Ok(Value::Int(*i)),
+        other => Err(InterpError::new(format!(
+            "from_int expects an integer, got {}",
+            other
+        ))),
     }
 }
 

@@ -1997,6 +1997,26 @@ impl BytecodeCompiler {
             Stmt::Continue => {
                 fc.emit(Op::QuoteContinue);
             }
+            // 0.31.22 soundness: contracts in quote! must error, not silently skip.
+            Stmt::Requires(_, span) => {
+                return Err(InterpError::new(format!(
+                    "quote! does not support `requires` contracts (soundness hole fix). \
+                     Contract at line {} col {} cannot be silently filtered.",
+                    span.start_line, span.start_col
+                )));
+            }
+            Stmt::Ensures(_, span) => {
+                return Err(InterpError::new(format!(
+                    "quote! does not support `ensures` contracts (soundness hole fix). \
+                     Contract at line {} col {} cannot be silently filtered.",
+                    span.start_line, span.start_col
+                )));
+            }
+            Stmt::Math(_) => {
+                return Err(InterpError::new(
+                    "quote! does not support `math` blocks (soundness hole fix).",
+                ));
+            }
             // Unsupported statements are skipped (tree-walker parity).
             _ => {}
         }
@@ -2153,6 +2173,7 @@ impl BytecodeCompiler {
                     params: params.clone(),
                     ret: ret.clone(),
                     body: body.clone(),
+                    free_vars: free_vars.iter().cloned().collect(),
                 });
                 fc.emit(Op::QuoteLambda { spec_idx });
             }
@@ -4001,8 +4022,20 @@ impl BytecodeCompiler {
         fc.loop_result_regs.push(result_reg);
 
         // Compile start and end bounds.
-        let r_idx = self.compile_expr(fc, start_expr)?;
-        let r_end = self.compile_expr(fc, end_expr)?;
+        // Allocate fresh registers to avoid aliasing the original variables
+        // (the loop increments r_idx in place).
+        let r_start = self.compile_expr(fc, start_expr)?;
+        let r_idx = fc.proto.alloc_reg();
+        fc.emit(Op::Mov {
+            rd: r_idx,
+            rs: r_start,
+        });
+        let r_end_src = self.compile_expr(fc, end_expr)?;
+        let r_end = fc.proto.alloc_reg();
+        fc.emit(Op::Mov {
+            rd: r_end,
+            rs: r_end_src,
+        });
         let r_one = fc.proto.alloc_reg();
         let c1 = fc.proto.add_const(ConstValue::Int(1));
         fc.emit(Op::LoadConst { rd: r_one, idx: c1 });
@@ -4758,6 +4791,64 @@ impl BytecodeCompiler {
             }
             Expr::Cast(inner, _) => {
                 self.collect_free_vars_expr(inner, local_vars, free_vars);
+            }
+            // ── Previously missing variants (audit fix) ──
+            Expr::Comprehension {
+                expr,
+                var,
+                iter,
+                guard,
+            } => {
+                self.collect_free_vars_expr(iter, local_vars, free_vars);
+                if let Some(g) = guard {
+                    self.collect_free_vars_expr(g, local_vars, free_vars);
+                }
+                let mut comp_locals = local_vars.clone();
+                comp_locals.insert(var.clone());
+                self.collect_free_vars_expr(expr, &mut comp_locals, free_vars);
+            }
+            Expr::Record { fields, .. } => {
+                for f in fields {
+                    self.collect_free_vars_expr(&f.value, local_vars, free_vars);
+                }
+            }
+            Expr::Try(e)
+            | Expr::OptionalChain(e, _)
+            | Expr::Spawn(e)
+            | Expr::Await(e)
+            | Expr::QuoteInterpolate(e)
+            | Expr::Old(e)
+            | Expr::TypeOf(e)
+            | Expr::TupleIndex(e, _)
+            | Expr::NamedArg(_, e) => {
+                self.collect_free_vars_expr(e, local_vars, free_vars);
+            }
+            Expr::SliceExpr { target, start, end } => {
+                self.collect_free_vars_expr(target, local_vars, free_vars);
+                if let Some(s) = start {
+                    self.collect_free_vars_expr(s, local_vars, free_vars);
+                }
+                if let Some(e) = end {
+                    self.collect_free_vars_expr(e, local_vars, free_vars);
+                }
+            }
+            Expr::Range { start, end } => {
+                self.collect_free_vars_expr(start, local_vars, free_vars);
+                self.collect_free_vars_expr(end, local_vars, free_vars);
+            }
+            Expr::MapLiteral { entries } => {
+                for (k, v) in entries {
+                    self.collect_free_vars_expr(k, local_vars, free_vars);
+                    self.collect_free_vars_expr(v, local_vars, free_vars);
+                }
+            }
+            Expr::SetLiteral(elems) => {
+                for e in elems {
+                    self.collect_free_vars_expr(e, local_vars, free_vars);
+                }
+            }
+            Expr::Comptime(block) | Expr::Arena(block) => {
+                self.collect_free_vars_block(block, local_vars, free_vars);
             }
             _ => {}
         }

@@ -394,16 +394,17 @@ fn builtin_pi(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, Interp
 
 fn builtin_random(_vm: &mut BytecodeVM<'_>, _args: &[Value]) -> Result<Value, InterpError> {
     // Simple LCG-based pseudo-random (no external crate).
+    // Uses 53-bit mantissa / 2^53 → [0, 1) (tree-walker parity).
     use std::time::SystemTime;
     let seed = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos() as u64;
-    let val = (seed
+    let val = seed
         .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407))
-        >> 33;
-    Ok(Value::Float((val as f64) / (u32::MAX as f64)))
+        .wrapping_add(1442695040888963407)
+        >> 11; // 53 bits
+    Ok(Value::Float((val as f64) / ((1u64 << 53) as f64)))
 }
 
 fn builtin_is_nan(_vm: &mut BytecodeVM<'_>, args: &[Value]) -> Result<Value, InterpError> {
